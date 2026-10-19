@@ -25,12 +25,17 @@ SIDEBAR_EDGES = ["right", "left"]
 # auto_hide: slides in when the pointer touches the edge; floating: always visible over windows;
 # docked: always visible, and iTerm2 windows on that monitor are kept out of its area.
 SIDEBAR_MODES = ["auto_hide", "floating", "docked"]
+# The Sort pop-up at the top of the list (list_sorting.py).
+LIST_SORT_ORDERS = ["manual", "activity", "alphabet", "created_time"]
+# A tab row's information columns that the settings can show or hide, in their left-to-right
+# order (the tool icon column, between existence_duration and state, shows by itself when two
+# or more agent tools run).
+LIST_COLUMNS = ["context_tokens", "created_time", "existence_duration", "state", "state_duration"]
 
 DEFAULT_SETTINGS = {
     "sidebar_is_on": False,
     "sidebar_mode": "auto_hide",
-    "sidebar_edge": "right",
-    "sidebar_monitor_name": "",  # "" means the menu-bar monitor
+    "sidebar_edge": "right",  # of the menu-bar monitor
     "sidebar_width": 400,
     "icon_color": "auto",
     "icon_shows_asking_count": True,
@@ -39,6 +44,8 @@ DEFAULT_SETTINGS = {
         {"agent_tool_name": "Codex", "launch_command": "codex"},
     ],
     "stuck_minutes": 10,
+    "list_sort_order": "manual",
+    "shown_columns": ["context_tokens", "state", "state_duration"],
 }
 
 
@@ -51,6 +58,10 @@ def is_valid_setting_value(name, value):
         return value in SIDEBAR_EDGES
     if name == "sidebar_mode":
         return value in SIDEBAR_MODES
+    if name == "list_sort_order":
+        return value in LIST_SORT_ORDERS
+    if name == "shown_columns":
+        return isinstance(value, list) and all(column_name in LIST_COLUMNS for column_name in value)
     if name == "sidebar_width":
         return isinstance(value, (int, float)) and not isinstance(value, bool) and 200 <= value <= 1200
     if name == "stuck_minutes":

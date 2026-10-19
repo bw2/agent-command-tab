@@ -65,6 +65,12 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         entry = snapshot.monitors[0].windows[0].agent_sessions[0]
         self.assertEqual((entry.working_folder, entry.tab_title), ("/Users/someone/code/real-project", "real-project"))
 
+    def test_agent_process_start_time_becomes_the_created_time(self):
+        tab = make_tab("1", "claude", job_pid=42)
+        tab["first_session"]["job_started_at"] = 1760850000.0
+        snapshot = build_snapshot([make_window("w", [tab, make_tab("2", "codex")])])
+        self.assertEqual([entry.started_at for entry in snapshot.monitors[0].windows[0].agent_sessions], [1760850000.0, None])
+
     def test_titles_set_by_the_user_win(self):
         snapshot = build_snapshot([make_window(
             "w", [make_tab("1", "claude", title="Review bot", title_override_format="Review bot")],

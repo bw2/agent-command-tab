@@ -24,35 +24,28 @@ class FindOuterScreenEdgesTests(unittest.TestCase):
 
 class ChooseSidebarEdgeTests(unittest.TestCase):
     def test_default_is_the_right_edge_of_the_menu_bar_monitor(self):
-        self.assertEqual(tuple(choose_sidebar_edge("", "right", [LAPTOP])), (0, "right", True))
+        self.assertEqual(tuple(choose_sidebar_edge("right", [LAPTOP])), (0, "right", True))
 
-    def test_saved_monitor_and_edge(self):
-        self.assertEqual(tuple(choose_sidebar_edge("Studio", "right", [LAPTOP, RIGHT_DISPLAY])), (1, "right", True))
+    def test_saved_edge_of_the_menu_bar_monitor_with_another_monitor_attached(self):
+        self.assertEqual(tuple(choose_sidebar_edge("left", [LAPTOP, RIGHT_DISPLAY])), (0, "left", True))
 
-    def test_saved_edge_no_longer_outer_uses_the_other_edge_of_that_monitor(self):
-        self.assertEqual(tuple(choose_sidebar_edge("", "right", [LAPTOP, RIGHT_DISPLAY])), (0, "left", False))
-
-    def test_unplugged_saved_monitor_falls_back_to_the_menu_bar_monitor(self):
-        self.assertEqual(tuple(choose_sidebar_edge("Studio", "right", [LAPTOP])), (0, "right", False))
+    def test_saved_edge_no_longer_outer_uses_the_other_edge_of_the_menu_bar_monitor(self):
+        self.assertEqual(tuple(choose_sidebar_edge("right", [LAPTOP, RIGHT_DISPLAY])), (0, "left", False))
 
     def test_menu_bar_monitor_in_the_middle_of_three(self):
-        placement = choose_sidebar_edge("", "right", [LAPTOP, LEFT_DISPLAY, RIGHT_DISPLAY])
+        placement = choose_sidebar_edge("right", [LAPTOP, LEFT_DISPLAY, RIGHT_DISPLAY])
         self.assertEqual(tuple(placement), (2, "right", False))
 
     def test_no_screens(self):
-        self.assertIsNone(choose_sidebar_edge("", "right", []))
+        self.assertIsNone(choose_sidebar_edge("right", []))
 
 
 class PlacementFallbackNoteTests(unittest.TestCase):
-    def test_no_note_when_the_saved_choice_works(self):
-        self.assertEqual(describe_sidebar_placement_fallback("Studio", "right", [LAPTOP, RIGHT_DISPLAY]), "")
-
-    def test_unplugged_monitor(self):
-        self.assertEqual(describe_sidebar_placement_fallback("Studio", "right", [LAPTOP]),
-                         "Studio isn't connected, so the sidebar is on the right edge of Built-in until it is.")
+    def test_no_note_when_the_saved_edge_works(self):
+        self.assertEqual(describe_sidebar_placement_fallback("right", [LAPTOP]), "")
 
     def test_edge_that_borders_another_monitor(self):
-        self.assertEqual(describe_sidebar_placement_fallback("", "right", [LAPTOP, RIGHT_DISPLAY]),
+        self.assertEqual(describe_sidebar_placement_fallback("right", [LAPTOP, RIGHT_DISPLAY]),
                          "The saved edge borders another monitor, so the sidebar is on the left edge of Built-in.")
 
 

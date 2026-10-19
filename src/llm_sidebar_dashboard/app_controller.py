@@ -79,6 +79,7 @@ class AppController(NSObject):
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.connection_thread.send_stuck_threshold_seconds(self.settings["stuck_minutes"] * 60)
         self.sidebar_controller.apply_settings(self.settings)
+        self.apply_list_settings(self.settings)
         # Always once at start, also when not docked (reserve_screen_area only sends changes): the
         # core waits for it before giving back room still owed from before a restart.
         self.connection_thread.send_reserved_screen_area(self.reserved_screen_area)
@@ -271,8 +272,22 @@ class AppController(NSObject):
         save_settings(new_settings)
         self.status_item_controller.redraw()
         self.sidebar_controller.apply_settings(new_settings)
+        self.apply_list_settings(new_settings)
         self.settings_window_controller.reflect_settings(new_settings)
         self.connection_thread.send_stuck_threshold_seconds(new_settings["stuck_minutes"] * 60)
+
+    @objc.python_method
+    def list_sort_order_chosen(self, list_sort_order):
+        """The Sort pop-up at the top of the dropdown or the sidebar: one choice for both, saved with the settings."""
+        if list_sort_order != self.settings["list_sort_order"]:
+            self.settings_changed(dict(self.settings, list_sort_order=list_sort_order))
+
+    @objc.python_method
+    def apply_list_settings(self, settings):
+        """Gives the dropdown's and the sidebar's lists the same sort order and shown columns."""
+        for list_panel_controller in (self.dropdown_panel_controller, self.sidebar_controller.list_panel_controller):
+            list_panel_controller.show_list_sort_order(settings["list_sort_order"])
+            list_panel_controller.list_controller.set_shown_columns(settings["shown_columns"])
 
     @objc.python_method
     def show_sidebar_for_a_few_seconds(self):

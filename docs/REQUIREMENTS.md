@@ -35,7 +35,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 ### Sidebar
 
 - R4. Optional sidebar showing the same list and controls as the dropdown.
-- R5. The sidebar auto-hides: it slides in when the pointer touches the chosen screen edge and slides out when the pointer leaves. Edge (right or left, default right) and monitor are settings. Only outer edges are offered, meaning edges that don't border another monitor, because the pointer slides past a shared edge.
+- R5. The sidebar auto-hides: it slides in when the pointer touches the chosen screen edge and slides out when the pointer leaves. It is always on the menu bar's monitor; the edge (right or left, default right) is a setting. Only outer edges are offered, meaning edges that don't border another monitor, because the pointer slides past a shared edge.
 - R6. The sidebar never takes keyboard focus from iTerm2 unless the user clicks into a text field, and appears on every macOS desktop (Space).
 
 ### Window list
@@ -124,8 +124,10 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
 - R34. A settings button at the bottom of the dropdown and the sidebar.
 - R35. Settings include:
-  - sidebar on or off, edge, monitor and width (width also adjustable by dragging the edge of the sidebar);
+  - sidebar on or off, edge and width (width also adjustable by dragging the edge of the sidebar);
   - icon color, and whether the icon shows the asking count;
+  - which information columns tab rows show: State, State Duration, Used Token Count, Created Time, Existence Duration;
+  - the list's sort order (Manual, Activity, Alphabet, Created), also chosen with the Sort pop-up above the list;
   - which agent tools to detect (Claude Code, Codex), and the launch command for each;
   - stuck time limit (default 10 minutes);
   - how long a crashed agent session's row stays (default 5 minutes);

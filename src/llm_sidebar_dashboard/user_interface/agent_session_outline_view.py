@@ -28,6 +28,8 @@ from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSColor, NSDr
 from Foundation import NSMutableIndexSet, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
+from llm_sidebar_dashboard.list_sorting import sort_agent_session_entries, sort_window_entries
+from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS
 from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
 from llm_sidebar_dashboard.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image
 from llm_sidebar_dashboard.user_interface.row_text_rendering import (build_agent_session_row_text_parts,
@@ -40,12 +42,12 @@ ROW_LEFT_MARGIN = 8
 GAP_AFTER_PREFIX = 2
 NAME_FIELD_PADDING = 4
 GAP_BEFORE_DETAILS = 8
-GAP_BETWEEN_COLUMNS = 6  # between the tool icon, state and elapsed time columns
+GAP_BETWEEN_COLUMNS = 6  # between the columns at a tab row's right edge
 ROW_RIGHT_MARGIN = 8
 TEXT_FIELD_INSETS = 5  # a label's text sits a few points inside its field
 ROOM_FOR_GROWING_DETAILS = "0000"  # elapsed times grow ("9m" becomes "10m") without a refit
 SECONDS_TO_HOLD_BEFORE_PEEKING = 0.15
-SMALLEST_TAB_NAME_WIDTH = 80  # a narrower sidebar drops the context and icon columns first
+SMALLEST_TAB_NAME_WIDTH = 80  # a narrower sidebar drops columns: created time and existence first, then context, icon, state
 TAB_DRAG_TYPE = "org.llm-sidebar-dashboard.tab-id"
 WINDOW_DRAG_TYPE = "org.llm-sidebar-dashboard.window-id"
 COLUMN_IDENTIFIER = "main"
@@ -117,10 +119,11 @@ def make_label_text_field():
 
 
 class AgentListRowView(NSTableCellView):
-    """A row: [connector + dot] [name] [details] ... [context size] [tool icon] [state] [elapsed
-    time], the last four in columns at the right edge whose widths the list controller sets, so
-    they line up from row to row. The state is left-aligned in its column; the context size and
-    the time are right-aligned."""
+    """A row: [connector + dot] [name] [details] ... then, on a tab row, columns at the right
+    edge: [context size] [created time] [existence duration] [tool icon] [state] [state
+    duration]. The list controller sets each column's width, 0 for a hidden column, so the
+    columns line up from row to row. The state is left-aligned in its column; the others are
+    right-aligned."""
 
     def initWithFrame_(self, frame):
         self = objc.super(AgentListRowView, self).initWithFrame_(frame)
@@ -130,16 +133,21 @@ class AgentListRowView(NSTableCellView):
         self.name_text_field = make_label_text_field()
         self.details_text_field = make_label_text_field()
         self.context_text_field = make_label_text_field()
+        self.created_time_text_field = make_label_text_field()
+        self.existence_duration_text_field = make_label_text_field()
         self.state_text_field = make_label_text_field()
         self.elapsed_time_text_field = make_label_text_field()
         self.icon_image_view = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, ROW_HEIGHT))
         self.icon_image_view.setImageScaling_(NSImageScaleNone)
         for subview in (self.prefix_text_field, self.name_text_field, self.details_text_field, self.context_text_field,
-                        self.state_text_field, self.elapsed_time_text_field, self.icon_image_view):
+                        self.created_time_text_field, self.existence_duration_text_field, self.state_text_field,
+                        self.elapsed_time_text_field, self.icon_image_view):
             self.addSubview_(subview)
         self.setTextField_(self.name_text_field)
-        self.context_column_width = 0  # 0 while no agent session's context size is known
-        self.icon_column_width = 0  # 0 while the icon column is hidden
+        self.context_column_width = 0  # 0 while the column is hidden, or no agent session's context size is known
+        self.created_time_column_width = 0
+        self.existence_duration_column_width = 0
+        self.icon_column_width = 0  # 0 unless two or more agent tools run
         self.state_column_width = 0
         self.elapsed_time_column_width = 0
         self.look = None  # what the row shows, set by the list controller's fill_row_view
@@ -155,20 +163,24 @@ class AgentListRowView(NSTableCellView):
         name_x = ROW_LEFT_MARGIN + prefix_width + GAP_AFTER_PREFIX
         text_right_limit = bounds.size.width - ROW_RIGHT_MARGIN  # where the name and details end; a window's details are right-aligned there
         row_has_state = bool(self.state_text_field.stringValue())  # tab rows only
-        if row_has_state:
-            elapsed_time_x = bounds.size.width - ROW_RIGHT_MARGIN - self.elapsed_time_column_width
-            self.elapsed_time_text_field.setFrame_(NSMakeRect(elapsed_time_x, y, self.elapsed_time_column_width, text_height))
-            state_x = elapsed_time_x - self.state_column_width - (GAP_BETWEEN_COLUMNS if self.state_column_width else 0)
-            self.state_text_field.setFrame_(NSMakeRect(state_x, y, self.state_column_width, text_height))
-            icon_x = state_x - self.icon_column_width - (GAP_BETWEEN_COLUMNS if self.icon_column_width else 0)
-            self.icon_image_view.setFrame_(NSMakeRect(icon_x, 0, self.icon_column_width, bounds.size.height))
-            context_x = icon_x - self.context_column_width - (GAP_BETWEEN_COLUMNS if self.context_column_width else 0)
-            self.context_text_field.setFrame_(NSMakeRect(context_x, y, self.context_column_width, text_height))
-            text_right_limit = context_x - GAP_BEFORE_DETAILS
-        self.state_text_field.setHidden_(not row_has_state or not self.state_column_width)
-        self.elapsed_time_text_field.setHidden_(not row_has_state)
-        self.icon_image_view.setHidden_(not row_has_state or not self.icon_column_width)
-        self.context_text_field.setHidden_(not row_has_state or not self.context_column_width)
+        column_right_edge = bounds.size.width - ROW_RIGHT_MARGIN
+        for column_view, column_width in ((self.elapsed_time_text_field, self.elapsed_time_column_width),
+                                          (self.state_text_field, self.state_column_width),
+                                          (self.icon_image_view, self.icon_column_width),
+                                          (self.existence_duration_text_field, self.existence_duration_column_width),
+                                          (self.created_time_text_field, self.created_time_column_width),
+                                          (self.context_text_field, self.context_column_width)):  # right to left
+            is_shown = row_has_state and column_width > 0
+            column_view.setHidden_(not is_shown)
+            if not is_shown:
+                continue
+            column_x = column_right_edge - column_width
+            if column_view is self.icon_image_view:
+                column_view.setFrame_(NSMakeRect(column_x, 0, column_width, bounds.size.height))
+            else:
+                column_view.setFrame_(NSMakeRect(column_x, y, column_width, text_height))
+            text_right_limit = column_x - GAP_BEFORE_DETAILS
+            column_right_edge = column_x - GAP_BETWEEN_COLUMNS
         available_width = max(text_right_limit - name_x, 0)
         name_fitting_width = self.name_text_field.fittingSize().width + NAME_FIELD_PADDING
         details_fitting_width = self.details_text_field.fittingSize().width
@@ -220,11 +232,12 @@ class AgentSessionListController(NSObject):
         self.held_snapshot = None
         self.rename_in_progress = False
         self.drag_in_progress = False
+        self.row_press_in_progress = False  # the button is down on a row (row_pressed until row_released)
         self.menu_is_open = False
         self.blink_phase_is_dim = False
         self.peek_timer = None
         self.peek_in_progress = False
-        self.item_toggled_by_last_click = None
+        self.item_under_first_click = None  # the row a single click hit, for a double-click's second click
         self.applying_expansion_state = False
         self.item_whose_expansion_is_changing = None
         self.item_being_renamed = None
@@ -235,11 +248,15 @@ class AgentSessionListController(NSObject):
         self.right_aligned_paragraph_style.setAlignment_(NSTextAlignmentRight)
         self.right_aligned_paragraph_style.setLineBreakMode_(NSLineBreakByTruncatingTail)
         self.agent_tool_icons_by_name = build_agent_tool_icons()
-        self.context_column_width = 0  # 0 while no agent session's context size is known
+        self.context_column_width = 0  # 0 while the column is hidden, or no agent session's context size is known
+        self.created_time_column_width = 0
+        self.existence_duration_column_width = 0
         self.icon_column_width = 0  # 0 unless two or more agent tools are running
         self.width_is_set_by_the_user = False  # True for the sidebar's list; the dropdown fits its width to the rows
         self.state_column_width = 0
         self.elapsed_time_column_width = 0
+        self.list_sort_order = "manual"  # set by the Sort pop-up (list_sorting.py)
+        self.shown_columns = list(DEFAULT_SETTINGS["shown_columns"])  # set from the settings (settings_store.LIST_COLUMNS)
         self.outline_view = self.build_outline_view()
         self.refresh_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.6, self, "refreshTimerFired:", None, True)
@@ -280,8 +297,9 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def apply_snapshot(self, snapshot):
-        """Shows a new snapshot (held while a rename or drag is in progress)."""
-        if self.rename_in_progress or self.drag_in_progress:
+        """Shows a new snapshot (held while a rename or drag is in progress, or the button is down
+        on a row: a sorted list could reorder its rows under the held button)."""
+        if self.rename_in_progress or self.drag_in_progress or self.row_press_in_progress:
             self.held_snapshot = snapshot
             return
         self.snapshot = snapshot
@@ -290,7 +308,8 @@ class AgentSessionListController(NSObject):
         new_top_level_items = []
         live_keys = set()
         for monitor_entry in snapshot.monitors:
-            window_items = [self.update_window_item(window_entry, live_keys) for window_entry in monitor_entry.windows]
+            window_items = [self.update_window_item(window_entry, live_keys)
+                            for window_entry in sort_window_entries(monitor_entry.windows, self.list_sort_order)]
             if show_monitor_rows:
                 monitor_item = self.find_or_make_item("monitor", monitor_entry.monitor_id, monitor_entry, live_keys)
                 self.set_child_items(monitor_item, window_items)
@@ -316,8 +335,28 @@ class AgentSessionListController(NSObject):
     def update_window_item(self, window_entry, live_keys):
         window_item = self.find_or_make_item("window", window_entry.window_id, window_entry, live_keys)
         self.set_child_items(window_item, [self.find_or_make_item("tab", agent_session_entry.tab_id, agent_session_entry, live_keys)
-                                           for agent_session_entry in window_entry.agent_sessions])
+                                           for agent_session_entry in sort_agent_session_entries(
+                                               window_entry.agent_sessions, self.list_sort_order)])
         return window_item
+
+    @objc.python_method
+    def set_list_sort_order(self, list_sort_order):
+        """Shows the rows in this order from now on ("manual", "activity", "alphabet" or "created_time")."""
+        if list_sort_order == self.list_sort_order:
+            return
+        self.list_sort_order = list_sort_order
+        if self.held_snapshot is None and self.snapshot is not None:
+            self.apply_snapshot(self.snapshot)  # (a held snapshot is sorted when it is applied)
+
+    @objc.python_method
+    def set_shown_columns(self, shown_columns):
+        """Shows these information columns on tab rows from now on (names from settings_store.LIST_COLUMNS)."""
+        if list(shown_columns) == self.shown_columns:
+            return
+        self.shown_columns = list(shown_columns)
+        self.measure_right_columns()
+        self.redraw_visible_rows()  # each row's look includes the column widths
+        self.on_row_count_changed()  # the dropdown fits its width again
 
     @objc.python_method
     def find_or_make_item(self, kind, item_id, entry, live_keys):
@@ -510,7 +549,8 @@ class AgentSessionListController(NSObject):
         # Everything the row's look depends on: an unchanged row is neither refilled nor laid out
         # again, which keeps the 0.6-second refresh cheap with many rows.
         look = (parts, item.kind, is_in_front, status_reason, parts.dot_blinks and self.blink_phase_is_dim,
-                self.context_column_width, self.icon_column_width, self.state_column_width, self.elapsed_time_column_width)
+                self.context_column_width, self.created_time_column_width, self.existence_duration_column_width,
+                self.icon_column_width, self.state_column_width, self.elapsed_time_column_width)
         if look == row_view.look:
             return
         row_view.look = look
@@ -540,17 +580,24 @@ class AgentSessionListController(NSObject):
             parts.state_text, secondary_text_attributes))
         row_view.elapsed_time_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             parts.elapsed_time_text, right_aligned_secondary_text_attributes))
-        row_view.context_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
-            parts.context_text, right_aligned_secondary_text_attributes))
+        for text_field, text in ((row_view.context_text_field, parts.context_text),
+                                 (row_view.created_time_text_field, parts.created_time_text),
+                                 (row_view.existence_duration_text_field, parts.existence_duration_text)):
+            text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
+                text, right_aligned_secondary_text_attributes))
         row_view.icon_image_view.setImage_(self.find_agent_tool_icon(parts.agent_tool_name) if parts.agent_tool_name else None)
         row_view.context_column_width = self.context_column_width
+        row_view.created_time_column_width = self.created_time_column_width
+        row_view.existence_duration_column_width = self.existence_duration_column_width
         row_view.icon_column_width = self.icon_column_width
         row_view.state_column_width = self.state_column_width
         row_view.elapsed_time_column_width = self.elapsed_time_column_width
-        # The full text, with the tool's name, for when a narrow sidebar cuts it or the icon column is hidden.
-        tooltip_details = " · ".join(text for text in (parts.agent_tool_name, f"{parts.state_text} {parts.elapsed_time_text}".strip(),
-                                                       status_reason, parts.context_text and f"{parts.context_text} tokens in context",
-                                                       parts.details_text) if text)
+        # The full text, with the tool's name, for when a narrow sidebar cuts it or columns are hidden.
+        tooltip_details = " · ".join(text for text in (
+            parts.agent_tool_name, f"{parts.state_text} {parts.elapsed_time_text}".strip(), status_reason,
+            parts.context_text and f"{parts.context_text} tokens in context",
+            parts.created_time_text and f"started {parts.created_time_text}, {parts.existence_duration_text} ago",
+            parts.details_text) if text)
         row_view.setToolTip_(f"{parts.name_text}  {tooltip_details}".strip())
         row_view.setNeedsLayout_(True)
 
@@ -567,27 +614,34 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def measure_right_columns(self):
-        """Sets the context size, state and elapsed time columns' widths to fit their widest text
-        (the context column is 0 while no size is known), and the icon column's to fit the
-        widest tool icon, or 0 when all agent sessions use the same tool."""
+        """Sets each information column's width to fit its widest text, or 0 when the settings hide
+        it or no row has text for it (no context size known yet); the icon column's fits the
+        widest tool icon, or is 0 when all agent sessions use the same tool."""
         agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)] if self.snapshot else []
         now = time.time()
         all_parts = [build_agent_session_row_text_parts(entry, [], now) for entry in agent_session_entries]
 
-        def measure_widest(texts):
+        def measure_column(column_name, texts):
+            if column_name not in self.shown_columns:
+                return 0
             # Each distinct text is measured once; many sessions share "idle" or "2m".
-            return max((self.measure_text_width(text, self.regular_font) for text in set(texts) if text), default=0)
-        self.state_column_width = TEXT_FIELD_INSETS + measure_widest(parts.state_text for parts in all_parts)
-        self.elapsed_time_column_width = TEXT_FIELD_INSETS + measure_widest(parts.elapsed_time_text for parts in all_parts)
-        widest_context_text_width = measure_widest(parts.context_text for parts in all_parts)
-        self.context_column_width = TEXT_FIELD_INSETS + widest_context_text_width if widest_context_text_width else 0
+            widest_text_width = max((self.measure_text_width(text, self.regular_font) for text in set(texts) if text), default=0)
+            return TEXT_FIELD_INSETS + widest_text_width if widest_text_width else 0
+        self.context_column_width = measure_column("context_tokens", (parts.context_text for parts in all_parts))
+        self.created_time_column_width = measure_column("created_time", (parts.created_time_text for parts in all_parts))
+        self.existence_duration_column_width = measure_column(
+            "existence_duration", (parts.existence_duration_text for parts in all_parts))
+        self.state_column_width = measure_column("state", (parts.state_text for parts in all_parts))
+        self.elapsed_time_column_width = measure_column("state_duration", (parts.elapsed_time_text for parts in all_parts))
         agent_tool_names = {entry.agent_tool_name for entry in agent_session_entries}
         self.icon_column_width = (max(self.find_agent_tool_icon(name).size().width for name in agent_tool_names)
                                   if len(agent_tool_names) >= 2 else 0)
         if self.width_is_set_by_the_user:
-            # A narrow sidebar keeps room for names: the context column goes first, then the icons,
-            # then the state words (the dot's color still shows the state; the tooltip has it all).
-            for column_name in ("context_column_width", "icon_column_width", "state_column_width"):
+            # A narrow sidebar keeps room for names: the created time and existence columns go
+            # first, then the context column, the icons and the state words (the dot's color
+            # still shows the state; the tooltip has it all).
+            for column_name in ("created_time_column_width", "existence_duration_column_width", "context_column_width",
+                                "icon_column_width", "state_column_width"):
                 if self.measure_room_left_for_tab_names() < SMALLEST_TAB_NAME_WIDTH:
                     setattr(self, column_name, 0)
 
@@ -602,8 +656,10 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def measure_right_columns_width(self):
         """Returns the width of a tab row's right-hand columns with the gaps between them (0-width columns are hidden)."""
-        return sum(width + GAP_BETWEEN_COLUMNS for width in (self.context_column_width, self.icon_column_width,
-                                                             self.state_column_width) if width) + self.elapsed_time_column_width
+        shown_column_widths = [width for width in (self.context_column_width, self.created_time_column_width,
+                                                   self.existence_duration_column_width, self.icon_column_width,
+                                                   self.state_column_width, self.elapsed_time_column_width) if width]
+        return sum(shown_column_widths) + GAP_BETWEEN_COLUMNS * max(len(shown_column_widths) - 1, 0)
 
     @objc.python_method
     def choose_name_font(self, item):
@@ -660,12 +716,11 @@ class AgentSessionListController(NSObject):
         if current_event is not None and current_event.clickCount() > 1:
             return  # the second click of a double-click: rowDoubleClicked_ handles it
         item = self.find_clicked_item()
-        self.item_toggled_by_last_click = None
+        self.item_under_first_click = item  # for a double-click, should the rows move before its second click
         if item is None or item.kind == "tab":
             return  # a tab is shown by a double-click (user request, milestone 2)
         # At once, so it feels instant; a double-click puts the row back (rowDoubleClicked_).
         self.toggle_expansion(item)
-        self.item_toggled_by_last_click = item
 
     # Pressing and holding a tab row shows that tab until the button comes up (user request,
     # milestone 2). The short wait tells a hold from a click.
@@ -673,6 +728,7 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def row_pressed(self, row):
         self.cancel_peek_timer()
+        self.row_press_in_progress = True
         item = self.outline_view.itemAtRow_(row) if row >= 0 else None
         if item is None or item.kind != "tab":
             return
@@ -695,6 +751,8 @@ class AgentSessionListController(NSObject):
         if self.peek_in_progress:
             self.peek_in_progress = False
             self.owner.end_peek()
+        self.row_press_in_progress = False
+        self.apply_held_snapshot()
 
     @objc.python_method
     def cancel_peek_timer(self):
@@ -703,13 +761,14 @@ class AgentSessionListController(NSObject):
             self.peek_timer = None
 
     def rowDoubleClicked_(self, sender):
-        # The row the first click toggled, not the one under the pointer now: collapsing it can
-        # scroll the list, which moves another row under the second click.
-        toggled_item, self.item_toggled_by_last_click = self.item_toggled_by_last_click, None
-        item = toggled_item or self.find_clicked_item()
+        # The row under the first click, not the one under the pointer now: collapsing a window
+        # can scroll the list, and a sorted list can reorder its rows (a held snapshot is applied
+        # when the first click's button comes up), either of which moves another row under the second click.
+        first_click_item, self.item_under_first_click = self.item_under_first_click, None
+        item = first_click_item or self.find_clicked_item()
         if item is None:
             return
-        if item is toggled_item and item.kind == "window":
+        if item is first_click_item and item.kind == "window":
             self.toggle_expansion(item)  # undoes the first click's toggle
         if item.kind in ("window", "tab"):
             self.show_item(item)
@@ -992,6 +1051,13 @@ class AgentSessionListController(NSObject):
         dragged_item = getattr(self, "dragged_item", None)
         if dragged_item is None:
             return NSDragOperationNone
+        if dragged_item.kind == "tab" and self.list_sort_order != "manual":
+            # Sorted rows aren't in iTerm2's tab order, so a tab can only go to the end of another window.
+            window_item = proposed_item.parent_item if proposed_item is not None and proposed_item.kind == "tab" else proposed_item
+            if window_item is None or window_item.kind != "window" or window_item is dragged_item.parent_item:
+                return NSDragOperationNone
+            outline_view.setDropItem_dropChildIndex_(window_item, -1)
+            return NSDragOperationMove
         if dragged_item.kind == "tab":
             # Tabs drop between the tabs of a window: retarget drops on a tab to its window.
             if proposed_item is not None and proposed_item.kind == "tab":
@@ -1003,14 +1069,15 @@ class AgentSessionListController(NSObject):
                     outline_view.setDropItem_dropChildIndex_(proposed_item, len(proposed_item.child_items))
                 return NSDragOperationMove
             return NSDragOperationNone
-        # Windows reorder among the windows of the same group (R12)...
+        # Windows reorder among the windows of the same group (R12), in the manual order only...
         parent_item = dragged_item.parent_item
-        if proposed_item is parent_item and child_index >= 0:
-            return NSDragOperationMove
-        if proposed_item is not None and proposed_item.kind == "window" and proposed_item.parent_item is parent_item:
-            sibling_items = parent_item.child_items if parent_item is not None else self.top_level_items
-            outline_view.setDropItem_dropChildIndex_(parent_item, sibling_items.index(proposed_item))
-            return NSDragOperationMove
+        if self.list_sort_order == "manual":
+            if proposed_item is parent_item and child_index >= 0:
+                return NSDragOperationMove
+            if proposed_item is not None and proposed_item.kind == "window" and proposed_item.parent_item is parent_item:
+                sibling_items = parent_item.child_items if parent_item is not None else self.top_level_items
+                outline_view.setDropItem_dropChildIndex_(parent_item, sibling_items.index(proposed_item))
+                return NSDragOperationMove
         # ...or move to another monitor when dropped into that monitor's group (R32).
         target_monitor_item = None
         if proposed_item is not None and proposed_item.kind == "monitor":

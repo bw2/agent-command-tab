@@ -6,18 +6,19 @@ Set LLM_SIDEBAR_DASHBOARD_SMOKE_TEST_IMAGE=/path/to/file.png to also save what t
 import os
 import time
 import unittest
+import unittest.mock
 
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered,
-                    NSBitmapImageFileTypePNG, NSMakeRect, NSMenu, NSParagraphStyleAttributeName, NSTextAlignmentRight,
-                    NSWindow, NSWindowStyleMaskBorderless)
+                    NSBitmapImageFileTypePNG, NSColorSpace, NSDragOperationMove, NSDragOperationNone, NSMakeRect,
+                    NSMenu, NSParagraphStyleAttributeName, NSTextAlignmentRight, NSWindow, NSWindowStyleMaskBorderless)
 from Foundation import NSIndexSet
 
-from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS
+from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES
 from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
 from llm_sidebar_dashboard.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, POPOVER_WIDTH, TOP_BAR_HEIGHT,
                                                                     ListPanelController)
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import ROW_HEIGHT, AgentSessionListController
-from llm_sidebar_dashboard.user_interface.menu_bar_status_item import choose_automatic_icon_color_name
+from llm_sidebar_dashboard.user_interface.menu_bar_status_item import ICON_COLORS_BY_NAME, choose_automatic_icon_color_name
 from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
 from llm_sidebar_dashboard.user_interface.sidebar_panel import (SidebarController,
                                                                 allow_pointer_changes_while_another_app_is_in_front)
@@ -33,6 +34,7 @@ class RecordingOwner:
         self.windows_asked_about_closing = []
         self.answer_to_closing_window = False
         self.peeks = []
+        self.chosen_list_sort_orders = []
 
     def submit_action(self, action_request):
         self.submitted_actions.append(action_request)
@@ -61,6 +63,9 @@ class RecordingOwner:
     def confirm_closing_window(self, window_entry):
         self.windows_asked_about_closing.append(window_entry.window_id)
         return self.answer_to_closing_window
+
+    def list_sort_order_chosen(self, list_sort_order):
+        self.chosen_list_sort_orders.append(list_sort_order)
 
 
 def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False):
@@ -171,6 +176,90 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.outlineView_acceptDrop_item_childIndex_(outline_view, None, window_item, 0)
         self.assertEqual(self.submitted_actions[-1].arguments["drop_before_tab_id"], "1")
 
+    def test_sort_orders_change_only_the_order_of_the_rows(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+
+        def list_first_window_tab_titles():
+            return [outline_view.itemAtRow_(row).entry.tab_title for row in range(1, 4)]
+        self.assertEqual(list_first_window_tab_titles(), ["planning", "phase0-tests", "codex-review"])
+        self.list_controller.set_list_sort_order("activity")  # asking, working, done
+        self.assertEqual(list_first_window_tab_titles(), ["phase0-tests", "planning", "codex-review"])
+        self.list_controller.set_list_sort_order("alphabet")
+        self.assertEqual(list_first_window_tab_titles(), ["codex-review", "phase0-tests", "planning"])
+        self.list_controller.set_list_sort_order("manual")  # iTerm2's own order, unchanged
+        self.assertEqual(list_first_window_tab_titles(), ["planning", "phase0-tests", "codex-review"])
+
+    def test_sorted_rows_allow_moves_to_another_window_or_monitor_but_no_reordering(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.list_controller.set_list_sort_order("alphabet")
+        outline_view = self.list_controller.outline_view
+        first_window_item, second_window_item = self.list_controller.top_level_items
+        self.list_controller.dragged_item = first_window_item.child_items[0]
+        self.assertEqual(self.list_controller.outlineView_validateDrop_proposedItem_proposedChildIndex_(
+            outline_view, None, first_window_item, 1), NSDragOperationNone)  # within its own window
+        self.assertEqual(self.list_controller.outlineView_validateDrop_proposedItem_proposedChildIndex_(
+            outline_view, None, second_window_item.child_items[0], -1), NSDragOperationMove)  # into the other window
+        self.list_controller.outlineView_acceptDrop_item_childIndex_(outline_view, None, second_window_item, -1)
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].arguments),
+                         ("move_tab", {"target_window_id": "w2", "drop_before_tab_id": None}))  # to its end
+        self.list_controller.dragged_item = second_window_item
+        self.assertEqual(self.list_controller.outlineView_validateDrop_proposedItem_proposedChildIndex_(
+            outline_view, None, None, 0), NSDragOperationNone)  # windows keep the order set in Manual
+
+    def test_shown_columns_follow_the_settings(self):
+        snapshot = make_sample_snapshot()
+        window_one = snapshot.monitors[0].windows[0]
+        started_entries = tuple(entry._replace(started_at=time.time() - 3700) for entry in window_one.agent_sessions)
+        snapshot = snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one._replace(agent_sessions=started_entries), snapshot.monitors[0].windows[1])),))
+        self.list_controller.apply_snapshot(snapshot)
+        self.window.contentView().layoutSubtreeIfNeeded()
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
+        self.assertEqual(self.list_controller.created_time_column_width, 0)  # off by default
+        self.list_controller.set_shown_columns(["created_time", "existence_duration", "state_duration"])
+        row_view.layoutSubtreeIfNeeded()
+        self.assertEqual([not view.isHidden() for view in (row_view.created_time_text_field, row_view.existence_duration_text_field,
+                                                            row_view.state_text_field, row_view.elapsed_time_text_field)],
+                         [True, True, False, True])
+        self.assertEqual(row_view.existence_duration_text_field.stringValue(), "1h 1m")
+        self.list_controller.set_shown_columns([])
+        row_view.layoutSubtreeIfNeeded()
+        self.assertTrue(row_view.elapsed_time_text_field.isHidden())
+        # Only the tool icon column is left: it shows by itself, since Claude Code and Codex both run.
+        self.assertEqual(self.list_controller.measure_right_columns_width(), self.list_controller.icon_column_width)
+
+    def test_top_bar_drops_the_sort_label_then_the_sort_popup_when_narrow(self):
+        panel = self.dropdown_panel_controller
+        # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's smallest width.
+        for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (292, False, True), (250, False, False),
+                                                (200, False, False), (460, True, True)):
+            self.window.setContentSize_((width, 260))
+            self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden()),
+                             (label_shown, popup_shown), width)
+            settings_button_x = panel.settings_button.frame().origin.x
+            if popup_shown:
+                popup_frame = panel.list_sort_order_popup.frame()
+                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, settings_button_x)
+            message_frame = panel.message_text_field.frame()
+            self.assertTrue(message_frame.size.width == 0 or message_frame.origin.x + message_frame.size.width <= settings_button_x,
+                            width)  # never covers the settings button
+        self.assertGreater(panel.message_text_field.frame().size.width, 100)  # room again for a connection message
+        self.window.setContentSize_((320, 260))
+        panel.show_message("iTerm2 can't be reached; retrying")  # the sort control steps aside for it
+        self.assertTrue(panel.list_sort_order_popup.isHidden())
+        self.assertGreater(panel.message_text_field.frame().size.width, 100)
+        panel.show_message("")
+        self.assertFalse(panel.list_sort_order_popup.isHidden())
+
+    def test_sort_popup_reports_the_choice_to_the_owner(self):
+        self.dropdown_panel_controller.list_sort_order_popup.selectItemWithTitle_("Activity")
+        self.dropdown_panel_controller.listSortOrderChosen_(self.dropdown_panel_controller.list_sort_order_popup)
+        self.assertEqual(self.owner.chosen_list_sort_orders, ["activity"])
+        self.dropdown_panel_controller.show_list_sort_order("alphabet")
+        self.assertEqual(self.dropdown_panel_controller.list_sort_order_popup.titleOfSelectedItem(), "Alphabet")
+        self.assertEqual(self.list_controller.list_sort_order, "alphabet")
+
     def test_window_menu_offers_new_agent_sessions_in_the_window_folder(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         window_item = self.list_controller.outline_view.itemAtRow_(0)
@@ -256,6 +345,35 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.owner.peeks, [("start", "s1"), ("end",)])
         self.list_controller.row_pressed(0)  # a window row doesn't peek
         self.assertIsNone(self.list_controller.peek_timer)
+        self.list_controller.row_released()
+
+    def test_a_double_click_shows_the_tab_under_its_first_click_even_if_the_rows_moved(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        first_click_item, other_item = outline_view.itemAtRow_(1), outline_view.itemAtRow_(2)
+        self.list_controller.find_clicked_item = lambda: first_click_item
+        self.list_controller.rowClicked_(None)  # the first click
+        self.list_controller.find_clicked_item = lambda: other_item  # the rows moved under the pointer
+        self.list_controller.rowDoubleClicked_(None)
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                         ("focus_agent_session", {"session_id": first_click_item.entry.session_id}))
+
+    def test_rows_dont_reorder_under_a_held_button(self):
+        # Activity order: a peek marks a "done" tab as seen ("idle"), which would move its row.
+        self.list_controller.set_list_sort_order("activity")
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        held_item = outline_view.itemAtRow_(1)
+        self.list_controller.row_pressed(1)
+        snapshot = make_sample_snapshot()
+        window_one = snapshot.monitors[0].windows[0]
+        seen_entries = tuple(entry._replace(status="idle") if entry.tab_id == held_item.item_id else entry
+                             for entry in window_one.agent_sessions)
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one._replace(agent_sessions=seen_entries), snapshot.monitors[0].windows[1])),)))
+        self.assertIs(outline_view.itemAtRow_(1), held_item)  # held back while the button is down
+        self.list_controller.row_released()
+        self.assertIsNot(outline_view.itemAtRow_(1), held_item)  # applied on release
 
     def test_a_narrow_sidebar_drops_the_context_then_the_icon_column_to_keep_room_for_names(self):
         snapshot = make_sample_snapshot()
@@ -447,6 +565,18 @@ class AutomaticIconColorTests(unittest.TestCase):
                 ([], "green")):
             self.assertEqual(choose_automatic_icon_color_name(self.snapshot_with_states(states)), expected_color_name)
 
+    def test_every_icon_color_choice_looks_different(self):
+        # Current macOS makes system purple a magenta and system pink nearly its red.
+        components_by_name = {}
+        for color_name in ICON_COLOR_NAMES[1:]:  # all but "auto"
+            color = ICON_COLORS_BY_NAME[color_name]().colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
+            components_by_name[color_name] = (color.redComponent() * 255, color.greenComponent() * 255, color.blueComponent() * 255)
+        for first_name, first in components_by_name.items():
+            for second_name, second in components_by_name.items():
+                if first_name < second_name:
+                    distance = sum((a - b) ** 2 for a, b in zip(first, second)) ** 0.5
+                    self.assertGreater(distance, 60, f"{first_name} and {second_name} look alike")
+
 
 class SidebarWidthDragTests(unittest.TestCase):
     def setUp(self):
@@ -543,18 +673,37 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
     def setUp(self):
-        # A monitor that isn't plugged in, so the window can't show it.
-        self.owner = SettingsRecordingOwner(dict(DEFAULT_SETTINGS, sidebar_monitor_name="Unplugged Display"))
+        self.owner = SettingsRecordingOwner(dict(DEFAULT_SETTINGS))
         self.controller = SettingsWindowController.alloc().initWithOwner_(self.owner)
         self.controller.settings = dict(self.owner.settings)
         self.controller.window = self.controller.build_window()  # built without showing it
 
-    def test_changing_one_control_keeps_settings_the_window_does_not_show(self):
+    def test_changing_one_control_keeps_changes_made_elsewhere(self):
+        self.owner.settings = dict(self.owner.settings, sidebar_width=555)  # dragged at the sidebar's edge meanwhile
         self.controller.stuck_minutes_field.setStringValue_("25")
         self.controller.controlChanged_(self.controller.stuck_minutes_field)
         self.assertEqual(self.owner.settings["stuck_minutes"], 25)
-        self.assertEqual(self.owner.settings["sidebar_monitor_name"], "Unplugged Display")
-        self.assertTrue(self.controller.edge_note.stringValue().startswith("Unplugged Display isn't connected"))
+        self.assertEqual(self.owner.settings["sidebar_width"], 555)
+
+    def test_both_edges_stay_choosable_when_the_menu_bar_monitor_stands_between_two_others(self):
+        three_monitors_in_a_row = [
+            {"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)},
+            {"name": "Dell", "frame": (-1920, 0, 1920, 1080), "visible_frame": (-1920, 0, 1920, 1080)},
+            {"name": "Studio", "frame": (1500, -200, 2500, 1400), "visible_frame": (1500, -200, 2500, 1400)}]
+        with unittest.mock.patch("llm_sidebar_dashboard.user_interface.settings_window.read_monitors_from_screens",
+                                 return_value=three_monitors_in_a_row):
+            self.controller.update_edge_choices()
+        self.assertEqual([menu_item.isEnabled() for menu_item in self.controller.edge_popup.itemArray()], [True, True])
+
+    def test_column_checkboxes_choose_the_shown_columns_in_their_left_to_right_order(self):
+        checkboxes = self.controller.column_checkboxes
+        self.assertEqual([title for title in (checkbox.title() for checkbox in checkboxes.values())],
+                         ["State", "State Duration", "Used Token Count", "Created Time", "Existence Duration"])
+        checkboxes["state"].setState_(0)
+        self.controller.controlChanged_(checkboxes["state"])
+        checkboxes["created_time"].setState_(1)
+        self.controller.controlChanged_(checkboxes["created_time"])
+        self.assertEqual(self.owner.settings["shown_columns"], ["context_tokens", "created_time", "state_duration"])
 
     def test_text_fields_save_when_they_lose_focus_too(self):
         self.assertTrue(self.controller.stuck_minutes_field.cell().sendsActionOnEndEditing())

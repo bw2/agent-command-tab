@@ -1,15 +1,17 @@
-"""The panel around the list: expand and collapse all and settings at the top, "+" at the bottom.
+"""The panel around the list: expand and collapse all, the sort order and settings at the top, "+" at the bottom.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item) and in
 the sidebar, each with its own list controller.
 """
 
 import objc
-from AppKit import (NSBezelStyleInline, NSButton, NSColor, NSEdgeInsetsMake, NSImage, NSMakeRect, NSMenu,
-                    NSMenuItem, NSPopover, NSPopoverBehaviorTransient, NSScreen, NSScrollView, NSTextField, NSView,
-                    NSViewController, NSViewHeightSizable, NSViewMaxYMargin, NSViewMinXMargin, NSViewMinYMargin,
-                    NSViewWidthSizable)
+from AppKit import (NSBezelStyleInline, NSBezelStyleRecessed, NSButton, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSFont, NSImage,
+                    NSMakeRect, NSMenu, NSMenuItem, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
+                    NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxYMargin,
+                    NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
+# "Created" rather than "Created Time" keeps the pop-up narrow enough for a 292-point sidebar.
+LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabet", "created_time": "Created"}
 POPOVER_WIDTH = 460  # before the first fit
 SMALLEST_POPOVER_WIDTH = 320
 LARGEST_SHARE_OF_SCREEN_WIDTH = 0.9
@@ -48,11 +50,21 @@ def make_symbol_button(symbol_name, fallback_title, tool_tip, target, action_nam
     return button
 
 
+class ListPanelView(NSView):
+    """The panel's root view: tells its controller when its size changes, so the top bar fits."""
+
+    def resizeSubviewsWithOldSize_(self, old_size):
+        objc.super(ListPanelView, self).resizeSubviewsWithOldSize_(old_size)
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.fit_top_bar_to_width()
+
+
 class ListPanelController(NSViewController):
     """Holds a list controller's outline view in a scroll view, with a top and a bottom bar.
 
     The owner is the list controller's owner (see AgentSessionListController); the panel also
-    calls its open_settings().
+    calls its open_settings() and list_sort_order_chosen(list_sort_order).
     """
 
     def initWithListController_(self, list_controller):
@@ -64,7 +76,7 @@ class ListPanelController(NSViewController):
 
     def loadView(self):
         width, height = POPOVER_WIDTH, INITIAL_PANEL_HEIGHT
-        root_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+        root_view = ListPanelView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
         scroll_view = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(0, BOTTOM_BAR_HEIGHT, width, height - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT))
         scroll_view.setDocumentView_(self.list_controller.outline_view)
@@ -77,8 +89,8 @@ class ListPanelController(NSViewController):
         scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         root_view.addSubview_(scroll_view)
 
-        # Top bar (user request, milestone 2): expand and collapse all on the left (R8.1), the
-        # settings button on the right (R34), and a message line between them.
+        # Top bar (user request, milestone 2): expand and collapse all and the sort order on the
+        # left (R8.1), the settings button on the right (R34), and a message line between them.
         x = 8
         for title, action_name in (("Expand all", "expandAll:"), ("Collapse all", "collapseAll:")):
             button = make_small_button(title, self, action_name)
@@ -86,15 +98,33 @@ class ListPanelController(NSViewController):
             button.setAutoresizingMask_(NSViewMinYMargin)  # stays at the top left
             root_view.addSubview_(button)
             x += button.frame().size.width + 6
-        settings_button = make_symbol_button("gearshape", "Settings", "Settings", self, "settingsClicked:")
-        settings_button.setFrameOrigin_((width - 6 - settings_button.frame().size.width, height - TOP_BAR_HEIGHT + 3))
-        settings_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)  # stays at the top right
-        root_view.addSubview_(settings_button)
+        self.sort_label = NSTextField.labelWithString_("Sort:")
+        self.sort_label.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.sort_label.sizeToFit()
+        self.sort_label.setFrameOrigin_((x, height - TOP_BAR_HEIGHT + 6))
+        self.sort_label.setAutoresizingMask_(NSViewMinYMargin)
+        root_view.addSubview_(self.sort_label)
+        self.list_sort_order_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 90, 20), False)
+        # A gray pill like the buttons beside it, and narrower than the standard style (the inline
+        # style draws no text in a pop-up).
+        self.list_sort_order_popup.setBezelStyle_(NSBezelStyleRecessed)
+        self.list_sort_order_popup.setControlSize_(NSControlSizeSmall)
+        self.list_sort_order_popup.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.list_sort_order_popup.addItemsWithTitles_(list(LIST_SORT_ORDER_TITLES.values()))
+        self.list_sort_order_popup.sizeToFit()
+        self.list_sort_order_popup.setTarget_(self)
+        self.list_sort_order_popup.setAction_("listSortOrderChosen:")
+        self.list_sort_order_popup.setFrameOrigin_((0, height - TOP_BAR_HEIGHT + 3))  # fit_top_bar_to_width sets x
+        self.list_sort_order_popup.setAutoresizingMask_(NSViewMinYMargin)
+        root_view.addSubview_(self.list_sort_order_popup)
+        self.settings_button = make_symbol_button("gearshape", "Settings", "Settings", self, "settingsClicked:")
+        self.settings_button.setFrameOrigin_((width - 6 - self.settings_button.frame().size.width, height - TOP_BAR_HEIGHT + 3))
+        self.settings_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)  # stays at the top right
+        root_view.addSubview_(self.settings_button)
         self.message_text_field = NSTextField.labelWithString_("")
-        self.message_text_field.setFrame_(NSMakeRect(x + 2, height - TOP_BAR_HEIGHT + 4,
-                                                     max(settings_button.frame().origin.x - x - 8, 0), 18))
+        self.message_text_field.setFrame_(NSMakeRect(0, height - TOP_BAR_HEIGHT + 4, 0, 18))  # fit_top_bar_to_width sets x and width
         self.message_text_field.setTextColor_(NSColor.secondaryLabelColor())
-        self.message_text_field.setAutoresizingMask_(NSViewMinYMargin | NSViewWidthSizable)
+        self.message_text_field.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.message_text_field)
 
         # Bottom bar: a new window with an agent session (R13.1).
@@ -104,12 +134,51 @@ class ListPanelController(NSViewController):
         self.new_window_button.setAutoresizingMask_(NSViewMaxYMargin)
         root_view.addSubview_(self.new_window_button)
         self.setView_(root_view)
+        root_view.controller = self
+        self.fit_top_bar_to_width()
+
+    @objc.python_method
+    def fit_top_bar_to_width(self):
+        """Fits the sort control between "Collapse all" and the settings button: with its "Sort:"
+        label when there is room, without it in a narrow sidebar, and hidden when even the pop-up
+        doesn't fit (the dropdown, at least 320 points wide, always shows both). The message line
+        takes the room left before the settings button, so it never covers that button; while it
+        shows a message (iTerm2 can't be reached, so there are no rows to sort) the sort control
+        steps aside for it."""
+        label_x, label_width = self.sort_label.frame().origin.x, self.sort_label.frame().size.width
+        popup_frame = self.list_sort_order_popup.frame()
+        settings_button_x = self.settings_button.frame().origin.x
+        room_right_edge = settings_button_x - 2
+        popup_x_after_label = label_x + label_width + 2
+        is_showing_a_message = bool(self.message_text_field.stringValue())
+        label_fits = not is_showing_a_message and popup_x_after_label + popup_frame.size.width <= room_right_edge
+        popup_fits = not is_showing_a_message and label_x + popup_frame.size.width <= room_right_edge
+        popup_x = popup_x_after_label if label_fits else label_x
+        self.sort_label.setHidden_(not label_fits)
+        self.list_sort_order_popup.setHidden_(not popup_fits)
+        self.list_sort_order_popup.setFrameOrigin_((popup_x, popup_frame.origin.y))
+        message_x = popup_x + popup_frame.size.width + 8 if popup_fits else label_x
+        message_frame = self.message_text_field.frame()
+        self.message_text_field.setFrame_(NSMakeRect(message_x, message_frame.origin.y,
+                                                     max(settings_button_x - message_x - 8, 0), message_frame.size.height))
 
     def expandAll_(self, sender):
         self.list_controller.set_all_expanded(True)
 
     def collapseAll_(self, sender):
         self.list_controller.set_all_expanded(False)
+
+    def listSortOrderChosen_(self, sender):
+        chosen_title = sender.titleOfSelectedItem()
+        self.list_controller.owner.list_sort_order_chosen(
+            next(list_sort_order for list_sort_order, title in LIST_SORT_ORDER_TITLES.items() if title == chosen_title))
+
+    @objc.python_method
+    def show_list_sort_order(self, list_sort_order):
+        """Shows the rows in this order and the pop-up with it chosen (the dropdown and the sidebar share one choice)."""
+        self.view()
+        self.list_sort_order_popup.selectItemWithTitle_(LIST_SORT_ORDER_TITLES[list_sort_order])
+        self.list_controller.set_list_sort_order(list_sort_order)
 
     def settingsClicked_(self, sender):
         self.list_controller.owner.open_settings()
@@ -133,6 +202,7 @@ class ListPanelController(NSViewController):
         self.view()
         self.message_text_field.setStringValue_(message)
         self.message_text_field.setToolTip_(message)
+        self.fit_top_bar_to_width()
 
     @objc.python_method
     def fit_size_to_rows(self):

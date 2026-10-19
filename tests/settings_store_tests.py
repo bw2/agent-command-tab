@@ -20,6 +20,14 @@ class MergeSettingsTests(unittest.TestCase):
         self.assertEqual(settings["agent_tools"], DEFAULT_SETTINGS["agent_tools"])
         self.assertNotIn("something_else", settings)
 
+    def test_list_sort_order_and_shown_columns(self):
+        settings = merge_settings_with_defaults({"list_sort_order": "created_time", "shown_columns": ["state", "created_time"]})
+        self.assertEqual((settings["list_sort_order"], settings["shown_columns"]), ("created_time", ["state", "created_time"]))
+        settings = merge_settings_with_defaults({"list_sort_order": "random", "shown_columns": ["state", "favorite_color"]})
+        self.assertEqual((settings["list_sort_order"], settings["shown_columns"]),
+                         (DEFAULT_SETTINGS["list_sort_order"], DEFAULT_SETTINGS["shown_columns"]))
+        self.assertEqual(merge_settings_with_defaults({"shown_columns": []})["shown_columns"], [])  # every column off
+
     def test_a_boolean_is_not_a_width(self):
         self.assertEqual(merge_settings_with_defaults({"sidebar_width": True})["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])
 

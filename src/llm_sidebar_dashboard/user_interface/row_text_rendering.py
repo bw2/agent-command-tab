@@ -5,18 +5,21 @@ when important), then gray details. Colors are names that the view maps to syste
 """
 
 import collections
+import time
 
 from llm_sidebar_dashboard.context_window_usage import format_token_count
 from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
 
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
-                     "agent_tool_name", "state_text", "elapsed_time_text", "context_text"],
-    defaults=["", "", "", ""])
+                     "agent_tool_name", "state_text", "elapsed_time_text", "context_text", "created_time_text",
+                     "existence_duration_text"],
+    defaults=["", "", "", "", "", ""])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
                         "in columns that line up from row to row: context_text (the context's size, \"425k\", "
-                        "right-aligned), the icon for agent_tool_name, state_text (left-aligned) and "
-                        "elapsed_time_text (right-aligned).")
+                        "right-aligned), created_time_text (when the agent session started) and "
+                        "existence_duration_text (how long ago), the icon for agent_tool_name, state_text "
+                        "(left-aligned) and elapsed_time_text (the state's duration, right-aligned).")
 
 DOT_GLYPH_AND_COLOR_BY_STATE = {
     "asking": ("●", "light_blue"),  # the same light blue as the menu bar icon's "C" and count (user request, milestone 2)
@@ -43,6 +46,14 @@ def format_elapsed_time(elapsed_seconds):
     return f"{elapsed_seconds // 86400}d"
 
 
+def format_clock_time(timestamp, now):
+    """Returns a short local time: "6:08 AM" for a time today, otherwise the day, such as "Oct 17"."""
+    moment = time.localtime(timestamp)
+    if time.localtime(now)[:3] == moment[:3]:
+        return time.strftime("%I:%M %p", moment).lstrip("0")
+    return time.strftime("%b %d", moment).replace(" 0", " ")
+
+
 def build_tree_connector_text(is_last_child_at_each_level):
     """Returns the gray prefix that draws the tree, for example "│  └─ ".
 
@@ -63,9 +74,10 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
     Args:
         agent_session_entry: An AgentSessionEntry.
         is_last_child_at_each_level: See build_tree_connector_text.
-        now: The current time, for the elapsed time since the status changed.
+        now: The current time, for the elapsed time since the status changed and since the agent session started.
     """
     dot_glyph, dot_color_name = DOT_GLYPH_AND_COLOR_BY_STATE.get(agent_session_entry.status, DOT_GLYPH_AND_COLOR_BY_STATE["unknown"])
+    started_at = agent_session_entry.started_at
     return RowTextParts(
         connector_text=build_tree_connector_text(is_last_child_at_each_level),
         dot_glyph=dot_glyph,
@@ -80,6 +92,8 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
                                                      if agent_session_entry.running_command_name
                                                      else agent_session_entry.status_since)),
         context_text=format_token_count(agent_session_entry.context_tokens) if agent_session_entry.context_tokens else "",
+        created_time_text=format_clock_time(started_at, now) if started_at is not None else "",
+        existence_duration_text=format_elapsed_time(now - started_at) if started_at is not None else "",
     )
 
 

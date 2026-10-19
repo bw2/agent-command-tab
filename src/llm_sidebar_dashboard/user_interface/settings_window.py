@@ -11,7 +11,8 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSButtonTypeSwitch,
 from Foundation import NSObject
 from PyObjCTools import AppHelper
 
-from llm_sidebar_dashboard.settings_store import ICON_COLOR_NAMES, find_launch_command_problem, is_valid_setting_value
+from llm_sidebar_dashboard.settings_store import (ICON_COLOR_NAMES, LIST_COLUMNS, find_launch_command_problem,
+                                                  is_valid_setting_value)
 from llm_sidebar_dashboard.user_interface.screen_layout import read_monitors_from_screens
 from llm_sidebar_dashboard.user_interface.sidebar_placement import (describe_sidebar_placement_fallback,
                                                                     find_outer_screen_edges)
@@ -19,11 +20,18 @@ from llm_sidebar_dashboard.user_interface.sidebar_placement import (describe_sid
 WINDOW_WIDTH = 540
 LABEL_WIDTH = 180  # fits "Claude Code command:"
 ROW_SPACING = 30
-MENU_BAR_MONITOR_TITLE = "The menu bar's monitor"
 SIDEBAR_MODE_TITLES = {
     "auto_hide": "Auto-hide",
     "floating": "Always: Above other windows",
     "docked": "Always: Resize iTerm2 windows",
+}
+# The tab rows' information columns, in the order the user listed them (user request, 2026-10-19).
+LIST_COLUMN_TITLES = {
+    "state": "State",
+    "state_duration": "State Duration",
+    "context_tokens": "Used Token Count",
+    "created_time": "Created Time",
+    "existence_duration": "Existence Duration",
 }
 
 
@@ -59,10 +67,7 @@ class SettingsWindowController(NSObject):
         self.sidebar_is_on_checkbox = self.make_checkbox("Enable the sidebar at the edge of the screen",
                                                          self.settings["sidebar_is_on"])
         self.sidebar_mode_popup = self.make_popup(list(SIDEBAR_MODE_TITLES.values()), SIDEBAR_MODE_TITLES[self.settings["sidebar_mode"]])
-        screens = read_monitors_from_screens()
-        self.monitor_popup = self.make_popup([MENU_BAR_MONITOR_TITLE] + [screen["name"] for screen in screens],
-                                             self.settings["sidebar_monitor_name"] or MENU_BAR_MONITOR_TITLE)
-        self.edge_popup = self.make_popup(["right", "left"], self.settings["sidebar_edge"])
+        self.edge_popup =self.make_popup(["right", "left"], self.settings["sidebar_edge"])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
         self.icon_color_popup = self.make_popup([color_name.capitalize() for color_name in ICON_COLOR_NAMES],
                                                 self.settings["icon_color"].capitalize())
@@ -71,11 +76,14 @@ class SettingsWindowController(NSObject):
         self.asking_count_checkbox = self.make_checkbox(
             "Show number of agents waiting for my answer", self.settings["icon_shows_asking_count"])
         self.stuck_minutes_field = self.make_text_field(str(self.settings["stuck_minutes"]), 80)
+        self.column_checkboxes = {column_name: self.make_checkbox(title, column_name in self.settings["shown_columns"])
+                                  for column_name, title in LIST_COLUMN_TITLES.items()}
         rows += [("Sidebar", self.sidebar_is_on_checkbox, None), ("Show", self.sidebar_mode_popup, None),
-                 ("Monitor", self.monitor_popup, None), ("Edge", self.edge_popup, None),
+                 ("Edge", self.edge_popup, None),
                  ("Width", self.sidebar_width_field, "points"), (None, None, None),
-                 ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None),
-                 (None, None, None), ("Agent is stuck if it thinks for more than", self.stuck_minutes_field, "minutes"),
+                 ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None), (None, None, None)]
+        rows += [("Columns" if index == 0 else None, checkbox, None) for index, checkbox in enumerate(self.column_checkboxes.values())]
+        rows += [(None, None, None), ("Agent is stuck if it thinks for more than", self.stuck_minutes_field, "minutes"),
                  (None, None, None)]
         self.launch_command_fields = []
         for agent_tool in self.settings["agent_tools"]:
@@ -158,38 +166,33 @@ class SettingsWindowController(NSObject):
 
     @objc.python_method
     def update_edge_choices(self):
-        """Enables only the outer edges of the chosen monitor (R5)."""
+        """Enables only the outer edges of the menu-bar monitor, where the sidebar goes (R5). When
+        neither of its edges is outer (it stands between two monitors), both stay enabled: the
+        saved side then picks the outer edge of the monitor nearest it (choose_sidebar_edge)."""
         screens = read_monitors_from_screens()
-        monitor_title = self.monitor_popup.titleOfSelectedItem()
-        screen_index = next((index for index, screen in enumerate(screens) if screen["name"] == monitor_title), 0)
-        outer_edges = {edge for index, edge in find_outer_screen_edges([screen["frame"] for screen in screens]) if index == screen_index}
+        outer_edges = ({edge for index, edge in find_outer_screen_edges([screen["frame"] for screen in screens]) if index == 0}
+                       or {"right", "left"})
         self.edge_popup.setAutoenablesItems_(False)
         for menu_item in self.edge_popup.itemArray():
             menu_item.setEnabled_(menu_item.title() in outer_edges)
-        if outer_edges and self.edge_popup.titleOfSelectedItem() not in outer_edges:
+        if self.edge_popup.titleOfSelectedItem() not in outer_edges:
             self.edge_popup.selectItemWithTitle_(sorted(outer_edges)[-1])  # "right" if it is outer
 
     @objc.python_method
     def show_placement_fallback_note(self, settings):
         """Says where the sidebar is when it can't go where the settings ask (PLAN.md section 8)."""
-        self.edge_note.setStringValue_(describe_sidebar_placement_fallback(
-            settings["sidebar_monitor_name"], settings["sidebar_edge"], read_monitors_from_screens()))
+        self.edge_note.setStringValue_(describe_sidebar_placement_fallback(settings["sidebar_edge"], read_monitors_from_screens()))
 
     def controlChanged_(self, sender):
         """Changes only the setting that sender controls, on top of the app's current settings, so
-        a saved monitor or edge that isn't shown (an unplugged monitor) and changes made elsewhere
-        (a width dragged at the sidebar's edge) are kept."""
+        a saved edge that can't be used right now (it borders another monitor) and changes made
+        elsewhere (a width dragged at the sidebar's edge) are kept."""
         new_settings = dict(self.owner.settings)
         if sender is self.sidebar_is_on_checkbox:
             new_settings["sidebar_is_on"] = bool(sender.state())
         elif sender is self.sidebar_mode_popup:
             selected_mode_title = sender.titleOfSelectedItem()
             new_settings["sidebar_mode"] = next(mode for mode, title in SIDEBAR_MODE_TITLES.items() if title == selected_mode_title)
-        elif sender is self.monitor_popup:
-            self.update_edge_choices()
-            monitor_title = sender.titleOfSelectedItem()
-            new_settings["sidebar_monitor_name"] = "" if monitor_title == MENU_BAR_MONITOR_TITLE else monitor_title
-            new_settings["sidebar_edge"] = self.edge_popup.titleOfSelectedItem()
         elif sender is self.edge_popup:
             new_settings["sidebar_edge"] = sender.titleOfSelectedItem()
         elif sender is self.sidebar_width_field:
@@ -200,6 +203,9 @@ class SettingsWindowController(NSObject):
             new_settings["icon_color"] = ICON_COLOR_NAMES[sender.indexOfSelectedItem()]
         elif sender is self.asking_count_checkbox:
             new_settings["icon_shows_asking_count"] = bool(sender.state())
+        elif sender in self.column_checkboxes.values():
+            new_settings["shown_columns"] = [column_name for column_name in LIST_COLUMNS
+                                             if self.column_checkboxes[column_name].state()]
         elif sender in self.launch_command_fields:
             tool_index = self.launch_command_fields.index(sender)
             agent_tools = [dict(agent_tool) for agent_tool in new_settings["agent_tools"]]

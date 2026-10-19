@@ -217,7 +217,7 @@ class SidebarController(NSObject):
         if self.settings is None:
             return
         self.screens = read_monitors_from_screens()
-        self.placement = choose_sidebar_edge(self.settings["sidebar_monitor_name"], self.settings["sidebar_edge"], self.screens)
+        self.placement = choose_sidebar_edge(self.settings["sidebar_edge"], self.screens)
         if self.placement is None:
             self.stop_tracking_the_pointer()
             self.cancel_hide_timer()

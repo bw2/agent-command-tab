@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, MonitorEntry, WindowEntry
@@ -53,6 +54,17 @@ class RowTextPartsTests(unittest.TestCase):
                                                                     running_command_started_at=220.0)
         parts = build_agent_session_row_text_parts(entry, [True], 280.0)
         self.assertEqual((parts.state_text, parts.elapsed_time_text), ("running", "1m"))
+
+    def test_created_time_and_existence_duration(self):
+        now = time.mktime((2026, 10, 19, 15, 30, 0, 0, 0, -1))  # local time
+        started_today = time.mktime((2026, 10, 19, 6, 8, 0, 0, 0, -1))
+        parts = build_agent_session_row_text_parts(make_entry("idle")._replace(started_at=started_today), [True], now)
+        self.assertEqual((parts.created_time_text, parts.existence_duration_text), ("6:08 AM", "9h 22m"))
+        started_earlier = time.mktime((2026, 10, 7, 23, 0, 0, 0, 0, -1))
+        parts = build_agent_session_row_text_parts(make_entry("idle")._replace(started_at=started_earlier), [True], now)
+        self.assertEqual((parts.created_time_text, parts.existence_duration_text), ("Oct 7", "11d"))
+        parts = build_agent_session_row_text_parts(make_entry("idle"), [True], now)  # start unknown
+        self.assertEqual((parts.created_time_text, parts.existence_duration_text), ("", ""))
 
     def test_asking_dot(self):
         parts = build_agent_session_row_text_parts(make_entry("asking"), [False], 1.0)

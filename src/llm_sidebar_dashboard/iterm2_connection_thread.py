@@ -475,11 +475,13 @@ class DashboardCore:
                 tab_variables_reading, read_iterm2_variables(self.connection, ["jobPid", "commandLine", "status", "path"],
                                                              session_id=first_session.session_id))
             job_process_id = parse_job_process_id(job_pid)
+            job_process = read_process_info(job_process_id) if job_process_id else None
             gathered_session = {
                 "session_id": first_session.session_id,
                 "command_line": command_line,
                 "job_pid": job_process_id,
                 "job_folder": read_process_current_folder(job_process_id),
+                "job_started_at": job_process.started_at if job_process is not None else None,
                 "status": status,
                 "path": path or "",
             }

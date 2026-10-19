@@ -9,6 +9,7 @@ Shape of a gathered window (see DashboardCore.gather_iterm2_windows and Dashboar
      "tabs": [{"tab_id": str, "title": str, "title_override_format": str or None,
                "first_session": {"session_id": str, "command_line": str, "job_pid": int or None,
                                  "job_folder": str (the job process's current folder, or ""),
+                                 "job_started_at": float or None (when the job process started),
                                  "status": str or None, "path": str}}]}
 """
 
@@ -50,7 +51,8 @@ def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_a
 
     Returns:
         {session_id: {"adapter": AgentToolAdapter, "process_id": int or None, "is_in_background": bool,
-                      "agent_tool_name": str, "working_folder": the agent process's current folder or ""}}.
+                      "agent_tool_name": str, "working_folder": the agent process's current folder or "",
+                      "started_at": when the agent process started, or None}}.
     """
     agent_sessions = {}
     for gathered_window in gathered_windows:
@@ -66,7 +68,8 @@ def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_a
                 agent_sessions[session_id] = {
                     "adapter": adapter, "process_id": first_session.get("job_pid"), "is_in_background": False,
                     "agent_tool_name": adapter.name_agent_tool_for_command_line(first_session.get("command_line")),
-                    "working_folder": first_session.get("job_folder") or ""}
+                    "working_folder": first_session.get("job_folder") or "",
+                    "started_at": first_session.get("job_started_at")}
             elif (previous_agent_session is not None and previous_agent_session["process_id"]
                   and process_is_alive(previous_agent_session["process_id"])):
                 agent_sessions[session_id] = dict(previous_agent_session, is_in_background=True)
@@ -166,6 +169,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         running_command_name=running_command[0] if running_command else "",
         running_command_started_at=running_command[1] if running_command else None,
         context_tokens=(screen_reading or {}).get("context_tokens"),
+        started_at=agent_session.get("started_at"),
     )
 
 

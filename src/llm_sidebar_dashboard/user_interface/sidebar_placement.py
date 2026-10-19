@@ -35,14 +35,14 @@ def find_outer_screen_edges(screen_frames):
     return outer_edges
 
 
-def choose_sidebar_edge(saved_monitor_name, saved_edge, screens):
-    """Returns the SidebarPlacement for the saved choice, or the nearest sensible outer edge.
+def choose_sidebar_edge(saved_edge, screens):
+    """Returns the SidebarPlacement for the saved edge of the menu-bar monitor, or the nearest
+    sensible outer edge.
 
-    Order: the saved edge of the saved monitor (an empty name means the menu-bar monitor); the
-    saved monitor's other outer edge; the menu-bar monitor's outer edges (saved edge first);
-    otherwise an outer edge on the saved edge's side, on the monitor closest to the menu-bar
-    monitor (for example the rightmost monitor's right edge when three stand in a row with the
-    menu bar on the middle one and "right" saved).
+    Order: the saved edge of the menu-bar monitor; its other edge; otherwise an outer edge on the
+    saved edge's side, on the monitor closest to the menu-bar monitor (for example the rightmost
+    monitor's right edge when three stand in a row with the menu bar on the middle one and
+    "right" saved).
 
     Returns None when there are no screens.
     """
@@ -50,17 +50,11 @@ def choose_sidebar_edge(saved_monitor_name, saved_edge, screens):
         return None
     frames = [screen["frame"] for screen in screens]
     outer_edges = set(find_outer_screen_edges(frames))
-    saved_screen_index = 0 if not saved_monitor_name else next(
-        (index for index, screen in enumerate(screens) if screen["name"] == saved_monitor_name), None)
     other_edge = "left" if saved_edge == "right" else "right"
-    if saved_screen_index is not None:
-        if (saved_screen_index, saved_edge) in outer_edges:
-            return SidebarPlacement(saved_screen_index, saved_edge, True)
-        if (saved_screen_index, other_edge) in outer_edges:
-            return SidebarPlacement(saved_screen_index, other_edge, False)
-    for edge in (saved_edge, other_edge):
-        if (0, edge) in outer_edges:
-            return SidebarPlacement(0, edge, False)
+    if (0, saved_edge) in outer_edges:
+        return SidebarPlacement(0, saved_edge, True)
+    if (0, other_edge) in outer_edges:
+        return SidebarPlacement(0, other_edge, False)
 
     def rank_outer_edge(screen_index_and_edge):
         """The saved edge's side first, then the monitor closest to the menu-bar monitor."""
@@ -72,16 +66,14 @@ def choose_sidebar_edge(saved_monitor_name, saved_edge, screens):
     return SidebarPlacement(screen_index, edge, False)
 
 
-def describe_sidebar_placement_fallback(saved_monitor_name, saved_edge, screens):
-    """Returns a sentence for the settings window when the sidebar can't go where the settings
-    ask (an unplugged monitor, or an edge that borders another monitor), else ""."""
-    placement = choose_sidebar_edge(saved_monitor_name, saved_edge, screens)
+def describe_sidebar_placement_fallback(saved_edge, screens):
+    """Returns a sentence for the settings window when the sidebar can't go on the saved edge
+    (it borders another monitor), else ""."""
+    placement = choose_sidebar_edge(saved_edge, screens)
     if placement is None or placement.is_the_saved_choice:
         return ""
-    where_the_sidebar_is = f"the {placement.edge} edge of {screens[placement.screen_index]['name']}"
-    if saved_monitor_name and saved_monitor_name not in [screen["name"] for screen in screens]:
-        return f"{saved_monitor_name} isn't connected, so the sidebar is on {where_the_sidebar_is} until it is."
-    return f"The saved edge borders another monitor, so the sidebar is on {where_the_sidebar_is}."
+    return (f"The saved edge borders another monitor, so the sidebar is on the {placement.edge} edge "
+            f"of {screens[placement.screen_index]['name']}.")
 
 
 def compute_sidebar_frame(visible_frame, screen_frame, edge, width, is_shown):
