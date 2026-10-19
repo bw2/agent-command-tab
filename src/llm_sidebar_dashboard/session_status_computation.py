@@ -82,8 +82,16 @@ def permission_dialog_was_answered(state, iterm2_status_change_time, screen_read
             and "permission_dialog_gone_since" in screen_reading)
 
 
-def compute_session_status_from_sources(iterm2_status_value, iterm2_status_change_time, last_time_tab_was_seen,
-                                        tab_is_seen_now, screen_reading, stuck_threshold_seconds, now):
+def status_change_ends_a_turn(previous_state, new_state):
+    """Returns whether iTerm2's status changing from previous_state to new_state (as mapped by
+    map_iterm2_status_value_to_state) ends a turn: done, or idle after working or asking (Codex
+    reports only idle when its turn ends)."""
+    return new_state == "done" or (new_state == "idle" and previous_state in ("working", "asking"))
+
+
+def compute_session_status_from_sources(iterm2_status_value, iterm2_status_change_time, last_turn_ended_at,
+                                        last_time_tab_was_seen, tab_is_seen_now, screen_reading, stuck_threshold_seconds,
+                                        now):
     """Returns (state, reason) for one agent session.
 
     - "asking" ends when a screen check made after the status changed no longer finds the
@@ -91,13 +99,15 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
       iTerm2's status stays "waiting" until the approved tool finishes (Phase 0).
     - "stuck" is working with no screen change (progress noise masked) for the threshold while
       running no command of its own: an agent waiting on a long command it started is working.
-    - "done" means the turn ended after the tab was last seen (selected in the key iTerm2
-      window while iTerm2 was the active app); a turn that ended while the tab was seen counts
-      as idle.
+    - "done" means the last turn ended after the tab was last seen (selected in the key iTerm2
+      window while iTerm2 was the active app), whether the status now says done or idle, so it
+      lasts until the tab is seen; a turn that ended while the tab was seen counts as idle.
 
     Args:
         iterm2_status_value: iTerm2's `status` variable for the session's first pane.
         iterm2_status_change_time: When that value was first observed (seconds since the epoch).
+        last_turn_ended_at: When the status last changed in a way that ends a turn
+            (status_change_ends_a_turn), or None if it hasn't since the session was first seen.
         last_time_tab_was_seen: When the tab was last seen, or None if never.
         tab_is_seen_now: Whether the tab is being seen at this moment.
         screen_reading: {"permission_dialog_is_showing": bool, "permission_dialog_checked_at":
@@ -130,8 +140,10 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         if now - quiet_since >= stuck_threshold_seconds:
             return "stuck", f"thinking with no screen change for {max(1, round((now - quiet_since) / 60))} min"
         return "working", ""
-    if state == "done":
-        if tab_is_seen_now or (last_time_tab_was_seen is not None and last_time_tab_was_seen >= iterm2_status_change_time):
+    if state == "done" and last_turn_ended_at is None:
+        last_turn_ended_at = iterm2_status_change_time  # a session first seen as done: its turn ended by then
+    if state in ("done", "idle") and last_turn_ended_at is not None:
+        if tab_is_seen_now or (last_time_tab_was_seen is not None and last_time_tab_was_seen >= last_turn_ended_at):
             return "idle", "turn finished and seen"
         return "done", "turn finished"
     return state, ""

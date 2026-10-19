@@ -4,6 +4,7 @@ from llm_sidebar_dashboard.session_status_computation import (compute_session_st
                                                               map_iterm2_status_value_to_state,
                                                               permission_dialog_was_answered,
                                                               pick_most_urgent_state,
+                                                              status_change_ends_a_turn,
                                                               summarize_state_counts_in_urgency_order,
                                                               update_permission_dialog_reading)
 
@@ -29,9 +30,10 @@ class MapIterm2StatusValueTests(unittest.TestCase):
 STUCK_THRESHOLD_SECONDS = 600
 
 
-def compute_state(iterm2_status_value, status_change_time, last_seen=None, seen_now=False, screen_reading=None, now=200):
-    return compute_session_status_from_sources(iterm2_status_value, status_change_time, last_seen, seen_now,
-                                               screen_reading, STUCK_THRESHOLD_SECONDS, now)[0]
+def compute_state(iterm2_status_value, status_change_time, last_seen=None, seen_now=False, screen_reading=None, now=200,
+                  last_turn_ended_at=None):
+    return compute_session_status_from_sources(iterm2_status_value, status_change_time, last_turn_ended_at, last_seen,
+                                               seen_now, screen_reading, STUCK_THRESHOLD_SECONDS, now)[0]
 
 
 class ComputeSessionStatusTests(unittest.TestCase):
@@ -49,6 +51,30 @@ class ComputeSessionStatusTests(unittest.TestCase):
 
     def test_done_while_being_seen_is_idle(self):
         self.assertEqual(compute_state("done", 100, seen_now=True), "idle")
+
+    def test_done_lasts_until_seen_when_the_status_then_says_idle(self):
+        # The turn ended at 100; the status changed to idle at 150 without the tab being seen.
+        self.assertEqual(compute_state("idle", 150, last_turn_ended_at=100), "done")
+        self.assertEqual(compute_state("idle", 150, last_seen=90, last_turn_ended_at=100), "done")
+        self.assertEqual(compute_state("idle", 150, last_seen=160, last_turn_ended_at=100), "idle")
+        self.assertEqual(compute_state("idle", 150, seen_now=True, last_turn_ended_at=100), "idle")
+
+    def test_a_turn_ending_in_idle_is_done_until_seen(self):
+        # Codex goes from working straight to idle when its turn ends.
+        self.assertEqual(compute_state("idle", 100, last_turn_ended_at=100), "done")
+        self.assertEqual(compute_state("idle", 100, last_seen=100, last_turn_ended_at=100), "idle")
+
+    def test_idle_without_an_ended_turn_is_idle(self):
+        self.assertEqual(compute_state("idle", 100), "idle")
+
+    def test_status_changes_that_end_a_turn(self):
+        self.assertTrue(status_change_ends_a_turn("working", "done"))
+        self.assertTrue(status_change_ends_a_turn("working", "idle"))
+        self.assertTrue(status_change_ends_a_turn("asking", "idle"))  # Codex after "No" or Esc
+        self.assertTrue(status_change_ends_a_turn(None, "done"))
+        self.assertFalse(status_change_ends_a_turn("done", "idle"))  # the turn ended at done
+        self.assertFalse(status_change_ends_a_turn(None, "idle"))  # a new session at its input box
+        self.assertFalse(status_change_ends_a_turn("idle", "working"))
 
     def test_working_and_asking_pass_through(self):
         self.assertEqual(compute_state("working", 100, last_seen=110, seen_now=True), "working")
@@ -75,7 +101,7 @@ class ComputeSessionStatusTests(unittest.TestCase):
 
     def test_waiting_on_a_long_command_is_never_stuck(self):
         reading = {"fingerprint_changed_at": 150, "running_command": ("python3", 160), "command_last_seen_running_at": 2000}
-        self.assertEqual(compute_session_status_from_sources("working", 100, None, False, reading, 600, 2000),
+        self.assertEqual(compute_session_status_from_sources("working", 100, None, None, False, reading, 600, 2000),
                          ("working", "running python3"))
 
     def test_the_stuck_clock_restarts_when_the_command_ends(self):

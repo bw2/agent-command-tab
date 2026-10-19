@@ -25,7 +25,9 @@ AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent sess
                              "running_command_name is the command a working agent started in this turn and waits "
                              "on (for example \"python3\"), or \"\" while it thinks. context_tokens is how many "
                              "tokens its context holds, from its conversation file, or None if unknown. "
-                             "started_at is when the agent's process started (the Created Time column), or None.")
+                             "started_at is when the agent's process started (the Created Time column), or None. "
+                             "preview_line is the gray line under the tab row: what the agent asks or runs, what "
+                             "it said since the last prompt, or that prompt (session_preview_computation).")
 
 WindowEntry = collections.namedtuple(
     "WindowEntry",

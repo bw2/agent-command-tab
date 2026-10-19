@@ -5,6 +5,7 @@ from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, Monit
 from llm_sidebar_dashboard.user_interface.row_text_rendering import (build_agent_session_row_text_parts,
                                                                      build_monitor_row_text_parts,
                                                                      build_tree_connector_text,
+                                                                     build_tree_continuation_text,
                                                                      build_window_row_text_parts,
                                                                      format_elapsed_time)
 
@@ -38,6 +39,11 @@ class TreeConnectorTests(unittest.TestCase):
         self.assertEqual(build_tree_connector_text([True]), "└─ ")
         self.assertEqual(build_tree_connector_text([False, True]), "│  └─ ")
         self.assertEqual(build_tree_connector_text([True, False]), "   ├─ ")
+
+    def test_continuation_under_a_row_carries_the_vertical_lines_down(self):
+        self.assertEqual(build_tree_continuation_text([False]), "│  ")
+        self.assertEqual(build_tree_continuation_text([True]), "   ")
+        self.assertEqual(build_tree_continuation_text([False, True]), "│     ")
 
 
 class RowTextPartsTests(unittest.TestCase):

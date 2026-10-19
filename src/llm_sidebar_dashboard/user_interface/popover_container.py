@@ -10,8 +10,7 @@ from AppKit import (NSBezelStyleInline, NSBezelStyleRecessed, NSButton, NSColor,
                     NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
-# "Created" rather than "Created Time" keeps the pop-up narrow enough for a 292-point sidebar.
-LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabet", "created_time": "Created"}
+LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabetically", "created_time": "Created Time"}
 POPOVER_WIDTH = 460  # before the first fit
 SMALLEST_POPOVER_WIDTH = 320
 LARGEST_SHARE_OF_SCREEN_WIDTH = 0.9
@@ -141,7 +140,7 @@ class ListPanelController(NSViewController):
     def fit_top_bar_to_width(self):
         """Fits the sort control between "Collapse all" and the settings button: with its "Sort:"
         label when there is room, without it in a narrow sidebar, and hidden when even the pop-up
-        doesn't fit (the dropdown, at least 320 points wide, always shows both). The message line
+        doesn't fit (the dropdown, at least 320 points wide, always shows the pop-up). The message line
         takes the room left before the settings button, so it never covers that button; while it
         shows a message (iTerm2 can't be reached, so there are no rows to sort) the sort control
         steps aside for it."""
@@ -209,13 +208,11 @@ class ListPanelController(NSViewController):
         """Sizes the panel so every row's text shows in full when all rows are expanded, scrolling
         only when the rows are taller (or wider) than the screen allows. Collapsing or expanding
         rows keeps that size (user request, milestone 2)."""
-        outline_view = self.list_controller.outline_view
         window = self.view().window()
         screen = (window.screen() if window is not None else None) or NSScreen.screens()[0]
         usable_frame = screen.visibleFrame()
         bars_height = TOP_BAR_HEIGHT + BOTTOM_BAR_HEIGHT
-        row_count_when_fully_expanded = len(self.list_controller.list_all_items())
-        list_height = row_count_when_fully_expanded * (outline_view.rowHeight() + outline_view.intercellSpacing().height)
+        list_height = self.list_controller.measure_fully_expanded_list_height()  # the list has no spacing between rows
         largest_list_height = usable_frame.size.height - bars_height - SPACE_FOR_POPOVER_ARROW_AND_MARGIN
         list_height = min(max(list_height + LIST_BOTTOM_PADDING, SMALLEST_LIST_HEIGHT), largest_list_height)
         width = self.list_controller.measure_widest_row_width() + SPACE_FOR_SCROLLER_AND_MARGINS

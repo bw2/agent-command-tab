@@ -110,7 +110,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
 ### Preview
 
-- R23. Each tab row shows a one-line preview, in this order of preference: what it is asking (the tool asking permission, or the question), the tool it is running, the start of its last message, the user's last prompt.
+- R23. Each tab row shows a one-line preview, in this order of preference: what it is asking (the tool asking permission, or the question), the tool it is running, the start of its last message, the user's last prompt. It is two gray lines under the tab's row, opened and closed by a single click on the tab, like one more level of the tree (user requests, 2026-10-19).
 - R24. Hovering a tab row shows more: the last prompt, the last message (long text shortened), the current tool, the time in the current state, the working folder.
 - R25. An optional AI-written one-line summary per agent session, off by default (later version).
 
@@ -126,8 +126,8 @@ Make sure to carefully assess the relative complexity and difficulty of features
 - R35. Settings include:
   - sidebar on or off, edge and width (width also adjustable by dragging the edge of the sidebar);
   - icon color, and whether the icon shows the asking count;
-  - which information columns tab rows show: State, State Duration, Used Token Count, Created Time, Existence Duration;
-  - the list's sort order (Manual, Activity, Alphabet, Created), also chosen with the Sort pop-up above the list;
+  - which information columns tab rows show: State, State Duration, Used Token Count, Created Time, Time Since Created;
+  - the list's sort order (Manual, Activity, Alphabetically, Created Time), also chosen with the Sort pop-up above the list;
   - which agent tools to detect (Claude Code, Codex), and the launch command for each;
   - stuck time limit (default 10 minutes);
   - how long a crashed agent session's row stays (default 5 minutes);
@@ -181,7 +181,7 @@ My rough ratings. *Code* is the amount, *Complexity* how hard it is to get right
 | "Stuck" detection (R20) | Small | Medium | Low | **Can be high** | **Warning:** watching every screen redraw is costly (agent spinners redraw many times a second, so 20 agent sessions could mean hundreds of updates a second). Planned instead: compare a screen fingerprint every 30 seconds, which is nearly free. |
 | Importance (R26) | Medium | Medium | Medium | Low | Recent interaction needs iTerm2's keystroke events: the app sees every keystroke in iTerm2 but keeps only the time. The activity rules are guesses and will need tuning; they depend on hook payloads (weaker for Codex). |
 | Background-process lights (R26.2) | Small | Low | Medium | Low | iTerm2 reports a count of background tasks per session; details come only from Claude Code's hooks. |
-| Previews (R23, R24) | Medium | Medium | Medium | Low | Needs hooks installed in Claude Code and Codex (Q7). |
+| Previews (R23, R24) | Medium | Medium | Medium | Low | R23 is built from the conversation files, without hooks (2026-10-19); the files' formats are internal and can change. |
 | Monitors (R31 to R33) | Small to Medium | Low to Medium | Low | Low | Window positions checked every 2 seconds only while 2 or more monitors are attached. Cheaper than it sounds. |
 | Visual style (R36 to R41) | Medium | Medium | Low | Low | Custom-drawn rows with tree connectors and animated dots. |
 | Later: core and views boundary for other views and computers | Small now | Low now | Low | None | Version 1 keeps all state in plain snapshots and all actions as plain requests, so later views can plug in. No network code in version 1. |

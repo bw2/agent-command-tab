@@ -17,6 +17,7 @@ import os
 
 from llm_sidebar_dashboard.agent_adapters import find_agent_tool_adapter_for_tab
 from llm_sidebar_dashboard.monitor_assignment import assign_windows_to_monitors_by_largest_overlap
+from llm_sidebar_dashboard.session_preview_computation import choose_preview_text
 from llm_sidebar_dashboard.session_status_computation import compute_session_status_from_sources
 from llm_sidebar_dashboard.snapshot_data_classes import (AgentSessionEntry, ComputerSnapshot, MonitorEntry,
                                                          WindowEntry)
@@ -110,8 +111,8 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         agent_session: The tab's entry from resolve_agent_sessions.
         claude_agent_record: The tab's entry from `claude agents --json` (matched by the agent's
             process ID), or None.
-        session_tracking: {"status_change_time": float, "last_time_tab_was_seen": float or None}
-            for the tab's first session, or None.
+        session_tracking: {"status_change_time": float, "last_time_tab_was_seen": float or None,
+            "last_turn_ended_at": float (once a turn ended)} for the tab's first session, or None.
         previous_displayed_state: (state, since) shown for this session in the previous snapshot,
             or None.
         screen_reading: The core's latest screen reading for the session, or None (see
@@ -143,6 +144,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         state, reason = compute_session_status_from_sources(
             first_session.get("status"),
             session_tracking.get("status_change_time", now),
+            session_tracking.get("last_turn_ended_at"),
             session_tracking.get("last_time_tab_was_seen"),
             session_id == seen_session_id,
             screen_reading,
@@ -168,6 +170,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         last_time_tab_was_seen=session_tracking.get("last_time_tab_was_seen"),
         running_command_name=running_command[0] if running_command else "",
         running_command_started_at=running_command[1] if running_command else None,
+        preview_line=choose_preview_text(state, (screen_reading or {}).get("conversation_preview")),
         context_tokens=(screen_reading or {}).get("context_tokens"),
         started_at=agent_session.get("started_at"),
     )

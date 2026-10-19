@@ -17,7 +17,8 @@ from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NA
 from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
 from llm_sidebar_dashboard.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, POPOVER_WIDTH, TOP_BAR_HEIGHT,
                                                                     ListPanelController)
-from llm_sidebar_dashboard.user_interface.agent_session_outline_view import ROW_HEIGHT, AgentSessionListController
+from llm_sidebar_dashboard.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
+                                                                             AgentSessionListController)
 from llm_sidebar_dashboard.user_interface.menu_bar_status_item import ICON_COLORS_BY_NAME, choose_automatic_icon_color_name
 from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
 from llm_sidebar_dashboard.user_interface.sidebar_panel import (SidebarController,
@@ -232,8 +233,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
     def test_top_bar_drops_the_sort_label_then_the_sort_popup_when_narrow(self):
         panel = self.dropdown_panel_controller
         # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's smallest width.
-        for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (292, False, True), (250, False, False),
-                                                (200, False, False), (460, True, True)):
+        for width, label_shown, popup_shown in ((460, True, True), (350, True, True), (320, False, True), (310, False, True),
+                                                (292, False, False), (200, False, False), (460, True, True)):
             self.window.setContentSize_((width, 260))
             self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden()),
                              (label_shown, popup_shown), width)
@@ -257,7 +258,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.dropdown_panel_controller.listSortOrderChosen_(self.dropdown_panel_controller.list_sort_order_popup)
         self.assertEqual(self.owner.chosen_list_sort_orders, ["activity"])
         self.dropdown_panel_controller.show_list_sort_order("alphabet")
-        self.assertEqual(self.dropdown_panel_controller.list_sort_order_popup.titleOfSelectedItem(), "Alphabet")
+        self.assertEqual(self.dropdown_panel_controller.list_sort_order_popup.titleOfSelectedItem(), "Alphabetically")
         self.assertEqual(self.list_controller.list_sort_order, "alphabet")
 
     def test_window_menu_offers_new_agent_sessions_in_the_window_folder(self):
@@ -296,7 +297,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(self.list_controller.rename_in_progress)
         self.assertNotIn(("window", "w1"), self.list_controller.collapsed_item_keys)  # put back
 
-    def test_single_click_on_a_tab_does_nothing_and_double_click_shows_it(self):
+    def test_single_click_on_a_tab_without_a_preview_does_nothing_and_double_click_shows_it(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         tab_item = self.list_controller.outline_view.itemAtRow_(1)
         self.list_controller.find_clicked_item = lambda: tab_item
@@ -464,7 +465,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.dropdown_panel_controller.fit_size_to_rows()
         width, height = self.dropdown_panel_controller.preferredContentSize()
         self.assertGreater(width, self.list_controller.measure_widest_row_width())
-        self.assertGreaterEqual(height, 7 * ROW_HEIGHT + TOP_BAR_HEIGHT + BOTTOM_BAR_HEIGHT)
+        self.assertGreaterEqual(height, self.list_controller.measure_fully_expanded_list_height() + TOP_BAR_HEIGHT
+                                + BOTTOM_BAR_HEIGHT)
         # Laid out at that size, the long name and every row's details show in full.
         self.window.setContentSize_((width, height))
         self.window.contentView().layoutSubtreeIfNeeded()
@@ -474,6 +476,92 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(name_text_field.frame().size.width, name_text_field.fittingSize().width)
         details_text_field = row_view.details_text_field
         self.assertGreaterEqual(details_text_field.frame().size.width, details_text_field.fittingSize().width)
+
+    def apply_snapshot_with_previews(self):
+        """Applies the sample snapshot with previews on both tabs of the second window and the first tab of the first."""
+        snapshot = make_sample_snapshot()
+        previews = {"1": "Bash: python3 -m unittest", "10": "You: compare the calls", "11": "All tests pass."}
+        snapshot = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=tuple(
+            window._replace(agent_sessions=tuple(entry._replace(preview_line=previews.get(entry.tab_id, ""))
+                                                 for entry in window.agent_sessions))
+            for window in snapshot.monitors[0].windows)),))
+        self.list_controller.apply_snapshot(snapshot)
+        return self.list_controller.outline_view
+
+    def click_row(self, row):
+        item = self.list_controller.outline_view.itemAtRow_(row)
+        self.list_controller.find_clicked_item = lambda: item
+        self.list_controller.rowClicked_(None)
+
+    def test_a_click_on_a_tab_opens_its_preview_under_the_name_and_another_click_closes_it(self):
+        outline_view = self.apply_snapshot_with_previews()
+        self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)  # closed at first
+        self.click_row(1)
+        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in range(3)],
+                         [ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT])
+        self.assertEqual(self.submitted_actions, [])  # a single click doesn't show the tab
+        self.window.setContentSize_((POPOVER_WIDTH + 200, 400))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
+        row_view.layoutSubtreeIfNeeded()
+        preview_frame = row_view.preview_text_field.frame()
+        self.assertEqual(row_view.preview_text_field.stringValue(), "Bash: python3 -m unittest")
+        self.assertFalse(row_view.preview_text_field.isHidden())
+        self.assertEqual(row_view.preview_text_field.maximumNumberOfLines(), 2)
+        self.assertEqual(preview_frame.origin.x, row_view.name_text_field.frame().origin.x)  # starts under the name
+        self.assertLessEqual(preview_frame.origin.y + preview_frame.size.height, row_view.name_text_field.frame().origin.y)
+        self.assertEqual(row_view.preview_connector_text_field.stringValue(), "│  \n│  ")  # the window's tree line carries on
+        self.assertEqual(self.list_controller.measure_fully_expanded_list_height(), 6 * ROW_HEIGHT + TAB_ROW_HEIGHT_WITH_PREVIEW)
+        self.click_row(1)
+        self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)
+        self.click_row(2)  # a tab without a preview has nothing to open
+        self.assertEqual(outline_view.rectOfRow_(2).size.height, ROW_HEIGHT)
+
+    def test_a_double_click_on_a_tab_shows_it_and_puts_its_preview_back(self):
+        outline_view = self.apply_snapshot_with_previews()
+        self.click_row(1)  # the first click opens the preview at once
+        self.list_controller.rowDoubleClicked_(None)
+        self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)
+        self.assertEqual(self.submitted_actions[-1].action, "focus_agent_session")
+
+    def test_holding_a_tab_to_peek_doesnt_open_its_preview(self):
+        outline_view = self.apply_snapshot_with_previews()
+        self.list_controller.row_pressed(1)
+        self.list_controller.peekTimerFired_(self.list_controller.peek_timer)
+        self.click_row(1)  # the click arrives when the button comes up, before row_released
+        self.list_controller.row_released()
+        self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)
+
+    def test_expand_all_and_collapse_all_open_and_close_the_previews_too(self):
+        outline_view = self.apply_snapshot_with_previews()
+        self.list_controller.set_all_expanded(True)
+        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 2, 5, 6)],
+                         [TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW, TAB_ROW_HEIGHT_WITH_PREVIEW])
+        self.list_controller.set_all_expanded(False)
+        self.assertEqual(outline_view.numberOfRows(), 2)
+        self.assertEqual(self.list_controller.open_preview_item_keys, set())
+
+    def test_an_expanded_window_row_has_buttons_that_open_and_close_its_tabs_previews(self):
+        outline_view = self.apply_snapshot_with_previews()
+        self.window.contentView().layoutSubtreeIfNeeded()
+        window_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 4, True)  # tandem-repeats
+        window_row_view.layoutSubtreeIfNeeded()
+        self.assertFalse(window_row_view.open_previews_button.isHidden())
+        self.assertLessEqual(window_row_view.name_text_field.frame().origin.x + window_row_view.name_text_field.frame().size.width,
+                             window_row_view.open_previews_button.frame().origin.x)
+        with unittest.mock.patch.object(outline_view, "rowForView_", return_value=4):
+            self.list_controller.openPreviewsButtonClicked_(window_row_view.open_previews_button)
+            self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 5, 6)],
+                             [ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW, TAB_ROW_HEIGHT_WITH_PREVIEW])
+            self.list_controller.closePreviewsButtonClicked_(window_row_view.close_previews_button)
+        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (5, 6)], [ROW_HEIGHT, ROW_HEIGHT])
+        self.list_controller.toggle_expansion(outline_view.itemAtRow_(4))  # collapsed: no buttons
+        window_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 4, True)
+        window_row_view.layoutSubtreeIfNeeded()
+        self.assertTrue(window_row_view.open_previews_button.isHidden())
+        tab_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
+        tab_row_view.layoutSubtreeIfNeeded()
+        self.assertTrue(tab_row_view.open_previews_button.isHidden())
 
     def lay_out_tab_row_views(self, snapshot):
         self.list_controller.apply_snapshot(snapshot)
@@ -540,7 +628,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertGreater(row_view.frame().size.width, POPOVER_WIDTH - 60)  # the column fills the dropdown
         self.assertEqual(row_view.name_text_field.stringValue(), "planning")
         self.assertEqual(row_view.state_text_field.stringValue(), "working")
-        self.assertIn("Claude Code", row_view.toolTip())
+        self.assertIsNone(row_view.toolTip())  # no hover popups on rows (user request, 2026-10-19)
         self.assertTrue(row_view.prefix_text_field.stringValue().startswith("├─ "))
         image_path = os.environ.get("LLM_SIDEBAR_DASHBOARD_SMOKE_TEST_IMAGE")
         if image_path:
@@ -695,10 +783,20 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             self.controller.update_edge_choices()
         self.assertEqual([menu_item.isEnabled() for menu_item in self.controller.edge_popup.itemArray()], [True, True])
 
+    def test_window_edge_popup_shows_capitalized_titles_and_saves_the_edge_name(self):
+        self.assertEqual(self.controller.edge_popup.itemTitles(), ["Right", "Left"])
+        self.assertEqual(self.controller.edge_popup.titleOfSelectedItem(), "Right")  # the default edge
+        with unittest.mock.patch("llm_sidebar_dashboard.user_interface.settings_window.read_monitors_from_screens",
+                                 return_value=[{"name": "Built-in", "frame": (0, 0, 1500, 1000),
+                                                "visible_frame": (0, 0, 1500, 970)}]):
+            self.controller.edge_popup.selectItemWithTitle_("Left")
+            self.controller.controlChanged_(self.controller.edge_popup)
+        self.assertEqual(self.owner.settings["sidebar_edge"], "left")
+
     def test_column_checkboxes_choose_the_shown_columns_in_their_left_to_right_order(self):
         checkboxes = self.controller.column_checkboxes
         self.assertEqual([title for title in (checkbox.title() for checkbox in checkboxes.values())],
-                         ["State", "State Duration", "Used Token Count", "Created Time", "Existence Duration"])
+                         ["State", "State Duration", "Used Token Count", "Created Time", "Time Since Created"])
         checkboxes["state"].setState_(0)
         self.controller.controlChanged_(checkboxes["state"])
         checkboxes["created_time"].setState_(1)

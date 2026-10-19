@@ -11,6 +11,7 @@ from llm_sidebar_dashboard.agent_process_tree import read_process_current_folder
 from llm_sidebar_dashboard.context_window_usage import (find_codex_conversation_files,
                                                         read_context_tokens_from_codex_conversation_file,
                                                         read_turn_started_at_from_codex_conversation_file)
+from llm_sidebar_dashboard.session_preview_computation import read_preview_fields_from_codex_conversation_file
 
 # <sessions folder>/2026/10/18/rollout-2026-10-18T15-04-05-<conversation ID>.jsonl
 CONVERSATION_FILE_PATTERN = re.compile(
@@ -64,6 +65,9 @@ class CodexAdapter(AgentToolAdapter):
 
     def read_turn_started_at(self, conversation_file_path):
         return read_turn_started_at_from_codex_conversation_file(conversation_file_path)
+
+    def read_preview_fields(self, conversation_file_path):
+        return read_preview_fields_from_codex_conversation_file(conversation_file_path)
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
         """Continues a copy of the conversation (`codex fork <id>`)."""

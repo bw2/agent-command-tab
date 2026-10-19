@@ -91,12 +91,28 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="done")])], tracking=tracking)
         self.assertEqual(snapshot.monitors[0].windows[0].agent_sessions[0].status, "idle")
 
+    def test_an_ended_turn_stays_done_until_seen_after_the_status_says_idle(self):
+        tab = make_tab("1", "codex", status="idle")
+        tracking = {"session-1": {"status_change_time": 900.0, "last_turn_ended_at": 900.0, "last_time_tab_was_seen": 850.0}}
+        self.assertEqual(build_snapshot([make_window("w", [tab])], tracking=tracking).monitors[0].windows[0]
+                         .agent_sessions[0].status, "done")
+        tracking["session-1"]["last_time_tab_was_seen"] = 950.0
+        self.assertEqual(build_snapshot([make_window("w", [tab])], tracking=tracking).monitors[0].windows[0]
+                         .agent_sessions[0].status, "idle")
+
     def test_screen_readings_reach_the_status(self):
         tracking = {"session-1": {"status_change_time": 100.0, "last_time_tab_was_seen": None}}
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="working")])], tracking=tracking,
                                   screen_readings={"session-1": {"fingerprint_changed_at": 200.0}})
         entry = snapshot.monitors[0].windows[0].agent_sessions[0]
         self.assertEqual((entry.status, entry.status_reason), ("stuck", "thinking with no screen change for 13 min"))
+
+    def test_the_preview_follows_the_state(self):
+        preview = {"last_prompt": "Fix it", "message_since_prompt": "Looking now.", "open_tool_call": "Bash: pytest"}
+        for status, expected_preview_line in (("working", "Bash: pytest"), ("idle", "Looking now.")):
+            snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
+                                      screen_readings={"session-1": {"conversation_preview": preview}})
+            self.assertEqual(snapshot.monitors[0].windows[0].agent_sessions[0].preview_line, expected_preview_line)
 
     def test_snapshot_converts_to_json(self):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="waiting")])])

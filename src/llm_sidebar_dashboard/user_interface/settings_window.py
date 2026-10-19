@@ -25,13 +25,14 @@ SIDEBAR_MODE_TITLES = {
     "floating": "Always: Above other windows",
     "docked": "Always: Resize iTerm2 windows",
 }
+SIDEBAR_EDGE_TITLES = {"right": "Right", "left": "Left"}
 # The tab rows' information columns, in the order the user listed them (user request, 2026-10-19).
 LIST_COLUMN_TITLES = {
     "state": "State",
     "state_duration": "State Duration",
     "context_tokens": "Used Token Count",
     "created_time": "Created Time",
-    "existence_duration": "Existence Duration",
+    "existence_duration": "Time Since Created",
 }
 
 
@@ -67,7 +68,7 @@ class SettingsWindowController(NSObject):
         self.sidebar_is_on_checkbox = self.make_checkbox("Enable the sidebar at the edge of the screen",
                                                          self.settings["sidebar_is_on"])
         self.sidebar_mode_popup = self.make_popup(list(SIDEBAR_MODE_TITLES.values()), SIDEBAR_MODE_TITLES[self.settings["sidebar_mode"]])
-        self.edge_popup =self.make_popup(["right", "left"], self.settings["sidebar_edge"])
+        self.edge_popup = self.make_popup(list(SIDEBAR_EDGE_TITLES.values()), SIDEBAR_EDGE_TITLES[self.settings["sidebar_edge"]])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
         self.icon_color_popup = self.make_popup([color_name.capitalize() for color_name in ICON_COLOR_NAMES],
                                                 self.settings["icon_color"].capitalize())
@@ -78,8 +79,8 @@ class SettingsWindowController(NSObject):
         self.stuck_minutes_field = self.make_text_field(str(self.settings["stuck_minutes"]), 80)
         self.column_checkboxes = {column_name: self.make_checkbox(title, column_name in self.settings["shown_columns"])
                                   for column_name, title in LIST_COLUMN_TITLES.items()}
-        rows += [("Sidebar", self.sidebar_is_on_checkbox, None), ("Show", self.sidebar_mode_popup, None),
-                 ("Edge", self.edge_popup, None),
+        rows += [("Sidebar", self.sidebar_is_on_checkbox, None), ("Window Edge", self.edge_popup, None),
+                 ("Show", self.sidebar_mode_popup, None),
                  ("Width", self.sidebar_width_field, "points"), (None, None, None),
                  ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None), (None, None, None)]
         rows += [("Columns" if index == 0 else None, checkbox, None) for index, checkbox in enumerate(self.column_checkboxes.values())]
@@ -173,10 +174,10 @@ class SettingsWindowController(NSObject):
         outer_edges = ({edge for index, edge in find_outer_screen_edges([screen["frame"] for screen in screens]) if index == 0}
                        or {"right", "left"})
         self.edge_popup.setAutoenablesItems_(False)
-        for menu_item in self.edge_popup.itemArray():
-            menu_item.setEnabled_(menu_item.title() in outer_edges)
-        if self.edge_popup.titleOfSelectedItem() not in outer_edges:
-            self.edge_popup.selectItemWithTitle_(sorted(outer_edges)[-1])  # "right" if it is outer
+        for edge, menu_item in zip(SIDEBAR_EDGE_TITLES, self.edge_popup.itemArray()):
+            menu_item.setEnabled_(edge in outer_edges)
+        if list(SIDEBAR_EDGE_TITLES)[self.edge_popup.indexOfSelectedItem()] not in outer_edges:
+            self.edge_popup.selectItemWithTitle_(SIDEBAR_EDGE_TITLES[sorted(outer_edges)[-1]])  # "right" if it is outer
 
     @objc.python_method
     def show_placement_fallback_note(self, settings):
@@ -194,7 +195,7 @@ class SettingsWindowController(NSObject):
             selected_mode_title = sender.titleOfSelectedItem()
             new_settings["sidebar_mode"] = next(mode for mode, title in SIDEBAR_MODE_TITLES.items() if title == selected_mode_title)
         elif sender is self.edge_popup:
-            new_settings["sidebar_edge"] = sender.titleOfSelectedItem()
+            new_settings["sidebar_edge"] = list(SIDEBAR_EDGE_TITLES)[sender.indexOfSelectedItem()]
         elif sender is self.sidebar_width_field:
             self.read_number_field_into_settings(sender, "sidebar_width", new_settings)
         elif sender is self.stuck_minutes_field:

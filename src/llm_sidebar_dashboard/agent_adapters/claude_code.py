@@ -8,6 +8,7 @@ from llm_sidebar_dashboard.agent_adapters.base import AgentToolAdapter, split_co
 from llm_sidebar_dashboard.context_window_usage import (find_claude_code_transcript,
                                                         read_context_tokens_from_claude_code_transcript,
                                                         read_turn_started_at_from_claude_code_transcript)
+from llm_sidebar_dashboard.session_preview_computation import read_preview_fields_from_claude_code_transcript
 
 ELAPSED_TIME = r"(?:\d+h )?(?:\d+m )?\d+s"
 
@@ -52,6 +53,9 @@ class ClaudeCodeAdapter(AgentToolAdapter):
 
     def read_turn_started_at(self, conversation_file_path):
         return read_turn_started_at_from_claude_code_transcript(conversation_file_path)
+
+    def read_preview_fields(self, conversation_file_path):
+        return read_preview_fields_from_claude_code_transcript(conversation_file_path)
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
         """Continues a copy of the conversation under a new session ID (`--resume <id> --fork-session`),

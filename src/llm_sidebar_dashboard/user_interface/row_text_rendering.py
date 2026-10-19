@@ -13,13 +13,15 @@ from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_st
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
                      "agent_tool_name", "state_text", "elapsed_time_text", "context_text", "created_time_text",
-                     "existence_duration_text"],
-    defaults=["", "", "", "", "", ""])
+                     "existence_duration_text", "preview_connector_text", "preview_text"],
+    defaults=["", "", "", "", "", "", "", ""])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
                         "in columns that line up from row to row: context_text (the context's size, \"425k\", "
                         "right-aligned), created_time_text (when the agent session started) and "
                         "existence_duration_text (how long ago), the icon for agent_tool_name, state_text "
-                        "(left-aligned) and elapsed_time_text (the state's duration, right-aligned).")
+                        "(left-aligned) and elapsed_time_text (the state's duration, right-aligned). Under it, "
+                        "a tab row has a gray preview line (R23): preview_connector_text continues the tree's "
+                        "lines, and preview_text starts under the name.")
 
 DOT_GLYPH_AND_COLOR_BY_STATE = {
     "asking": ("●", "light_blue"),  # the same light blue as the menu bar icon's "C" and count (user request, milestone 2)
@@ -68,6 +70,12 @@ def build_tree_connector_text(is_last_child_at_each_level):
     return "".join(ancestor_parts) + ("└─ " if is_last_child_at_each_level[-1] else "├─ ")
 
 
+def build_tree_continuation_text(is_last_child_at_each_level):
+    """Returns the gray prefix for a second line under a row: the tree's vertical lines carried
+    down, for example "│  │  " under "│  ├─ ", and "   " under a last child's "└─ "."""
+    return "".join("   " if is_last else "│  " for is_last in is_last_child_at_each_level)
+
+
 def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_each_level, now):
     """Returns the RowTextParts for a tab row.
 
@@ -84,7 +92,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         dot_color_name=dot_color_name,
         dot_blinks=agent_session_entry.status == "working",
         name_text=agent_session_entry.tab_title,
-        details_text=agent_session_entry.preview_line,
+        details_text="",  # the preview has its own line under the row
         agent_tool_name=agent_session_entry.agent_tool_name,
         # While it waits on a command it started, a working agent shows "running" and the command's time.
         state_text="running" if agent_session_entry.running_command_name else agent_session_entry.status,
@@ -94,6 +102,8 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         context_text=format_token_count(agent_session_entry.context_tokens) if agent_session_entry.context_tokens else "",
         created_time_text=format_clock_time(started_at, now) if started_at is not None else "",
         existence_duration_text=format_elapsed_time(now - started_at) if started_at is not None else "",
+        preview_connector_text=build_tree_continuation_text(is_last_child_at_each_level),
+        preview_text=agent_session_entry.preview_line,
     )
 
 

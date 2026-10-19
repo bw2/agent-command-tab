@@ -35,6 +35,7 @@ from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, c
                                                    screen_shows_permission_dialog)
 from llm_sidebar_dashboard.session_status_computation import (map_iterm2_status_value_to_state,
                                                               permission_dialog_was_answered,
+                                                              status_change_ends_a_turn,
                                                               update_permission_dialog_reading)
 from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
 from llm_sidebar_dashboard.window_list_ordering import move_window_in_window_list_order, update_window_list_order
@@ -535,7 +536,8 @@ class DashboardCore:
         return [gathered_window for gathered_window in gathered_windows if gathered_window is not None]
 
     def update_session_tracking(self, now):
-        """Records when each session's status value changed, and forgets sessions that are gone."""
+        """Records when each session's status value changed and when its turns start and end, and
+        forgets sessions that are gone."""
         live_session_ids = set()
         for gathered_window in self.gathered_windows:
             for gathered_tab in gathered_window["tabs"]:
@@ -553,6 +555,8 @@ class DashboardCore:
                     tracking["status_change_time"] = now
                     if new_state == "working" and previous_state not in ("working", "asking"):
                         tracking["turn_started_at"] = now  # a permission prompt in between doesn't start a new turn
+                    if status_change_ends_a_turn(previous_state, new_state):
+                        tracking["last_turn_ended_at"] = now  # kept when the status later changes, so done lasts until seen
                     if new_state == "asking":
                         self.screen_check_needed.set()
         for session_id in set(self.session_tracking_by_session_id) - live_session_ids:
@@ -788,8 +792,9 @@ class DashboardCore:
                 self.snapshot_needed.set()  # also lets "stuck" appear once its time has come
 
     async def read_context_window_usage_periodically(self):
-        """Keeps each agent session's context size ("context_tokens" in its screen reading) current
-        from the end of its conversation file (context_window_usage). The file is looked up
+        """Keeps each agent session's context size and preview fields ("context_tokens" and
+        "conversation_preview" in its screen reading) current from the end of its conversation
+        file (context_window_usage, session_preview_computation). The file is looked up
         (Claude Code: from `claude agents --json`; Codex: by its folder and start time) for each new process or Claude
         Code conversation and again every minute, and read again only when it changed."""
         claude_config_folders = list_folders_that_may_hold_claude_code_transcripts()
@@ -817,26 +822,35 @@ class DashboardCore:
                     else:
                         conversation_file = {"key": conversation_key, "path": path, "looked_up_at": now, "modified_at": None}
                         self.conversation_files_by_session_id[session_id] = conversation_file
-                        self.note_context_tokens(session_id, None)  # the old conversation's size no longer applies
+                        # The old conversation's size and preview no longer apply.
+                        self.note_conversation_reading(session_id, "context_tokens", None)
+                        self.note_conversation_reading(session_id, "conversation_preview", None)
                 if conversation_file["path"] is None:
                     continue
                 try:
                     modified_at = os.path.getmtime(conversation_file["path"])
                 except OSError:
                     conversation_file["path"] = None
-                    self.note_context_tokens(session_id, None)
+                    self.note_conversation_reading(session_id, "context_tokens", None)
+                    self.note_conversation_reading(session_id, "conversation_preview", None)
                     continue
                 if modified_at != conversation_file["modified_at"]:
                     conversation_file["modified_at"] = modified_at
                     context_tokens = await asyncio.to_thread(agent_session["adapter"].read_context_tokens, conversation_file["path"])
+                    preview_fields = await asyncio.to_thread(agent_session["adapter"].read_preview_fields, conversation_file["path"])
+                    if session_id not in self.agent_sessions:
+                        continue  # the tab closed during the reads
                     # None means no usage in the file's end (one huge line), so the last size stays.
-                    if context_tokens is not None and session_id in self.agent_sessions:
-                        self.note_context_tokens(session_id, context_tokens)
+                    if context_tokens is not None:
+                        self.note_conversation_reading(session_id, "context_tokens", context_tokens)
+                    self.note_conversation_reading(session_id, "conversation_preview", preview_fields)
 
-    def note_context_tokens(self, session_id, context_tokens):
+    def note_conversation_reading(self, session_id, reading_name, value):
+        """Stores what was read from a session's conversation file ("context_tokens" or
+        "conversation_preview") in its screen reading, asking for a snapshot when it changed."""
         reading = self.screen_readings_by_session_id.setdefault(session_id, {})
-        if context_tokens != reading.get("context_tokens"):
-            reading["context_tokens"] = context_tokens
+        if value != reading.get(reading_name):
+            reading[reading_name] = value
             self.snapshot_needed.set()
 
     async def note_command_the_agent_is_waiting_on(self, session_id, agent_session, reading, state, is_effectively_working, now):
