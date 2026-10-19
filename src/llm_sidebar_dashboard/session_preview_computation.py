@@ -18,8 +18,13 @@ TOOL_INPUT_KEYS_IN_PREFERENCE_ORDER = ("command", "file_path", "notebook_path", 
 # A line holding only a time, such as "[10/19/2026 09:19:52 AM EDT]", which some users have every reply start with.
 BRACKETED_TIME_LINE = re.compile(r"^\[[^\]]*\d{1,2}:\d{2}[^\]]*\]$")
 MARKDOWN_LINE_START = re.compile(r"^(?:#+|>|[-*+]|\d+[.)])\s+")
-# User records that Claude Code writes itself: slash command echoes and output, task notifications, interrupt notes.
+# User records that Claude Code writes itself: slash command output, caveats, interrupt notes.
 GENERATED_USER_TEXT_STARTS = ("<", "[Request interrupted", "Caveat:")
+# A slash command or skill the user typed is written as "<command-message>…<command-name>/x</command-name>
+# <command-args>…</command-args>": a prompt. A background task's "<task-notification>" also starts a turn.
+COMMAND_NAME_PATTERN = re.compile(r"<command-name>(.*?)</command-name>", re.S)
+COMMAND_ARGUMENTS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+TURN_STARTING_NOTIFICATION_START = "<task-notification>"
 # The command in a Codex "exec" tool call, whose input is JavaScript such as tools.exec_command({cmd:"ls -la"}).
 CODEX_EXEC_COMMAND = re.compile(r'\bcmd\s*:\s*"((?:[^"\\]|\\.)*)"')
 
@@ -91,10 +96,12 @@ def read_preview_fields_from_claude_code_transcript(file_path):
 
     Records are read newest first, back to the last prompt. Each assistant record holds one
     block (text, thinking or tool_use); a tool_use is open while no later user record holds its
-    tool_result and the agent has written no text since. Subagent records, Claude Code's own
-    user records (GENERATED_USER_TEXT_STARTS, meta records, the summary after /compact) and tool
-    results are not prompts. When the prompt is older than the part read, the "last-prompt"
-    record that Claude Code keeps near the end supplies it.
+    tool_result and the agent has written no text since. A slash command or skill the user typed
+    is a prompt ("/name arguments"); a background task's notification starts a turn too, whose
+    prompt is then the last one typed. Subagent records, Claude Code's own other user records
+    (GENERATED_USER_TEXT_STARTS, meta records, the summary after /compact) and tool results are
+    not prompts. When the prompt is older than the part read, or a notification started the
+    turn, the "last-prompt" record that Claude Code keeps near the end supplies it.
 
     Returns:
         {"last_prompt": str, "message_since_prompt": str, "open_tool_call": str}, each "" when
@@ -104,6 +111,7 @@ def read_preview_fields_from_claude_code_transcript(file_path):
     message_since_prompt = ""
     open_tool_call = ""
     saved_last_prompt = ""
+    turn_started_with_a_notification = False  # then only the prompt is still looked for
     for line in read_last_lines(file_path):
         try:
             record = json.loads(line)
@@ -113,6 +121,8 @@ def read_preview_fields_from_claude_code_transcript(file_path):
             continue
         if record.get("type") == "last-prompt":
             saved_last_prompt = saved_last_prompt or make_one_line(record.get("lastPrompt") or "")
+            if turn_started_with_a_notification:
+                break
             continue
         content = (record.get("message") or {}).get("content") if isinstance(record.get("message"), dict) else None
         blocks = content if isinstance(content, list) else [{"type": "text", "text": content}] if isinstance(content, str) else []
@@ -123,9 +133,19 @@ def read_preview_fields_from_claude_code_transcript(file_path):
                 answered_tool_use_ids |= tool_result_ids
                 continue
             prompt_text = "\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text")
+            command_name_match = COMMAND_NAME_PATTERN.search(prompt_text)
+            if command_name_match:
+                command_arguments_match = COMMAND_ARGUMENTS_PATTERN.search(prompt_text)
+                command = f"{command_name_match.group(1)} {command_arguments_match.group(1) if command_arguments_match else ''}"
+                return build_preview_fields(make_one_line(command), message_since_prompt, open_tool_call)
+            if prompt_text.lstrip().startswith(TURN_STARTING_NOTIFICATION_START):
+                turn_started_with_a_notification = True
+                if saved_last_prompt:
+                    break
+                continue
             if prompt_text.strip() and not prompt_text.lstrip().startswith(GENERATED_USER_TEXT_STARTS):
                 return build_preview_fields(make_one_line(prompt_text), message_since_prompt, open_tool_call)
-        elif record.get("type") == "assistant":
+        elif record.get("type") == "assistant" and not turn_started_with_a_notification:
             for block in reversed(blocks):
                 if block.get("type") == "text" and not message_since_prompt and str(block.get("text") or "").strip():
                     message_since_prompt = make_one_line(block["text"])

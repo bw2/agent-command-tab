@@ -35,7 +35,7 @@ from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, c
                                                    screen_shows_permission_dialog)
 from llm_sidebar_dashboard.session_status_computation import (map_iterm2_status_value_to_state,
                                                               permission_dialog_was_answered,
-                                                              status_change_ends_a_turn,
+                                                              track_status_value,
                                                               update_permission_dialog_reading)
 from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
 from llm_sidebar_dashboard.window_list_ordering import move_window_in_window_list_order, update_window_list_order
@@ -544,21 +544,14 @@ class DashboardCore:
                 first_session = gathered_tab["first_session"]
                 if first_session is None:
                     continue
-                live_session_ids.add(first_session["session_id"])
-                tracking = self.session_tracking_by_session_id.setdefault(
-                    first_session["session_id"],
-                    {"status_value": first_session["status"], "status_change_time": now, "last_time_tab_was_seen": None})
-                if tracking["status_value"] != first_session["status"]:
-                    previous_state = map_iterm2_status_value_to_state(tracking["status_value"])
-                    new_state = map_iterm2_status_value_to_state(first_session["status"])
-                    tracking["status_value"] = first_session["status"]
-                    tracking["status_change_time"] = now
-                    if new_state == "working" and previous_state not in ("working", "asking"):
-                        tracking["turn_started_at"] = now  # a permission prompt in between doesn't start a new turn
-                    if status_change_ends_a_turn(previous_state, new_state):
-                        tracking["last_turn_ended_at"] = now  # kept when the status later changes, so done lasts until seen
-                    if new_state == "asking":
-                        self.screen_check_needed.set()
+                session_id = first_session["session_id"]
+                live_session_ids.add(session_id)
+                previous_tracking = self.session_tracking_by_session_id.get(session_id)
+                tracking = track_status_value(previous_tracking, first_session["status"], now)
+                self.session_tracking_by_session_id[session_id] = tracking
+                if (previous_tracking is not None and tracking is not previous_tracking
+                        and map_iterm2_status_value_to_state(first_session["status"]) == "asking"):
+                    self.screen_check_needed.set()
         for session_id in set(self.session_tracking_by_session_id) - live_session_ids:
             del self.session_tracking_by_session_id[session_id]
 

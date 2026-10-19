@@ -21,10 +21,11 @@ SMALLEST_LIST_HEIGHT = 60
 LIST_BOTTOM_PADDING = 6
 SPACE_FOR_POPOVER_ARROW_AND_MARGIN = 40
 INITIAL_PANEL_HEIGHT = 300
-# The top bar's one expand or collapse button (user request, 2026-10-19): (SF Symbol, text
-# fallback, tooltip), by whether the list is fully expanded, so it shows what a click does.
-EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: ("rectangle.expand.vertical", "Expand all", "Expand all"),
-                                True: ("rectangle.compress.vertical", "Collapse all", "Collapse all")}
+# The top bar's one expand or collapse button (user requests, 2026-10-19): (SF Symbol, text
+# fallback, tooltip), by whether the list is fully expanded. The symbol shows the current state;
+# the fallback text and the tooltip say what a click does.
+EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: ("rectangle.compress.vertical", "Expand all", "Expand all"),
+                                True: ("rectangle.expand.vertical", "Collapse all", "Collapse all")}
 
 
 def make_symbol_button(symbol_name, fallback_title, tool_tip, target, action_name):
@@ -114,7 +115,7 @@ class ListPanelController(NSViewController):
                                                             height - TOP_BAR_HEIGHT + 3))
         self.expand_or_collapse_all_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)
         root_view.addSubview_(self.expand_or_collapse_all_button)
-        self.list_controller.on_expansion_changed = self.show_whether_the_list_is_fully_expanded
+        self.list_controller.on_expansion_changed = self.update_expand_or_collapse_all_button
         self.message_text_field = NSTextField.labelWithString_("")
         self.message_text_field.setFrame_(NSMakeRect(0, height - TOP_BAR_HEIGHT + 4, 0, 18))  # fit_top_bar_to_width sets x and width
         self.message_text_field.setTextColor_(NSColor.secondaryLabelColor())
@@ -130,19 +131,22 @@ class ListPanelController(NSViewController):
         self.setView_(root_view)
         root_view.controller = self
         self.fit_top_bar_to_width()
-        self.show_whether_the_list_is_fully_expanded()
+        self.update_expand_or_collapse_all_button()
 
     @objc.python_method
     def fit_top_bar_to_width(self):
-        """Fits the sort control between the panel's left edge and the expand or collapse button:
-        with its "Sort:" label when there is room, without it in a narrow sidebar, and hidden when
-        even the pop-up doesn't fit (the dropdown, at least 320 points wide, always shows both).
-        The message line takes the room left before that button, so it never covers it; while it
-        shows a message (iTerm2 can't be reached, so there are no rows to sort) the sort control
-        steps aside for it."""
+        """Fits the sort control between the panel's left edge and the buttons on the right (the
+        expand or collapse button, when shown, then the settings button): with its "Sort:" label
+        when there is room, without it in a narrow sidebar, and hidden when even the pop-up
+        doesn't fit (the dropdown, at least 320 points wide, always shows both). The message line
+        takes the room left before those buttons, so it never covers them; while it shows a
+        message (iTerm2 can't be reached, so there are no rows to sort) the sort control steps
+        aside for it."""
         label_x, label_width = self.sort_label.frame().origin.x, self.sort_label.frame().size.width
         popup_frame = self.list_sort_order_popup.frame()
-        right_buttons_x = self.expand_or_collapse_all_button.frame().origin.x  # the first button on the right
+        first_right_button = (self.settings_button if self.expand_or_collapse_all_button.isHidden()
+                              else self.expand_or_collapse_all_button)
+        right_buttons_x = first_right_button.frame().origin.x
         room_right_edge = right_buttons_x - 2
         popup_x_after_label = label_x + label_width + 2
         is_showing_a_message = bool(self.message_text_field.stringValue())
@@ -158,18 +162,24 @@ class ListPanelController(NSViewController):
                                                      max(right_buttons_x - message_x - 8, 0), message_frame.size.height))
 
     def expandOrCollapseAllClicked_(self, sender):
-        """Collapses everything when the list is fully expanded, and otherwise expands everything
-        (windows and the tabs' previews)."""
+        """Collapses all monitor and window rows when the list is fully expanded, and otherwise
+        expands them all (the tabs' previews stay as they are)."""
         self.list_controller.set_all_expanded(not self.list_controller.is_fully_expanded())
 
     @objc.python_method
-    def show_whether_the_list_is_fully_expanded(self):
-        """Gives the expand or collapse button the look of what a click does."""
+    def update_expand_or_collapse_all_button(self):
+        """Shows the expand or collapse button only while the list has two or more windows (user
+        request, 2026-10-19), with the look of the list's current state; the top bar refits when
+        the button appears or goes. Called after every snapshot and expansion change."""
         symbol_name, fallback_title, tool_tip = EXPAND_OR_COLLAPSE_ALL_LOOKS[self.list_controller.is_fully_expanded()]
         image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, tool_tip)
         self.expand_or_collapse_all_button.setImage_(image)
         self.expand_or_collapse_all_button.setTitle_("" if image is not None else fallback_title)
         self.expand_or_collapse_all_button.setToolTip_(tool_tip)
+        is_shown = self.list_controller.count_window_rows() >= 2
+        if self.expand_or_collapse_all_button.isHidden() == is_shown:
+            self.expand_or_collapse_all_button.setHidden_(not is_shown)
+            self.fit_top_bar_to_width()
 
     def listSortOrderChosen_(self, sender):
         chosen_title = sender.titleOfSelectedItem()

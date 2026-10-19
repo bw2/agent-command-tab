@@ -89,6 +89,43 @@ def status_change_ends_a_turn(previous_state, new_state):
     return new_state == "done" or (new_state == "idle" and previous_state in ("working", "asking"))
 
 
+def track_status_value(session_tracking, iterm2_status_value, now):
+    """Returns a session's tracking updated for its iTerm2 status value read now.
+
+    The tracking records when the value last changed, when the current turn started (working
+    after anything but working or asking: a permission prompt in between doesn't start a new
+    turn) and when the last turn ended (status_change_ends_a_turn). The turn's end is kept when
+    the status changes again, so done lasts until the tab is seen. A session first seen as done
+    ended its turn by then.
+
+    Args:
+        session_tracking: The session's tracking so far, or None for a session seen for the
+            first time; it is not changed.
+        iterm2_status_value: iTerm2's `status` variable for the session's first pane.
+        now: The time of the reading.
+
+    Returns:
+        session_tracking itself when the value is unchanged, else a new dict with "status_value",
+        "status_change_time", "last_time_tab_was_seen", and once known "turn_started_at" and
+        "last_turn_ended_at".
+    """
+    new_state = map_iterm2_status_value_to_state(iterm2_status_value)
+    if session_tracking is None:
+        tracking = {"status_value": iterm2_status_value, "status_change_time": now, "last_time_tab_was_seen": None}
+        if status_change_ends_a_turn(None, new_state):
+            tracking["last_turn_ended_at"] = now
+        return tracking
+    if session_tracking["status_value"] == iterm2_status_value:
+        return session_tracking
+    previous_state = map_iterm2_status_value_to_state(session_tracking["status_value"])
+    tracking = dict(session_tracking, status_value=iterm2_status_value, status_change_time=now)
+    if new_state == "working" and previous_state not in ("working", "asking"):
+        tracking["turn_started_at"] = now
+    if status_change_ends_a_turn(previous_state, new_state):
+        tracking["last_turn_ended_at"] = now
+    return tracking
+
+
 def compute_session_status_from_sources(iterm2_status_value, iterm2_status_change_time, last_turn_ended_at,
                                         last_time_tab_was_seen, tab_is_seen_now, screen_reading, stuck_threshold_seconds,
                                         now):

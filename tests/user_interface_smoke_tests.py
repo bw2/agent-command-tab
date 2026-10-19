@@ -10,7 +10,8 @@ import unittest.mock
 
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSColorSpace, NSDragOperationMove, NSDragOperationNone, NSMakeRect,
-                    NSMenu, NSParagraphStyleAttributeName, NSTextAlignmentRight, NSWindow, NSWindowStyleMaskBorderless)
+                    NSFloatingWindowLevel, NSMenu, NSNormalWindowLevel, NSParagraphStyleAttributeName, NSTextAlignmentRight,
+                    NSTextField, NSWindow, NSWindowStyleMaskBorderless)
 from Foundation import NSIndexSet
 
 from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES
@@ -18,7 +19,8 @@ from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, Compu
 from llm_sidebar_dashboard.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, POPOVER_WIDTH, TOP_BAR_HEIGHT,
                                                                     ListPanelController)
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
-                                                                             AgentSessionListController)
+                                                                             AgentSessionListController, RowButton)
+from llm_sidebar_dashboard.user_interface.list_window import ListWindowController, frame_is_on_a_screen
 from llm_sidebar_dashboard.user_interface.menu_bar_status_item import ICON_COLORS_BY_NAME, choose_automatic_icon_color_name
 from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
 from llm_sidebar_dashboard.user_interface.sidebar_panel import (SidebarController,
@@ -232,6 +234,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_top_bar_drops_the_sort_label_then_the_sort_popup_when_narrow(self):
         panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # two windows: the expand or collapse button shows
         # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's
         # smallest width and 200 the sidebar's (180 can't happen, but checks the last step).
         for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (220, True, True), (210, False, True),
@@ -335,6 +338,20 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(row_view.name_text_field.stringValue(), "new name")
         self.assertEqual(tab_item.entry.tab_title, "new name")
         self.assertEqual(self.submitted_actions[-1].action, "rename_tab")
+
+    def test_a_rename_ended_by_a_click_on_another_row_keeps_the_new_name_after_the_release(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        tab_item = self.list_controller.outline_view.itemAtRow_(1)
+        self.list_controller.begin_rename(tab_item)
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # arrives during the rename: held
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False)
+        row_view.name_text_field.setStringValue_("new name")
+        self.list_controller.row_pressed(3)  # the click on another row that ends the rename
+        notification = type("NotificationStandIn", (), {"object": lambda self: row_view.name_text_field})()
+        self.list_controller.controlTextDidEndEditing_(notification)
+        self.list_controller.row_released()
+        self.assertEqual(self.list_controller.items_by_key[("tab", "1")].entry.tab_title, "new name")
 
     def test_holding_a_tab_row_peeks_and_releasing_ends_it_but_a_click_does_not(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -568,6 +585,47 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel.expandOrCollapseAllClicked_(button)
         self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (7, "Collapse all"))
 
+    def test_a_collapsed_monitor_left_without_windows_doesnt_count_as_collapsed(self):
+        two_monitor_snapshot = make_two_monitor_snapshot(make_sample_snapshot())
+        self.list_controller.apply_snapshot(two_monitor_snapshot)
+        self.list_controller.toggle_expansion(self.list_controller.outline_view.itemAtRow_(0))  # the first monitor
+        self.assertFalse(self.list_controller.is_fully_expanded())
+        first_monitor, second_monitor = two_monitor_snapshot.monitors
+        self.list_controller.apply_snapshot(two_monitor_snapshot._replace(monitors=(  # its window moved to the other monitor
+            first_monitor._replace(windows=()), second_monitor._replace(windows=first_monitor.windows + second_monitor.windows))))
+        self.assertTrue(self.list_controller.is_fully_expanded())
+
+    def test_a_snapshot_waits_while_a_row_button_is_held(self):
+        outline_view = self.apply_snapshot_with_previews()
+        arrow = self.lay_out_row_view(1).disclosure_button
+        self.assertIsInstance(arrow, RowButton)
+        self.assertIs(arrow.target(), self.list_controller)
+        self.list_controller.row_press_in_progress = True  # what RowButton.mouseDown_ sets while the button is down
+        self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=3))
+        self.assertEqual(outline_view.numberOfRows(), 7)  # held
+        self.list_controller.row_press_in_progress = False
+        self.list_controller.apply_held_snapshot()
+        self.assertEqual(outline_view.numberOfRows(), 8)
+
+    def test_the_expand_or_collapse_button_shows_only_with_two_or_more_windows(self):
+        panel = self.dropdown_panel_controller
+        button = panel.expand_or_collapse_all_button
+        self.assertTrue(button.isHidden())  # no windows yet
+        one_window_snapshot = make_sample_snapshot()
+        one_window_snapshot = one_window_snapshot._replace(monitors=(one_window_snapshot.monitors[0]._replace(
+            windows=one_window_snapshot.monitors[0].windows[:1]),))
+        self.list_controller.apply_snapshot(one_window_snapshot)
+        self.assertTrue(button.isHidden())
+        self.window.setContentSize_((320, 260))
+        message_frame = panel.message_text_field.frame()  # the message line reaches the settings button instead
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, panel.settings_button.frame().origin.x - 8)
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.assertFalse(button.isHidden())
+        message_frame = panel.message_text_field.frame()
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, button.frame().origin.x - 8)
+        self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # one window per monitor
+        self.assertFalse(button.isHidden())
+
     def test_an_expanded_window_row_has_a_button_that_opens_or_closes_its_tabs_previews(self):
         outline_view = self.apply_snapshot_with_previews()
         self.window.contentView().layoutSubtreeIfNeeded()
@@ -704,7 +762,7 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.controller = SidebarController.alloc().initWithOwner_(self.owner)
         self.controller.list_controller.refresh_timer.invalidate()
         # Set up by hand rather than through apply_settings, so no window appears on screen.
-        self.controller.settings = dict(DEFAULT_SETTINGS, sidebar_is_on=True, sidebar_mode="floating")
+        self.controller.settings = dict(DEFAULT_SETTINGS, show_as="sidebar", sidebar_mode="floating")
         self.controller.screens = [{"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)}]
         self.controller.placement = SidebarPlacement(0, "right", True)
         self.controller.is_shown = True
@@ -734,11 +792,11 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.assertIsNotNone(self.controller.hide_timer)  # checks again when the 5 seconds are up
         self.controller.cancel_hide_timer()
 
-    def test_a_turned_off_sidebar_is_parked_just_past_its_edge(self):
+    def test_a_sidebar_not_chosen_in_show_as_is_parked_just_past_its_edge(self):
         # So "Show the sidebar" slides it in from that edge. (The shown case isn't tested here:
         # it would put a real window on the screen.)
         self.owner.reserve_screen_area = lambda area: None
-        self.controller.settings = dict(self.controller.settings, sidebar_is_on=False)
+        self.controller.settings = dict(self.controller.settings, show_as="popup")
         self.controller.is_shown = False
         self.controller.update_placement()  # the real screens: the sidebar stays hidden
         self.assertFalse(self.controller.is_shown or self.controller.window.isVisible())
@@ -783,6 +841,30 @@ class SettingsRecordingOwner:
     def settings_changed(self, new_settings):
         self.settings = new_settings
         self.changed_settings.append(new_settings)
+
+
+class ListWindowSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+    def test_a_saved_frame_is_used_only_while_it_is_on_a_screen(self):
+        screens = [(0, 0, 1500, 1000), (1500, 0, 1920, 1080)]
+        self.assertTrue(frame_is_on_a_screen((1600, 100, 500, 400), screens))
+        self.assertFalse(frame_is_on_a_screen((4000, 100, 500, 400), screens))  # its monitor is gone
+
+    def test_the_window_holds_its_own_list_and_reports_its_frame(self):
+        owner = RecordingOwner()
+        owner.reported_frames = []
+        owner.list_window_frame_changed = owner.reported_frames.append
+        controller = ListWindowController.alloc().initWithOwner_(owner)
+        controller.list_controller.refresh_timer.invalidate()
+        self.assertTrue(controller.list_controller.width_is_set_by_the_user)  # narrow, it drops columns like the sidebar
+        self.assertIs(controller.window.contentView(), controller.list_panel_controller.view())
+        self.assertFalse(controller.window.isReleasedWhenClosed())  # closing only hides it
+        controller.window.setFrame_display_(NSMakeRect(-4000, -4000, 500, 400), False)  # off every screen: not shown
+        controller.report_frame()
+        self.assertEqual(owner.reported_frames[-1], [-4000, -4000, 500, 400])
 
 
 class SettingsWindowSmokeTests(unittest.TestCase):
@@ -843,14 +925,44 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertEqual(self.controller.sidebar_width_field.stringValue(), str(DEFAULT_SETTINGS["sidebar_width"]))
 
     def test_changes_made_elsewhere_show_in_the_open_window_and_are_kept(self):
-        self.owner.settings = dict(self.owner.settings, sidebar_is_on=True, sidebar_width=650)
+        self.owner.settings = dict(self.owner.settings, show_as="sidebar", sidebar_width=650)
         self.controller.reflect_settings(self.owner.settings)
-        self.assertEqual(self.controller.sidebar_is_on_checkbox.state(), 1)
+        self.assertEqual([radio_button.state() for radio_button in self.controller.show_as_radio_buttons], [0, 1, 0])  # Sidebar
         self.assertEqual(self.controller.sidebar_width_field.stringValue(), "650")
         self.controller.asking_count_checkbox.setState_(0)
         self.controller.controlChanged_(self.controller.asking_count_checkbox)
-        self.assertEqual((self.owner.settings["sidebar_is_on"], self.owner.settings["sidebar_width"]), (True, 650))
+        self.assertEqual((self.owner.settings["show_as"], self.owner.settings["sidebar_width"]), ("sidebar", 650))
         self.assertFalse(self.owner.settings["icon_shows_asking_count"])
+
+    def test_show_as_radio_buttons_save_the_choice(self):
+        self.assertEqual([radio_button.title() for radio_button in self.controller.show_as_radio_buttons],
+                         ["Window", "Sidebar", "Popup"])
+        self.assertEqual([radio_button.state() for radio_button in self.controller.show_as_radio_buttons], [0, 0, 1])
+        window_radio_button = self.controller.show_as_radio_buttons[0]
+        window_radio_button.setState_(1)
+        self.controller.controlChanged_(window_radio_button)
+        self.assertEqual(self.owner.settings["show_as"], "window")
+
+    def test_always_on_top_keeps_the_list_window_above_other_windows(self):
+        checkbox = self.controller.list_window_always_on_top_checkbox
+        self.assertEqual((checkbox.title(), checkbox.state()), ("Always on top", 0))
+        checkbox.setState_(1)
+        self.controller.controlChanged_(checkbox)
+        self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
+        list_window_controller = ListWindowController.alloc().initWithOwner_(RecordingOwner())
+        list_window_controller.list_controller.refresh_timer.invalidate()
+        list_window_controller.apply_settings(self.owner.settings)
+        self.assertEqual(list_window_controller.window.level(), NSFloatingWindowLevel)
+        list_window_controller.apply_settings(dict(self.owner.settings, list_window_is_always_on_top=False))
+        self.assertEqual(list_window_controller.window.level(), NSNormalWindowLevel)
+
+    def test_settings_are_grouped_under_sidebar_and_commands_titles(self):
+        texts_top_to_bottom = [subview.stringValue() for subview in sorted(
+            (subview for subview in self.controller.window.contentView().subviews() if isinstance(subview, NSTextField)),
+            key=lambda subview: -subview.frame().origin.y)]
+        for earlier, later in (("Show as:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Commands"),
+                               ("Commands", "Claude Code command:")):
+            self.assertLess(texts_top_to_bottom.index(earlier), texts_top_to_bottom.index(later), (earlier, later))
 
     def test_icon_color_popup_offers_auto_first_and_stores_lowercase_names(self):
         self.assertEqual(self.controller.icon_color_popup.titleOfSelectedItem(), "Auto")

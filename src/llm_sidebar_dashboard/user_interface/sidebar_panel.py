@@ -227,8 +227,9 @@ class SidebarController(NSObject):
             return
         visible_frame = self.screens[self.placement.screen_index]["visible_frame"]
         self.move_width_drag_strip_to_inner_edge(self.placement.edge)
-        if not self.settings["sidebar_is_on"]:
-            # Turned off: parked just past its edge, so "Show the sidebar" slides it in from there.
+        if self.settings["show_as"] != "sidebar":
+            # The list shows as a popup or a window: the sidebar is parked just past its edge, so
+            # "Show the sidebar" slides it in from there.
             # While that keeps it out, a settings change (a width dragged meanwhile) leaves it out.
             self.stop_tracking_the_pointer()
             self.owner.reserve_screen_area(None)
@@ -288,12 +289,13 @@ class SidebarController(NSObject):
 
     @objc.python_method
     def show_for_a_few_seconds(self):
-        """The menu bar item's "Show the sidebar" (user request, milestone 2): shows the sidebar,
-        also when it is turned off in the settings, for SECONDS_SHOWN_FROM_THE_MENU, then hides
-        it once the pointer isn't on it. A sidebar that is always shown stays as it is."""
+        """The menu bar item's "Show the sidebar" (user request, milestone 2), and a click on the
+        menu bar icon while the list shows as a sidebar: shows the sidebar, also while the list
+        shows as a popup or a window, for SECONDS_SHOWN_FROM_THE_MENU, then hides it once the
+        pointer isn't on it. A sidebar that is always shown stays as it is."""
         if self.settings is None or self.placement is None:
             return
-        if self.settings["sidebar_is_on"] and self.settings["sidebar_mode"] != "auto_hide":
+        if self.settings["show_as"] == "sidebar" and self.settings["sidebar_mode"] != "auto_hide":
             return
         self.keep_shown_until = time.time() + SECONDS_SHOWN_FROM_THE_MENU
         self.set_shown(True)

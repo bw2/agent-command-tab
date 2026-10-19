@@ -21,6 +21,11 @@ ENVIRONMENT_SETTING_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # "ANTHRO
 # "auto" follows the most urgent agent session: light blue while one is asking, red for an
 # error, orange when one is stuck, otherwise green.
 ICON_COLOR_NAMES = ["auto", "teal", "blue", "purple", "pink", "red", "orange", "green"]
+# How the list is shown (user request, 2026-10-19): window, a regular window (then the menu bar
+# icon brings it to the front); sidebar, at the edge of the screen (then the icon slides it in);
+# popup, the dropdown under the menu bar icon.
+SHOW_AS_CHOICES = ["window", "sidebar", "popup"]
+SMALLEST_LIST_WINDOW_SIZE = (250, 200)
 SIDEBAR_EDGES = ["right", "left"]
 # auto_hide: slides in when the pointer touches the edge; floating: always visible over windows;
 # docked: always visible, and iTerm2 windows on that monitor are kept out of its area.
@@ -33,7 +38,9 @@ LIST_SORT_ORDERS = ["manual", "activity", "alphabet", "created_time"]
 LIST_COLUMNS = ["context_tokens", "created_time", "existence_duration", "state", "state_duration"]
 
 DEFAULT_SETTINGS = {
-    "sidebar_is_on": False,
+    "show_as": "popup",
+    "list_window_frame": None,  # [x, y, width, height] of the "Show as: Window" window, once it has been shown
+    "list_window_is_always_on_top": False,
     "sidebar_mode": "auto_hide",
     "sidebar_edge": "right",  # of the menu-bar monitor
     "sidebar_width": 400,
@@ -54,6 +61,12 @@ def is_valid_setting_value(name, value):
     default_value = DEFAULT_SETTINGS[name]
     if name == "icon_color":
         return value in ICON_COLOR_NAMES
+    if name == "show_as":
+        return value in SHOW_AS_CHOICES
+    if name == "list_window_frame":
+        return value is None or (isinstance(value, list) and len(value) == 4
+                                 and all(isinstance(number, (int, float)) and not isinstance(number, bool) for number in value)
+                                 and value[2] >= SMALLEST_LIST_WINDOW_SIZE[0] and value[3] >= SMALLEST_LIST_WINDOW_SIZE[1])
     if name == "sidebar_edge":
         return value in SIDEBAR_EDGES
     if name == "sidebar_mode":
@@ -75,9 +88,12 @@ def is_valid_setting_value(name, value):
 
 
 def merge_settings_with_defaults(stored_settings):
-    """Returns the defaults overlaid with every valid stored value (invalid or unknown values are dropped)."""
+    """Returns the defaults overlaid with every valid stored value (invalid or unknown values are
+    dropped). A file from before "Show as" with the old sidebar checkbox on shows the sidebar."""
     settings = json.loads(json.dumps(DEFAULT_SETTINGS))  # a deep copy
     if isinstance(stored_settings, dict):
+        if "show_as" not in stored_settings and stored_settings.get("sidebar_is_on") is True:
+            settings["show_as"] = "sidebar"
         for name, value in stored_settings.items():
             if name in DEFAULT_SETTINGS and is_valid_setting_value(name, value):
                 settings[name] = value

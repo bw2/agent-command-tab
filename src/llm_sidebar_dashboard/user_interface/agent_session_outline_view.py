@@ -1,16 +1,16 @@
 """The shared list of monitors, windows and agent session tabs (PLAN.md section 8, "Shared list").
 
-Two instances exist (dropdown and sidebar), each with its own NSOutlineView, expanded rows and
-selection, fed the same snapshots. Main thread only.
+Three instances exist (dropdown, sidebar and list window), each with its own NSOutlineView,
+expanded rows, open previews and selection, fed the same snapshots. Main thread only.
 
 How snapshots are applied without breaking expansion, renames or drags:
 - one OutlineListItem per (kind, ID) lives as long as that ID exists, so expansion and
   selection, which NSOutlineView tracks by item identity, survive updates;
-- when the rows' structure (which rows, in which order) is unchanged, the items' entries are
-  replaced and only the visible rows are redrawn; otherwise the outline view is reloaded and
-  the expansion and selection are restored from the controller's own records;
-- while a rename or a drag is in progress, snapshots are held and the newest is applied when
-  it ends.
+- when the rows' structure (which rows, in which order, how tall) is unchanged, the items'
+  entries are replaced and only the visible rows are redrawn; otherwise the outline view is
+  reloaded and the expansion and selection are restored from the controller's own records;
+- while a rename or a drag is in progress, or the button is held down on a row or on a row's
+  own button, snapshots are held and the newest is applied when that ends.
 """
 
 import time
@@ -51,9 +51,11 @@ PREVIEW_BUTTON_SIZE = 16  # an expanded window row's button that opens or closes
 DISCLOSURE_ARROW_SLOT_WIDTH = 14
 DISCLOSURE_ARROW_POINT_SIZE = 9
 DISCLOSURE_ARROW_LOOKS = {False: ("chevron.right", ">", "Open"), True: ("chevron.down", "v", "Close")}  # by whether the row is open
-# The button's (SF Symbol, text fallback, description), by whether all of the window's previews are open.
-PREVIEW_BUTTON_LOOKS = {False: ("rectangle.expand.vertical", "+", "Show the tabs' previews"),
-                        True: ("rectangle.compress.vertical", "−", "Hide the tabs' previews")}
+# The button's (SF Symbol, text fallback, description), by whether all of the window's previews
+# are open. The symbol shows the current state, like the top bar's expand or collapse button
+# (user request, 2026-10-19); the fallback text and the description say what a click does.
+PREVIEW_BUTTON_LOOKS = {False: ("rectangle.compress.vertical", "+", "Show the tabs' previews"),
+                        True: ("rectangle.expand.vertical", "−", "Hide the tabs' previews")}
 ROW_LEFT_MARGIN = 8
 GAP_AFTER_PREFIX = 2
 NAME_FIELD_PADDING = 4
@@ -98,9 +100,9 @@ class OutlineListItem(NSObject):
 
 
 class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
-    """An NSOutlineView that draws no disclosure triangles (rows are expanded by clicking them),
-    and that tells its delegate when the button goes down on a row and comes back up, so holding
-    a tab row can show that tab for a moment."""
+    """An NSOutlineView that draws no disclosure triangles of its own (each row has its own arrow
+    button), and that tells its delegate when the button goes down on a row and comes back up,
+    so holding a tab row can show that tab for a moment."""
 
     def frameOfOutlineCellAtRow_(self, row):
         return NSZeroRect
@@ -146,10 +148,25 @@ def make_multiline_label_text_field(line_count):
     return text_field
 
 
+class RowButton(NSButton):
+    """A button inside a row. While it is pressed, its target (the list controller) holds
+    snapshots, as a press on the row itself does, so a snapshot can't reorder or reload the rows
+    under it and leave its click without a row."""
+
+    def mouseDown_(self, event):
+        list_controller = self.target()
+        list_controller.row_press_in_progress = True
+        try:
+            objc.super(RowButton, self).mouseDown_(event)  # returns once the button is up, after the action
+        finally:
+            list_controller.row_press_in_progress = False
+        list_controller.apply_held_snapshot()
+
+
 def make_row_icon_button():
     """Returns a small borderless gray button for a row, without a tooltip, since the list's rows
     have no hover popups (user request, 2026-10-19); show_symbol_on_button gives it its icon."""
-    button = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, PREVIEW_BUTTON_SIZE, PREVIEW_BUTTON_SIZE))
+    button = RowButton.alloc().initWithFrame_(NSMakeRect(0, 0, PREVIEW_BUTTON_SIZE, PREVIEW_BUTTON_SIZE))
     button.setBordered_(False)
     button.setImagePosition_(NSImageOnly)
     button.setContentTintColor_(NSColor.secondaryLabelColor())
@@ -308,7 +325,8 @@ class AgentSessionListController(NSObject):
         self.submit_action = owner.submit_action
         self.on_tab_focused = lambda: owner.tab_was_focused(self)
         self.on_row_count_changed = lambda: owner.rows_changed(self)
-        self.on_expansion_changed = lambda: None  # the panel's expand or collapse button sets this to follow along
+        # Called after every snapshot and expansion change; the panel sets it so its expand or collapse button follows along.
+        self.on_expansion_changed = lambda: None
         self.items_by_key = {}
         self.top_level_items = []
         self.collapsed_item_keys = set()
@@ -738,7 +756,7 @@ class AgentSessionListController(NSObject):
         row_view.icon_image_view.setImage_(self.find_agent_tool_icon(parts.agent_tool_name) if parts.agent_tool_name else None)
         row_view.has_preview_line = self.preview_is_open(item)
         row_view.shows_preview_toggle_button = shows_preview_toggle_button
-        if shows_preview_toggle_button:  # it shows what a click does: close them all once all are open
+        if shows_preview_toggle_button:  # it shows whether all are open; a click then closes them all
             show_symbol_on_button(row_view.preview_toggle_button, *PREVIEW_BUTTON_LOOKS[all_previews_are_open])
         row_view.preview_connector_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             "\n".join([parts.preview_connector_text] * PREVIEW_LINE_COUNT),
@@ -955,8 +973,15 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def is_fully_expanded(self):
-        """Whether every monitor and window row is expanded (the previews don't count)."""
-        return not self.collapsed_item_keys
+        """Whether every monitor and window row with rows below it is expanded (the previews don't
+        count). A collapsed monitor whose windows all moved away keeps its choice for later but
+        hides nothing now."""
+        return not any(self.items_by_key[key].child_items for key in self.collapsed_item_keys if key in self.items_by_key)
+
+    @objc.python_method
+    def count_window_rows(self):
+        """Returns how many window rows the list has, also inside collapsed monitor rows."""
+        return sum(1 for item in self.list_all_items() if item.kind == "window")
 
     @objc.python_method
     def set_previews_open(self, tab_items, is_open):
@@ -1064,6 +1089,11 @@ class AgentSessionListController(NSObject):
                 self.submit_action(ActionRequest("rename_window", {"window_id": item.item_id}, {"new_title": new_title}))
         name_text_field.superview().look = None
         self.apply_held_snapshot()  # first, so a snapshot held during the rename doesn't bring the old name back
+        if item is not None and self.held_snapshot is not None:
+            # Held again (the rename ended with a click on another row, whose button is still
+            # down): it predates the rename and would bring the old name back on release. The
+            # core sends a fresh one after the rename.
+            self.held_snapshot = None
         renamed_item = self.items_by_key.get((item.kind, item.item_id)) if item is not None else None
         if renamed_item is not None and renamed_item.entry is not None and new_title.strip():
             # Shown at once; the next snapshot confirms it (or puts the old name back if iTerm2 refused).

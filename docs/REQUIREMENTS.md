@@ -124,7 +124,8 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
 - R34. A settings button at the bottom of the dropdown and the sidebar.
 - R35. Settings include:
-  - sidebar on or off, edge and width (width also adjustable by dragging the edge of the sidebar);
+  - how the list is shown, "Show as: Window, Sidebar, Popup" (a regular window, the sidebar at the screen's edge, or the dropdown under the menu bar icon; user request, 2026-10-19), and for the window "Always on top";
+  - the sidebar's mode, edge and width (width also adjustable by dragging the edge of the sidebar);
   - icon color, and whether the icon shows the asking count;
   - which information columns tab rows show: State, State Duration, Used Token Count, Created Time, Time Since Created;
   - the list's sort order (Manual, Activity, Alphabetically, Created Time), also chosen with the Sort pop-up above the list;

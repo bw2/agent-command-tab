@@ -3,11 +3,13 @@
 Settings are added here as the features that use them are built (see settings_store).
 """
 
+import collections
 import threading
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSButtonTypeSwitch, NSColor, NSFont, NSMakeRect,
-                    NSPopUpButton, NSTextField, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskTitled)
+from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxSeparator, NSButton, NSButtonTypeRadio,
+                    NSButtonTypeSwitch, NSColor, NSFont, NSMakeRect, NSPopUpButton, NSTextField, NSView, NSWindow,
+                    NSWindowStyleMaskClosable, NSWindowStyleMaskTitled)
 from Foundation import NSObject
 from PyObjCTools import AppHelper
 
@@ -20,6 +22,8 @@ from llm_sidebar_dashboard.user_interface.sidebar_placement import (describe_sid
 WINDOW_WIDTH = 540
 LABEL_WIDTH = 180  # fits "Claude Code command:"
 ROW_SPACING = 30
+GAP_BETWEEN_RADIO_BUTTONS = 16
+SHOW_AS_TITLES = {"window": "Window", "sidebar": "Sidebar", "popup": "Popup"}  # settings_store.SHOW_AS_CHOICES
 SIDEBAR_MODE_TITLES = {
     "auto_hide": "Auto-hide",
     "floating": "Always: Above other windows",
@@ -34,6 +38,8 @@ LIST_COLUMN_TITLES = {
     "created_time": "Created Time",
     "existence_duration": "Time Since Created",
 }
+# A titled section of the window, drawn as a bold title and a line to the right edge (user request, 2026-10-19).
+SettingsSection = collections.namedtuple("SettingsSection", ["title"])
 
 
 class SettingsWindowController(NSObject):
@@ -63,10 +69,18 @@ class SettingsWindowController(NSObject):
 
     @objc.python_method
     def build_window(self):
-        rows = []  # (label or None, control or None, units after the control or None) from top to bottom
-        # Turned off, the sidebar still appears for a few seconds from the menu bar icon's "Show the sidebar".
-        self.sidebar_is_on_checkbox = self.make_checkbox("Enable the sidebar at the edge of the screen",
-                                                         self.settings["sidebar_is_on"])
+        # From top to bottom: (label or None, control or None, units after the control or None), or a SettingsSection.
+        rows = []
+        # Shown as a popup or a window, the sidebar still appears for a few seconds from the menu bar icon's "Show the sidebar".
+        self.show_as_radio_buttons = [self.make_radio_button(title, show_as == self.settings["show_as"])
+                                      for show_as, title in SHOW_AS_TITLES.items()]
+        show_as_radio_group = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 22))  # one group: same view, same action
+        x = 0
+        for radio_button in self.show_as_radio_buttons:
+            radio_button.setFrameOrigin_((x, 0))
+            show_as_radio_group.addSubview_(radio_button)
+            x += radio_button.frame().size.width + GAP_BETWEEN_RADIO_BUTTONS
+        show_as_radio_group.setFrameSize_((x, 22))
         self.sidebar_mode_popup = self.make_popup(list(SIDEBAR_MODE_TITLES.values()), SIDEBAR_MODE_TITLES[self.settings["sidebar_mode"]])
         self.edge_popup = self.make_popup(list(SIDEBAR_EDGE_TITLES.values()), SIDEBAR_EDGE_TITLES[self.settings["sidebar_edge"]])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
@@ -79,22 +93,26 @@ class SettingsWindowController(NSObject):
         self.stuck_minutes_field = self.make_text_field(str(self.settings["stuck_minutes"]), 80)
         self.column_checkboxes = {column_name: self.make_checkbox(title, column_name in self.settings["shown_columns"])
                                   for column_name, title in LIST_COLUMN_TITLES.items()}
-        rows += [("Sidebar", self.sidebar_is_on_checkbox, None), ("Window Edge", self.edge_popup, None),
-                 ("Show", self.sidebar_mode_popup, None),
-                 ("Width", self.sidebar_width_field, "points"), (None, None, None),
+        self.edge_note = NSTextField.wrappingLabelWithString_("")
+        self.edge_note.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
+        rows += [("Show as", show_as_radio_group, None), (None, None, None),
                  ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None), (None, None, None)]
         rows += [("Columns" if index == 0 else None, checkbox, None) for index, checkbox in enumerate(self.column_checkboxes.values())]
         rows += [(None, None, None), ("Agent is stuck if it thinks for more than", self.stuck_minutes_field, "minutes"),
                  (None, None, None)]
+        self.list_window_always_on_top_checkbox = self.make_checkbox("Always on top", self.settings["list_window_is_always_on_top"])
+        rows += [SettingsSection("Window"), (None, self.list_window_always_on_top_checkbox, None), (None, None, None)]
+        rows += [SettingsSection("Sidebar"), ("Show", self.sidebar_mode_popup, None), ("Window Edge", self.edge_popup, None),
+                 ("Width", self.sidebar_width_field, "points"),
+                 (None, self.edge_note, None), (None, None, None)]  # the note may take two lines
+        rows.append(SettingsSection("Commands"))
         self.launch_command_fields = []
         for agent_tool in self.settings["agent_tools"]:
             launch_command_field = self.make_text_field(agent_tool["launch_command"], WINDOW_WIDTH - LABEL_WIDTH - 40)
             self.launch_command_fields.append(launch_command_field)
             rows.append((f"{agent_tool['agent_tool_name']} command", launch_command_field, None))
-        self.edge_note = NSTextField.wrappingLabelWithString_("")
-        self.edge_note.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
-        self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
-        rows += [(None, self.edge_note, None), (None, None, None)]  # the note may take two lines
+        rows.append((None, None, None))
 
         height = 24 + ROW_SPACING * len(rows)
         window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -104,7 +122,12 @@ class SettingsWindowController(NSObject):
         window.setReleasedWhenClosed_(False)
         content_view = window.contentView()
         y = height - 12 - ROW_SPACING
-        for label, control, units in rows:
+        for row in rows:
+            if isinstance(row, SettingsSection):
+                self.add_section_title(content_view, row.title, y)
+                y -= ROW_SPACING
+                continue
+            label, control, units = row
             control_x = LABEL_WIDTH + 12
             if label is not None:
                 label_field = NSTextField.labelWithString_(label + ":")
@@ -132,6 +155,29 @@ class SettingsWindowController(NSObject):
         for launch_command_field in self.launch_command_fields:
             self.check_launch_command(launch_command_field)
         return window
+
+    @objc.python_method
+    def add_section_title(self, content_view, title, y):
+        """Draws a section's bold title at the left edge and a thin line from it to the right edge."""
+        title_field = NSTextField.labelWithString_(title)
+        title_field.setFont_(NSFont.boldSystemFontOfSize_(NSFont.systemFontSize()))
+        title_width = title_field.fittingSize().width
+        title_field.setFrame_(NSMakeRect(12, y + 3, title_width, 18))
+        content_view.addSubview_(title_field)
+        line = NSBox.alloc().initWithFrame_(NSMakeRect(12 + title_width + 8, y + 11, WINDOW_WIDTH - 12 - title_width - 8 - 12, 1))
+        line.setBoxType_(NSBoxSeparator)
+        content_view.addSubview_(line)
+
+    @objc.python_method
+    def make_radio_button(self, title, is_on):
+        radio_button = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 22))
+        radio_button.setButtonType_(NSButtonTypeRadio)
+        radio_button.setTitle_(title)
+        radio_button.setState_(1 if is_on else 0)
+        radio_button.setTarget_(self)
+        radio_button.setAction_("controlChanged:")
+        radio_button.sizeToFit()
+        return radio_button
 
     @objc.python_method
     def make_checkbox(self, title, is_checked):
@@ -189,8 +235,8 @@ class SettingsWindowController(NSObject):
         a saved edge that can't be used right now (it borders another monitor) and changes made
         elsewhere (a width dragged at the sidebar's edge) are kept."""
         new_settings = dict(self.owner.settings)
-        if sender is self.sidebar_is_on_checkbox:
-            new_settings["sidebar_is_on"] = bool(sender.state())
+        if sender in self.show_as_radio_buttons:
+            new_settings["show_as"] = list(SHOW_AS_TITLES)[self.show_as_radio_buttons.index(sender)]
         elif sender is self.sidebar_mode_popup:
             selected_mode_title = sender.titleOfSelectedItem()
             new_settings["sidebar_mode"] = next(mode for mode, title in SIDEBAR_MODE_TITLES.items() if title == selected_mode_title)
@@ -202,6 +248,8 @@ class SettingsWindowController(NSObject):
             self.read_number_field_into_settings(sender, "stuck_minutes", new_settings)
         elif sender is self.icon_color_popup:
             new_settings["icon_color"] = ICON_COLOR_NAMES[sender.indexOfSelectedItem()]
+        elif sender is self.list_window_always_on_top_checkbox:
+            new_settings["list_window_is_always_on_top"] = bool(sender.state())
         elif sender is self.asking_count_checkbox:
             new_settings["icon_shows_asking_count"] = bool(sender.state())
         elif sender in self.column_checkboxes.values():
@@ -257,6 +305,8 @@ class SettingsWindowController(NSObject):
         self.settings = dict(settings)
         if self.window is None:
             return
-        self.sidebar_is_on_checkbox.setState_(1 if settings["sidebar_is_on"] else 0)
+        for show_as, radio_button in zip(SHOW_AS_TITLES, self.show_as_radio_buttons):
+            radio_button.setState_(1 if show_as == settings["show_as"] else 0)
+        self.list_window_always_on_top_checkbox.setState_(1 if settings["list_window_is_always_on_top"] else 0)
         self.sidebar_width_field.setStringValue_(str(int(settings["sidebar_width"])))
         self.show_placement_fallback_note(settings)

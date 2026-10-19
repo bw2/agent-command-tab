@@ -27,6 +27,7 @@ from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThrea
 from llm_sidebar_dashboard.settings_store import load_settings_resolving_paths_at_first_run, save_settings
 from llm_sidebar_dashboard.snapshot_data_classes import choose_folder_for_new_agent_window
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import AgentSessionListController
+from llm_sidebar_dashboard.user_interface.list_window import ListWindowController
 from llm_sidebar_dashboard.user_interface.menu_bar_status_item import MenuBarStatusItemController
 from llm_sidebar_dashboard.user_interface.popover_container import ListPanelController, build_dropdown_popover
 from llm_sidebar_dashboard.user_interface.screen_layout import read_monitors_from_screens
@@ -60,6 +61,7 @@ class AppController(NSObject):
         self.popover.setDelegate_(self)  # popoverWillClose_
         self.status_item_controller = MenuBarStatusItemController.alloc().initWithPopover_owner_(self.popover, self)
         self.sidebar_controller = SidebarController.alloc().initWithOwner_(self)
+        self.list_window_controller = ListWindowController.alloc().initWithOwner_(self)
         self.settings_window_controller = SettingsWindowController.alloc().initWithOwner_(self)
         self.connection_thread = Iterm2ConnectionThread(self.receive_snapshot_on_background_thread,
                                                         self.receive_connection_lost_on_background_thread, verbose,
@@ -79,7 +81,10 @@ class AppController(NSObject):
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.connection_thread.send_stuck_threshold_seconds(self.settings["stuck_minutes"] * 60)
         self.sidebar_controller.apply_settings(self.settings)
+        self.list_window_controller.apply_settings(self.settings)
         self.apply_list_settings(self.settings)
+        if self.settings["show_as"] == "window":
+            self.list_window_controller.show(self.settings["list_window_frame"])
         # Always once at start, also when not docked (reserve_screen_area only sends changes): the
         # core waits for it before giving back room still owed from before a restart.
         self.connection_thread.send_reserved_screen_area(self.reserved_screen_area)
@@ -100,8 +105,8 @@ class AppController(NSObject):
         with self.latest_snapshot_lock:
             snapshot = self.latest_snapshot
             self.snapshot_delivery_is_scheduled = False
-        self.dropdown_list_controller.apply_snapshot(snapshot)
-        self.sidebar_controller.list_controller.apply_snapshot(snapshot)
+        for list_controller in self.list_all_list_controllers():
+            list_controller.apply_snapshot(snapshot)
         self.status_item_controller.show_snapshot(snapshot)
         if self.popover.isShown() and not self.dropdown_list_controller.rename_in_progress:
             self.dropdown_panel_controller.fit_size_to_rows()
@@ -118,8 +123,8 @@ class AppController(NSObject):
         """
         print(f"llm-sidebar-dashboard: {message}; exiting so the supervisor reconnects", flush=True)
         explanation = f"{message}. Retrying soon. Is iTerm2 running, with Settings > General > Magic > Enable Python API on?"
-        self.dropdown_panel_controller.show_message(explanation)
-        self.sidebar_controller.list_panel_controller.show_message(explanation)
+        for list_panel_controller in self.list_all_list_panel_controllers():
+            list_panel_controller.show_message(explanation)
         self.status_item_controller.show_connection_problem()
         AppHelper.callLater(SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING, self.exit_now_with_reconnect_status)
 
@@ -129,6 +134,33 @@ class AppController(NSObject):
         os._exit(RECONNECT_EXIT_STATUS)
 
     # ----- owner methods for the list controllers and panels -----
+
+    @objc.python_method
+    def list_all_list_panel_controllers(self):
+        """The dropdown's, the sidebar's and the list window's panels: each has its own list controller."""
+        return [self.dropdown_panel_controller, self.sidebar_controller.list_panel_controller,
+                self.list_window_controller.list_panel_controller]
+
+    @objc.python_method
+    def list_all_list_controllers(self):
+        return [list_panel_controller.list_controller for list_panel_controller in self.list_all_list_panel_controllers()]
+
+    @objc.python_method
+    def menu_bar_icon_clicked(self):
+        """A left click on the menu bar icon shows the list the way the settings ask: the dropdown
+        opens or closes, the sidebar slides in for a few seconds, or the window comes to the front."""
+        if self.settings["show_as"] == "sidebar":
+            self.sidebar_controller.show_for_a_few_seconds()
+        elif self.settings["show_as"] == "window":
+            self.list_window_controller.show(self.settings["list_window_frame"])
+        else:
+            self.status_item_controller.toggle_popover()
+
+    @objc.python_method
+    def list_window_frame_changed(self, frame):
+        """The list window was moved or resized: its frame is saved, so it opens there next time."""
+        if frame != self.settings["list_window_frame"]:
+            self.settings_changed(dict(self.settings, list_window_frame=frame))
 
     @objc.python_method
     def submit_action(self, action_request):
@@ -160,8 +192,12 @@ class AppController(NSObject):
             application_in_front = NSWorkspace.sharedWorkspace().frontmostApplication()
             if application_in_front is not None and application_in_front.processIdentifier() == os.getpid():
                 # The dashboard is in front: with the dropdown open, bring back what was in front before
-                # it opened; otherwise (Settings or a rename is open) bring back nothing.
-                application_in_front = self.application_in_front_before_dropdown if self.popover.isShown() else None
+                # it opened; with the list window in front, the dashboard itself; otherwise (Settings or
+                # a rename is open) bring back nothing.
+                if self.popover.isShown():
+                    application_in_front = self.application_in_front_before_dropdown
+                elif not self.list_window_controller.window.isKeyWindow():
+                    application_in_front = None
             self.peek_in_progress = {"application_in_front": application_in_front, "dropdown_was_open": self.popover.isShown()}
         if self.popover.isShown():
             self.popover.setBehavior_(NSPopoverBehaviorApplicationDefined)
@@ -267,25 +303,34 @@ class AppController(NSObject):
 
     @objc.python_method
     def settings_changed(self, new_settings):
-        """Saves new settings and applies them to the menu bar item, the sidebar and an open settings window."""
+        """Saves new settings and applies them to the menu bar item, the sidebar, the list window
+        (shown when "Show as" turns to Window, hidden when it turns away) and an open settings window."""
+        show_as_before = self.settings["show_as"]
         self.settings = new_settings
         save_settings(new_settings)
         self.status_item_controller.redraw()
+        if new_settings["show_as"] != show_as_before:
+            self.close_dropdown()
+            if new_settings["show_as"] == "window":
+                self.list_window_controller.show(new_settings["list_window_frame"])
+            elif show_as_before == "window":
+                self.list_window_controller.hide()
         self.sidebar_controller.apply_settings(new_settings)
+        self.list_window_controller.apply_settings(new_settings)
         self.apply_list_settings(new_settings)
         self.settings_window_controller.reflect_settings(new_settings)
         self.connection_thread.send_stuck_threshold_seconds(new_settings["stuck_minutes"] * 60)
 
     @objc.python_method
     def list_sort_order_chosen(self, list_sort_order):
-        """The Sort pop-up at the top of the dropdown or the sidebar: one choice for both, saved with the settings."""
+        """The Sort pop-up at the top of the dropdown, the sidebar or the list window: one choice for all, saved with the settings."""
         if list_sort_order != self.settings["list_sort_order"]:
             self.settings_changed(dict(self.settings, list_sort_order=list_sort_order))
 
     @objc.python_method
     def apply_list_settings(self, settings):
-        """Gives the dropdown's and the sidebar's lists the same sort order and shown columns."""
-        for list_panel_controller in (self.dropdown_panel_controller, self.sidebar_controller.list_panel_controller):
+        """Gives the dropdown's, the sidebar's and the list window's lists the same sort order and shown columns."""
+        for list_panel_controller in self.list_all_list_panel_controllers():
             list_panel_controller.show_list_sort_order(settings["list_sort_order"])
             list_panel_controller.list_controller.set_shown_columns(settings["shown_columns"])
 

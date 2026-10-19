@@ -11,9 +11,9 @@ from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, find_launch_
 class MergeSettingsTests(unittest.TestCase):
     def test_valid_values_are_kept_and_invalid_or_unknown_ones_dropped(self):
         settings = merge_settings_with_defaults({
-            "sidebar_is_on": True, "icon_color": "chartreuse", "sidebar_width": 5000, "sidebar_edge": "left",
+            "show_as": "window", "icon_color": "chartreuse", "sidebar_width": 5000, "sidebar_edge": "left",
             "agent_tools": [{"agent_tool_name": "Aider", "launch_command": " "}], "something_else": 1})
-        self.assertTrue(settings["sidebar_is_on"])
+        self.assertEqual(settings["show_as"], "window")
         self.assertEqual(settings["sidebar_edge"], "left")
         self.assertEqual(settings["icon_color"], DEFAULT_SETTINGS["icon_color"])
         self.assertEqual(settings["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])
@@ -28,6 +28,19 @@ class MergeSettingsTests(unittest.TestCase):
                          (DEFAULT_SETTINGS["list_sort_order"], DEFAULT_SETTINGS["shown_columns"]))
         self.assertEqual(merge_settings_with_defaults({"shown_columns": []})["shown_columns"], [])  # every column off
 
+    def test_the_old_sidebar_checkbox_becomes_show_as(self):
+        self.assertEqual(merge_settings_with_defaults({"sidebar_is_on": True})["show_as"], "sidebar")
+        self.assertEqual(merge_settings_with_defaults({"sidebar_is_on": False})["show_as"], "popup")
+        self.assertEqual(merge_settings_with_defaults({"sidebar_is_on": True, "show_as": "window"})["show_as"], "window")
+        self.assertNotIn("sidebar_is_on", merge_settings_with_defaults({"sidebar_is_on": True}))
+
+    def test_show_as_and_list_window_frame(self):
+        self.assertEqual(merge_settings_with_defaults({"show_as": "tooltip"})["show_as"], "popup")
+        self.assertEqual(merge_settings_with_defaults({"list_window_frame": [10, 20, 500, 400]})["list_window_frame"],
+                         [10, 20, 500, 400])
+        for bad_frame in ([10, 20, 100, 400], [10, 20, 500], "10,20,500,400", [True, 20, 500, 400]):
+            self.assertIsNone(merge_settings_with_defaults({"list_window_frame": bad_frame})["list_window_frame"], bad_frame)
+
     def test_a_boolean_is_not_a_width(self):
         self.assertEqual(merge_settings_with_defaults({"sidebar_width": True})["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])
 
@@ -41,8 +54,8 @@ class LoadAndSaveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "nested", "settings.json")
             self.assertEqual(load_settings(path), DEFAULT_SETTINGS)
-            save_settings(dict(DEFAULT_SETTINGS, sidebar_is_on=True), path)
-            self.assertTrue(load_settings(path)["sidebar_is_on"])
+            save_settings(dict(DEFAULT_SETTINGS, show_as="sidebar"), path)
+            self.assertEqual(load_settings(path)["show_as"], "sidebar")
             with open(path, "w") as settings_file:
                 settings_file.write("{not json")
             self.assertEqual(load_settings(path), DEFAULT_SETTINGS)

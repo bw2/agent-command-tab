@@ -40,10 +40,11 @@ def choose_automatic_icon_color_name(snapshot):
 
 
 class MenuBarStatusItemController(NSObject):
-    """Owns the NSStatusItem. A left click toggles the dropdown; a right click shows a small menu.
+    """Owns the NSStatusItem. A left click shows the list (the owner decides how: toggle_popover
+    for the dropdown); a right click shows a small menu.
 
-    The owner (the app controller) has settings, open_settings(), show_sidebar_for_a_few_seconds(),
-    quit() and note_application_in_front_before_dropdown(application).
+    The owner (the app controller) has settings, menu_bar_icon_clicked(), open_settings(),
+    show_sidebar_for_a_few_seconds(), quit() and note_application_in_front_before_dropdown(application).
     """
 
     def initWithPopover_owner_(self, popover, owner):
@@ -99,7 +100,13 @@ class MenuBarStatusItemController(NSObject):
     def statusItemClicked_(self, sender):
         if NSApp.currentEvent().type() == NSEventTypeRightMouseUp:
             self.show_right_click_menu()
-        elif self.popover.isShown():
+        else:
+            self.owner.menu_bar_icon_clicked()
+
+    @objc.python_method
+    def toggle_popover(self):
+        """Opens the dropdown, or closes it when it is open."""
+        if self.popover.isShown():
             self.popover.performClose_(None)
         else:
             self.show_popover()

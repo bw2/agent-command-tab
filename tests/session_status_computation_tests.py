@@ -6,6 +6,7 @@ from llm_sidebar_dashboard.session_status_computation import (compute_session_st
                                                               pick_most_urgent_state,
                                                               status_change_ends_a_turn,
                                                               summarize_state_counts_in_urgency_order,
+                                                              track_status_value,
                                                               update_permission_dialog_reading)
 
 
@@ -66,6 +67,25 @@ class ComputeSessionStatusTests(unittest.TestCase):
 
     def test_idle_without_an_ended_turn_is_idle(self):
         self.assertEqual(compute_state("idle", 100), "idle")
+
+    def test_a_session_first_seen_as_done_stays_done_after_the_status_says_idle(self):
+        tracking = track_status_value(None, "done", 100)  # the turn ended before the dashboard started
+        self.assertEqual(tracking["last_turn_ended_at"], 100)
+        tracking = track_status_value(tracking, "idle", 150)
+        self.assertEqual(compute_state("idle", tracking["status_change_time"],
+                                       last_turn_ended_at=tracking["last_turn_ended_at"]), "done")
+        self.assertNotIn("last_turn_ended_at", track_status_value(None, "idle", 100))  # unknown: idle
+
+    def test_tracking_records_turn_starts_and_ends_and_keeps_unchanged_values(self):
+        tracking = track_status_value(None, "idle", 100)
+        self.assertIs(track_status_value(tracking, "idle", 110), tracking)
+        tracking = track_status_value(tracking, "working", 120)
+        self.assertEqual((tracking["status_change_time"], tracking["turn_started_at"]), (120, 120))
+        tracking = track_status_value(tracking, "waiting", 130)  # a permission prompt: the same turn
+        tracking = track_status_value(tracking, "working", 140)
+        self.assertEqual(tracking["turn_started_at"], 120)
+        tracking = track_status_value(dict(tracking, last_time_tab_was_seen=125), "idle", 150)  # Codex's end of a turn
+        self.assertEqual((tracking["last_turn_ended_at"], tracking["last_time_tab_was_seen"]), (150, 125))
 
     def test_status_changes_that_end_a_turn(self):
         self.assertTrue(status_change_ends_a_turn("working", "done"))
