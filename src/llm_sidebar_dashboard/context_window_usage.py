@@ -15,6 +15,9 @@ import glob
 import json
 import os
 
+from llm_sidebar_dashboard.claude_code_transcript_records import (RECORD_KINDS_THAT_START_A_TURN, classify_user_record,
+                                                                 list_message_blocks)
+
 BYTES_TO_READ_FROM_THE_END = 512 * 1024
 
 
@@ -35,13 +38,21 @@ def read_last_lines(file_path, byte_count=BYTES_TO_READ_FROM_THE_END):
     return list(reversed(lines))
 
 
-def read_context_tokens_from_claude_code_transcript(file_path):
-    """Returns the tokens in context after the latest reply in a Claude Code transcript, or None."""
+def read_last_records(file_path):
+    """Yields the JSON objects of a conversation file's last complete lines (read_last_lines),
+    newest first, skipping lines that are not JSON objects."""
     for line in read_last_lines(file_path):
         try:
             record = json.loads(line)
         except ValueError:
             continue
+        if isinstance(record, dict):
+            yield record
+
+
+def read_context_tokens_from_claude_code_transcript(file_path):
+    """Returns the tokens in context after the latest reply in a Claude Code transcript, or None."""
+    for record in read_last_records(file_path):
         message = (record.get("message") or {}) if record.get("type") == "assistant" else {}
         usage = message.get("usage")
         if not isinstance(usage, dict) or message.get("model") == "<synthetic>":
@@ -55,12 +66,8 @@ def read_context_tokens_from_claude_code_transcript(file_path):
 
 def read_context_tokens_from_codex_conversation_file(file_path):
     """Returns the tokens in context after the latest turn in a Codex conversation file, or None."""
-    for line in read_last_lines(file_path):
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        payload = record.get("payload") if isinstance(record, dict) else None
+    for record in read_last_records(file_path):
+        payload = record.get("payload")
         if isinstance(payload, dict) and payload.get("type") == "token_count":
             last_token_usage = (payload.get("info") or {}).get("last_token_usage") or {}
             if "total_tokens" in last_token_usage:
@@ -69,31 +76,20 @@ def read_context_tokens_from_codex_conversation_file(file_path):
 
 
 def read_turn_started_at_from_claude_code_transcript(file_path):
-    """Returns when the current turn began: the newest "user" record that isn't a tool result
-    (a prompt, or a notification that starts a turn), or None if none is in the file's end."""
-    for line in read_last_lines(file_path):
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if record.get("type") != "user":
-            continue
-        content = (record.get("message") or {}).get("content")
-        is_tool_result = isinstance(content, list) and any(
-            isinstance(part, dict) and part.get("type") == "tool_result" for part in content)
-        if not is_tool_result and parse_iso_time(record.get("timestamp")):
+    """Returns when the current turn began: the newest record that starts a turn (a prompt, a
+    typed command or a background task's notification; claude_code_transcript_records), or
+    None if none is in the file's end."""
+    for record in read_last_records(file_path):
+        if (classify_user_record(record, list_message_blocks(record)) in RECORD_KINDS_THAT_START_A_TURN
+                and parse_iso_time(record.get("timestamp"))):
             return parse_iso_time(record.get("timestamp"))
     return None
 
 
 def read_turn_started_at_from_codex_conversation_file(file_path):
     """Returns when the current turn began (the newest "task_started" event), or None."""
-    for line in read_last_lines(file_path):
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        payload = record.get("payload") if isinstance(record, dict) else None
+    for record in read_last_records(file_path):
+        payload = record.get("payload")
         if isinstance(payload, dict) and payload.get("type") == "task_started" and parse_iso_time(record.get("timestamp")):
             return parse_iso_time(record.get("timestamp"))
     return None

@@ -24,20 +24,22 @@ from llm_sidebar_dashboard.command_line import RECONNECT_EXIT_STATUS
 from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
 from llm_sidebar_dashboard.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
 from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThread
-from llm_sidebar_dashboard.settings_store import (list_included_agent_tool_names, list_left_out_agent_tool_names,
+from llm_sidebar_dashboard.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
                                                   load_settings_resolving_paths_at_first_run, save_settings)
 from llm_sidebar_dashboard.snapshot_data_classes import choose_folder_for_new_agent_window
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import AgentSessionListController
 from llm_sidebar_dashboard.user_interface.list_window import ListWindowController
 from llm_sidebar_dashboard.user_interface.menu_bar_status_item import MenuBarStatusItemController
 from llm_sidebar_dashboard.user_interface.popover_container import ListPanelController, build_dropdown_popover
-from llm_sidebar_dashboard.user_interface.screen_layout import read_monitors_from_screens
+from llm_sidebar_dashboard.user_interface.screen_layout import (convert_rect_to_frame_list, grow_frame_to_smallest_size,
+                                                                read_monitors_from_screens)
 from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
 from llm_sidebar_dashboard.user_interface.sidebar_panel import SidebarController
 
 ITERM2_BUNDLE_IDENTIFIER = "com.googlecode.iterm2"
 SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING = 10
 SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING = 3
+SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
 
 
 class AppController(NSObject):
@@ -51,7 +53,8 @@ class AppController(NSObject):
         self.settings = load_settings_resolving_paths_at_first_run()
         self.reserved_screen_area = None
         self.application_in_front_before_dropdown = None
-        self.peek_in_progress = None  # {"application_in_front", "dropdown_was_open"} while a tab row is held
+        self.peek_in_progress = None  # {"application_in_front"} while a tab row is held
+        self.settings_save_is_scheduled = False  # a moved window's frame waits to be written (window_frame_changed)
         self.peek_waiting_for_put_back = None  # a released peek until the app in front before is back
         self.list_window_drag_check_timer = None  # while the list window's title bar is dragged
         self.latest_snapshot_lock = threading.Lock()
@@ -81,13 +84,12 @@ class AppController(NSObject):
     def start(self):
         self.connection_thread.start()
         self.connection_thread.send_monitors(read_monitors_from_screens())
-        self.connection_thread.send_stuck_threshold_seconds(self.settings["stuck_minutes"] * 60)
-        self.connection_thread.send_left_out_agent_tool_names(list_left_out_agent_tool_names(self.settings))
+        self.connection_thread.send_core_settings(build_core_settings(self.settings))
         self.sidebar_controller.apply_settings(self.settings)
         self.list_window_controller.apply_settings(self.settings)
         self.apply_list_settings(self.settings)
         if self.settings["show_as"] == "window":
-            self.list_window_controller.show(self.settings["list_window_frame"])
+            self.list_window_controller.show(self.settings["list_window_frame"], takes_keyboard_focus=False)
         # Always once at start, also when not docked (reserve_screen_area only sends changes): the
         # core waits for it before giving back room still owed from before a restart.
         self.connection_thread.send_reserved_screen_area(self.reserved_screen_area)
@@ -160,10 +162,23 @@ class AppController(NSObject):
             self.status_item_controller.toggle_popover()
 
     @objc.python_method
-    def list_window_frame_changed(self, frame):
-        """The list window was moved or resized: its frame is saved, so it opens there next time."""
-        if frame != self.settings["list_window_frame"]:
-            self.settings_changed(dict(self.settings, list_window_frame=frame))
+    def window_frame_changed(self, setting_name, frame):
+        """The list window or the settings window was moved or resized: its frame is kept under
+        setting_name (settings_store.SMALLEST_WINDOW_SIZES), so it opens there next time. Nothing
+        else depends on a frame, so settings_changed's other steps are skipped, and the settings
+        file is written once the window has stopped moving (a drag moves it at every pointer step)."""
+        if frame == self.settings[setting_name]:
+            return
+        self.settings = dict(self.settings, **{setting_name: frame})
+        if not self.settings_save_is_scheduled:
+            self.settings_save_is_scheduled = True
+            AppHelper.callLater(SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME, self.save_settings_if_scheduled)
+
+    @objc.python_method
+    def save_settings_if_scheduled(self):
+        if self.settings_save_is_scheduled:
+            self.settings_save_is_scheduled = False
+            save_settings(self.settings)
 
     # Dragging the dropdown's top bar detaches it into the list window, and dropping the list
     # window on the menu bar icon turns it back into the dropdown (user request, 2026-10-19).
@@ -176,10 +191,12 @@ class AppController(NSObject):
             return
         dropdown_window = list_panel_controller.view().window()
         content_rect = dropdown_window.convertRectToScreen_(list_panel_controller.view().frame())
-        window_frame = self.list_window_controller.window.frameRectForContentRect_(content_rect)
-        pointer_offset = (start_point_on_screen[0] - window_frame.origin.x, start_point_on_screen[1] - window_frame.origin.y)
-        self.settings_changed(dict(self.settings, show_as="window", list_window_frame=[
-            window_frame.origin.x, window_frame.origin.y, window_frame.size.width, window_frame.size.height]))
+        # A dropdown with few rows is shorter than the list window may be; it grows downward.
+        window_frame = grow_frame_to_smallest_size(
+            convert_rect_to_frame_list(self.list_window_controller.window.frameRectForContentRect_(content_rect)),
+            SMALLEST_WINDOW_SIZES["list_window_frame"])
+        pointer_offset = (start_point_on_screen[0] - window_frame[0], start_point_on_screen[1] - window_frame[1])
+        self.settings_changed(dict(self.settings, show_as="window", list_window_frame=window_frame))
         self.list_window_controller.follow_the_pointer_until_the_button_comes_up(pointer_offset)
 
     @objc.python_method
@@ -226,6 +243,20 @@ class AppController(NSObject):
 
     def popoverWillClose_(self, notification):
         self.dropdown_list_controller.cancel_rename()  # an open rename would keep the list from updating
+        self.place_the_settings_window_above_the_lists(dropdown_is_open=False)
+
+    @objc.python_method
+    def update_dropdown_closing_behavior(self):
+        """The dropdown closes when you click elsewhere, except while a tab is shown for a moment
+        (a peek brings iTerm2 forward) and while the settings window is open (user request,
+        2026-10-19: changing settings mustn't close it)."""
+        keeps_the_dropdown_open = (self.peek_in_progress is not None or self.peek_waiting_for_put_back is not None
+                                   or self.settings_window_controller.is_open())
+        self.popover.setBehavior_(NSPopoverBehaviorApplicationDefined if keeps_the_dropdown_open else NSPopoverBehaviorTransient)
+
+    @objc.python_method
+    def settings_window_closed(self):
+        self.update_dropdown_closing_behavior()
 
     @objc.python_method
     def note_application_in_front_before_dropdown(self, application):
@@ -251,9 +282,8 @@ class AppController(NSObject):
                     application_in_front = self.application_in_front_before_dropdown
                 elif not self.list_window_controller.window.isKeyWindow():
                     application_in_front = None
-            self.peek_in_progress = {"application_in_front": application_in_front, "dropdown_was_open": self.popover.isShown()}
-        if self.popover.isShown():
-            self.popover.setBehavior_(NSPopoverBehaviorApplicationDefined)
+            self.peek_in_progress = {"application_in_front": application_in_front}
+        self.update_dropdown_closing_behavior()
         self.submit_action(ActionRequest("peek_agent_session", {"session_id": session_id}))
 
     @objc.python_method
@@ -280,8 +310,7 @@ class AppController(NSObject):
         if application is not None and not iterm2_was_in_front:
             NSApp.yieldActivationToApplication_(application)
             application.activateWithOptions_(0)
-        if peek["dropdown_was_open"]:
-            self.popover.setBehavior_(NSPopoverBehaviorTransient)
+        self.update_dropdown_closing_behavior()
 
     @objc.python_method
     def tab_was_focused(self, list_controller):
@@ -372,8 +401,23 @@ class AppController(NSObject):
 
     @objc.python_method
     def open_settings(self):
-        self.close_dropdown()
+        """Opens the settings window; over an open dropdown, which stays open while it is (user request, 2026-10-19)."""
         self.settings_window_controller.show(self.settings)
+        self.place_the_settings_window_above_the_lists(self.popover.isShown())
+        self.update_dropdown_closing_behavior()
+
+    @objc.python_method
+    def place_the_settings_window_above_the_lists(self, dropdown_is_open):
+        """Puts the settings window at the level of the windows it would otherwise open under: just
+        above an open dropdown, and level with the list window while that is shown and always on
+        top (in front of it when opened); otherwise at the normal level."""
+        window_levels = []
+        if dropdown_is_open:
+            window_levels.append(self.dropdown_panel_controller.view().window().level() + 1)
+        list_window = self.list_window_controller.window
+        if list_window.isVisible() and self.settings["list_window_is_always_on_top"]:
+            window_levels.append(list_window.level())
+        self.settings_window_controller.set_window_level(max(window_levels) if window_levels else None)
 
     # ----- settings -----
 
@@ -384,6 +428,7 @@ class AppController(NSObject):
         show_as_before = self.settings["show_as"]
         self.settings = new_settings
         save_settings(new_settings)
+        self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
         self.status_item_controller.redraw()
         if new_settings["show_as"] != show_as_before:
             self.close_dropdown()
@@ -395,8 +440,11 @@ class AppController(NSObject):
         self.list_window_controller.apply_settings(new_settings)
         self.apply_list_settings(new_settings)
         self.settings_window_controller.reflect_settings(new_settings)
-        self.connection_thread.send_stuck_threshold_seconds(new_settings["stuck_minutes"] * 60)
-        self.connection_thread.send_left_out_agent_tool_names(list_left_out_agent_tool_names(new_settings))
+        if self.settings_window_controller.is_open():
+            self.place_the_settings_window_above_the_lists(self.popover.isShown())
+            if self.list_window_controller.window.isVisible():  # a list window just shown or put on top stays behind it
+                self.settings_window_controller.window.orderFront_(None)
+        self.connection_thread.send_core_settings(build_core_settings(new_settings))
 
     @objc.python_method
     def list_sort_order_chosen(self, list_sort_order):
@@ -451,6 +499,7 @@ class AppController(NSObject):
         os._exit(0)
 
     def applicationWillTerminate_(self, notification):
+        self.save_settings_if_scheduled()
         self.give_room_back_before_exiting()  # for example after Ctrl+C in the terminal that started the app
 
     @objc.python_method

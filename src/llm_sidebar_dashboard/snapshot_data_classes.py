@@ -17,9 +17,9 @@ AgentSessionEntry = collections.namedtuple(
         "context_fill_percent", "importance_level", "background_task_count", "last_user_interaction_time",
         "ended_abnormally_at", "is_in_front", "peer_messaging_address", "last_time_tab_was_seen",
         "running_command_name", "running_command_started_at", "context_tokens", "started_at", "memory_bytes",
-        "cpu_percent",
+        "cpu_percent", "slash_commands",
     ],
-    defaults=["", 0.0, "", "", None, 0, 0, None, None, False, "", None, "", None, None, None, None, None],
+    defaults=["", 0.0, "", "", None, 0, 0, None, None, False, "", None, "", None, None, None, None, None, ()],
 )
 AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent session. last_time_tab_was_seen is when "
                              "the tab was last selected in the key iTerm2 window while iTerm2 was active, or None. "
@@ -31,7 +31,8 @@ AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent sess
                              "it said since the last prompt, or that prompt (session_preview_computation). "
                              "memory_bytes and cpu_percent are what the agent process and all the processes below it "
                              "use (physical memory to the megabyte; percent of one CPU core, a whole number), or "
-                             "None until they are read.")
+                             "None until they are read. slash_commands are the commands the tab's menu can type "
+                             "into its agent tool (its adapter's), in menu order.")
 
 WindowEntry = collections.namedtuple(
     "WindowEntry",

@@ -39,15 +39,15 @@ def screen_shows_permission_dialog(screen_lines, permission_dialog_screen_patter
     return all(any(pattern.search(line) for line in bottom_lines) for pattern in permission_dialog_screen_patterns)
 
 
-def input_area_is_empty(screen_lines_with_faint_flags, input_line_marker, input_area_end_pattern):
-    """Returns whether the agent's input box holds no typed text, so a command typed into it
-    can't join a draft (PLAN.md section 8, "Sending /compact and /clear").
+def read_typed_input_area_text(screen_lines_with_faint_flags, input_line_marker, input_area_end_pattern):
+    """Returns the text typed into the agent's input box, or None when the box can't be found on
+    screen (PLAN.md section 8, "Sending /compact and /clear").
 
     The input line is the last line starting with the marker; the input area runs from it to
     the line just below it that matches input_area_end_pattern (a multi-line draft continues on
-    the lines in between). Empty means nothing after the marker but faint cells (the tool's
-    placeholder or suggested prompt) and EMPTY_INPUT_CELL_PATTERN cells. Fails safe: False when
-    the input line or the end of the area can't be found.
+    the lines in between). Typed text is what follows the marker except faint cells (the tool's
+    placeholder or suggested prompt) and EMPTY_INPUT_CELL_PATTERN cells, with the area's lines
+    joined by newlines and empty lines at the start and end left out.
 
     Args:
         screen_lines_with_faint_flags: For each visible line, (text, faint_flags): its
@@ -58,21 +58,28 @@ def input_area_is_empty(screen_lines_with_faint_flags, input_line_marker, input_
     marker_line_indexes = [index for index, (text, _) in enumerate(screen_lines_with_faint_flags)
                            if text.lstrip(" \x00").startswith(input_line_marker)]
     if not marker_line_indexes:
-        return False
+        return None
     input_line_index = marker_line_indexes[-1]
     last_index_to_look_at = min(input_line_index + LONGEST_INPUT_AREA_LINES, len(screen_lines_with_faint_flags) - 1)
     end_index = next((index for index in range(input_line_index + 1, last_index_to_look_at + 1)
                       if input_area_end_pattern.search(clean_screen_line(screen_lines_with_faint_flags[index][0]))), None)
     if end_index is None:
-        return False
+        return None
+    typed_lines = []
     for index in range(input_line_index, end_index):
         text, faint_flags = screen_lines_with_faint_flags[index]
         first_input_position = text.index(input_line_marker) + 1 if index == input_line_index else 0
-        for position in range(first_input_position, len(text)):
-            is_faint = position < len(faint_flags) and faint_flags[position]
-            if not is_faint and not EMPTY_INPUT_CELL_PATTERN.match(text[position]):
-                return False
-    return True
+        typed_lines.append("".join(
+            text[position] for position in range(first_input_position, len(text))
+            if not (position < len(faint_flags) and faint_flags[position]) and not EMPTY_INPUT_CELL_PATTERN.match(text[position])))
+    return "\n".join(typed_lines).strip("\n")
+
+
+def input_area_is_empty(screen_lines_with_faint_flags, input_line_marker, input_area_end_pattern):
+    """Returns whether the agent's input box holds no typed text, so a command typed into it
+    can't join a draft (read_typed_input_area_text). Fails safe: False when the box can't be
+    found on screen."""
+    return read_typed_input_area_text(screen_lines_with_faint_flags, input_line_marker, input_area_end_pattern) == ""
 
 
 def count_lines_matching(screen_lines, pattern):

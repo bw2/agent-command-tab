@@ -175,6 +175,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         memory_bytes=(screen_reading or {}).get("memory_bytes"),
         cpu_percent=(screen_reading or {}).get("cpu_percent"),
         started_at=agent_session.get("started_at"),
+        slash_commands=agent_session["adapter"].slash_commands,
     )
 
 

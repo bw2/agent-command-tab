@@ -27,6 +27,7 @@ from llm_sidebar_dashboard.agent_process_tree import (choose_command_the_agent_i
                                                       read_name_the_process_was_started_as, read_process_current_folder,
                                                       read_process_info, read_process_tree_resource_usage)
 from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
+from llm_sidebar_dashboard.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
 from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.dashboard_core_api import ActionRegistry, ActionResult
 from llm_sidebar_dashboard.iterm2_snapshot_builder import build_computer_snapshot, resolve_agent_sessions
@@ -35,7 +36,8 @@ from llm_sidebar_dashboard.docked_window_frames_store import (adopt_records_of_r
 from llm_sidebar_dashboard.monitor_assignment import compute_frame_clear_of_area, frames_are_within_tolerance
 from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, count_lines_matching,
                                                    screen_shows_permission_dialog)
-from llm_sidebar_dashboard.session_status_computation import (map_iterm2_status_value_to_state,
+from llm_sidebar_dashboard.session_status_computation import (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT,
+                                                              map_iterm2_status_value_to_state,
                                                               permission_dialog_was_answered,
                                                               track_status_value,
                                                               update_permission_dialog_reading)
@@ -51,9 +53,11 @@ SECONDS_AN_AGENT_TAKES_TO_START_ITS_HELPERS = 30
 SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS = 30  # while a session is idle
 CONTEXT_USAGE_CHECK_INTERVAL_SECONDS = 5
 RESOURCE_USAGE_CHECK_INTERVAL_SECONDS = 3  # the Memory and CPU columns
+CPU_PERCENT_SHOWN_AS_IDLE = 3  # an idle agent's CPU use wavers between 0 and 2 percent
 SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED = 5  # "Kill Session": SIGTERM, then SIGKILL
 CONVERSATION_FILE_RETRY_SECONDS = 15  # a conversation file not found yet (Codex writes it at the first prompt)
 CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up again in case the conversation changed
+CONVERSATION_FILE_READING_NAMES = ("context_tokens", "conversation_preview")  # screen reading values read from it
 DEFAULT_STUCK_THRESHOLD_SECONDS = 600
 SMALLEST_WINDOW_WIDTH = 400  # a docked sidebar never makes an iTerm2 window narrower than this
 FRAME_TOLERANCE_POINTS = 20  # iTerm2 rounds window sizes to whole character cells
@@ -193,6 +197,7 @@ class DashboardCore:
         self.window_room_lock = asyncio.Lock()
         self.stuck_threshold_seconds = DEFAULT_STUCK_THRESHOLD_SECONDS
         self.left_out_agent_tool_names = frozenset()  # the settings' Harnesses section
+        self.resource_usage_is_read = False  # while the Memory or CPU column is shown
         self.claude_agents_by_process_id = {}
         self.key_terminal_window_id = None  # None while no terminal window (for example iTerm2's Settings) has keyboard focus
         self.last_seen_session_id = None
@@ -201,7 +206,8 @@ class DashboardCore:
         self.snapshot_needed = asyncio.Event()
         self.regather_needed = asyncio.Event()
         self.screen_check_needed = asyncio.Event()
-        self.conversation_files_by_session_id = {}  # {"key", "path", "looked_up_at", "modified_at"}
+        self.conversation_files_by_session_id = {}  # {"key", "path", "looked_up_at", "modified_at", "cleared_path"}
+        self.folders_that_may_hold_claude_code_transcripts = list_folders_that_may_hold_claude_code_transcripts()
         self.peek_lock = asyncio.Lock()  # a quick release must not undo a peek that hasn't happened yet
         self.iterm2_state_before_peek = None
         self.action_registry = ActionRegistry()
@@ -276,11 +282,44 @@ class DashboardCore:
         agent_session = self.agent_sessions.get(session_id)
         if agent_session is None:
             return ActionResult(False, "that tab no longer runs an agent")
+        if agent_session["is_in_background"]:
+            # Its row keeps the state from before, but keys would go to the shell or editor in front.
+            return ActionResult(False, "the agent is suspended or another program is in front of it")
         state, _ = self.displayed_state_by_session_id.get(session_id, ("unknown", 0))
-        if state not in ("idle", "done"):
+        if state not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
             return ActionResult(False, f"the agent is {state}; commands are typed only while it waits at its prompt")
-        return await iterm2_actions.type_slash_command(self.app, session_id, action_request.arguments["command"],
-                                                       agent_session["adapter"])
+        command = action_request.arguments["command"]
+        # Known before the conversation ends, since a lookup after /clear can't tell old from new.
+        path_of_conversation_to_clear = await self.find_current_conversation_file(session_id, agent_session) \
+            if command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION else None
+        action_result = await iterm2_actions.type_slash_command(self.app, session_id, command, agent_session["adapter"])
+        if action_result.succeeded and command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION:
+            self.forget_the_cleared_conversation(session_id, agent_session, path_of_conversation_to_clear)
+        return action_result
+
+    async def find_current_conversation_file(self, session_id, agent_session):
+        """Returns the path of the agent session's conversation file: the one last found for its
+        current conversation, else looked up now; or None."""
+        conversation_file = self.conversation_files_by_session_id.get(session_id)
+        if (conversation_file is not None and conversation_file["path"] is not None
+                and conversation_file["key"] == self.find_conversation_key(agent_session)):
+            return conversation_file["path"]
+        return await self.look_up_conversation_file(agent_session)
+
+    def forget_the_cleared_conversation(self, session_id, agent_session, cleared_path):
+        """After /clear: the old conversation's size and preview no longer apply, and its finished
+        turn no longer waits to be seen. Its file (cleared_path) is ignored until the agent writes
+        a new one: Codex keeps its process and starts the new chat's file only with its first
+        prompt, so looking the file up again finds the old one. Claude Code's new session ID is
+        asked for at the gather that follows this action."""
+        conversation_file = self.conversation_files_by_session_id.setdefault(session_id, {
+            "key": self.find_conversation_key(agent_session), "path": None, "looked_up_at": time.time(),
+            "modified_at": None, "cleared_path": None})
+        conversation_file.update(path=None, modified_at=None, cleared_path=cleared_path or conversation_file.get("cleared_path"))
+        self.forget_conversation_file_readings(session_id)
+        if session_id in self.session_tracking_by_session_id:
+            self.session_tracking_by_session_id[session_id]["last_time_tab_was_seen"] = time.time()
+        self.process_ids_asked_about_in_claude_agents.discard(agent_session["process_id"])
 
     async def handle_end_agent_process(self, action_request):
         """Ends a tab's agent process ("Kill Session"; the tab and its shell stay): SIGTERM, and
@@ -464,7 +503,11 @@ class DashboardCore:
             return ActionResult(False, "that tab no longer runs an agent session")
         process_id = agent_session["process_id"]
         claude_agent_record = self.claude_agents_by_process_id.get(process_id)
-        conversation_id = await agent_session["adapter"].find_conversation_id(process_id, claude_agent_record)
+        conversation_file = self.conversation_files_by_session_id.get(session_id) or {}
+        if conversation_file.get("cleared_path") and conversation_file["path"] is None:
+            conversation_id = None  # /clear ended the conversation and the next one has no file yet: start fresh
+        else:
+            conversation_id = await agent_session["adapter"].find_conversation_id(process_id, claude_agent_record)
         launch_command_for_the_copy = agent_session["adapter"].build_launch_command_for_a_copy(
             action_request.arguments["launch_command"], conversation_id, claude_agent_record)
         action_result = await iterm2_actions.duplicate_agent_session(
@@ -493,14 +536,13 @@ class DashboardCore:
         self.monitors = list(monitors)
         self.snapshot_needed.set()
 
-    def set_stuck_threshold_seconds(self, stuck_threshold_seconds):
-        """Receives the stuck time limit from the settings."""
-        self.stuck_threshold_seconds = stuck_threshold_seconds
-        self.snapshot_needed.set()
-
-    def set_left_out_agent_tool_names(self, left_out_agent_tool_names):
-        """Receives the agent tools the settings' Harnesses section leaves out of the list."""
-        self.left_out_agent_tool_names = frozenset(left_out_agent_tool_names)
+    def set_core_settings(self, core_settings):
+        """Receives the settings the core uses (settings_store.build_core_settings): the stuck
+        time limit, the agent tools the Harnesses section leaves out of the list, and whether
+        memory and CPU use are read."""
+        self.stuck_threshold_seconds = core_settings["stuck_threshold_seconds"]
+        self.left_out_agent_tool_names = frozenset(core_settings["left_out_agent_tool_names"])
+        self.resource_usage_is_read = core_settings["resource_usage_is_read"]
         self.snapshot_needed.set()
 
     def set_dashboard_is_active(self, dashboard_is_active):
@@ -707,9 +749,13 @@ class DashboardCore:
             self.session_tracking_by_session_id, self.displayed_state_by_session_id, self.screen_readings_by_session_id,
             self.stuck_threshold_seconds, self.claude_agents_by_process_id, self.find_seen_session_id(),
             self.find_highlighted_session_id(), self.computer_id, self.computer_name, now)
+        # Sessions left out of the list (Harnesses) keep what they showed, for when they are listed again.
         self.displayed_state_by_session_id = {
+            session_id: displayed_state for session_id, displayed_state in self.displayed_state_by_session_id.items()
+            if session_id in self.agent_sessions}
+        self.displayed_state_by_session_id.update({
             agent_session_entry.session_id: (agent_session_entry.status, agent_session_entry.status_since)
-            for _, _, agent_session_entry in iterate_agent_session_entries(snapshot)}
+            for _, _, agent_session_entry in iterate_agent_session_entries(snapshot)})
         snapshot_without_time = snapshot._replace(taken_at=0)
         if snapshot_without_time != self.last_published_snapshot_without_time:
             self.last_published_snapshot_without_time = snapshot_without_time
@@ -839,53 +885,80 @@ class DashboardCore:
         file (context_window_usage, session_preview_computation). The file is looked up
         (Claude Code: from `claude agents --json`; Codex: by its folder and start time) for each new process or Claude
         Code conversation and again every minute, and read again only when it changed."""
-        claude_config_folders = list_folders_that_may_hold_claude_code_transcripts()
         while True:
             await asyncio.sleep(CONTEXT_USAGE_CHECK_INTERVAL_SECONDS)
             for session_id in set(self.conversation_files_by_session_id) - set(self.agent_sessions):
                 del self.conversation_files_by_session_id[session_id]
             for session_id, agent_session in list(self.agent_sessions.items()):
-                process_id = agent_session["process_id"]
-                claude_agent_record = self.claude_agents_by_process_id.get(process_id) or {}
-                # Looked up again for a new process or Claude Code conversation (/clear), and every
-                # so often anyway: Codex's /new starts a new file inside the same process.
-                conversation_key = (process_id, claude_agent_record.get("sessionId"))
-                conversation_file = self.conversation_files_by_session_id.get(session_id)
-                now = time.time()
-                seconds_between_lookups = (CONVERSATION_FILE_RETRY_SECONDS if conversation_file is None or conversation_file["path"] is None
-                                           else CONVERSATION_FILE_RECHECK_SECONDS)
-                if (conversation_file is None or conversation_file["key"] != conversation_key
-                        or now - conversation_file["looked_up_at"] >= seconds_between_lookups):
-                    path = await agent_session["adapter"].find_conversation_file(process_id, claude_agent_record, claude_config_folders)
-                    if session_id not in self.agent_sessions:
-                        continue  # the tab closed during the lookup
-                    if conversation_file is not None and conversation_file["key"] == conversation_key and conversation_file["path"] == path:
-                        conversation_file["looked_up_at"] = now
-                    else:
-                        conversation_file = {"key": conversation_key, "path": path, "looked_up_at": now, "modified_at": None}
-                        self.conversation_files_by_session_id[session_id] = conversation_file
-                        # The old conversation's size and preview no longer apply.
-                        self.note_reading_value(session_id, "context_tokens", None)
-                        self.note_reading_value(session_id, "conversation_preview", None)
-                if conversation_file["path"] is None:
-                    continue
-                try:
-                    modified_at = os.path.getmtime(conversation_file["path"])
-                except OSError:
-                    conversation_file["path"] = None
-                    self.note_reading_value(session_id, "context_tokens", None)
-                    self.note_reading_value(session_id, "conversation_preview", None)
-                    continue
-                if modified_at != conversation_file["modified_at"]:
-                    conversation_file["modified_at"] = modified_at
-                    context_tokens = await asyncio.to_thread(agent_session["adapter"].read_context_tokens, conversation_file["path"])
-                    preview_fields = await asyncio.to_thread(agent_session["adapter"].read_preview_fields, conversation_file["path"])
-                    if session_id not in self.agent_sessions:
-                        continue  # the tab closed during the reads
-                    # None means no usage in the file's end (one huge line), so the last size stays.
-                    if context_tokens is not None:
-                        self.note_reading_value(session_id, "context_tokens", context_tokens)
-                    self.note_reading_value(session_id, "conversation_preview", preview_fields)
+                await self.update_conversation_file_readings(session_id, agent_session)
+
+    async def update_conversation_file_readings(self, session_id, agent_session):
+        """Looks up one agent session's conversation file when due and reads its end again when
+        it changed. A /clear can change the session's record (conversation_files_by_session_id)
+        while this waits on a lookup or a read; the record is then fetched again, and the reads'
+        results are dropped."""
+        # Looked up again for a new process or Claude Code conversation (/clear), and every so
+        # often anyway: Codex's /new starts a new file inside the same process.
+        conversation_key = self.find_conversation_key(agent_session)
+        conversation_file = self.conversation_files_by_session_id.get(session_id)
+        now = time.time()
+        seconds_between_lookups = (CONVERSATION_FILE_RETRY_SECONDS if conversation_file is None or conversation_file["path"] is None
+                                   else CONVERSATION_FILE_RECHECK_SECONDS)
+        if (conversation_file is None or conversation_file["key"] != conversation_key
+                or now - conversation_file["looked_up_at"] >= seconds_between_lookups):
+            path = await self.look_up_conversation_file(agent_session)
+            if session_id not in self.agent_sessions:
+                return  # the tab closed during the lookup
+            conversation_file = self.conversation_files_by_session_id.get(session_id)
+            is_same_conversation = conversation_file is not None and conversation_file["key"] == conversation_key
+            if is_same_conversation and path == conversation_file.get("cleared_path"):
+                path = None  # the conversation /clear ended; the agent hasn't written its next one yet
+            if is_same_conversation and conversation_file["path"] == path:
+                conversation_file["looked_up_at"] = now
+            else:
+                conversation_file = {"key": conversation_key, "path": path, "looked_up_at": now, "modified_at": None,
+                                     "cleared_path": conversation_file.get("cleared_path") if is_same_conversation else None}
+                self.conversation_files_by_session_id[session_id] = conversation_file
+                self.forget_conversation_file_readings(session_id)
+        path = conversation_file["path"]
+        if path is None:
+            return
+        try:
+            modified_at = os.path.getmtime(path)
+        except OSError:
+            conversation_file["path"] = None
+            self.forget_conversation_file_readings(session_id)
+            return
+        if modified_at == conversation_file["modified_at"]:
+            return
+        context_tokens = await asyncio.to_thread(agent_session["adapter"].read_context_tokens, path)
+        preview_fields = await asyncio.to_thread(agent_session["adapter"].read_preview_fields, path)
+        if (session_id not in self.agent_sessions or self.conversation_files_by_session_id.get(session_id) is not conversation_file
+                or conversation_file["path"] != path):
+            return  # the tab closed, or /clear or a new conversation took this file's place, during the reads
+        conversation_file["modified_at"] = modified_at
+        # None means no usage in the file's end (one huge line), so the last size stays.
+        if context_tokens is not None:
+            self.note_reading_value(session_id, "context_tokens", context_tokens)
+        self.note_reading_value(session_id, "conversation_preview", preview_fields)
+
+    def find_conversation_key(self, agent_session):
+        """Returns (agent process ID, Claude Code session ID or None): another process, or another
+        Claude Code conversation in the same process (after /clear), is another conversation."""
+        process_id = agent_session["process_id"]
+        return process_id, (self.claude_agents_by_process_id.get(process_id) or {}).get("sessionId")
+
+    async def look_up_conversation_file(self, agent_session):
+        """Returns the path of the agent session's conversation file as its adapter finds it, or None."""
+        process_id = agent_session["process_id"]
+        return await agent_session["adapter"].find_conversation_file(
+            process_id, self.claude_agents_by_process_id.get(process_id) or {}, self.folders_that_may_hold_claude_code_transcripts)
+
+    def forget_conversation_file_readings(self, session_id):
+        """Clears the values read from a session's conversation file, when it is no longer its
+        conversation (a new one, a vanished file, /clear)."""
+        for reading_name in CONVERSATION_FILE_READING_NAMES:
+            self.note_reading_value(session_id, reading_name, None)
 
     def note_reading_value(self, session_id, reading_name, value):
         """Stores a value read for a session, from its conversation file ("context_tokens",
@@ -898,13 +971,21 @@ class DashboardCore:
 
     async def read_resource_usage_periodically(self):
         """Keeps each agent session's memory and CPU use ("memory_bytes", "cpu_percent" in its
-        screen reading) current: its agent process and every process below it, read every
-        RESOURCE_USAGE_CHECK_INTERVAL_SECONDS in a worker thread (a few system calls per process,
-        no subprocess). Both are rounded (to the megabyte, to a whole percent) so that an idle
+        screen reading) current while the Memory or CPU column is shown: its agent process and
+        every process below it, read every RESOURCE_USAGE_CHECK_INTERVAL_SECONDS in a worker
+        thread (a few system calls per process, no subprocess). Both are rounded (to the
+        megabyte, to a whole percent, and below CPU_PERCENT_SHOWN_AS_IDLE to 0) so that an idle
         session's row and the snapshot don't change at every reading."""
         cpu_time_readings_by_session_id = {}  # (process ID, CPU seconds, read at) from the last reading
         while True:
             await asyncio.sleep(RESOURCE_USAGE_CHECK_INTERVAL_SECONDS)
+            if not self.resource_usage_is_read:
+                # Columns shown again later start over rather than average over the hidden time.
+                cpu_time_readings_by_session_id.clear()
+                for session_id in list(self.screen_readings_by_session_id):
+                    self.note_reading_value(session_id, "memory_bytes", None)
+                    self.note_reading_value(session_id, "cpu_percent", None)
+                continue
             process_ids_by_session_id = {session_id: agent_session["process_id"]
                                          for session_id, agent_session in self.agent_sessions.items() if agent_session["process_id"]}
             usages_by_session_id = await asyncio.to_thread(
@@ -925,7 +1006,8 @@ class DashboardCore:
                         cpu_percent = compute_cpu_percent(previous_reading[1:], (usage[1], now))
                     cpu_time_readings_by_session_id[session_id] = (process_id, usage[1], now)
                     memory_bytes = round(usage[0] / 1024 ** 2) * 1024 ** 2
-                    cpu_percent = round(cpu_percent) if cpu_percent is not None else None
+                    if cpu_percent is not None:
+                        cpu_percent = round(cpu_percent) if cpu_percent >= CPU_PERCENT_SHOWN_AS_IDLE else 0
                 self.note_reading_value(session_id, "memory_bytes", memory_bytes)
                 self.note_reading_value(session_id, "cpu_percent", cpu_percent)
 
@@ -937,7 +1019,7 @@ class DashboardCore:
         ("helper_process_ids", for example MCP servers), which are not commands. A few system
         calls, no subprocess."""
         running_command = None
-        if state in ("idle", "done") and agent_session["process_id"] and \
+        if state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT and agent_session["process_id"] and \
                 now - reading.get("helper_process_ids_recorded_at", 0) >= SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS:
             reading["helper_process_ids"] = frozenset(
                 process.process_id for process in list_descendant_processes(agent_session["process_id"]))
@@ -1155,15 +1237,10 @@ class Iterm2ConnectionThread(threading.Thread):
         self.core_ready.wait()
         self.event_loop.call_soon_threadsafe(self.core.set_reserved_screen_area, area)
 
-    def send_stuck_threshold_seconds(self, stuck_threshold_seconds):
-        """Thread-safe: passes the stuck time limit from the settings to the core."""
+    def send_core_settings(self, core_settings):
+        """Thread-safe: passes the settings the core uses (settings_store.build_core_settings) to the core."""
         self.core_ready.wait()
-        self.event_loop.call_soon_threadsafe(self.core.set_stuck_threshold_seconds, stuck_threshold_seconds)
-
-    def send_left_out_agent_tool_names(self, left_out_agent_tool_names):
-        """Thread-safe: passes the agent tools the settings leave out of the list to the core."""
-        self.core_ready.wait()
-        self.event_loop.call_soon_threadsafe(self.core.set_left_out_agent_tool_names, left_out_agent_tool_names)
+        self.event_loop.call_soon_threadsafe(self.core.set_core_settings, core_settings)
 
     def send_dashboard_is_active(self, dashboard_is_active):
         """Thread-safe: tells the core whether the dashboard is the active app."""

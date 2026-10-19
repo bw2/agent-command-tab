@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -95,6 +96,13 @@ class ResourceUsageTests(unittest.TestCase):
             child.kill()
             child.wait()
         self.assertIsNone(read_process_tree_resource_usage(child.pid))  # gone
+
+    def test_a_finished_childs_cpu_time_stays_in_the_tree(self):
+        _, cpu_seconds_before = read_process_tree_resource_usage(os.getpid())
+        busy_loop = "import time\nend = time.process_time() + 0.3\nwhile time.process_time() < end: pass"
+        subprocess.run([sys.executable, "-c", busy_loop], check=True)
+        _, cpu_seconds_after = read_process_tree_resource_usage(os.getpid())
+        self.assertGreaterEqual(cpu_seconds_after - cpu_seconds_before, 0.25)
 
     def test_cpu_percent_between_two_readings(self):
         self.assertIsNone(compute_cpu_percent(None, (5.0, 100.0)))  # the first reading

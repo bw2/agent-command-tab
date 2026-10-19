@@ -25,7 +25,9 @@ ICON_COLOR_NAMES = ["auto", "teal", "blue", "purple", "pink", "red", "orange", "
 # icon brings it to the front); sidebar, at the edge of the screen (then the icon slides it in);
 # popup, the dropdown under the menu bar icon.
 SHOW_AS_CHOICES = ["window", "sidebar", "popup"]
-SMALLEST_LIST_WINDOW_SIZE = (250, 200)
+# The windows whose frames ([x, y, width, height]) are saved, with their smallest sizes.
+# The settings window is never narrower than the width its rows are laid out for.
+SMALLEST_WINDOW_SIZES = {"list_window_frame": (250, 200), "settings_window_frame": (540, 240)}
 SIDEBAR_EDGES = ["right", "left"]
 # auto_hide: slides in when the pointer touches the edge; floating: always visible over windows;
 # docked: always visible, and iTerm2 windows on that monitor are kept out of its area.
@@ -40,6 +42,7 @@ LIST_COLUMNS = ["context_tokens", "created_time", "existence_duration", "memory_
 DEFAULT_SETTINGS = {
     "show_as": "popup",
     "list_window_frame": None,  # [x, y, width, height] of the "Show as: Window" window, once it has been shown
+    "settings_window_frame": None,  # the settings window's, once it has been moved or resized (user request, 2026-10-19)
     "list_window_is_always_on_top": False,
     "sidebar_mode": "auto_hide",
     "sidebar_edge": "right",  # of the menu-bar monitor
@@ -65,10 +68,11 @@ def is_valid_setting_value(name, value):
         return value in ICON_COLOR_NAMES
     if name == "show_as":
         return value in SHOW_AS_CHOICES
-    if name == "list_window_frame":
+    if name in SMALLEST_WINDOW_SIZES:
+        smallest_width, smallest_height = SMALLEST_WINDOW_SIZES[name]
         return value is None or (isinstance(value, list) and len(value) == 4
                                  and all(isinstance(number, (int, float)) and not isinstance(number, bool) for number in value)
-                                 and value[2] >= SMALLEST_LIST_WINDOW_SIZE[0] and value[3] >= SMALLEST_LIST_WINDOW_SIZE[1])
+                                 and value[2] >= smallest_width and value[3] >= smallest_height)
     if name == "sidebar_edge":
         return value in SIDEBAR_EDGES
     if name == "sidebar_mode":
@@ -113,6 +117,17 @@ def list_included_agent_tool_names(settings):
 def list_left_out_agent_tool_names(settings):
     """Returns the agent tools that the Harnesses section leaves out of the list and the menus."""
     return [agent_tool["agent_tool_name"] for agent_tool in settings["agent_tools"] if not agent_tool["is_included"]]
+
+
+def build_core_settings(settings):
+    """Returns the part of the settings that the core uses: the stuck time limit, the agent
+    tools left out of the list, and whether memory and CPU use are read (only while one of
+    their columns is shown)."""
+    return {
+        "stuck_threshold_seconds": settings["stuck_minutes"] * 60,
+        "left_out_agent_tool_names": list_left_out_agent_tool_names(settings),
+        "resource_usage_is_read": bool({"memory_usage", "cpu_usage"} & set(settings["shown_columns"])),
+    }
 
 
 def load_settings(settings_file_path=SETTINGS_FILE_PATH):

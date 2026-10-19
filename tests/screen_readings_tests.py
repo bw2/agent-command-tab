@@ -5,7 +5,7 @@ import unittest
 from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.agent_adapters.codex import CodexAdapter
 from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, count_lines_matching, input_area_is_empty,
-                                                   screen_shows_permission_dialog)
+                                                   read_typed_input_area_text, screen_shows_permission_dialog)
 
 CLAUDE_LONG_TURN_AT_6_SECONDS = [
     " ▐▛███▛█\x00\x00\x00Claude Code\x00v2.1.302", "▝▜██████▀\x00\x00Haiku 5.5 · Claude Max",
@@ -133,6 +133,22 @@ class InputAreaIsEmptyTests(unittest.TestCase):
         self.assertTrue(self.check(ClaudeCodeAdapter(), screen))
         self.assertFalse(self.check(ClaudeCodeAdapter(), [mark_faint("⏺ a reply with no input box below it")]))
         self.assertFalse(self.check(ClaudeCodeAdapter(), CLAUDE_INPUT_BOX_PLACEHOLDER[:2]))  # no lower edge on screen
+
+
+class ReadTypedInputAreaTextTests(unittest.TestCase):
+    def read(self, adapter, screen_lines_with_faint_flags):
+        return read_typed_input_area_text(screen_lines_with_faint_flags, adapter.input_line_marker, adapter.input_area_end_pattern)
+
+    def test_a_command_left_in_the_box_is_read_without_the_placeholder(self):
+        self.assertEqual(self.read(ClaudeCodeAdapter(), CLAUDE_INPUT_BOX_PLACEHOLDER), "")
+        self.assertEqual(self.read(CodexAdapter(), CODEX_INPUT_BOX_PLACEHOLDER), "")
+        # An Enter taken as a new line leaves the command on the first of two lines.
+        screen = CLAUDE_INPUT_BOX_PLACEHOLDER[:1] + [mark_faint("❯\xa0/compact"), mark_faint("  ")] + CLAUDE_INPUT_BOX_PLACEHOLDER[2:]
+        self.assertEqual(self.read(ClaudeCodeAdapter(), screen), "/compact")
+
+    def test_a_box_that_is_not_on_screen_reads_as_none(self):
+        self.assertIsNone(self.read(ClaudeCodeAdapter(), [mark_faint("✻ Compacting conversation…")]))
+        self.assertIsNone(self.read(ClaudeCodeAdapter(), CLAUDE_INPUT_BOX_PLACEHOLDER[:2]))
 
 
 if __name__ == "__main__":

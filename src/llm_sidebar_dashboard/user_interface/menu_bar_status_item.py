@@ -9,20 +9,8 @@ from Foundation import NSObject
 
 from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_state
 from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
+from llm_sidebar_dashboard.user_interface.named_colors import build_color_from_name
 
-
-def make_srgb_color_maker(red, green, blue):
-    """Returns a function that makes this color, like NSColor.systemRedColor does for red."""
-    return lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(red / 255, green / 255, blue / 255, 1)
-
-
-# Purple and pink are fixed colors: on current macOS the system purple is a magenta and the
-# system pink is nearly the system red, so those two looked alike.
-ICON_COLORS_BY_NAME = {
-    "teal": NSColor.systemTealColor, "blue": NSColor.systemBlueColor, "purple": make_srgb_color_maker(150, 95, 255),
-    "pink": make_srgb_color_maker(255, 110, 190), "red": NSColor.systemRedColor, "orange": NSColor.systemOrangeColor,
-    "green": NSColor.systemGreenColor, "light_blue": NSColor.systemCyanColor,
-}
 AUTOMATIC_ICON_COLOR_NAME_BY_MOST_URGENT_STATE = {"asking": "light_blue", "error": "red", "stuck": "orange"}
 
 
@@ -86,7 +74,7 @@ class MenuBarStatusItemController(NSObject):
         settings = self.owner.settings
         color_name = self.automatic_icon_color_name if settings["icon_color"] == "auto" else settings["icon_color"]
         letter_color = (NSColor.secondaryLabelColor() if self.has_connection_problem
-                        else ICON_COLORS_BY_NAME.get(color_name, NSColor.systemGreenColor)())
+                        else build_color_from_name(color_name, NSColor.systemGreenColor))
         font = NSFont.menuBarFontOfSize_(0)
         title = NSMutableAttributedString.alloc().init()
         title.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
@@ -94,7 +82,8 @@ class MenuBarStatusItemController(NSObject):
                   NSForegroundColorAttributeName: letter_color}))
         if self.asking_count and settings["icon_shows_asking_count"] and not self.has_connection_problem:
             title.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
-                f" {self.asking_count}", {NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.systemCyanColor()}))
+                f" {self.asking_count}", {NSFontAttributeName: font,
+                                          NSForegroundColorAttributeName: build_color_from_name("light_blue")}))
         self.status_item.button().setAttributedTitle_(title)
 
     def statusItemClicked_(self, sender):

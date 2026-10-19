@@ -8,12 +8,16 @@ import math
 
 import objc
 from AppKit import (NSBezelStyleRecessed, NSBezelStyleRounded, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont,
-                    NSImage, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
+                    NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
                     NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
+from llm_sidebar_dashboard.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_NAMES, add_popup_choices,
+                                                                  read_popup_choice, select_popup_choice,
+                                                                  show_symbol_on_button)
 from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
 
+# The Sort pop-up's titles for settings_store.LIST_SORT_ORDERS.
 LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabetically", "created_time": "Created Time"}
 POPOVER_WIDTH = 460  # before the first fit
 SMALLEST_POPOVER_WIDTH = 320
@@ -26,26 +30,13 @@ LIST_BOTTOM_PADDING = 6
 SPACE_FOR_POPOVER_ARROW_AND_MARGIN = 40
 INITIAL_PANEL_HEIGHT = 300
 TOP_BAR_DRAG_DISTANCE_TO_DETACH = 6  # points: a shorter drag is a click
+PANEL_SIDE_MARGIN = 6  # between the panel's edges and the expand or collapse button and the Settings button
+EXPAND_OR_COLLAPSE_ALL_BUTTON_SIZE = (24, 22)
 # The top bar's one expand or collapse button (user requests, 2026-10-19): (SF Symbol, text
 # fallback, tooltip), by whether the list is fully expanded. The symbol shows the current state;
 # the fallback text and the tooltip say what a click does.
-EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: ("rectangle.compress.vertical", "Expand all", "Expand all"),
-                                True: ("rectangle.expand.vertical", "Collapse all", "Collapse all")}
-
-
-def make_symbol_button(symbol_name, fallback_title, tool_tip, target, action_name):
-    """Returns a borderless button showing an SF Symbol (or a text fallback), with the pointing hand."""
-    button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 24, 22))
-    image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, tool_tip)
-    if image is not None:
-        button.setImage_(image)
-    else:
-        button.setTitle_(fallback_title)
-    button.setBordered_(False)
-    button.setToolTip_(tool_tip)
-    button.setTarget_(target)
-    button.setAction_(action_name)
-    return button
+EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: (ROWS_OPEN_SYMBOL_NAMES[False], "Expand all", "Expand all"),
+                                True: (ROWS_OPEN_SYMBOL_NAMES[True], "Collapse all", "Collapse all")}
 
 
 class ListPanelView(NSView):
@@ -105,8 +96,7 @@ class ListPanelController(NSViewController):
         root_view.addSubview_(scroll_view)
 
         # Top bar (user requests, milestone 2 and 2026-10-19): the sort order on the left, one
-        # button that expands or collapses all (R8.1) beside the settings button on the right
-        # (R34), and a message line between them.
+        # button that expands or collapses all (R8.1) on the right, and a message line between them.
         self.sort_label = NSTextField.labelWithString_("Sort:")
         self.sort_label.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.sort_label.sizeToFit()
@@ -119,17 +109,19 @@ class ListPanelController(NSViewController):
         self.list_sort_order_popup.setBezelStyle_(NSBezelStyleRecessed)
         self.list_sort_order_popup.setControlSize_(NSControlSizeSmall)
         self.list_sort_order_popup.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
-        self.list_sort_order_popup.addItemsWithTitles_(list(LIST_SORT_ORDER_TITLES.values()))
+        add_popup_choices(self.list_sort_order_popup, LIST_SORT_ORDER_TITLES)
         self.list_sort_order_popup.sizeToFit()
         self.list_sort_order_popup.setTarget_(self)
         self.list_sort_order_popup.setAction_("listSortOrderChosen:")
         self.list_sort_order_popup.setFrameOrigin_((0, height - TOP_BAR_HEIGHT + 3))  # fit_top_bar_to_width sets x
         self.list_sort_order_popup.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.list_sort_order_popup)
-        self.expand_or_collapse_all_button = make_symbol_button(*EXPAND_OR_COLLAPSE_ALL_LOOKS[False], self,
-                                                                "expandOrCollapseAllClicked:")
-        self.expand_or_collapse_all_button.setFrameOrigin_((width - 6 - self.expand_or_collapse_all_button.frame().size.width,
-                                                            height - TOP_BAR_HEIGHT + 3))
+        button_width, button_height = EXPAND_OR_COLLAPSE_ALL_BUTTON_SIZE
+        self.expand_or_collapse_all_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(  # update_expand_or_collapse_all_button gives its look
+            width - PANEL_SIDE_MARGIN - button_width, height - TOP_BAR_HEIGHT + 3, button_width, button_height))
+        self.expand_or_collapse_all_button.setBordered_(False)
+        self.expand_or_collapse_all_button.setTarget_(self)
+        self.expand_or_collapse_all_button.setAction_("expandOrCollapseAllClicked:")
         self.expand_or_collapse_all_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)  # stays at the top right
         root_view.addSubview_(self.expand_or_collapse_all_button)
         self.list_controller.on_expansion_changed = self.update_expand_or_collapse_all_button
@@ -150,7 +142,7 @@ class ListPanelController(NSViewController):
         self.settings_button.setTarget_(self)
         self.settings_button.setAction_("settingsClicked:")
         self.settings_button.sizeToFit()
-        self.settings_button.setFrameOrigin_((6, (BOTTOM_BAR_HEIGHT - self.settings_button.frame().size.height) / 2))
+        self.settings_button.setFrameOrigin_((PANEL_SIDE_MARGIN, (BOTTOM_BAR_HEIGHT - self.settings_button.frame().size.height) / 2))
         self.settings_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMaxXMargin)  # stays at the bottom left
         root_view.addSubview_(self.settings_button)
         self.setView_(root_view)
@@ -168,9 +160,9 @@ class ListPanelController(NSViewController):
         can't be reached, so there are no rows to sort) the sort control steps aside for it."""
         label_x, label_width = self.sort_label.frame().origin.x, self.sort_label.frame().size.width
         popup_frame = self.list_sort_order_popup.frame()
-        right_buttons_x = (self.view().bounds().size.width - 6 if self.expand_or_collapse_all_button.isHidden()
-                           else self.expand_or_collapse_all_button.frame().origin.x)
-        room_right_edge = right_buttons_x - 2
+        right_end_x = (self.view().bounds().size.width - PANEL_SIDE_MARGIN if self.expand_or_collapse_all_button.isHidden()
+                       else self.expand_or_collapse_all_button.frame().origin.x)
+        room_right_edge = right_end_x - 2
         popup_x_after_label = label_x + label_width + 2
         is_showing_a_message = bool(self.message_text_field.stringValue())
         label_fits = not is_showing_a_message and popup_x_after_label + popup_frame.size.width <= room_right_edge
@@ -182,7 +174,7 @@ class ListPanelController(NSViewController):
         message_x = popup_x + popup_frame.size.width + 8 if popup_fits else label_x
         message_frame = self.message_text_field.frame()
         self.message_text_field.setFrame_(NSMakeRect(message_x, message_frame.origin.y,
-                                                     max(right_buttons_x - message_x - 8, 0), message_frame.size.height))
+                                                     max(right_end_x - message_x - 8, 0), message_frame.size.height))
 
     def expandOrCollapseAllClicked_(self, sender):
         """Collapses all monitor and window rows when the list is fully expanded, and otherwise
@@ -195,9 +187,7 @@ class ListPanelController(NSViewController):
         request, 2026-10-19), with the look of the list's current state; the top bar refits when
         the button appears or goes. Called after every snapshot and expansion change."""
         symbol_name, fallback_title, tool_tip = EXPAND_OR_COLLAPSE_ALL_LOOKS[self.list_controller.is_fully_expanded()]
-        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, tool_tip)
-        self.expand_or_collapse_all_button.setImage_(image)
-        self.expand_or_collapse_all_button.setTitle_("" if image is not None else fallback_title)
+        show_symbol_on_button(self.expand_or_collapse_all_button, symbol_name, fallback_title, tool_tip)
         self.expand_or_collapse_all_button.setToolTip_(tool_tip)
         is_shown = self.list_controller.count_window_rows() >= 2
         if self.expand_or_collapse_all_button.isHidden() == is_shown:
@@ -205,15 +195,13 @@ class ListPanelController(NSViewController):
             self.fit_top_bar_to_width()
 
     def listSortOrderChosen_(self, sender):
-        chosen_title = sender.titleOfSelectedItem()
-        self.list_controller.owner.list_sort_order_chosen(
-            next(list_sort_order for list_sort_order, title in LIST_SORT_ORDER_TITLES.items() if title == chosen_title))
+        self.list_controller.owner.list_sort_order_chosen(read_popup_choice(sender))
 
     @objc.python_method
     def show_list_sort_order(self, list_sort_order):
         """Shows the rows in this order and the pop-up with it chosen (the dropdown and the sidebar share one choice)."""
         self.view()
-        self.list_sort_order_popup.selectItemWithTitle_(LIST_SORT_ORDER_TITLES[list_sort_order])
+        select_popup_choice(self.list_sort_order_popup, list_sort_order)
         self.list_controller.set_list_sort_order(list_sort_order)
 
     def settingsClicked_(self, sender):

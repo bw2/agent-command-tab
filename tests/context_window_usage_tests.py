@@ -9,6 +9,7 @@ from llm_sidebar_dashboard.context_window_usage import (find_claude_code_transcr
                                                         format_token_count,
                                                         read_context_tokens_from_claude_code_transcript,
                                                         read_context_tokens_from_codex_conversation_file, read_last_lines,
+                                                        read_last_records,
                                                         read_turn_started_at_from_claude_code_transcript,
                                                         read_turn_started_at_from_codex_conversation_file)
 
@@ -59,6 +60,11 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(read_last_lines(path, byte_count=10), ["second"])  # the 10 bytes start inside "first"
         self.assertEqual(read_last_lines(path, byte_count=1000), ["second", "first", "x" * 100])
 
+    def test_records_are_the_json_objects_newest_first(self):
+        path = self.write_lines("mixed.jsonl", [{"type": "user"}, "not json", "[1, 2]", '"text"', {"type": "assistant"}])
+        self.assertEqual(list(read_last_records(path)), [{"type": "assistant"}, {"type": "user"}])
+        self.assertIsNone(read_context_tokens_from_claude_code_transcript(self.write_lines("list.jsonl", ["[1, 2]"])))
+
     def test_codex_conversation_file_is_found_by_folder_and_start_time(self):
         now = time.time()
         today = datetime.date.fromtimestamp(now)
@@ -90,6 +96,11 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "user", "timestamp": "2026-10-19T02:51:48.992Z", "message": {"content": "run the pipeline"}},
             {"type": "assistant", "timestamp": "2026-10-19T02:51:50.000Z", "message": {"usage": {"input_tokens": 1}}},
             {"type": "user", "timestamp": "2026-10-19T02:52:07.729Z", "message": {"content": [{"type": "tool_result"}]}},
+            # Written in the middle of the turn: a skill's text and Claude Code's own output, which don't start one.
+            {"type": "user", "timestamp": "2026-10-19T02:52:09.000Z", "isMeta": True,
+             "message": {"content": "Base directory for this skill: /x"}},
+            {"type": "user", "timestamp": "2026-10-19T02:52:10.000Z",
+             "message": {"content": "<local-command-stdout>done</local-command-stdout>"}},
         ])
         self.assertEqual(read_turn_started_at_from_claude_code_transcript(claude_path),
                          datetime.datetime(2026, 10, 19, 2, 51, 48, 992000, datetime.timezone.utc).timestamp())

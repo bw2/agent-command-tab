@@ -81,18 +81,21 @@ SECONDS_PER_MACH_TIME_UNIT = read_seconds_per_mach_time_unit()
 
 def read_process_resource_usage(process_id):
     """Returns (memory in bytes, CPU time in seconds) for one process: its physical footprint,
-    the number Activity Monitor shows as Memory, and the user plus system time it has used; or
-    None if it is gone or can't be read."""
+    the number Activity Monitor shows as Memory, and the user plus system time used by it and
+    by the children it has already waited for (so a finished command's CPU time stays counted
+    in its parent's); or None if it is gone or can't be read."""
     usage = ResourceUsageInfoV2()
     if LIBPROC.proc_pid_rusage(process_id, RUSAGE_INFO_V2, ctypes.byref(usage)) != 0:
         return None
-    return usage.ri_phys_footprint, (usage.ri_user_time + usage.ri_system_time) * SECONDS_PER_MACH_TIME_UNIT
+    cpu_time = usage.ri_user_time + usage.ri_system_time + usage.ri_child_user_time + usage.ri_child_system_time
+    return usage.ri_phys_footprint, cpu_time * SECONDS_PER_MACH_TIME_UNIT
 
 
 def read_process_tree_resource_usage(process_id):
     """Returns (memory in bytes, CPU time in seconds) summed over a process and all its
     descendants (an agent with the commands, servers and helpers it started), or None if the
-    process is gone. A descendant that ends while it is being read is left out."""
+    process is gone. A descendant that ends while it is being read is left out; once its
+    parent has waited for it, its CPU time is counted in the parent's."""
     own_usage = read_process_resource_usage(process_id)
     if own_usage is None:
         return None
@@ -103,8 +106,8 @@ def read_process_tree_resource_usage(process_id):
 
 def compute_cpu_percent(previous_reading, reading):
     """Returns the share of one CPU core used between two readings, in percent (200 means two
-    cores' worth), or None for the first reading. A descendant that ended in between takes its
-    CPU time with it, so a drop counts as 0.
+    cores' worth), or None for the first reading. A descendant that left the tree in between
+    without its parent waiting for it takes its CPU time with it, so a drop counts as 0.
 
     Args:
         previous_reading: (CPU seconds, read at) from the last reading, or None.

@@ -96,6 +96,11 @@ class ReadClaudeCodePreviewTests(unittest.TestCase):
         ])
         self.assertEqual((fields["last_prompt"], fields["message_since_prompt"]), ("The real prompt", "After the command."))
 
+    def test_a_prompt_that_starts_with_a_tag_is_the_users(self):
+        fields = self.read([claude_user_record("An earlier prompt"),
+                            claude_user_record('<pasted_content id="1">the log</pasted_content> why does this fail?')])
+        self.assertEqual(fields["last_prompt"], '<pasted_content id="1">the log</pasted_content> why does this fail?')
+
     def test_a_slash_command_or_skill_is_a_prompt_and_a_task_notification_starts_a_turn(self):
         fields = self.read([
             claude_user_record("commit and push"),

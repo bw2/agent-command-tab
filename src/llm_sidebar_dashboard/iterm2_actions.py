@@ -12,10 +12,11 @@ import iterm2
 from llm_sidebar_dashboard.dashboard_core_api import ActionResult
 from llm_sidebar_dashboard.monitor_assignment import (assign_windows_to_monitors_by_largest_overlap,
                                                       compute_window_frame_on_another_monitor)
-from llm_sidebar_dashboard.screen_readings import input_area_is_empty
+from llm_sidebar_dashboard.screen_readings import input_area_is_empty, read_typed_input_area_text
 from llm_sidebar_dashboard.tab_order_computation import compute_full_tab_order_after_move
 
 SECONDS_FOR_FULL_SCREEN_ANIMATION = 1.0
+SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED = 0.5  # the box empties within a redraw of the Enter
 
 
 def escape_text_for_iterm2_interpolated_string(text):
@@ -229,7 +230,8 @@ async def read_screen_lines_with_faint_flags(session):
 async def type_slash_command(app, session_id, command, adapter):
     """Types a slash command into the agent's empty input box, then Enter after the adapter's
     pause (R15.1; PLAN.md section 8, "Sending /compact and /clear"). Refuses when the box holds
-    unsent text or can't be found on screen, since the command would join the draft.
+    unsent text or can't be found on screen, since the command would join the draft. Reports
+    a failure, without retrying, when the command is still in the box a moment after Enter.
 
     Args:
         app: The iterm2.App.
@@ -248,4 +250,13 @@ async def type_slash_command(app, session_id, command, adapter):
     await session.async_send_text(command, suppress_broadcast=True)
     await asyncio.sleep(adapter.seconds_before_enter)
     await session.async_send_text("\r", suppress_broadcast=True)
+    await asyncio.sleep(SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED)
+    try:
+        typed_text = read_typed_input_area_text(await read_screen_lines_with_faint_flags(session), adapter.input_line_marker,
+                                                adapter.input_area_end_pattern)
+    except iterm2.RPCException:
+        return ActionResult(True)  # the tab closed meanwhile
+    # A box that is off screen (the tool redrawing) can't be checked; the command was sent.
+    if typed_text is not None and command in typed_text:
+        return ActionResult(False, f"{command} may not have been submitted: it is still in the tab's input box")
     return ActionResult(True)

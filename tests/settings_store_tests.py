@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, find_launch_command_problem,
+from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, build_core_settings, find_launch_command_problem,
                                                   list_included_agent_tool_names, list_left_out_agent_tool_names,
                                                   load_settings, merge_settings_with_defaults,
                                                   resolve_launch_command_paths, save_settings)
@@ -49,6 +49,13 @@ class MergeSettingsTests(unittest.TestCase):
         self.assertEqual([agent_tool["is_included"] for agent_tool in settings["agent_tools"]], [True, False])
         self.assertEqual(list_included_agent_tool_names(settings), ["Claude Code"])
         self.assertEqual(list_left_out_agent_tool_names(settings), ["Codex"])
+
+    def test_core_settings_read_memory_and_cpu_only_while_their_columns_are_shown(self):
+        settings = merge_settings_with_defaults({"stuck_minutes": 4})
+        self.assertEqual(build_core_settings(settings), {"stuck_threshold_seconds": 240, "left_out_agent_tool_names": [],
+                                                         "resource_usage_is_read": False})
+        settings["shown_columns"] = ["state", "cpu_usage"]
+        self.assertTrue(build_core_settings(settings)["resource_usage_is_read"])
 
     def test_a_boolean_is_not_a_width(self):
         self.assertEqual(merge_settings_with_defaults({"sidebar_width": True})["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])

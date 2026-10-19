@@ -11,18 +11,20 @@ import unittest.mock
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSColorSpace, NSDragOperationMove, NSDragOperationNone, NSMakeRect,
                     NSFloatingWindowLevel, NSMenu, NSNormalWindowLevel, NSParagraphStyleAttributeName, NSTextAlignmentRight,
-                    NSTextField, NSWindow, NSWindowStyleMaskBorderless)
+                    NSTextField, NSWindow, NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
 
-from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES
+from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES, SMALLEST_WINDOW_SIZES
 from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
-from llm_sidebar_dashboard.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, POPOVER_WIDTH, TOP_BAR_HEIGHT,
-                                                                    ListPanelController)
+from llm_sidebar_dashboard.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, PANEL_SIDE_MARGIN, POPOVER_WIDTH,
+                                                                    TOP_BAR_HEIGHT, ListPanelController)
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
                                                                              AgentSessionListController, RowButton)
-from llm_sidebar_dashboard.user_interface.list_window import ListWindowController, frame_is_on_a_screen
+from llm_sidebar_dashboard.user_interface.list_window import ListWindowController
+from llm_sidebar_dashboard.user_interface.screen_layout import frame_is_on_a_screen, grow_frame_to_smallest_size
 from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
-from llm_sidebar_dashboard.user_interface.menu_bar_status_item import ICON_COLORS_BY_NAME, choose_automatic_icon_color_name
+from llm_sidebar_dashboard.user_interface.menu_bar_status_item import choose_automatic_icon_color_name
+from llm_sidebar_dashboard.user_interface.named_colors import COLOR_MAKERS_BY_NAME
 from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
 from llm_sidebar_dashboard.user_interface.sidebar_panel import (SidebarController,
                                                                 allow_pointer_changes_while_another_app_is_in_front)
@@ -81,10 +83,10 @@ class RecordingOwner:
         self.chosen_list_sort_orders.append(list_sort_order)
 
 
-def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False):
+def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False, slash_commands=("/compact", "/clear")):
     return AgentSessionEntry(tab_id=tab_id, session_id=f"s{tab_id}", tab_title=title, tab_title_set_by_user=False,
                              agent_session_name=title, agent_tool_name=tool, working_folder="/x", status=status,
-                             status_since=0.0, is_in_front=is_in_front)
+                             status_since=0.0, is_in_front=is_in_front, slash_commands=slash_commands)
 
 
 def make_sample_snapshot(second_window_tabs=2):
@@ -302,13 +304,20 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.menuNewAgentSessionInWindow_(menu_item)
         self.assertEqual(self.owner.started_agent_sessions, [("w1", "/x", "Codex")])
 
-    def build_right_click_menu_titles(self, row):
-        """Returns the menu's item titles, with "---" for separators, as if the row were right-clicked."""
+    def build_right_click_menu(self, row):
+        """Returns the menu the list builds as if the row were right-clicked."""
         item = self.list_controller.outline_view.itemAtRow_(row)
         self.list_controller.find_clicked_item = lambda: item
         menu = NSMenu.alloc().initWithTitle_("")
         self.list_controller.menuNeedsUpdate_(menu)
-        return ["---" if menu_item.isSeparatorItem() else menu_item.title() for menu_item in menu.itemArray()]
+        return menu
+
+    def build_right_click_menu_titles(self, row):
+        """Returns the right-click menu's item titles, with "---" for separators."""
+        return ["---" if menu_item.isSeparatorItem() else menu_item.title() for menu_item in self.build_right_click_menu(row).itemArray()]
+
+    def build_right_click_menu_items_by_title(self, row):
+        return {menu_item.title(): menu_item for menu_item in self.build_right_click_menu(row).itemArray()}
 
     def test_window_and_tab_right_click_menus(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -321,18 +330,10 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_slash_commands_only_at_the_prompt_and_clear_and_kill_ask_first(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
-        outline_view = self.list_controller.outline_view
-
-        def build_right_click_menu_items_by_title(row):
-            item = outline_view.itemAtRow_(row)
-            self.list_controller.find_clicked_item = lambda: item
-            menu = NSMenu.alloc().initWithTitle_("")
-            self.list_controller.menuNeedsUpdate_(menu)
-            return {menu_item.title(): menu_item for menu_item in menu.itemArray()}
-        menu_items_by_title = build_right_click_menu_items_by_title(1)  # "planning" is working
+        menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # "planning" is working
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
         self.assertTrue(menu_items_by_title["Kill Session"].isEnabled())
-        menu_items_by_title = build_right_click_menu_items_by_title(5)  # analysis-0 is idle
+        menu_items_by_title = self.build_right_click_menu_items_by_title(5)  # analysis-0 is idle
         self.assertTrue(menu_items_by_title["/compact"].isEnabled())
         self.list_controller.menuSendSlashCommand_(menu_items_by_title["/compact"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].arguments),
@@ -345,6 +346,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.menuKillSession_(menu_items_by_title["Kill Session"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("end_agent_process", {"session_id": "s10"}))
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_two = window_two._replace(agent_sessions=tuple(entry._replace(agent_tool_name="Aider", slash_commands=())
+                                                              for entry in window_two.agent_sessions))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two)),)))
+        menu_items_by_title = self.build_right_click_menu_items_by_title(5)  # idle, but its tool takes no commands
+        self.assertFalse(menu_items_by_title["/compact"].isEnabled())
+        self.assertIn("Aider", menu_items_by_title["/compact"].toolTip())
 
     def test_double_click_on_a_window_shows_it_without_renaming_or_collapsing(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -474,12 +484,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                                          + window_two.agent_sessions[1:])
         self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
             windows=(snapshot.monitors[0].windows[0], window_two)),)))
-        item = self.list_controller.outline_view.itemAtRow_(5)  # the "aider" tab
-        self.list_controller.find_clicked_item = lambda: item
-        menu = NSMenu.alloc().initWithTitle_("")
-        self.list_controller.menuNeedsUpdate_(menu)
-        duplicate_item = next(menu_item for menu_item in menu.itemArray() if menu_item.title() == "Duplicate this tab")
-        self.assertFalse(duplicate_item.isEnabled())
+        self.assertFalse(self.build_right_click_menu_items_by_title(5)["Duplicate this tab"].isEnabled())  # the "aider" tab
 
     def test_closing_the_dropdown_cancels_an_open_rename_so_the_list_keeps_updating(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -489,6 +494,44 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.cancel_rename()
         self.assertFalse(self.list_controller.rename_in_progress)
         self.assertEqual(self.submitted_actions, [])  # nothing was renamed
+
+    def test_the_measured_start_of_a_name_is_where_the_row_draws_it(self):
+        self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        for row in range(self.list_controller.outline_view.numberOfRows() - 1):  # all but the "+" row
+            row_view = self.lay_out_row_view(row)
+            parts = self.list_controller.build_row_text_parts(self.list_controller.outline_view.itemAtRow_(row))
+            # Never short of where the row draws it, so measured widths don't cut text.
+            excess = self.list_controller.measure_name_x(parts.connector_text, parts.dot_glyph) - row_view.name_text_field.frame().origin.x
+            self.assertTrue(0 <= excess <= 2.5, (row, excess))
+
+    def collapse_from_the_right_click_menu(self, row):
+        self.list_controller.menu_target_item = self.list_controller.outline_view.itemAtRow_(row)
+        self.list_controller.menuToggleExpansion_(None)
+
+    def test_collapsing_the_window_of_a_tab_being_renamed_submits_the_rename_first(self):
+        for collapse in (lambda: self.click_row_arrow(0), lambda: self.list_controller.set_all_expanded(False),
+                         lambda: self.collapse_from_the_right_click_menu(0)):
+            self.list_controller.set_all_expanded(True)
+            self.list_controller.apply_snapshot(make_sample_snapshot())
+            self.window.contentView().layoutSubtreeIfNeeded()
+            self.list_controller.begin_rename(self.list_controller.outline_view.itemAtRow_(1))
+            self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False).name_text_field.currentEditor() \
+                .setString_("renamed")
+            collapse()  # AppKit raised an exception here while the name was being edited
+            self.assertFalse(self.list_controller.rename_in_progress)
+            self.assertIn(("window", "w1"), self.list_controller.collapsed_item_keys)
+            self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].arguments),
+                             ("rename_tab", {"new_title": "renamed"}))
+
+    def test_opening_previews_during_a_rename_submits_the_rename_first(self):
+        self.apply_snapshot_with_previews()
+        self.window.contentView().layoutSubtreeIfNeeded()
+        tab_item = self.list_controller.outline_view.itemAtRow_(1)
+        self.list_controller.begin_rename(tab_item)
+        self.list_controller.set_previews_open([tab_item], True)
+        self.assertFalse(self.list_controller.rename_in_progress)
+        self.assertTrue(self.lay_out_row_view(1).has_preview_line)  # refilled now that its name isn't being edited
 
     def test_expand_or_collapse_from_the_right_click_menu(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -635,9 +678,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         button = panel.expand_or_collapse_all_button
         panel_width = panel.view().bounds().size.width
-        self.assertEqual(button.frame().origin.x + button.frame().size.width, panel_width - 6)  # the top right corner
+        self.assertEqual(button.frame().origin.x + button.frame().size.width, panel_width - PANEL_SIDE_MARGIN)  # the top right corner
         settings_frame = panel.settings_button.frame()  # a button with its name, at the bottom left
-        self.assertEqual((panel.settings_button.title(), settings_frame.origin.x), ("Settings", 6))
+        self.assertEqual((panel.settings_button.title(), settings_frame.origin.x), ("Settings", PANEL_SIDE_MARGIN))
         self.assertLess(settings_frame.origin.y + settings_frame.size.height, BOTTOM_BAR_HEIGHT)
         self.assertEqual(button.toolTip(), "Collapse all")  # fully expanded: a click collapses
         panel.expandOrCollapseAllClicked_(button)
@@ -704,7 +747,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertTrue(button.isHidden())
         self.window.setContentSize_((320, 260))
         message_frame = panel.message_text_field.frame()  # the message line reaches the right edge instead
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, panel.view().bounds().size.width - 6 - 8)
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, panel.view().bounds().size.width - PANEL_SIDE_MARGIN - 8)
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertFalse(button.isHidden())
         message_frame = panel.message_text_field.frame()
@@ -831,7 +874,7 @@ class AutomaticIconColorTests(unittest.TestCase):
         # Current macOS makes system purple a magenta and system pink nearly its red.
         components_by_name = {}
         for color_name in ICON_COLOR_NAMES[1:]:  # all but "auto"
-            color = ICON_COLORS_BY_NAME[color_name]().colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
+            color = COLOR_MAKERS_BY_NAME[color_name]().colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
             components_by_name[color_name] = (color.redComponent() * 255, color.greenComponent() * 255, color.blueComponent() * 255)
         for first_name, first in components_by_name.items():
             for second_name, second in components_by_name.items():
@@ -928,6 +971,12 @@ class SettingsRecordingOwner:
         self.settings = new_settings
         self.changed_settings.append(new_settings)
 
+    def window_frame_changed(self, setting_name, frame):
+        pass
+
+    def settings_window_closed(self):
+        pass
+
 
 class ListWindowSmokeTests(unittest.TestCase):
     @classmethod
@@ -939,10 +988,14 @@ class ListWindowSmokeTests(unittest.TestCase):
         self.assertTrue(frame_is_on_a_screen((1600, 100, 500, 400), screens))
         self.assertFalse(frame_is_on_a_screen((4000, 100, 500, 400), screens))  # its monitor is gone
 
+    def test_a_dropdown_too_short_for_the_list_window_grows_downward_when_detached(self):
+        self.assertEqual(grow_frame_to_smallest_size([100, 800, 327, 148], (250, 200)), [100, 748, 327, 200])
+        self.assertEqual(grow_frame_to_smallest_size([100, 800, 400, 300], (250, 200)), [100, 800, 400, 300])
+
     def test_the_window_holds_its_own_list_and_reports_its_frame(self):
         owner = RecordingOwner()
         owner.reported_frames = []
-        owner.list_window_frame_changed = owner.reported_frames.append
+        owner.window_frame_changed = lambda setting_name, frame: owner.reported_frames.append((setting_name, frame))
         controller = ListWindowController.alloc().initWithOwner_(owner)
         controller.list_controller.refresh_timer.invalidate()
         self.assertTrue(controller.list_controller.width_is_set_by_the_user)  # narrow, it drops columns like the sidebar
@@ -950,7 +1003,7 @@ class ListWindowSmokeTests(unittest.TestCase):
         self.assertFalse(controller.window.isReleasedWhenClosed())  # closing only hides it
         controller.window.setFrame_display_(NSMakeRect(-4000, -4000, 500, 400), False)  # off every screen: not shown
         controller.report_frame()
-        self.assertEqual(owner.reported_frames[-1], [-4000, -4000, 500, 400])
+        self.assertEqual(owner.reported_frames[-1], ("list_window_frame", [-4000, -4000, 500, 400]))
 
 
 class SettingsWindowSmokeTests(unittest.TestCase):
@@ -963,6 +1016,16 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller = SettingsWindowController.alloc().initWithOwner_(self.owner)
         self.controller.settings = dict(self.owner.settings)
         self.controller.window = self.controller.build_window()  # built without showing it
+
+    def test_every_control_fits_in_the_narrowest_window(self):
+        narrowest_width = SMALLEST_WINDOW_SIZES["settings_window_frame"][0]
+        self.assertEqual(self.controller.window.minSize().width, narrowest_width)
+        for subview in self.controller.rows_view.subviews():
+            right_edge = subview.frame().origin.x + subview.frame().size.width
+            self.assertLessEqual(right_edge, narrowest_width, subview)
+            for inner_view in subview.subviews():  # the radio buttons and the command rows' fields
+                self.assertLessEqual(subview.frame().origin.x + inner_view.frame().origin.x + inner_view.frame().size.width,
+                                     narrowest_width, inner_view)
 
     def test_changing_one_control_keeps_changes_made_elsewhere(self):
         self.owner.settings = dict(self.owner.settings, sidebar_width=555)  # dragged at the sidebar's edge meanwhile
@@ -1043,13 +1106,28 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         list_window_controller.apply_settings(dict(self.owner.settings, list_window_is_always_on_top=False))
         self.assertEqual(list_window_controller.window.level(), NSNormalWindowLevel)
 
-    def test_settings_are_grouped_under_sidebar_and_commands_titles(self):
+    def test_settings_are_grouped_under_section_titles_in_a_resizable_scrolling_window(self):
+        rows_view = self.controller.rows_view  # flipped: y grows downward
         texts_top_to_bottom = [subview.stringValue() for subview in sorted(
-            (subview for subview in self.controller.window.contentView().subviews() if isinstance(subview, NSTextField)),
-            key=lambda subview: -subview.frame().origin.y)]
+            (subview for subview in rows_view.subviews() if isinstance(subview, NSTextField)),
+            key=lambda subview: subview.frame().origin.y)]
         for earlier, later in (("Show as:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Harnesses"),
-                               ("Harnesses", "Include:")):
+                               ("Harnesses", "Include:"), ("Include:", "Agent is stuck if it thinks for more than:")):
             self.assertLess(texts_top_to_bottom.index(earlier), texts_top_to_bottom.index(later), (earlier, later))
+        self.assertTrue(self.controller.window.styleMask() & NSWindowStyleMaskResizable)
+        self.assertIs(self.controller.window.contentView().documentView(), rows_view)
+        command_field = self.controller.launch_command_fields[0]
+        width_before = command_field.frame().size.width
+        self.controller.window.setContentSize_((self.controller.window.contentView().frame().size.width + 160, 300))
+        self.assertEqual(command_field.frame().size.width, width_before + 160)  # the command fields widen with the window
+
+    def test_the_settings_window_reports_its_frame_and_uses_a_saved_one(self):
+        reported_frames = []
+        self.owner.window_frame_changed = lambda setting_name, frame: reported_frames.append((setting_name, frame))
+        self.controller.window.setFrame_display_(NSMakeRect(-4000, -4000, 500, 400), False)
+        self.controller.report_frame()
+        self.assertEqual(reported_frames[-1], ("settings_window_frame", [-4000, -4000, 500, 400]))
+        self.assertFalse(self.controller.is_open())  # built but never shown
 
     def test_harnesses_can_be_left_out_and_keep_their_commands(self):
         self.assertEqual([checkbox.title() for checkbox in self.controller.include_checkboxes], ["Claude Code", "Codex"])

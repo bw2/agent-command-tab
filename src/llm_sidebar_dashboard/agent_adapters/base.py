@@ -4,6 +4,9 @@ import os
 import shlex
 
 SHELL_PROGRAM_NAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "elvish"}
+# The slash command that ends the conversation and starts a new one: the menu asks first, and
+# the core then forgets the old conversation's readings.
+COMMAND_THAT_STARTS_A_NEW_CONVERSATION = "/clear"
 
 
 def split_command_line_into_program_names(command_line):
@@ -46,8 +49,9 @@ class AgentToolAdapter:
             permission prompt is denied or the turn is interrupted, or None.
         helper_process_names: Names of processes the tool starts for itself during a turn, which
             are not commands the agent waits on (agent_process_tree).
-        slash_commands: The commands the tab's right-click menu may type into the tool
-            ("/compact", "/clear"); empty when the tool has none, or its input box can't be read.
+        slash_commands: The commands the tab's right-click menu may type into the tool, in menu
+            order ("/compact", "/clear"); empty when the tool has none, or its input box can't be
+            read. The menu lists every built-in tool's commands and enables these.
         input_line_marker: The character that starts the tool's input line ("❯"), for
             screen_readings.input_area_is_empty; None when unknown.
         input_area_end_pattern: Compiled pattern of the line just below the input area.
@@ -60,7 +64,7 @@ class AgentToolAdapter:
     progress_noise_patterns = ()
     interrupted_turn_screen_pattern = None
     helper_process_names = frozenset()
-    slash_commands = frozenset()
+    slash_commands = ()
     input_line_marker = None
     input_area_end_pattern = None
     seconds_before_enter = 0.15

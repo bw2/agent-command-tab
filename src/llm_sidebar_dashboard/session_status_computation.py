@@ -6,6 +6,8 @@ the agent runs (agent_process_tree). Hook events are added as a further source i
 """
 
 STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "done", "idle", "unknown", "exited"]
+# Between turns: the agent waits at its prompt, so /compact and /clear can be typed into it.
+STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done"})
 
 ITERM2_STATUS_WORDS_TO_STATES = {
     "idle": "idle",

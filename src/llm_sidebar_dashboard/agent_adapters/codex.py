@@ -28,7 +28,7 @@ class CodexAdapter(AgentToolAdapter):
     agent_tool_name = "Codex"
     progress_noise_patterns = (re.compile(r"\((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)"),)
     helper_process_names = frozenset({"codex-code-mode-host"})  # stays running for the whole session
-    slash_commands = frozenset({"/compact", "/clear"})
+    slash_commands = ("/compact", "/clear")
     # The input box: "›", then the input, above the line with the model and the folder
     # ("  GPT-6-Astra low fast · /private/tmp/…", Phase 0).
     input_line_marker = "›"

@@ -11,6 +11,13 @@ def build_built_in_agent_tool_adapters():
     return [ClaudeCodeAdapter(), CodexAdapter()], GenericAdapter()
 
 
+def list_slash_commands_of_the_built_in_agent_tools():
+    """Returns every built-in adapter's slash_commands once each, in their order: the tab menu
+    lists them all for every tab and enables those its tool takes, so the menu keeps its shape."""
+    specific_adapters, generic_adapter = build_built_in_agent_tool_adapters()
+    return tuple(dict.fromkeys(command for adapter in [*specific_adapters, generic_adapter] for command in adapter.slash_commands))
+
+
 def find_agent_tool_adapter_for_tab(command_line, iterm2_status_value, specific_adapters, generic_adapter):
     """Returns the adapter for a tab's first pane, or None when the tab runs no agent.
 

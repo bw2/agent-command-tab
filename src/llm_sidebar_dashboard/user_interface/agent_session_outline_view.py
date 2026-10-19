@@ -18,9 +18,7 @@ import time
 import objc
 from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSColor, NSDragOperationMove,
                     NSDragOperationNone, NSEventModifierFlagControl, NSFont, NSFontAttributeName, NSFontWeightBold,
-                    NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSImageOnly, NSImageScaleNone,
-                    NSImageSymbolConfiguration,
-                    NSImageView, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
+                    NSFontWeightRegular, NSForegroundColorAttributeName, NSImageOnly, NSImageScaleNone, NSImageView, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
                     NSMakeRect, NSMenu, NSMenuItem, NSMutableAttributedString, NSMutableParagraphStyle, NSOutlineView,
                     NSParagraphStyleAttributeName, NSPasteboardItem,
                     NSTableCellView, NSTableColumn, NSTableColumnAutoresizingMask,
@@ -29,11 +27,16 @@ from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSColor, NSDr
                     NSZeroRect)
 from Foundation import NSMutableIndexSet, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
+from llm_sidebar_dashboard.agent_adapters import list_slash_commands_of_the_built_in_agent_tools
+from llm_sidebar_dashboard.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
 from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
 from llm_sidebar_dashboard.list_sorting import sort_agent_session_entries, sort_window_entries
+from llm_sidebar_dashboard.session_status_computation import STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
 from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS
 from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
 from llm_sidebar_dashboard.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image
+from llm_sidebar_dashboard.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
+from llm_sidebar_dashboard.user_interface.named_colors import build_color_from_name
 from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
 from llm_sidebar_dashboard.user_interface.row_text_rendering import (RowTextParts, build_agent_session_row_text_parts,
                                                                      build_monitor_row_text_parts,
@@ -53,10 +56,10 @@ DISCLOSURE_ARROW_SLOT_WIDTH = 14
 DISCLOSURE_ARROW_POINT_SIZE = 9
 DISCLOSURE_ARROW_LOOKS = {False: ("chevron.right", ">", "Open"), True: ("chevron.down", "v", "Close")}  # by whether the row is open
 # The button's (SF Symbol, text fallback, description), by whether all of the window's previews
-# are open. The symbol shows the current state, like the top bar's expand or collapse button
-# (user request, 2026-10-19); the fallback text and the description say what a click does.
-PREVIEW_BUTTON_LOOKS = {False: ("rectangle.compress.vertical", "+", "Show the tabs' previews"),
-                        True: ("rectangle.expand.vertical", "−", "Hide the tabs' previews")}
+# are open. The symbol shows the current state, as the top bar's expand or collapse button's
+# does; the fallback text and the description say what a click does.
+PREVIEW_BUTTON_LOOKS = {False: (ROWS_OPEN_SYMBOL_NAMES[False], "+", "Show the tabs' previews"),
+                        True: (ROWS_OPEN_SYMBOL_NAMES[True], "−", "Hide the tabs' previews")}
 ROW_LEFT_MARGIN = 8
 GAP_AFTER_PREFIX = 2
 NAME_FIELD_PADDING = 4
@@ -85,26 +88,16 @@ LEFT_ALIGNED_COLUMN_NAMES = {"state"}
 # A narrow sidebar or window drops columns in this order to keep room for names (the dot's color still shows the state).
 COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usage", "cpu_usage", "context_tokens",
                               "agent_tool_icon", "state"]
+SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
 TAB_DRAG_TYPE = "org.llm-sidebar-dashboard.tab-id"
 WINDOW_DRAG_TYPE = "org.llm-sidebar-dashboard.window-id"
 COLUMN_IDENTIFIER = "main"
 ROW_VIEW_IDENTIFIER = "agent-list-row"
 
 
-def build_color_from_name(color_name):
-    """Returns the system color for a RowTextParts color name."""
-    return {
-        "light_blue": NSColor.systemCyanColor(),
-        "red": NSColor.systemRedColor(),
-        "orange": NSColor.systemOrangeColor(),
-        "green": NSColor.systemGreenColor(),
-        "blue": NSColor.systemBlueColor(),
-        "gray": NSColor.secondaryLabelColor(),
-    }.get(color_name, NSColor.labelColor())
-
-
 class OutlineListItem(NSObject):
-    """One row's item: kind is "monitor", "window" or "tab"; entry is its snapshot record."""
+    """One row's item: kind is "monitor", "window" or "tab"; entry is its snapshot record; key,
+    (kind, item ID), finds it in the controller's records (expansion, open previews, items)."""
 
     def initWithKind_itemId_(self, kind, item_id):
         self = objc.super(OutlineListItem, self).init()
@@ -112,6 +105,7 @@ class OutlineListItem(NSObject):
             return None
         self.kind = kind
         self.item_id = item_id
+        self.key = (kind, item_id)
         self.entry = None
         self.parent_item = None
         self.child_items = []
@@ -141,6 +135,17 @@ def build_index_set(indexes):
     for index in indexes:
         index_set.addIndex_(index)
     return index_set
+
+
+def run_without_animation(change_rows):
+    """Calls change_rows (expanding, collapsing or resizing rows) with the outline view's slide
+    animation off, so the rows change at once; the animation setting is restored even if it raises."""
+    NSAnimationContext.beginGrouping()
+    NSAnimationContext.currentContext().setDuration_(0)
+    try:
+        change_rows()
+    finally:
+        NSAnimationContext.endGrouping()
 
 
 def make_label_text_field():
@@ -174,6 +179,9 @@ class RowButton(PointingHandButton):
 
     def mouseDown_(self, event):
         list_controller = self.target()
+        # A double-click that starts here isn't the row's: its second click must not show the row
+        # an earlier single click hit.
+        list_controller.item_under_first_click = None
         list_controller.row_press_in_progress = True
         try:
             objc.super(RowButton, self).mouseDown_(event)  # returns once the button is up, after the action
@@ -190,18 +198,6 @@ def make_row_icon_button():
     button.setImagePosition_(NSImageOnly)
     button.setContentTintColor_(NSColor.secondaryLabelColor())
     return button
-
-
-def show_symbol_on_button(button, symbol_name, fallback_title, accessibility_description, point_size=None):
-    """Shows an SF Symbol on the button (at point_size, if given), or the fallback text where the
-    symbol doesn't exist."""
-    image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, accessibility_description)
-    if image is not None and point_size is not None:
-        image = image.imageWithSymbolConfiguration_(
-            NSImageSymbolConfiguration.configurationWithPointSize_weight_(point_size, NSFontWeightBold))
-    button.setImage_(image)
-    button.setTitle_("" if image is not None else fallback_title)
-    button.setImagePosition_(NSImageOnly if image is not None else 0)  # 0: NSNoImage, the title alone
 
 
 class AgentListRowView(NSTableCellView):
@@ -523,7 +519,7 @@ class AgentSessionListController(NSObject):
         self.outline_view.reloadData()
         self.apply_expansion_state(self.top_level_items)
         surviving_rows = [self.outline_view.rowForItem_(item) for item in selected_items
-                          if (item.kind, item.item_id) in self.items_by_key]
+                          if item.key in self.items_by_key]
         visible_surviving_rows = [row for row in surviving_rows if row >= 0]
         if visible_surviving_rows:
             self.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(visible_surviving_rows), False)
@@ -542,7 +538,7 @@ class AgentSessionListController(NSObject):
             for item in items:
                 if not item.child_items:
                     continue
-                if (item.kind, item.item_id) in self.collapsed_item_keys:
+                if item.key in self.collapsed_item_keys:
                     self.outline_view.collapseItem_(item)
                 else:
                     self.outline_view.expandItem_(item)
@@ -577,7 +573,7 @@ class AgentSessionListController(NSObject):
         if self.item_whose_expansion_is_changing is not None and item is not self.item_whose_expansion_is_changing:
             return  # a descendant reported along with the row that actually changed
         self.item_whose_expansion_is_changing = None
-        key = (item.kind, item.item_id)
+        key = item.key
         if is_expanded:
             self.collapsed_item_keys.discard(key)
         else:
@@ -669,7 +665,7 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def row_is_open(self, item):
         """Whether the row's arrow points down: an expanded monitor or window row, or a tab row whose preview is open."""
-        return self.preview_is_open(item) if item.kind == "tab" else (item.kind, item.item_id) not in self.collapsed_item_keys
+        return self.preview_is_open(item) if item.kind == "tab" else item.key not in self.collapsed_item_keys
 
     @objc.python_method
     def toggle_row(self, item):
@@ -688,7 +684,7 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def preview_is_open(self, item):
         """Whether a tab row shows its preview: it was opened, and there is one to show."""
-        return item.kind == "tab" and bool(item.entry.preview_line) and (item.kind, item.item_id) in self.open_preview_item_keys
+        return item.kind == "tab" and bool(item.entry.preview_line) and item.key in self.open_preview_item_keys
 
     @objc.python_method
     def measure_row_height(self, item):
@@ -717,7 +713,7 @@ class AgentSessionListController(NSObject):
         if item.kind == "tab":
             return build_agent_session_row_text_parts(item.entry, is_last_child_at_each_level, time.time())
         if item.kind == "window":
-            is_expanded = (item.kind, item.item_id) not in self.collapsed_item_keys
+            is_expanded = item.key not in self.collapsed_item_keys
             return build_window_row_text_parts(item.entry, is_last_child_at_each_level, is_expanded)
         if item.kind == "new_window":  # the "+" row draws only its button
             return RowTextParts("", "", "gray", False, "", "")
@@ -730,7 +726,7 @@ class AgentSessionListController(NSObject):
         parts = self.build_row_text_parts(item)
         is_in_front = item.kind == "tab" and item.entry.is_in_front
         tabs_with_previews = self.list_tabs_with_previews(item) if item.kind == "window" else []
-        shows_preview_toggle_button = bool(tabs_with_previews) and (item.kind, item.item_id) not in self.collapsed_item_keys
+        shows_preview_toggle_button = bool(tabs_with_previews) and item.key not in self.collapsed_item_keys
         all_previews_are_open = all(self.preview_is_open(tab_item) for tab_item in tabs_with_previews)
         shows_disclosure_button = self.row_can_open(item)
         # Everything the row's look depends on: an unchanged row is neither refilled nor laid out
@@ -806,6 +802,17 @@ class AgentSessionListController(NSObject):
         return NSAttributedString.alloc().initWithString_attributes_(text, {NSFontAttributeName: font}).size().width
 
     @objc.python_method
+    def measure_name_x(self, connector_text, dot_glyph):
+        """Returns where a row's name starts, as AgentListRowView.layout places it: after the
+        left margin, the tree connector's field, the arrow's room and the dot's field (each field
+        its text and TEXT_FIELD_INSETS, which is up to a point more than AppKit adds, so this
+        never falls short; the dot's text is as fill_row_view writes it)."""
+        dot_text = dot_glyph + (" " if dot_glyph else "")
+        return (ROW_LEFT_MARGIN + self.measure_text_width(connector_text, self.regular_font) + TEXT_FIELD_INSETS
+                + DISCLOSURE_ARROW_SLOT_WIDTH + self.measure_text_width(dot_text, self.regular_font) + TEXT_FIELD_INSETS
+                + GAP_AFTER_PREFIX)
+
+    @objc.python_method
     def measure_right_columns(self):
         """Sets each TAB_ROW_COLUMNS column's width to fit its widest text, or 0 when the settings
         hide it or no row has text for it (no context size known yet); the icon column's fits the
@@ -832,9 +839,8 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def measure_room_left_for_tab_names(self):
         """Returns the width left for a tab row's name and details beside the right-hand columns."""
-        deepest_tab_prefix = "│  ├─ ● " if self.snapshot is not None and len(self.snapshot.monitors) > 1 else "├─ ● "
-        return (self.outline_view.bounds().size.width - ROW_LEFT_MARGIN - GAP_AFTER_PREFIX - DISCLOSURE_ARROW_SLOT_WIDTH
-                - self.measure_text_width(deepest_tab_prefix, self.regular_font) - GAP_BEFORE_DETAILS
+        deepest_tab_connector = "│  ├─ " if self.snapshot is not None and len(self.snapshot.monitors) > 1 else "├─ "
+        return (self.outline_view.bounds().size.width - self.measure_name_x(deepest_tab_connector, "●") - GAP_BEFORE_DETAILS
                 - self.measure_right_columns_width() - ROW_RIGHT_MARGIN)
 
     @objc.python_method
@@ -877,12 +883,10 @@ class AgentSessionListController(NSObject):
             else:
                 parts_and_button_widths = [(self.build_row_text_parts(item), 0)]
             for parts, button_width in parts_and_button_widths:
-                row_width = (ROW_LEFT_MARGIN + measure_text_width(parts.connector_text, self.regular_font)
-                             + DISCLOSURE_ARROW_SLOT_WIDTH + measure_text_width(parts.dot_glyph + " ", self.regular_font)
-                             + GAP_AFTER_PREFIX + measure_text_width(parts.name_text, self.choose_name_font(item))
-                             + NAME_FIELD_PADDING + GAP_BEFORE_DETAILS
-                             + measure_text_width(parts.details_text + ROOM_FOR_GROWING_DETAILS, self.regular_font)
-                             + 4 * TEXT_FIELD_INSETS + ROW_RIGHT_MARGIN + button_width)
+                row_width = (self.measure_name_x(parts.connector_text, parts.dot_glyph)
+                             + measure_text_width(parts.name_text, self.choose_name_font(item)) + NAME_FIELD_PADDING
+                             + GAP_BEFORE_DETAILS + measure_text_width(parts.details_text + ROOM_FOR_GROWING_DETAILS, self.regular_font)
+                             + 2 * TEXT_FIELD_INSETS + ROW_RIGHT_MARGIN + button_width)
                 if parts.state_text:  # the columns at the right edge
                     row_width += GAP_BEFORE_DETAILS + self.measure_right_columns_width()
                 widest_row_width = max(widest_row_width, row_width)
@@ -955,28 +959,24 @@ class AgentSessionListController(NSObject):
     def toggle_expansion(self, item):
         """Expands or collapses a row at once, without the outline view's slide animation;
         record_expansion_change keeps the record and redraws."""
-        NSAnimationContext.beginGrouping()
-        NSAnimationContext.currentContext().setDuration_(0)
-        if self.outline_view.isItemExpanded_(item):
-            self.outline_view.collapseItem_(item)
-        else:
-            self.outline_view.expandItem_(item)
-        NSAnimationContext.endGrouping()
+        self.finish_rename()
+        if self.items_by_key.get(item.key) is not item:
+            return  # finishing the rename applied a snapshot without this row
+        run_without_animation(lambda: self.outline_view.collapseItem_(item) if self.outline_view.isItemExpanded_(item)
+                              else self.outline_view.expandItem_(item))
         self.item_whose_expansion_is_changing = None  # in case a change was announced but not made
 
     @objc.python_method
     def set_all_expanded(self, expanded):
         """Expands or collapses every monitor and window row (R8.1), leaving the tabs' previews
         as they are (user request, 2026-10-19)."""
+        self.finish_rename()
         if expanded:
             self.collapsed_item_keys.clear()
         else:
             self.collapsed_item_keys = {key for key, item in self.items_by_key.items() if item.child_items}
         # Row by row rather than through reloadData, which would rebuild every row view.
-        NSAnimationContext.beginGrouping()
-        NSAnimationContext.currentContext().setDuration_(0)
-        self.apply_expansion_state(self.top_level_items)
-        NSAnimationContext.endGrouping()
+        run_without_animation(lambda: self.apply_expansion_state(self.top_level_items))
         self.redraw_visible_rows()
         self.on_row_count_changed()
         self.on_expansion_changed()
@@ -991,16 +991,17 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def count_window_rows(self):
         """Returns how many window rows the list has, also inside collapsed monitor rows."""
-        return sum(1 for item in self.list_all_items() if item.kind == "window")
+        return len(self.list_window_items())
 
     @objc.python_method
     def set_previews_open(self, tab_items, is_open):
         """Opens or closes these tab rows' previews at once."""
+        self.finish_rename()
         for tab_item in tab_items:
             if is_open:
-                self.open_preview_item_keys.add((tab_item.kind, tab_item.item_id))
+                self.open_preview_item_keys.add(tab_item.key)
             else:
-                self.open_preview_item_keys.discard((tab_item.kind, tab_item.item_id))
+                self.open_preview_item_keys.discard(tab_item.key)
         self.apply_row_heights()
         self.redraw_visible_rows()
         self.on_row_count_changed()  # the dropdown fits its height again
@@ -1010,10 +1011,8 @@ class AgentSessionListController(NSObject):
         """Has the outline view take each row's current height (measure_row_height) at once,
         without its animation, and records the rows as shown so the next snapshot doesn't reload them."""
         self.row_structure = self.list_row_structure()
-        NSAnimationContext.beginGrouping()
-        NSAnimationContext.currentContext().setDuration_(0)
-        self.outline_view.noteHeightOfRowsWithIndexesChanged_(build_index_set(range(self.outline_view.numberOfRows())))
-        NSAnimationContext.endGrouping()
+        run_without_animation(lambda: self.outline_view.noteHeightOfRowsWithIndexesChanged_(
+            build_index_set(range(self.outline_view.numberOfRows()))))
 
     def previewToggleButtonClicked_(self, sender):
         """Closes the previews of the tabs in the window whose row holds this button when all are
@@ -1032,14 +1031,19 @@ class AgentSessionListController(NSObject):
     # ----- renaming in place -----
 
     @objc.python_method
-    def begin_rename(self, item):
+    def finish_rename(self):
+        """Submits an open rename for its own row, as a click elsewhere in the list does. Called
+        before rows open or close: AppKit raises an exception when a row whose name is being
+        edited is collapsed away, and the list would go on holding back snapshots."""
         if self.rename_in_progress:
-            # Finish the open rename first (it is submitted for its own row), then find this row again,
-            # since finishing can apply a held snapshot.
             self.outline_view.window().makeFirstResponder_(self.outline_view)
-        if (item.kind, item.item_id) not in self.items_by_key:
+
+    @objc.python_method
+    def begin_rename(self, item):
+        self.finish_rename()  # then this row is found again, since finishing can apply a held snapshot
+        if item.key not in self.items_by_key:
             return
-        item = self.items_by_key[(item.kind, item.item_id)]
+        item = self.items_by_key[item.key]
         row = self.outline_view.rowForItem_(item)
         row_view = self.outline_view.viewAtColumn_row_makeIfNecessary_(0, row, True) if row >= 0 else None
         if row_view is None:
@@ -1104,7 +1108,7 @@ class AgentSessionListController(NSObject):
             # down): it predates the rename and would bring the old name back on release. The
             # core sends a fresh one after the rename.
             self.held_snapshot = None
-        renamed_item = self.items_by_key.get((item.kind, item.item_id)) if item is not None else None
+        renamed_item = self.items_by_key.get(item.key) if item is not None else None
         if renamed_item is not None and renamed_item.entry is not None and new_title.strip():
             # Shown at once; the next snapshot confirms it (or puts the old name back if iTerm2 refused).
             renamed_item.entry = renamed_item.entry._replace(
@@ -1185,10 +1189,13 @@ class AgentSessionListController(NSObject):
                 move_to_new_window_item.setToolTip_("This tab is its window's only tab")
             # Typed into the agent only while it waits at its prompt (R15.1; user request, 2026-10-19).
             menu.addItem_(NSMenuItem.separatorItem())
-            for command in ("/compact", "/clear"):
+            for command in SLASH_COMMANDS_IN_THE_TAB_MENU:
                 command_item = self.add_menu_item(menu, command, "menuSendSlashCommand:")
                 command_item.setRepresentedObject_(command)
-                if item.entry.status not in ("idle", "done"):
+                if command not in item.entry.slash_commands:
+                    command_item.setEnabled_(False)
+                    command_item.setToolTip_(f"The dashboard can't type commands into {item.entry.agent_tool_name or 'this agent'}")
+                elif item.entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
                     command_item.setEnabled_(False)
                     command_item.setToolTip_(f"Only while the agent waits at its prompt (it is {item.entry.status})")
             self.add_menu_item(menu, "Kill Session", "menuKillSession:")
@@ -1260,7 +1267,7 @@ class AgentSessionListController(NSObject):
 
     def menuSendSlashCommand_(self, sender):
         tab_item, command = self.menu_target_item, sender.representedObject()
-        if command == "/clear" and not self.owner.ask_for_confirmation(
+        if command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION and not self.owner.ask_for_confirmation(
                 f'/clear starts a new conversation in "{tab_item.entry.tab_title}"; the current one stays in its history.'):
             return
         self.owner.submit_action_and_report_failure(
