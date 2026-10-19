@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-sidebar-dashboard"
+version = "0.1.0.dev0"
+description = "macOS menu bar list and screen-edge sidebar of the iTerm2 tabs where AI coding agents run"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # Pinned: the core relies on two private names of this package (see tests/iterm2_package_internals_tests.py).
+    "iterm2>=2.30,<2.31",
+    "pyobjc-framework-Cocoa>=10",
+]
+classifiers = [
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Environment :: MacOS X :: Cocoa",
+]
+
+[project.scripts]
+llm-sidebar-dashboard = "llm_sidebar_dashboard.command_line:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

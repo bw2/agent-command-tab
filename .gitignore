@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test and coverage output
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
+
+# Local notes and review runs from AI coding sessions
+.memory/
+.code_review_local/

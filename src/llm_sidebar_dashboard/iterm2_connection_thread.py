@@ -1,0 +1,903 @@
+"""The core's background thread: the iTerm2 connection, its subscriptions, and snapshot publishing.
+
+PLAN.md section 4. Everything here runs on one asyncio event loop in a background thread; the
+AppKit main thread only receives snapshots (through publish_snapshot) and sends messages and
+action requests (through the thread-safe methods of Iterm2ConnectionThread).
+"""
+
+import asyncio
+import ctypes
+import json
+import os
+import shutil
+import socket
+import threading
+import time
+
+import iterm2
+import iterm2.auth
+import iterm2.rpc
+from iterm2 import api_pb2
+from iterm2.notifications import async_subscribe_to_variable_change_notification
+
+from llm_sidebar_dashboard import iterm2_actions
+from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
+from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
+from llm_sidebar_dashboard.dashboard_core_api import ActionRegistry, ActionResult
+from llm_sidebar_dashboard.iterm2_snapshot_builder import build_computer_snapshot, resolve_agent_sessions
+from llm_sidebar_dashboard.docked_window_frames_store import (adopt_records_of_restored_windows,
+                                                              load_docked_window_frames, save_docked_window_frames)
+from llm_sidebar_dashboard.monitor_assignment import compute_frame_clear_of_area, frames_are_within_tolerance
+from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, count_lines_matching,
+                                                   screen_shows_permission_dialog)
+from llm_sidebar_dashboard.session_status_computation import (map_iterm2_status_value_to_state,
+                                                              permission_dialog_was_answered,
+                                                              update_permission_dialog_reading)
+from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
+from llm_sidebar_dashboard.window_list_ordering import move_window_in_window_list_order, update_window_list_order
+
+FRAME_POLL_INTERVAL_SECONDS = 2
+SCREEN_CHECK_INTERVAL_SECONDS = 2
+FINGERPRINT_INTERVAL_SECONDS = 30
+DEFAULT_STUCK_THRESHOLD_SECONDS = 600
+SMALLEST_WINDOW_WIDTH = 400  # a docked sidebar never makes an iTerm2 window narrower than this
+FRAME_TOLERANCE_POINTS = 20  # iTerm2 rounds window sizes to whole character cells
+RETRY_DELAY_SECONDS = 1
+CLAUDE_AGENTS_REFRESH_INTERVAL_SECONDS = 60
+CLAUDE_AGENTS_TIMEOUT_SECONDS = 5
+CLAUDE_AGENTS_RETRIES_FOR_A_NEW_PROCESS = 3
+CLAUDE_AGENTS_RETRY_DELAY_SECONDS = 3
+SNAPSHOT_COALESCING_DELAY_SECONDS = 0.1
+SESSION_VARIABLES_TO_WATCH = ("commandLine", "status")
+
+
+def find_claude_command_path():
+    """Returns the path of the `claude` command (the stable link on PATH, not a versioned file), or None."""
+    return shutil.which("claude") or next(
+        (path for path in [os.path.expanduser("~/.local/bin/claude")] if os.path.exists(path)), None)
+
+
+def list_claude_config_folders():
+    """Returns the Claude Code config folders to ask `claude agents --json` about.
+
+    None stands for the default folder (the command runs without CLAUDE_CONFIG_DIR).
+    """
+    config_folders = [None]
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        config_folders.append(os.environ["CLAUDE_CONFIG_DIR"])
+    return config_folders
+
+
+async def read_claude_agents_by_process_id(claude_command_path, config_folders):
+    """Runs `claude agents --json` once per config folder; returns {process ID: record}.
+
+    Failures (no command, a timeout, unreadable output) give an empty result for that folder.
+    """
+    claude_agents_by_process_id = {}
+    for config_folder in config_folders:
+        environment = dict(os.environ)
+        environment.pop("CLAUDE_CONFIG_DIR", None)
+        if config_folder:
+            environment["CLAUDE_CONFIG_DIR"] = config_folder
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                claude_command_path, "agents", "--json", env=environment,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            standard_output, _ = await asyncio.wait_for(process.communicate(), timeout=CLAUDE_AGENTS_TIMEOUT_SECONDS)
+            for record in json.loads(standard_output or b"[]"):
+                if isinstance(record, dict) and record.get("pid"):
+                    claude_agents_by_process_id[int(record["pid"])] = record
+        except (OSError, ValueError, asyncio.TimeoutError) as error:
+            print(f"claude agents --json failed for config folder {config_folder or '(default)'}: {error!r}")
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+    return claude_agents_by_process_id
+
+
+LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
+PROC_PIDVNODEPATHINFO = 9  # proc_pidinfo flavor that returns struct proc_vnodepathinfo
+VNODE_INFO_SIZE = 152  # sizeof(struct vnode_info); the current folder's path follows it
+MAXIMUM_PATH_LENGTH = 1024
+
+
+def read_process_current_folder(process_id):
+    """Returns a process's current folder (from macOS's libproc, no subprocess), or "" if unknown.
+
+    PLAN.md section 5: the working folder comes from the agent process, because iTerm2's `path`
+    variable can be empty or stale.
+    """
+    if not process_id:
+        return ""
+    buffer_size = 2 * (VNODE_INFO_SIZE + MAXIMUM_PATH_LENGTH)  # current folder, then root folder
+    buffer = ctypes.create_string_buffer(buffer_size)
+    if LIBPROC.proc_pidinfo(process_id, PROC_PIDVNODEPATHINFO, ctypes.c_uint64(0), buffer, buffer_size) <= 0:
+        return ""
+    return buffer.raw[VNODE_INFO_SIZE:VNODE_INFO_SIZE + MAXIMUM_PATH_LENGTH].split(b"\0", 1)[0].decode(errors="replace")
+
+
+def process_is_alive(process_id):
+    """Returns whether a process with this ID exists (one owned by another user counts as alive)."""
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def parse_job_process_id(job_pid_value):
+    """Returns iTerm2's `jobPid` variable as an int, or None."""
+    try:
+        return int(job_pid_value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def read_iterm2_variables(connection, names, session_id=None, tab_id=None, window_id=None):
+    """Returns the values of several variables of one session, tab or window, read in a single
+    request (the iterm2 package's async_get_variable sends one request per variable).
+
+    Raises:
+        iterm2.RPCException: The session, tab or window is gone.
+    """
+    response = await iterm2.rpc.async_variable(connection, session_id, [], names, tab_id=tab_id, window_id=window_id)
+    status = response.variable_response.status
+    if status != api_pb2.VariableResponse.Status.Value("OK"):
+        raise iterm2.RPCException(api_pb2.VariableResponse.Status.Name(status))
+    return [json.loads(value) for value in response.variable_response.values]
+
+
+async def read_window_frame(window):
+    """Returns an iTerm2 window's frame as (x, y, width, height)."""
+    frame = await window.async_get_frame()
+    return (frame.origin.x, frame.origin.y, frame.size.width, frame.size.height)
+
+
+class DashboardCore:
+    """The core: owns all shared state and runs on the background thread's event loop.
+
+    Args:
+        publish_snapshot: Called on the background thread with each new ComputerSnapshot.
+        report_connection_lost: Called on the background thread with a message when the
+            iTerm2 connection fails or closes; the app then exits so its supervisor restarts it.
+        verbose: Print diagnostics.
+        docked_window_frames_file_path: Where the frames windows had before a docked sidebar
+            narrowed them are kept across restarts; None keeps them in memory only.
+    """
+
+    def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None):
+        self.publish_snapshot = publish_snapshot
+        self.report_connection_lost = report_connection_lost
+        self.verbose = verbose
+        self.docked_window_frames_file_path = docked_window_frames_file_path
+        self.connection = None
+        self.app = None
+        self.specific_adapters, self.generic_adapter = build_built_in_agent_tool_adapters()
+        self.process_ids_asked_about_in_claude_agents = set()
+        self.claude_agents_retry_count_by_process_id = {}
+        self.agent_sessions = {}
+        self.claude_agents_refresh_is_running = False
+        self.computer_id = socket.gethostname()
+        self.computer_name = socket.gethostname().split(".")[0]
+        self.claude_command_path = find_claude_command_path()
+        self.gathered_windows = []
+        self.gather_is_in_progress = False
+        self.monitors = []
+        self.window_order = []
+        self.session_tracking_by_session_id = {}
+        self.displayed_state_by_session_id = {}
+        self.screen_readings_by_session_id = {}
+        self.reserved_screen_area = None
+        self.frames_before_making_room_by_window_id = (load_docked_window_frames(docked_window_frames_file_path)
+                                                       if docked_window_frames_file_path else {})
+        self.saved_docked_window_frames = dict(self.frames_before_making_room_by_window_id)
+        self.window_room_lock = asyncio.Lock()
+        self.stuck_threshold_seconds = DEFAULT_STUCK_THRESHOLD_SECONDS
+        self.claude_agents_by_process_id = {}
+        self.key_terminal_window_id = None  # None while no terminal window (for example iTerm2's Settings) has keyboard focus
+        self.last_seen_session_id = None
+        self.dashboard_is_active = False
+        self.last_published_snapshot_without_time = None
+        self.snapshot_needed = asyncio.Event()
+        self.regather_needed = asyncio.Event()
+        self.screen_check_needed = asyncio.Event()
+        self.action_registry = ActionRegistry()
+        self.register_actions()
+
+    # ----- actions -----
+
+    def register_actions(self):
+        """Registers every action with its flags (PLAN.md section 4)."""
+        register = self.action_registry.register_action
+        register("focus_agent_session", self.handle_focus_agent_session, True, False)
+        register("rename_tab", self.handle_rename_tab, True, False)
+        register("rename_window", self.handle_rename_window, True, False)
+        register("move_tab", self.handle_move_tab, False, False)
+        register("move_tab_to_new_window", self.handle_move_tab_to_new_window, False, False)
+        register("reorder_window_list", self.handle_reorder_window_list, False, False)
+        register("start_agent_session", self.handle_start_agent_session, True, False)
+        register("move_window_to_monitor", self.handle_move_window_to_monitor, False, False)
+        register("close_window", self.handle_close_window, False, False)
+
+    async def perform_action(self, action_request):
+        """Runs an action request, then asks for a fresh gather and snapshot.
+
+        The gather itself runs in publish_when_needed, so gathers never overlap and their
+        errors are handled in one place.
+        """
+        if self.app is None:
+            return ActionResult(False, "not connected to iTerm2")
+        action_result = await self.action_registry.perform_action(action_request)
+        if self.verbose or not action_result.succeeded:
+            print(f"action {action_request.action}: {action_result}")
+        self.regather_needed.set()
+        return action_result
+
+    async def handle_focus_agent_session(self, action_request):
+        return await iterm2_actions.focus_agent_session(self.app, action_request.target["session_id"])
+
+    async def handle_rename_tab(self, action_request):
+        return await iterm2_actions.rename_tab(self.app, action_request.target["tab_id"], action_request.arguments["new_title"])
+
+    async def handle_rename_window(self, action_request):
+        return await iterm2_actions.rename_window(self.app, action_request.target["window_id"],
+                                                  action_request.arguments["new_title"])
+
+    async def handle_move_tab(self, action_request):
+        return await iterm2_actions.move_tab_to_window_position(
+            self.app, action_request.target["tab_id"], action_request.arguments["target_window_id"],
+            action_request.arguments.get("drop_before_tab_id"))
+
+    async def handle_move_tab_to_new_window(self, action_request):
+        return await iterm2_actions.move_tab_to_new_window(self.app, action_request.target["tab_id"])
+
+    async def handle_start_agent_session(self, action_request):
+        """Target {"window_id": ...} opens a tab there; an empty target opens a new window."""
+        return await iterm2_actions.start_agent_session(
+            self.connection, self.app, action_request.target.get("window_id"), action_request.arguments["folder"],
+            action_request.arguments["launch_command"])
+
+    def set_reserved_screen_area(self, reserved_area):
+        """Receives the docked sidebar's area, {"frame": (x, y, width, height), "edge": "right" or
+        "left", "monitor_visible_frame": (...)}, or None when docking ends; kept until iTerm2 is
+        connected if it arrives earlier."""
+        asyncio.ensure_future(self.change_reserved_screen_area(reserved_area))
+
+    async def change_reserved_screen_area(self, new_reserved_area):
+        """Gives the room back for the old area, then makes room for the new one, holding the
+        lock so a regather can't resize windows in between."""
+        async with self.window_room_lock:
+            if new_reserved_area == self.reserved_screen_area:
+                return
+            if self.app is not None:
+                await self.give_room_back_while_holding_the_lock()  # both handle each window's errors themselves
+            self.reserved_screen_area = new_reserved_area
+            if self.app is not None:
+                await self.make_room_while_holding_the_lock()
+
+    async def make_room_for_reserved_area(self):
+        """Docked sidebar: narrows (or moves) iTerm2 windows that reach into the reserved area."""
+        async with self.window_room_lock:
+            await self.make_room_while_holding_the_lock()
+
+    async def make_room_while_holding_the_lock(self):
+        """Narrows or moves each window that reaches into the reserved area, remembering its frame
+        so it can get the room back. Full-screen windows are left alone (they have their own desktop).
+
+        Frames are read fresh, since with one monitor nothing polls them before docking starts.
+        A window that was moved or resized by hand since it was last made room for gets that
+        frame as the one to restore. A window that closes meanwhile is skipped.
+        """
+        if self.reserved_screen_area is None:
+            return
+        self.adopt_records_of_restored_windows()
+        for gathered_window in self.gathered_windows:
+            window = self.app.get_window_by_id(gathered_window["window_id"])
+            if window is None:
+                continue
+            try:
+                current_frame = await read_window_frame(window)
+                gathered_window["frame"] = current_frame
+                new_frame = compute_frame_clear_of_area(
+                    current_frame, self.reserved_screen_area["frame"], self.reserved_screen_area["edge"],
+                    self.reserved_screen_area["monitor_visible_frame"], SMALLEST_WINDOW_WIDTH)
+                if new_frame is None or await window.async_get_fullscreen():
+                    continue
+                original_frame, frame_that_was_set = self.frames_before_making_room_by_window_id.get(
+                    window.window_id, (current_frame, None))
+                if frame_that_was_set is not None and not frames_are_within_tolerance(
+                        current_frame, frame_that_was_set, FRAME_TOLERANCE_POINTS):
+                    original_frame = current_frame  # moved or resized by hand since
+                await window.async_set_frame(iterm2.Frame(iterm2.Point(new_frame[0], new_frame[1]),
+                                                          iterm2.Size(new_frame[2], new_frame[3])))
+                self.frames_before_making_room_by_window_id[window.window_id] = (original_frame, new_frame)
+                gathered_window["frame"] = new_frame
+            except (iterm2.RPCException, iterm2.GetPropertyException, iterm2.SetPropertyException) as error:
+                print(f"could not make room for the docked sidebar in window {gathered_window['window_id']}: {error!r}")
+        self.save_docked_window_frames()
+
+    async def give_room_back_while_holding_the_lock(self):
+        """Restores the windows narrowed for a docked sidebar, unless the user moved or resized
+        them since, and updates the cached frames so the next layout starts from the real ones.
+
+        A window that is full screen, or whose restore fails, stays remembered, so it can still
+        be restored when a later docking ends. Records of windows that are gone are dropped.
+        """
+        self.adopt_records_of_restored_windows()
+        gathered_windows_by_window_id = {gathered_window["window_id"]: gathered_window for gathered_window in self.gathered_windows}
+        for window_id, (original_frame, frame_that_was_set) in list(self.frames_before_making_room_by_window_id.items()):
+            window = self.app.get_window_by_id(window_id)
+            if window is None:
+                del self.frames_before_making_room_by_window_id[window_id]
+                continue
+            try:
+                if await window.async_get_fullscreen():
+                    continue  # its own desktop shows a full-screen frame; it returns to the narrowed one later
+                current_frame = await read_window_frame(window)
+                if frames_are_within_tolerance(current_frame, frame_that_was_set, FRAME_TOLERANCE_POINTS):
+                    await window.async_set_frame(iterm2.Frame(iterm2.Point(original_frame[0], original_frame[1]),
+                                                              iterm2.Size(original_frame[2], original_frame[3])))
+                    current_frame = original_frame
+            except (iterm2.RPCException, iterm2.GetPropertyException, iterm2.SetPropertyException) as error:
+                print(f"could not give window {window_id} its room back: {error!r}")
+                continue
+            del self.frames_before_making_room_by_window_id[window_id]
+            if window_id in gathered_windows_by_window_id:
+                gathered_windows_by_window_id[window_id]["frame"] = current_frame
+        self.save_docked_window_frames()
+
+    def adopt_records_of_restored_windows(self):
+        """Moves remembered frames of windows that are gone to windows iTerm2 restored after a
+        restart, which get new IDs but keep the narrowed frame."""
+        self.frames_before_making_room_by_window_id = adopt_records_of_restored_windows(
+            self.frames_before_making_room_by_window_id,
+            {gathered_window["window_id"]: gathered_window["frame"] for gathered_window in self.gathered_windows},
+            FRAME_TOLERANCE_POINTS)
+
+    def save_docked_window_frames(self):
+        """Writes the remembered frames to their file when they changed since the last write."""
+        if not self.docked_window_frames_file_path or self.frames_before_making_room_by_window_id == self.saved_docked_window_frames:
+            return
+        try:
+            save_docked_window_frames(self.docked_window_frames_file_path, self.frames_before_making_room_by_window_id)
+            self.saved_docked_window_frames = dict(self.frames_before_making_room_by_window_id)
+        except OSError as error:
+            print(f"could not save the docked windows' frames: {error!r}")
+
+    async def handle_close_window(self, action_request):
+        return await iterm2_actions.close_window(self.app, action_request.target["window_id"])
+
+    async def handle_move_window_to_monitor(self, action_request):
+        return await iterm2_actions.move_window_to_monitor(
+            self.app, action_request.target["window_id"], self.monitors, action_request.arguments["monitor_id"])
+
+    async def handle_reorder_window_list(self, action_request):
+        self.window_order = move_window_in_window_list_order(
+            self.window_order, action_request.target["window_id"], action_request.arguments.get("drop_before_window_id"))
+        return ActionResult(True)
+
+    # ----- messages from the main thread -----
+
+    def set_monitors(self, monitors):
+        """Receives the monitor rectangles from the main thread (menu-bar monitor first)."""
+        self.monitors = list(monitors)
+        self.snapshot_needed.set()
+
+    def set_stuck_threshold_seconds(self, stuck_threshold_seconds):
+        """Receives the stuck time limit from the settings."""
+        self.stuck_threshold_seconds = stuck_threshold_seconds
+        self.snapshot_needed.set()
+
+    def set_dashboard_is_active(self, dashboard_is_active):
+        """Receives whether the dashboard itself is the active app (then nothing counts as seen)."""
+        self.dashboard_is_active = dashboard_is_active
+        self.record_seen_time_for_the_seen_session()
+        self.snapshot_needed.set()
+
+    # ----- gathering -----
+
+    async def gather_iterm2_tab(self, tab):
+        """Reads one tab and its first-pane session into a plain dict, one request for each."""
+        first_session = tab.sessions[0] if tab.sessions else None
+        tab_variables_reading = read_iterm2_variables(self.connection, ["title", "titleOverrideFormat"], tab_id=tab.tab_id)
+        gathered_session = None
+        if first_session is None:
+            title, title_override_format = await tab_variables_reading
+        else:
+            (title, title_override_format), (job_pid, command_line, status, path) = await asyncio.gather(
+                tab_variables_reading, read_iterm2_variables(self.connection, ["jobPid", "commandLine", "status", "path"],
+                                                             session_id=first_session.session_id))
+            job_process_id = parse_job_process_id(job_pid)
+            gathered_session = {
+                "session_id": first_session.session_id,
+                "command_line": command_line,
+                "job_pid": job_process_id,
+                "job_folder": read_process_current_folder(job_process_id),
+                "status": status,
+                "path": path or "",
+            }
+        return {
+            "tab_id": tab.tab_id,
+            "title": title or "",
+            "title_override_format": title_override_format,
+            "first_session": gathered_session,
+        }
+
+    async def gather_iterm2_window(self, window):
+        """Reads one window and its tabs into a plain dict; a tab that closes meanwhile is left
+        out (and another gather is requested). Raises if the window itself is gone."""
+
+        async def gather_tab_unless_it_closed(tab):
+            try:
+                return await self.gather_iterm2_tab(tab)
+            except iterm2.RPCException:
+                self.regather_needed.set()
+                return None
+
+        frame, (title, title_override_format), *gathered_tabs = await asyncio.gather(
+            read_window_frame(window),
+            read_iterm2_variables(self.connection, ["title", "titleOverrideFormat"], window_id=window.window_id),
+            *(gather_tab_unless_it_closed(tab) for tab in window.tabs))
+        return {
+            "window_id": window.window_id,
+            "frame": frame,
+            "title": title or "",
+            "title_override_format": title_override_format,
+            "tabs": [gathered_tab for gathered_tab in gathered_tabs if gathered_tab is not None],
+        }
+
+    async def gather_iterm2_windows(self):
+        """Reads every window, tab and first-pane session that the snapshot needs into plain dicts.
+
+        All windows and tabs are read at the same time, so a gather takes about as long as one
+        round trip to iTerm2 rather than one per tab (20 windows with 100 tabs stay quick). A
+        window or tab that closes while it is being read makes iTerm2 answer with an error; it
+        is skipped, and another gather is requested so the list catches up.
+        """
+
+        async def gather_window_unless_it_closed(window):
+            try:
+                return await self.gather_iterm2_window(window)
+            except (iterm2.RPCException, iterm2.GetPropertyException):
+                self.regather_needed.set()
+                return None
+
+        gathered_windows = await asyncio.gather(*(gather_window_unless_it_closed(window) for window in self.app.terminal_windows))
+        return [gathered_window for gathered_window in gathered_windows if gathered_window is not None]
+
+    def update_session_tracking(self, now):
+        """Records when each session's status value changed, and forgets sessions that are gone."""
+        live_session_ids = set()
+        for gathered_window in self.gathered_windows:
+            for gathered_tab in gathered_window["tabs"]:
+                first_session = gathered_tab["first_session"]
+                if first_session is None:
+                    continue
+                live_session_ids.add(first_session["session_id"])
+                tracking = self.session_tracking_by_session_id.setdefault(
+                    first_session["session_id"],
+                    {"status_value": first_session["status"], "status_change_time": now, "last_time_tab_was_seen": None})
+                if tracking["status_value"] != first_session["status"]:
+                    tracking["status_value"] = first_session["status"]
+                    tracking["status_change_time"] = now
+                    if map_iterm2_status_value_to_state(first_session["status"]) == "asking":
+                        self.screen_check_needed.set()
+        for session_id in set(self.session_tracking_by_session_id) - live_session_ids:
+            del self.session_tracking_by_session_id[session_id]
+
+    def find_first_session_id_of_tab(self, tab_id):
+        """Returns the first-pane session ID of a gathered tab, or None."""
+        for gathered_window in self.gathered_windows:
+            for gathered_tab in gathered_window["tabs"]:
+                if gathered_tab["tab_id"] == tab_id and gathered_tab["first_session"]:
+                    return gathered_tab["first_session"]["session_id"]
+        return None
+
+    def find_front_tab_id(self):
+        """Returns the selected tab of iTerm2's current terminal window, as the iterm2 App object
+        tracks it from focus notifications (it ignores windows resigning focus), or None."""
+        current_window = self.app.current_terminal_window
+        if current_window is None or current_window.current_tab is None:
+            return None
+        return current_window.current_tab.tab_id
+
+    def find_seen_session_id(self):
+        """Returns the session being seen: the front tab's, while iTerm2 (not the dashboard) is active
+        and a terminal window (not, for example, iTerm2's Settings) has keyboard focus."""
+        if self.app is None or not self.app.app_active or self.key_terminal_window_id is None or self.dashboard_is_active:
+            return None  # (the main thread can report the dashboard's activity before iTerm2 is connected)
+        return self.find_first_session_id_of_tab(self.find_front_tab_id())
+
+    def find_highlighted_session_id(self):
+        """Returns the session shown as in front (R41): the front tab's while it is seen, and also
+        while the dashboard itself is active (so the highlight doesn't vanish while you use the
+        list); None while another app is active."""
+        if self.dashboard_is_active or self.find_seen_session_id() is not None:
+            return self.find_first_session_id_of_tab(self.find_front_tab_id())
+        return None
+
+    def record_seen_time_for_the_seen_session(self):
+        """Stamps "seen until now" on the session that was seen at the last check and on the one
+        seen now. Called with each snapshot and when the dashboard's activity changes, so a tab
+        that stops being seen keeps the time it was last seen, whenever the change is noticed."""
+        now = time.time()
+        seen_session_id = self.find_seen_session_id()
+        for session_id in (self.last_seen_session_id, seen_session_id):
+            if session_id in self.session_tracking_by_session_id:
+                self.session_tracking_by_session_id[session_id]["last_time_tab_was_seen"] = now
+        self.last_seen_session_id = seen_session_id
+
+    async def regather_and_publish(self):
+        """Re-reads iTerm2 and publishes a snapshot if anything changed."""
+        await self.app.async_refresh()
+        self.gather_is_in_progress = True
+        try:
+            self.gathered_windows = await self.gather_iterm2_windows()
+        finally:
+            self.gather_is_in_progress = False
+        await self.make_room_for_reserved_area()  # a new or moved window may reach under a docked sidebar
+        self.publish_snapshot_if_changed()
+        process_ids_not_asked_about = self.list_claude_code_process_ids() - self.process_ids_asked_about_in_claude_agents
+        if self.claude_command_path and process_ids_not_asked_about and not self.claude_agents_refresh_is_running:
+            self.process_ids_asked_about_in_claude_agents |= process_ids_not_asked_about
+            # A separate task, so snapshots keep flowing while the command runs (it can take seconds).
+            asyncio.ensure_future(self.refresh_claude_agents())
+
+    def list_claude_code_process_ids(self):
+        """Returns the agent process IDs of the tabs that run Claude Code (also those in the background)."""
+        return {agent_session["process_id"] for agent_session in self.agent_sessions.values()
+                if isinstance(agent_session["adapter"], ClaudeCodeAdapter) and agent_session["process_id"]}
+
+    async def refresh_claude_agents(self):
+        """Re-reads `claude agents --json` (names and folders), then asks for a snapshot.
+
+        A Claude Code process registers its session a second or so after it starts, so a process
+        missing from the output is asked about again by a gather CLAUDE_AGENTS_RETRY_DELAY_SECONDS
+        later, up to CLAUDE_AGENTS_RETRIES_FOR_A_NEW_PROCESS times.
+        """
+        self.claude_agents_refresh_is_running = True
+        try:
+            self.claude_agents_by_process_id = await read_claude_agents_by_process_id(
+                self.claude_command_path, list_claude_config_folders())
+        finally:
+            self.claude_agents_refresh_is_running = False
+        retry_is_due = False
+        for process_id in self.list_claude_code_process_ids() - set(self.claude_agents_by_process_id):
+            self.claude_agents_retry_count_by_process_id[process_id] = self.claude_agents_retry_count_by_process_id.get(process_id, 0) + 1
+            if self.claude_agents_retry_count_by_process_id[process_id] <= CLAUDE_AGENTS_RETRIES_FOR_A_NEW_PROCESS:
+                self.process_ids_asked_about_in_claude_agents.discard(process_id)
+                retry_is_due = True
+        if retry_is_due:  # the next gather asks again
+            asyncio.get_running_loop().call_later(CLAUDE_AGENTS_RETRY_DELAY_SECONDS, self.regather_needed.set)
+        self.snapshot_needed.set()
+
+    def publish_snapshot_if_changed(self):
+        """Builds the snapshot from the cached state and publishes it unless only its time changed."""
+        now = time.time()
+        self.update_session_tracking(now)
+        self.record_seen_time_for_the_seen_session()
+        self.window_order = update_window_list_order(
+            self.window_order, [gathered_window["window_id"] for gathered_window in self.gathered_windows])
+        for gathered_window in self.gathered_windows:  # the App object follows tab switches itself, without a regather
+            window = self.app.get_window_by_id(gathered_window["window_id"])
+            gathered_window["selected_tab_id"] = window.current_tab.tab_id if window and window.current_tab else None
+        self.agent_sessions = resolve_agent_sessions(
+            self.gathered_windows, self.agent_sessions, self.specific_adapters, self.generic_adapter, process_is_alive)
+        snapshot = build_computer_snapshot(
+            self.gathered_windows, self.agent_sessions, self.monitors, self.window_order,
+            self.session_tracking_by_session_id, self.displayed_state_by_session_id, self.screen_readings_by_session_id,
+            self.stuck_threshold_seconds, self.claude_agents_by_process_id, self.find_seen_session_id(),
+            self.find_highlighted_session_id(), self.computer_id, self.computer_name, now)
+        self.displayed_state_by_session_id = {
+            agent_session_entry.session_id: (agent_session_entry.status, agent_session_entry.status_since)
+            for _, _, agent_session_entry in iterate_agent_session_entries(snapshot)}
+        snapshot_without_time = snapshot._replace(taken_at=0)
+        if snapshot_without_time != self.last_published_snapshot_without_time:
+            self.last_published_snapshot_without_time = snapshot_without_time
+            self.publish_snapshot(snapshot)
+
+    # ----- subscriptions -----
+
+    async def handle_session_variable_change(self, connection, notification):
+        """Updates the cached commandLine or status of one session, then asks for a snapshot.
+
+        A change that arrives during a gather would be written into the list that the gather
+        is about to replace, so it asks for another gather instead.
+        """
+        if self.gather_is_in_progress:
+            self.regather_needed.set()
+            return
+        new_value = json.loads(notification.json_new_value) if notification.json_new_value else None
+        field_name = {"commandLine": "command_line", "status": "status"}[notification.name]
+        for gathered_window in self.gathered_windows:
+            for gathered_tab in gathered_window["tabs"]:
+                first_session = gathered_tab["first_session"]
+                if first_session and first_session["session_id"] == notification.identifier:
+                    first_session[field_name] = new_value
+                    if field_name == "command_line":
+                        self.regather_needed.set()  # the job process ID and folder change with the job
+        self.snapshot_needed.set()
+
+    async def watch_layout_changes(self):
+        async with iterm2.LayoutChangeMonitor(self.connection) as monitor:
+            while True:
+                await monitor.async_get()
+                self.regather_needed.set()
+
+    async def watch_new_sessions(self):
+        async with iterm2.NewSessionMonitor(self.connection) as monitor:
+            while True:
+                await monitor.async_get()
+                self.regather_needed.set()
+
+    async def watch_session_terminations(self):
+        async with iterm2.SessionTerminationMonitor(self.connection) as monitor:
+            while True:
+                await monitor.async_get()
+                self.regather_needed.set()
+
+    async def watch_focus_changes(self):
+        """Tracks which terminal window has keyboard focus, and asks for a snapshot on any focus change.
+
+        The front tab and whether iTerm2 is active come from the iterm2 App object, which handles
+        the same notifications itself; the snapshot is built after the coalescing delay, by which
+        time it has.
+        """
+        async with iterm2.FocusMonitor(self.connection) as monitor:
+            while True:
+                focus_update = await monitor.async_get_next_update()
+                if focus_update.window_changed is not None:
+                    self.update_key_terminal_window(focus_update.window_changed)
+                self.snapshot_needed.set()
+
+    def update_key_terminal_window(self, window_changed):
+        """Tracks which terminal window has keyboard focus, whatever order iTerm2 reports the
+        old window resigning and the new one becoming key in."""
+        reasons = iterm2.FocusUpdateWindowChanged.Reason
+        if window_changed.event == reasons.TERMINAL_WINDOW_BECAME_KEY:
+            self.key_terminal_window_id = window_changed.window_id
+        elif window_changed.event == reasons.TERMINAL_WINDOW_IS_CURRENT:
+            self.key_terminal_window_id = None  # a non-terminal window such as Settings has keyboard focus
+        elif window_changed.event == reasons.TERMINAL_WINDOW_RESIGNED_KEY and self.key_terminal_window_id == window_changed.window_id:
+            self.key_terminal_window_id = None
+
+    async def read_agent_screens_periodically(self):
+        """Reads the screens the status rules need (PLAN.md section 6): the permission dialog of an
+        asking session whose tool needs the check (every SCREEN_CHECK_INTERVAL_SECONDS), and a
+        fingerprint of each working session (every FINGERPRINT_INTERVAL_SECONDS) for "stuck".
+        One screen read serves both. A session that starts asking is read at once, so the count of
+        "Interrupted" lines from before the user could answer is known."""
+        while True:
+            try:
+                await asyncio.wait_for(self.screen_check_needed.wait(), SCREEN_CHECK_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            self.screen_check_needed.clear()
+            status_by_session_id = {gathered_tab["first_session"]["session_id"]: gathered_tab["first_session"]["status"]
+                                    for gathered_window in self.gathered_windows for gathered_tab in gathered_window["tabs"]
+                                    if gathered_tab["first_session"]}
+            for session_id in set(self.screen_readings_by_session_id) - set(self.agent_sessions):
+                del self.screen_readings_by_session_id[session_id]
+            for session_id, agent_session in list(self.agent_sessions.items()):
+                if agent_session["is_in_background"]:
+                    continue
+                state = map_iterm2_status_value_to_state(status_by_session_id.get(session_id))
+                reading = self.screen_readings_by_session_id.setdefault(session_id, {})
+                adapter = agent_session["adapter"]
+                now = time.time()
+                status_change_time = self.session_tracking_by_session_id.get(session_id, {}).get("status_change_time", now)
+                needs_dialog_check = state == "asking" and bool(adapter.permission_dialog_screen_patterns)
+                # An approved tool runs while iTerm2 still says waiting, so it is fingerprinted like "working".
+                is_effectively_working = state == "working" or permission_dialog_was_answered(state, status_change_time, reading)
+                needs_fingerprint = is_effectively_working and now - reading.get("fingerprint_checked_at", 0) >= FINGERPRINT_INTERVAL_SECONDS
+                if not (needs_dialog_check or needs_fingerprint):
+                    continue
+                session = self.app.get_session_by_id(session_id)
+                if session is None:
+                    continue
+                try:
+                    contents = await session.async_get_screen_contents()
+                except iterm2.RPCException:
+                    continue  # the tab closed meanwhile
+                screen_lines = [contents.line(index).string for index in range(contents.number_of_lines)]
+                if needs_dialog_check:
+                    reading = update_permission_dialog_reading(
+                        reading, screen_shows_permission_dialog(screen_lines, adapter.permission_dialog_screen_patterns),
+                        count_lines_matching(screen_lines, adapter.interrupted_turn_screen_pattern), status_change_time, now)
+                    self.screen_readings_by_session_id[session_id] = reading
+                if needs_fingerprint:
+                    fingerprint = compute_screen_fingerprint(screen_lines, adapter.progress_noise_patterns)
+                    if fingerprint != reading.get("fingerprint"):
+                        reading["fingerprint"] = fingerprint
+                        reading["fingerprint_changed_at"] = now
+                    reading["fingerprint_checked_at"] = now
+                self.snapshot_needed.set()  # also lets "stuck" appear once its time has come
+
+    async def handle_title_change(self, connection, notification):
+        """A tab or window title changed (here, in iTerm2's own dialogs, or by a program): re-read."""
+        self.regather_needed.set()
+
+    async def poll_window_frames_when_they_matter(self):
+        """Notices windows moved by hand, which iTerm2 sends no notification for (PLAN.md section 4):
+        with several monitors, to regroup them; while a sidebar is docked, to keep them out of its
+        area (a regather makes room). With one monitor and no docked sidebar, frames don't matter."""
+        while True:
+            await asyncio.sleep(FRAME_POLL_INTERVAL_SECONDS)
+            if len(self.monitors) < 2 and self.reserved_screen_area is None:
+                continue
+            for gathered_window in list(self.gathered_windows):
+                window = self.app.get_window_by_id(gathered_window["window_id"])
+                if window is None:
+                    continue
+                try:
+                    new_frame = await read_window_frame(window)
+                except iterm2.GetPropertyException:
+                    continue  # closed meanwhile; the layout change handles it
+                if new_frame != gathered_window["frame"]:
+                    gathered_window["frame"] = new_frame
+                    if self.reserved_screen_area is not None:
+                        self.regather_needed.set()
+                    else:
+                        self.snapshot_needed.set()
+
+    async def refresh_claude_agents_periodically(self):
+        """Keeps names and folders from `claude agents --json` current (started only when `claude` exists).
+
+        PLAN.md section 7: the program is large, so this runs only while Claude Code tabs exist
+        (in phase 2: only those without hooks); new sessions trigger a run of their own.
+        """
+        while True:
+            await asyncio.sleep(CLAUDE_AGENTS_REFRESH_INTERVAL_SECONDS)
+            if not self.claude_agents_refresh_is_running and self.list_claude_code_process_ids():
+                await self.refresh_claude_agents()
+
+    async def publish_when_needed(self):
+        """Coalesces requests: at most one regather or rebuild per SNAPSHOT_COALESCING_DELAY_SECONDS."""
+        while True:
+            regather_task = asyncio.ensure_future(self.regather_needed.wait())
+            snapshot_task = asyncio.ensure_future(self.snapshot_needed.wait())
+            await asyncio.wait([regather_task, snapshot_task], return_when=asyncio.FIRST_COMPLETED)
+            regather_task.cancel()
+            snapshot_task.cancel()
+            await asyncio.sleep(SNAPSHOT_COALESCING_DELAY_SECONDS)
+            regather_is_needed = self.regather_needed.is_set()
+            self.regather_needed.clear()
+            self.snapshot_needed.clear()
+            try:
+                if regather_is_needed:
+                    await self.regather_and_publish()
+                else:
+                    self.publish_snapshot_if_changed()
+            except (iterm2.RPCException, iterm2.GetPropertyException) as error:
+                # For example the app list changed under the refresh; a lost connection is caught elsewhere.
+                print(f"regather failed, trying again: {error!r}")
+                asyncio.get_running_loop().call_later(RETRY_DELAY_SECONDS, self.regather_needed.set)
+
+    async def watch_for_connection_loss(self):
+        """Returns when the websocket closes or the package's dispatch task ends."""
+        dispatch_future = getattr(self.connection, "_Connection__dispatch_forever_future", None)
+        waiters = [asyncio.ensure_future(self.connection.websocket.wait_closed())]
+        if dispatch_future is not None:
+            waiters.append(dispatch_future)
+        await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+
+    async def start_up_after_connecting(self):
+        """Reads the App object, subscribes to session variable changes, and publishes the first snapshot."""
+        self.app = await iterm2.async_get_app(self.connection)
+        # FocusMonitor reports only later changes, so read the current focus once. Its window
+        # entry says whether that terminal window has keyboard focus or only is current (for
+        # example while iTerm2's Settings window has focus).
+        focus_info = await iterm2.rpc.async_get_focus_info(self.connection)
+        for notification in focus_info.focus_response.notifications:
+            if notification.HasField("window"):
+                self.update_key_terminal_window(iterm2.FocusUpdateWindowChanged(
+                    notification.window.window_id, iterm2.FocusUpdateWindowChanged.Reason(notification.window.window_status)))
+        session_scope, window_scope = api_pb2.VariableScope.Value("SESSION"), api_pb2.VariableScope.Value("WINDOW")
+        for variable_name in SESSION_VARIABLES_TO_WATCH:
+            await async_subscribe_to_variable_change_notification(
+                self.connection, self.handle_session_variable_change, session_scope, variable_name, "all")
+        # Titles set by the user. iTerm2 rejects "all" for the tab scope, but a session's
+        # tab.titleOverrideFormat reports its tab's title (checked against iTerm2 3.7.6).
+        await async_subscribe_to_variable_change_notification(
+            self.connection, self.handle_title_change, session_scope, "tab.titleOverrideFormat", "all")
+        await async_subscribe_to_variable_change_notification(
+            self.connection, self.handle_title_change, window_scope, "titleOverrideFormat", "all")
+        await self.regather_and_publish()
+
+    async def run(self):
+        """Connects, gathers, subscribes, and runs until the connection is lost.
+
+        Every way this ends calls report_connection_lost, so the app exits and its supervisor
+        restarts it.
+        """
+        iterm2.auth.gAppKitAvailable = False  # fetch the token with osascript, never NSAppleScript (PLAN.md section 4)
+        try:
+            self.connection = await iterm2.Connection.async_create()
+        except Exception as error:
+            self.report_connection_lost(f"could not connect to iTerm2: {error}")
+            return
+        # The watchdog starts at once: a request whose answer never comes (iTerm2 quit meanwhile)
+        # would otherwise hang the start-up forever.
+        connection_loss_task = asyncio.ensure_future(self.watch_for_connection_loss())
+        start_up_task = asyncio.ensure_future(self.start_up_after_connecting())
+        await asyncio.wait([start_up_task, connection_loss_task], return_when=asyncio.FIRST_COMPLETED)
+        if not start_up_task.done():
+            start_up_task.cancel()
+            self.report_connection_lost("the iTerm2 connection closed during start-up")
+            return
+        if start_up_task.exception() is not None:
+            self.report_connection_lost(f"the core could not start: {start_up_task.exception()!r}")
+            return
+        coroutines = [self.watch_layout_changes(), self.watch_new_sessions(), self.watch_session_terminations(),
+                      self.watch_focus_changes(), self.poll_window_frames_when_they_matter(),
+                      self.read_agent_screens_periodically(), self.publish_when_needed()]
+        if self.claude_command_path:
+            coroutines.append(self.refresh_claude_agents_periodically())
+        background_tasks = [asyncio.ensure_future(coroutine) for coroutine in coroutines]
+        done_tasks, _ = await asyncio.wait(background_tasks + [connection_loss_task], return_when=asyncio.FIRST_COMPLETED)
+        failure_message = "the iTerm2 connection closed"
+        for done_task in done_tasks:
+            if done_task is not connection_loss_task and not done_task.cancelled() and done_task.exception():
+                failure_message = f"the core stopped: {done_task.exception()!r}"
+        self.report_connection_lost(failure_message)
+
+
+class Iterm2ConnectionThread(threading.Thread):
+    """Runs DashboardCore on its own asyncio event loop, and offers thread-safe entry points."""
+
+    def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None):
+        super().__init__(name="iterm2-connection", daemon=True)
+        self.core_ready = threading.Event()
+        self.core = None
+        self.event_loop = None
+        self.publish_snapshot = publish_snapshot
+        self.report_connection_lost = report_connection_lost
+        self.verbose = verbose
+        self.docked_window_frames_file_path = docked_window_frames_file_path
+
+    def run(self):
+        self.event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.event_loop)
+        self.core = DashboardCore(self.publish_snapshot, self.report_connection_lost, self.verbose,
+                                  self.docked_window_frames_file_path)
+        self.core_ready.set()
+        self.event_loop.run_until_complete(self.core.run())
+
+    def give_room_back_and_wait(self, timeout_seconds):
+        """Thread-safe: ends docking and waits, at most timeout_seconds, until the iTerm2 windows
+        have their room back; called just before the app exits."""
+        if not self.core_ready.is_set():
+            return
+        future = asyncio.run_coroutine_threadsafe(self.core.change_reserved_screen_area(None), self.event_loop)
+        try:
+            future.result(timeout_seconds)
+        except Exception as error:  # a timeout or a lost connection: the saved frames still allow a later restore
+            print(f"could not give the iTerm2 windows their room back before exiting: {error!r}")
+
+    def submit_action(self, action_request):
+        """Thread-safe: schedules an action on the core's loop (the core prints failures)."""
+        self.core_ready.wait()
+        asyncio.run_coroutine_threadsafe(self.core.perform_action(action_request), self.event_loop)
+
+    def send_monitors(self, monitors):
+        """Thread-safe: passes the monitor rectangles to the core."""
+        self.core_ready.wait()
+        self.event_loop.call_soon_threadsafe(self.core.set_monitors, monitors)
+
+    def send_reserved_screen_area(self, area):
+        """Thread-safe: passes the docked sidebar's area (or None) to the core."""
+        self.core_ready.wait()
+        self.event_loop.call_soon_threadsafe(self.core.set_reserved_screen_area, area)
+
+    def send_stuck_threshold_seconds(self, stuck_threshold_seconds):
+        """Thread-safe: passes the stuck time limit from the settings to the core."""
+        self.core_ready.wait()
+        self.event_loop.call_soon_threadsafe(self.core.set_stuck_threshold_seconds, stuck_threshold_seconds)
+
+    def send_dashboard_is_active(self, dashboard_is_active):
+        """Thread-safe: tells the core whether the dashboard is the active app."""
+        self.core_ready.wait()
+        self.event_loop.call_soon_threadsafe(self.core.set_dashboard_is_active, dashboard_is_active)
