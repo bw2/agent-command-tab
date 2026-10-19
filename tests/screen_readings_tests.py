@@ -4,7 +4,7 @@ import unittest
 
 from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.agent_adapters.codex import CodexAdapter
-from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, count_lines_matching,
+from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, count_lines_matching, input_area_is_empty,
                                                    screen_shows_permission_dialog)
 
 CLAUDE_LONG_TURN_AT_6_SECONDS = [
@@ -88,6 +88,51 @@ class PermissionDialogTests(unittest.TestCase):
 
     def test_no_patterns_means_nothing_to_check(self):
         self.assertTrue(screen_shows_permission_dialog(CODEX_LONG_TURN_AT_6_SECONDS, ()))
+
+
+def mark_faint(text, faint_flags_as_letters=""):
+    """Returns (text, faint_flags), the flags written as in the Phase 0 recording: "f" faint, "n" not."""
+    return text, [letter == "f" for letter in faint_flags_as_letters.ljust(len(text), "n")]
+
+
+CLAUDE_INPUT_BOX_PLACEHOLDER = [
+    mark_faint("──────────────────────────────────────────── phase0-test-claude-slash-commands ─"),
+    mark_faint('❯\xa0Try "refactor <filepath>"', "nn" + "f" * 25),
+    mark_faint("─" * 80),
+    mark_faint("  ⏸ manual mode on · ← for agents"),
+]
+CODEX_INPUT_BOX_PLACEHOLDER = [
+    mark_faint("⠁   ⠈         ⠄          ⢀                       ⠐ ⠐"),
+    mark_faint("›⠁Ask Codex to do anything\x00\x00\x00⠈\x00\x00⠂", "nn" + "f" * 24),
+    mark_faint("        ⠐        ⠄                                    ⠄⠂"),
+    mark_faint("  GPT-6-Astra low fast · /private/tmp/…/phase0_codex_test_project"),
+    mark_faint("  ? for shortcuts"),
+]
+
+
+class InputAreaIsEmptyTests(unittest.TestCase):
+    def check(self, adapter, screen_lines_with_faint_flags):
+        return input_area_is_empty(screen_lines_with_faint_flags, adapter.input_line_marker, adapter.input_area_end_pattern)
+
+    def test_a_faint_placeholder_is_empty_and_a_typed_draft_is_not(self):
+        self.assertTrue(self.check(ClaudeCodeAdapter(), CLAUDE_INPUT_BOX_PLACEHOLDER))
+        self.assertTrue(self.check(CodexAdapter(), CODEX_INPUT_BOX_PLACEHOLDER))
+        claude_draft = list(CLAUDE_INPUT_BOX_PLACEHOLDER)
+        claude_draft[1] = mark_faint("❯\xa0phase0 draft text")
+        self.assertFalse(self.check(ClaudeCodeAdapter(), claude_draft))
+        codex_draft = [CODEX_INPUT_BOX_PLACEHOLDER[0], mark_faint("› phase0 draft text"), CODEX_INPUT_BOX_PLACEHOLDER[3]]
+        self.assertFalse(self.check(CodexAdapter(), codex_draft))
+
+    def test_a_draft_on_a_continuation_line_is_not_empty(self):
+        screen = CLAUDE_INPUT_BOX_PLACEHOLDER[:1] + [mark_faint("❯\xa0"), mark_faint("  second line of the draft")] + \
+            CLAUDE_INPUT_BOX_PLACEHOLDER[2:]
+        self.assertFalse(self.check(ClaudeCodeAdapter(), screen))
+
+    def test_an_earlier_prompt_in_the_transcript_doesnt_count_and_a_missing_box_fails_safe(self):
+        screen = [mark_faint("❯ an earlier prompt"), mark_faint("⏺ the reply")] + CLAUDE_INPUT_BOX_PLACEHOLDER
+        self.assertTrue(self.check(ClaudeCodeAdapter(), screen))
+        self.assertFalse(self.check(ClaudeCodeAdapter(), [mark_faint("⏺ a reply with no input box below it")]))
+        self.assertFalse(self.check(ClaudeCodeAdapter(), CLAUDE_INPUT_BOX_PLACEHOLDER[:2]))  # no lower edge on screen
 
 
 if __name__ == "__main__":

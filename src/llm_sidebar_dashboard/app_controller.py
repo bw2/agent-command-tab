@@ -14,9 +14,9 @@ import time
 from AppKit import (NSAlert, NSAlertSecondButtonReturn, NSAlertStyleWarning, NSApp, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSApplicationDidBecomeActiveNotification,
                     NSApplicationDidChangeScreenParametersNotification, NSApplicationDidResignActiveNotification,
-                    NSApplicationWillTerminateNotification, NSPopoverBehaviorApplicationDefined, NSPopoverBehaviorTransient,
-                    NSRunningApplication, NSWorkspace)
-from Foundation import NSNotificationCenter, NSObject
+                    NSApplicationWillTerminateNotification, NSEvent, NSPointInRect, NSPopoverBehaviorApplicationDefined,
+                    NSPopoverBehaviorTransient, NSRunningApplication, NSWorkspace)
+from Foundation import NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 from PyObjCTools import AppHelper
 import objc
 
@@ -24,7 +24,8 @@ from llm_sidebar_dashboard.command_line import RECONNECT_EXIT_STATUS
 from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
 from llm_sidebar_dashboard.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
 from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThread
-from llm_sidebar_dashboard.settings_store import load_settings_resolving_paths_at_first_run, save_settings
+from llm_sidebar_dashboard.settings_store import (list_included_agent_tool_names, list_left_out_agent_tool_names,
+                                                  load_settings_resolving_paths_at_first_run, save_settings)
 from llm_sidebar_dashboard.snapshot_data_classes import choose_folder_for_new_agent_window
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import AgentSessionListController
 from llm_sidebar_dashboard.user_interface.list_window import ListWindowController
@@ -52,6 +53,7 @@ class AppController(NSObject):
         self.application_in_front_before_dropdown = None
         self.peek_in_progress = None  # {"application_in_front", "dropdown_was_open"} while a tab row is held
         self.peek_waiting_for_put_back = None  # a released peek until the app in front before is back
+        self.list_window_drag_check_timer = None  # while the list window's title bar is dragged
         self.latest_snapshot_lock = threading.Lock()
         self.latest_snapshot = None
         self.snapshot_delivery_is_scheduled = False
@@ -80,6 +82,7 @@ class AppController(NSObject):
         self.connection_thread.start()
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.connection_thread.send_stuck_threshold_seconds(self.settings["stuck_minutes"] * 60)
+        self.connection_thread.send_left_out_agent_tool_names(list_left_out_agent_tool_names(self.settings))
         self.sidebar_controller.apply_settings(self.settings)
         self.list_window_controller.apply_settings(self.settings)
         self.apply_list_settings(self.settings)
@@ -162,6 +165,56 @@ class AppController(NSObject):
         if frame != self.settings["list_window_frame"]:
             self.settings_changed(dict(self.settings, list_window_frame=frame))
 
+    # Dragging the dropdown's top bar detaches it into the list window, and dropping the list
+    # window on the menu bar icon turns it back into the dropdown (user request, 2026-10-19).
+
+    @objc.python_method
+    def top_bar_dragged(self, list_panel_controller, start_point_on_screen):
+        """A list's top bar was dragged: the dropdown's turns into the list window where the
+        dropdown was, which then follows the pointer until the button comes up."""
+        if list_panel_controller is not self.dropdown_panel_controller or not self.popover.isShown():
+            return
+        dropdown_window = list_panel_controller.view().window()
+        content_rect = dropdown_window.convertRectToScreen_(list_panel_controller.view().frame())
+        window_frame = self.list_window_controller.window.frameRectForContentRect_(content_rect)
+        pointer_offset = (start_point_on_screen[0] - window_frame.origin.x, start_point_on_screen[1] - window_frame.origin.y)
+        self.settings_changed(dict(self.settings, show_as="window", list_window_frame=[
+            window_frame.origin.x, window_frame.origin.y, window_frame.size.width, window_frame.size.height]))
+        self.list_window_controller.follow_the_pointer_until_the_button_comes_up(pointer_offset)
+
+    @objc.python_method
+    def list_window_drag_started(self):
+        """The list window's title bar is being dragged: until the button comes up, the menu bar
+        icon is highlighted while the pointer is on it."""
+        if self.list_window_drag_check_timer is None:
+            self.list_window_drag_check_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.05, self, "listWindowDragCheckTimerFired:", None, True)
+            NSRunLoop.currentRunLoop().addTimer_forMode_(self.list_window_drag_check_timer, NSRunLoopCommonModes)
+
+    def listWindowDragCheckTimerFired_(self, timer):
+        if NSEvent.pressedMouseButtons() & 1:
+            self.list_window_is_being_dragged()
+            return
+        timer.invalidate()
+        self.list_window_drag_check_timer = None
+        self.list_window_drag_ended()
+
+    @objc.python_method
+    def list_window_is_being_dragged(self):
+        self.status_item_controller.highlight(self.pointer_is_on_the_menu_bar_icon())
+
+    @objc.python_method
+    def list_window_drag_ended(self):
+        """Dropped on the menu bar icon, the list window turns back into the dropdown."""
+        self.status_item_controller.highlight(False)
+        if self.pointer_is_on_the_menu_bar_icon() and self.settings["show_as"] == "window":
+            self.settings_changed(dict(self.settings, show_as="popup"))
+            self.status_item_controller.show_popover()
+
+    @objc.python_method
+    def pointer_is_on_the_menu_bar_icon(self):
+        return NSPointInRect(NSEvent.mouseLocation(), self.status_item_controller.find_icon_frame_on_screen())
+
     @objc.python_method
     def submit_action(self, action_request):
         """Sends an action to the core; returns a future that completes with its ActionResult."""
@@ -243,27 +296,50 @@ class AppController(NSObject):
 
     @objc.python_method
     def list_agent_tool_names(self):
-        return [agent_tool["agent_tool_name"] for agent_tool in self.settings["agent_tools"]]
+        """The agent tools the menus offer for new agent sessions: those the settings include."""
+        return list_included_agent_tool_names(self.settings)
 
     @objc.python_method
     def confirm_closing_window(self, window_entry):
-        """Asks "Are you sure?" before an iTerm2 window, and the agent sessions in it, is closed.
-        No is the default button, so Return keeps the window."""
+        """Asks "Are you sure?" before an iTerm2 window, and the agent sessions in it, is closed."""
         agent_session_count = len(window_entry.agent_sessions)
         other_tab_count = window_entry.total_tab_count - agent_session_count
         explanation = (f'Closing "{window_entry.title}" ends the {agent_session_count} agent '
                        f'session{"" if agent_session_count == 1 else "s"} running in it')
         if other_tab_count:
             explanation += f' and closes its {other_tab_count} other tab{"" if other_tab_count == 1 else "s"}'
+        return self.ask_for_confirmation(explanation + ".")
+
+    @objc.python_method
+    def ask_for_confirmation(self, explanation):
+        """Asks "Are you sure?" with this explanation; returns True for Yes. No is the default
+        button, so Return keeps things as they are."""
         alert = NSAlert.alloc().init()
         alert.setAlertStyle_(NSAlertStyleWarning)
         alert.setMessageText_("Are you sure?")
-        alert.setInformativeText_(explanation + ".")
+        alert.setInformativeText_(explanation)
         alert.addButtonWithTitle_("No")  # the first button is the default and sits rightmost
         alert.addButtonWithTitle_("Yes")
         self.close_dropdown()
         NSApp.activateIgnoringOtherApps_(True)
         return alert.runModal() == NSAlertSecondButtonReturn
+
+    @objc.python_method
+    def submit_action_and_report_failure(self, action_request, failure_title):
+        """Sends an action the user chose from a menu to the core and, should it fail, says why
+        in an alert, since the list alone wouldn't show it (a command not typed, say)."""
+        self.submit_action(action_request).add_done_callback(
+            lambda done_future: AppHelper.callAfter(self.report_action_failure, done_future.result(), failure_title))
+
+    @objc.python_method
+    def report_action_failure(self, action_result, failure_title):
+        if action_result.succeeded:
+            return
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(failure_title)
+        alert.setInformativeText_(action_result.message[:1].upper() + action_result.message[1:] + ".")
+        NSApp.activateIgnoringOtherApps_(True)
+        alert.runModal()
 
     @objc.python_method
     def find_launch_command(self, agent_tool_name):
@@ -320,6 +396,7 @@ class AppController(NSObject):
         self.apply_list_settings(new_settings)
         self.settings_window_controller.reflect_settings(new_settings)
         self.connection_thread.send_stuck_threshold_seconds(new_settings["stuck_minutes"] * 60)
+        self.connection_thread.send_left_out_agent_tool_names(list_left_out_agent_tool_names(new_settings))
 
     @objc.python_method
     def list_sort_order_chosen(self, list_sort_order):

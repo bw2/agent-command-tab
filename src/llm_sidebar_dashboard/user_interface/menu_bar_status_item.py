@@ -104,6 +104,17 @@ class MenuBarStatusItemController(NSObject):
             self.owner.menu_bar_icon_clicked()
 
     @objc.python_method
+    def find_icon_frame_on_screen(self):
+        """Returns the icon's frame in screen coordinates (its status bar window's frame)."""
+        return self.status_item.button().window().frame()
+
+    @objc.python_method
+    def highlight(self, is_highlighted):
+        """Highlights the icon as a drop target while the list window is dragged onto it."""
+        if bool(self.status_item.button().isHighlighted()) != is_highlighted:
+            self.status_item.button().highlight_(is_highlighted)
+
+    @objc.python_method
     def toggle_popover(self):
         """Opens the dropdown, or closes it when it is open."""
         if self.popover.isShown():

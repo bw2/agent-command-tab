@@ -46,6 +46,13 @@ class AgentToolAdapter:
             permission prompt is denied or the turn is interrupted, or None.
         helper_process_names: Names of processes the tool starts for itself during a turn, which
             are not commands the agent waits on (agent_process_tree).
+        slash_commands: The commands the tab's right-click menu may type into the tool
+            ("/compact", "/clear"); empty when the tool has none, or its input box can't be read.
+        input_line_marker: The character that starts the tool's input line ("❯"), for
+            screen_readings.input_area_is_empty; None when unknown.
+        input_area_end_pattern: Compiled pattern of the line just below the input area.
+        seconds_before_enter: The pause between a typed command and its Enter, so the tool
+            doesn't take the two as one paste (PLAN.md section 8, "Sending /compact and /clear").
     """
 
     agent_tool_name = ""
@@ -53,6 +60,10 @@ class AgentToolAdapter:
     progress_noise_patterns = ()
     interrupted_turn_screen_pattern = None
     helper_process_names = frozenset()
+    slash_commands = frozenset()
+    input_line_marker = None
+    input_area_end_pattern = None
+    seconds_before_enter = 0.15
 
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         """Returns the ID of the conversation the agent process is in, or None if unknown.

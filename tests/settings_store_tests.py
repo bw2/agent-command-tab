@@ -3,9 +3,10 @@ import os
 import tempfile
 import unittest
 
-from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, find_launch_command_problem, load_settings,
-                                                  merge_settings_with_defaults, resolve_launch_command_paths,
-                                                  save_settings)
+from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, find_launch_command_problem,
+                                                  list_included_agent_tool_names, list_left_out_agent_tool_names,
+                                                  load_settings, merge_settings_with_defaults,
+                                                  resolve_launch_command_paths, save_settings)
 
 
 class MergeSettingsTests(unittest.TestCase):
@@ -40,6 +41,14 @@ class MergeSettingsTests(unittest.TestCase):
                          [10, 20, 500, 400])
         for bad_frame in ([10, 20, 100, 400], [10, 20, 500], "10,20,500,400", [True, 20, 500, 400]):
             self.assertIsNone(merge_settings_with_defaults({"list_window_frame": bad_frame})["list_window_frame"], bad_frame)
+
+    def test_agent_tools_from_before_the_harnesses_section_are_included(self):
+        settings = merge_settings_with_defaults({"agent_tools": [{"agent_tool_name": "Claude Code", "launch_command": "yc"},
+                                                                 {"agent_tool_name": "Codex", "launch_command": "codex",
+                                                                  "is_included": False}]})
+        self.assertEqual([agent_tool["is_included"] for agent_tool in settings["agent_tools"]], [True, False])
+        self.assertEqual(list_included_agent_tool_names(settings), ["Claude Code"])
+        self.assertEqual(list_left_out_agent_tool_names(settings), ["Codex"])
 
     def test_a_boolean_is_not_a_width(self):
         self.assertEqual(merge_settings_with_defaults({"sidebar_width": True})["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])

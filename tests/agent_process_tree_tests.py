@@ -7,9 +7,10 @@ import unittest
 from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.agent_adapters.codex import CONVERSATION_FILE_PATTERN, CodexAdapter
 from llm_sidebar_dashboard.agent_adapters.generic import GenericAdapter
-from llm_sidebar_dashboard.agent_process_tree import (ProcessInfo, choose_command_the_agent_is_waiting_on,
+from llm_sidebar_dashboard.agent_process_tree import (ProcessInfo, choose_command_the_agent_is_waiting_on, compute_cpu_percent,
                                                       list_descendant_processes, read_name_the_process_was_started_as,
-                                                      read_process_info)
+                                                      read_process_info, read_process_resource_usage,
+                                                      read_process_tree_resource_usage)
 
 TURN_STARTED_AT = 1000.0
 NOW = 1100.0
@@ -79,6 +80,26 @@ class ProcessTreeReadingTests(unittest.TestCase):
             finally:
                 process.kill()
                 process.wait()
+
+
+class ResourceUsageTests(unittest.TestCase):
+    def test_a_process_tree_counts_its_running_descendants_memory_and_cpu_time(self):
+        child = subprocess.Popen(["/bin/sleep", "5"])
+        try:
+            own_memory, own_cpu_seconds = read_process_resource_usage(os.getpid())
+            tree_memory, tree_cpu_seconds = read_process_tree_resource_usage(os.getpid())
+            self.assertGreater(own_memory, 1024 ** 2)
+            self.assertGreater(tree_memory, own_memory)  # the sleeping child counts too
+            self.assertGreaterEqual(tree_cpu_seconds, own_cpu_seconds)
+        finally:
+            child.kill()
+            child.wait()
+        self.assertIsNone(read_process_tree_resource_usage(child.pid))  # gone
+
+    def test_cpu_percent_between_two_readings(self):
+        self.assertIsNone(compute_cpu_percent(None, (5.0, 100.0)))  # the first reading
+        self.assertEqual(compute_cpu_percent((5.0, 100.0), (6.5, 103.0)), 50)
+        self.assertEqual(compute_cpu_percent((5.0, 100.0), (4.0, 103.0)), 0)  # a descendant that ended took its time along
 
 
 class DuplicateLaunchCommandTests(unittest.TestCase):

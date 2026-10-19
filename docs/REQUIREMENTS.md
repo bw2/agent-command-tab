@@ -127,7 +127,8 @@ Make sure to carefully assess the relative complexity and difficulty of features
   - how the list is shown, "Show as: Window, Sidebar, Popup" (a regular window, the sidebar at the screen's edge, or the dropdown under the menu bar icon; user request, 2026-10-19), and for the window "Always on top";
   - the sidebar's mode, edge and width (width also adjustable by dragging the edge of the sidebar);
   - icon color, and whether the icon shows the asking count;
-  - which information columns tab rows show: State, State Duration, Used Token Count, Created Time, Time Since Created;
+  - which information columns tab rows show: State, State Duration, Used Token Count, Created Time, Time Since Created, Memory Usage, CPU Usage (the agent and every process below it);
+  - which harnesses are included (Claude Code, Codex): a tool left out isn't listed or offered for new sessions;
   - the list's sort order (Manual, Activity, Alphabetically, Created Time), also chosen with the Sort pop-up above the list;
   - which agent tools to detect (Claude Code, Codex), and the launch command for each;
   - stuck time limit (default 10 minutes);

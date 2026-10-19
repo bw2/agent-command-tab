@@ -1,23 +1,35 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]  # 77 reads the SPDX license expression below
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-sidebar-dashboard"
-version = "0.1.0.dev0"
-description = "macOS menu bar list and screen-edge sidebar of the iTerm2 tabs where AI coding agents run"
+version = "0.1.0"
+description = "macOS menu bar list, window or screen-edge sidebar of the iTerm2 tabs where AI coding agents run"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ben Weisburd" }]
 requires-python = ">=3.10"
 dependencies = [
     # Pinned: the core relies on two private names of this package (see tests/iterm2_package_internals_tests.py).
     "iterm2>=2.30,<2.31",
     "pyobjc-framework-Cocoa>=10",
 ]
+keywords = ["iterm2", "claude-code", "codex", "ai-agents", "macos", "menu-bar", "dashboard"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X :: Cocoa",
+    "Intended Audience :: Developers",
     "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
-    "Environment :: MacOS X :: Cocoa",
+    "Topic :: Software Development",
+    "Topic :: Terminals",
 ]
+
+[project.urls]
+Homepage = "https://github.com/bw2/llm-sidebar-dashboard"
+Issues = "https://github.com/bw2/llm-sidebar-dashboard/issues"
 
 [project.scripts]
 llm-sidebar-dashboard = "llm_sidebar_dashboard.command_line:main"

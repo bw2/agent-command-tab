@@ -33,9 +33,9 @@ SIDEBAR_MODES = ["auto_hide", "floating", "docked"]
 # The Sort pop-up at the top of the list (list_sorting.py).
 LIST_SORT_ORDERS = ["manual", "activity", "alphabet", "created_time"]
 # A tab row's information columns that the settings can show or hide, in their left-to-right
-# order (the tool icon column, between existence_duration and state, shows by itself when two
-# or more agent tools run).
-LIST_COLUMNS = ["context_tokens", "created_time", "existence_duration", "state", "state_duration"]
+# order (the tool icon column, between cpu_usage and state, shows by itself when two or more
+# agent tools run). Memory and CPU usage count the agent and every process below it.
+LIST_COLUMNS = ["context_tokens", "created_time", "existence_duration", "memory_usage", "cpu_usage", "state", "state_duration"]
 
 DEFAULT_SETTINGS = {
     "show_as": "popup",
@@ -46,9 +46,11 @@ DEFAULT_SETTINGS = {
     "sidebar_width": 400,
     "icon_color": "auto",
     "icon_shows_asking_count": True,
+    # The settings window's Harnesses section: a tool not included is left out of the list and of
+    # the menus that start new agent sessions (user request, 2026-10-19).
     "agent_tools": [
-        {"agent_tool_name": "Claude Code", "launch_command": "claude"},
-        {"agent_tool_name": "Codex", "launch_command": "codex"},
+        {"agent_tool_name": "Claude Code", "launch_command": "claude", "is_included": True},
+        {"agent_tool_name": "Codex", "launch_command": "codex", "is_included": True},
     ],
     "stuck_minutes": 10,
     "list_sort_order": "manual",
@@ -83,6 +85,7 @@ def is_valid_setting_value(name, value):
         return (isinstance(value, list) and value
                 and all(isinstance(tool, dict) and isinstance(tool.get("agent_tool_name"), str) and tool["agent_tool_name"]
                         and isinstance(tool.get("launch_command"), str) and tool["launch_command"].strip()
+                        and isinstance(tool.get("is_included", True), bool)
                         for tool in value))
     return isinstance(value, type(default_value))
 
@@ -97,7 +100,19 @@ def merge_settings_with_defaults(stored_settings):
         for name, value in stored_settings.items():
             if name in DEFAULT_SETTINGS and is_valid_setting_value(name, value):
                 settings[name] = value
+    # Files from before the Harnesses section have no "is_included": those tools are included.
+    settings["agent_tools"] = [dict({"is_included": True}, **agent_tool) for agent_tool in settings["agent_tools"]]
     return settings
+
+
+def list_included_agent_tool_names(settings):
+    """Returns the agent tools that the Harnesses section includes, in their settings order."""
+    return [agent_tool["agent_tool_name"] for agent_tool in settings["agent_tools"] if agent_tool["is_included"]]
+
+
+def list_left_out_agent_tool_names(settings):
+    """Returns the agent tools that the Harnesses section leaves out of the list and the menus."""
+    return [agent_tool["agent_tool_name"] for agent_tool in settings["agent_tools"] if not agent_tool["is_included"]]
 
 
 def load_settings(settings_file_path=SETTINGS_FILE_PATH):

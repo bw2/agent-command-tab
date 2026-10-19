@@ -13,15 +13,16 @@ from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_st
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
                      "agent_tool_name", "state_text", "elapsed_time_text", "context_text", "created_time_text",
-                     "existence_duration_text", "preview_connector_text", "preview_text"],
-    defaults=["", "", "", "", "", "", "", ""])
+                     "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text", "preview_text"],
+    defaults=["", "", "", "", "", "", "", "", "", ""])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
-                        "in columns that line up from row to row: context_text (the context's size, \"425k\", "
-                        "right-aligned), created_time_text (when the agent session started) and "
-                        "existence_duration_text (how long ago), the icon for agent_tool_name, state_text "
-                        "(left-aligned) and elapsed_time_text (the state's duration, right-aligned). Under it, "
-                        "a tab row has a gray preview line (R23): preview_connector_text continues the tree's "
-                        "lines, and preview_text starts under the name.")
+                        "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
+                        "context_text (the context's size, \"425k\"), created_time_text (when the agent session "
+                        "started) and existence_duration_text (how long ago), memory_text and cpu_text (what the "
+                        "agent and the processes it started use), the icon for agent_tool_name, state_text and "
+                        "elapsed_time_text (the state's duration). Under it, a tab row has a gray preview line "
+                        "(R23): preview_connector_text continues the tree's lines, and preview_text starts under "
+                        "the name.")
 
 DOT_GLYPH_AND_COLOR_BY_STATE = {
     "asking": ("●", "light_blue"),  # the same light blue as the menu bar icon's "C" and count (user request, milestone 2)
@@ -46,6 +47,13 @@ def format_elapsed_time(elapsed_seconds):
         hours, minutes = divmod(elapsed_seconds // 60, 60)
         return f"{hours}h {minutes}m" if minutes else f"{hours}h"
     return f"{elapsed_seconds // 86400}d"
+
+
+def format_memory_size(memory_bytes):
+    """Returns a short memory size such as "512M", or "1.4G" from a gigabyte up (powers of 1024, as Activity Monitor shows)."""
+    if memory_bytes >= 1024 ** 3:
+        return f"{memory_bytes / 1024 ** 3:.1f}G"
+    return f"{round(memory_bytes / 1024 ** 2)}M"
 
 
 def format_clock_time(timestamp, now):
@@ -102,6 +110,8 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         context_text=format_token_count(agent_session_entry.context_tokens) if agent_session_entry.context_tokens else "",
         created_time_text=format_clock_time(started_at, now) if started_at is not None else "",
         existence_duration_text=format_elapsed_time(now - started_at) if started_at is not None else "",
+        memory_text=format_memory_size(agent_session_entry.memory_bytes) if agent_session_entry.memory_bytes is not None else "",
+        cpu_text=f"{agent_session_entry.cpu_percent}%" if agent_session_entry.cpu_percent is not None else "",
         preview_connector_text=build_tree_continuation_text(is_last_child_at_each_level),
         preview_text=agent_session_entry.preview_line,
     )

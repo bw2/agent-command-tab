@@ -31,6 +31,10 @@ class ClaudeCodeAdapter(AgentToolAdapter):
         re.compile(r"\(ctrl\+b to run in background\)"),
     )
     helper_process_names = frozenset({"caffeinate"})  # keeps the Mac awake while a turn runs
+    slash_commands = frozenset({"/compact", "/clear"})
+    # The input box: "❯" and a no-break space, then the input, between two rules of "─" (Phase 0).
+    input_line_marker = "❯"
+    input_area_end_pattern = re.compile(r"^─{10,}\s*$")
 
     def matches_command_line(self, command_line):
         """Returns whether the command line's program is `claude` (by base name, so full paths match)."""

@@ -28,6 +28,12 @@ class CodexAdapter(AgentToolAdapter):
     agent_tool_name = "Codex"
     progress_noise_patterns = (re.compile(r"\((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)"),)
     helper_process_names = frozenset({"codex-code-mode-host"})  # stays running for the whole session
+    slash_commands = frozenset({"/compact", "/clear"})
+    # The input box: "›", then the input, above the line with the model and the folder
+    # ("  GPT-6-Astra low fast · /private/tmp/…", Phase 0).
+    input_line_marker = "›"
+    input_area_end_pattern = re.compile(r"^  \S[^·]* · [~/…]")
+    seconds_before_enter = 0.3  # Codex takes keys within 8 ms of each other as a paste, and Enter for 120 ms after it as a newline
 
     def matches_command_line(self, command_line):
         """Returns whether the command line runs `codex`, directly or as `node <path>/codex`."""

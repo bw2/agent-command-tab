@@ -1,25 +1,54 @@
 # LLM Sidebar Dashboard
 
-A macOS menu bar app and optional screen-edge sidebar that lists the iTerm2 windows and tabs where AI coding agents are running (Claude Code, OpenAI Codex CLI, and others), shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents.
+A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agents run (Claude Code, OpenAI Codex CLI, and others), shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents. The list shows as a dropdown under the menu bar icon, a sidebar at the edge of the screen, or a regular window.
 
-**Status: planning.** No app code yet. See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for what it will do and [docs/PLAN.md](docs/PLAN.md) for the design and the implementation phases.
+**Status: alpha.** It works day to day on the author's Mac; expect rough edges.
 
-## What it will do
+## What it does
 
-- Menu bar icon whose dropdown lists every iTerm2 window that has at least one agent tab, with each window's tabs in a collapsible sublist.
-- The same list as a sidebar on the edge of the screen, either kept visible or auto-hiding.
-- A status dot per tab (idle, working, waiting for you, done, error, stuck) and a summary per window.
-- Click a tab to bring its window and tab to the front.
-- Rename windows and tabs in place.
-- Right-click a window to open a new tab running an agent.
-- Drag tabs to reorder them or move them to another window, without restarting the agent.
-- With several monitors, group windows by monitor and drag windows between monitors.
+- **One tree of your agents:** every iTerm2 window with at least one agent tab, with its tabs below it, grouped by monitor when you have several. Tabs without an agent are left out.
+- **What each agent is doing:** a status dot and word per tab (asking for permission, working, stuck, done, idle, error), how long it has been so, the context size in tokens, and optionally when it started, its memory and CPU use. "Done" stays until you look at the tab. The menu bar icon counts the agents waiting for your answer.
+- **A preview per tab:** what the agent is asking or running, what it said since your last prompt, or that prompt. Open it with the tab's arrow.
+- **Control:** double-click to bring a window or tab to the front; press and hold to peek at a tab; rename in place; drag tabs between windows and windows between monitors; start a new agent window or tab; duplicate a tab; type `/compact` or `/clear` into an agent waiting at its prompt; end an agent's process.
+- **Your choice of view:** a dropdown under the menu bar icon, a sidebar that hides at the screen's edge or stays visible (optionally keeping iTerm2 windows out of its way), or a regular window (optionally always on top).
 
-## Requirements (planned)
+## Requirements
 
-- macOS with iTerm2 3.7 or later, and iTerm2's Python API turned on (Settings > General > Magic > Enable Python API).
-- Python 3.10 or later.
+- macOS, with iTerm2 3.7 or later and iTerm2's Python API turned on: iTerm2 > Settings > General > Magic > Enable Python API.
+- Python 3.10 or later (for an install with pip or pipx).
+
+## Install
+
+Not published yet. Once it is:
+
+```bash
+pipx install llm-sidebar-dashboard        # or: pip install llm-sidebar-dashboard
+brew install bw2/tap/llm-sidebar-dashboard
+```
+
+From a clone of this repository:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e .
+```
+
+## Use
+
+```bash
+llm-sidebar-dashboard                # the menu bar app; restarts itself if iTerm2's connection drops
+llm-sidebar-dashboard dump-snapshot  # prints the current list as JSON
+```
+
+Click the "C" in the menu bar to see the list, right-click it for Settings. The first time, iTerm2 asks whether to allow the app to use its Python API.
+
+## Development
+
+```bash
+.venv/bin/python -m unittest discover -s tests -p '*_tests.py'
+```
+
+[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) describes what the app does, [docs/PLAN.md](docs/PLAN.md) how it works, and [docs/RELEASING.md](docs/RELEASING.md) how to publish a version.
 
 ## License
 
-Not chosen yet. The app will use iTerm2's official `iterm2` Python package, which is licensed GPL-2.0-or-later, so this project's license needs to be GPL-compatible. See the open decisions in [docs/PLAN.md](docs/PLAN.md).
+MIT; see [LICENSE](LICENSE). The app uses iTerm2's `iterm2` Python package, which is licensed GPL-2.0-or-later and is installed alongside it as a separate package.

@@ -1,14 +1,18 @@
-"""The panel around the list: the sort order, expand or collapse all, and settings at the top, "+" at the bottom.
+"""The panel around the list: the sort order and expand or collapse all at the top, a Settings button at the bottom left.
 
-The same panel class is used in the dropdown (an NSPopover under the menu bar item) and in
-the sidebar, each with its own list controller.
+The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
+sidebar and in the list window, each with its own list controller.
 """
 
+import math
+
 import objc
-from AppKit import (NSBezelStyleRecessed, NSButton, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSFont, NSImage,
-                    NSMakeRect, NSMenu, NSMenuItem, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
-                    NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxYMargin,
+from AppKit import (NSBezelStyleRecessed, NSBezelStyleRounded, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont,
+                    NSImage, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
+                    NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
+
+from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
 
 LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabetically", "created_time": "Created Time"}
 POPOVER_WIDTH = 460  # before the first fit
@@ -21,6 +25,7 @@ SMALLEST_LIST_HEIGHT = 60
 LIST_BOTTOM_PADDING = 6
 SPACE_FOR_POPOVER_ARROW_AND_MARGIN = 40
 INITIAL_PANEL_HEIGHT = 300
+TOP_BAR_DRAG_DISTANCE_TO_DETACH = 6  # points: a shorter drag is a click
 # The top bar's one expand or collapse button (user requests, 2026-10-19): (SF Symbol, text
 # fallback, tooltip), by whether the list is fully expanded. The symbol shows the current state;
 # the fallback text and the tooltip say what a click does.
@@ -29,8 +34,8 @@ EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: ("rectangle.compress.vertical", "Expand a
 
 
 def make_symbol_button(symbol_name, fallback_title, tool_tip, target, action_name):
-    """Returns a borderless button showing an SF Symbol (or a text fallback)."""
-    button = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 24, 22))
+    """Returns a borderless button showing an SF Symbol (or a text fallback), with the pointing hand."""
+    button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 24, 22))
     image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, tool_tip)
     if image is not None:
         button.setImage_(image)
@@ -44,7 +49,9 @@ def make_symbol_button(symbol_name, fallback_title, tool_tip, target, action_nam
 
 
 class ListPanelView(NSView):
-    """The panel's root view: tells its controller when its size changes, so the top bar fits."""
+    """The panel's root view: tells its controller when its size changes, so the top bar fits,
+    and when the top bar's empty space is dragged (the dropdown then detaches into the list
+    window; user request, 2026-10-19). The top bar's controls take their own clicks."""
 
     def resizeSubviewsWithOldSize_(self, old_size):
         objc.super(ListPanelView, self).resizeSubviewsWithOldSize_(old_size)
@@ -52,12 +59,27 @@ class ListPanelView(NSView):
         if controller is not None:
             controller.fit_top_bar_to_width()
 
+    def mouseDown_(self, event):
+        point = self.convertPoint_fromView_(event.locationInWindow(), None)
+        is_on_the_top_bar = point.y >= self.bounds().size.height - TOP_BAR_HEIGHT
+        self.top_bar_drag_start = NSEvent.mouseLocation() if is_on_the_top_bar else None  # screen coordinates
+        if not is_on_the_top_bar:
+            objc.super(ListPanelView, self).mouseDown_(event)
+
+    def mouseDragged_(self, event):
+        start = getattr(self, "top_bar_drag_start", None)
+        pointer = NSEvent.mouseLocation()
+        if start is not None and math.hypot(pointer.x - start.x, pointer.y - start.y) >= TOP_BAR_DRAG_DISTANCE_TO_DETACH:
+            self.top_bar_drag_start = None
+            self.controller.list_controller.owner.top_bar_dragged(self.controller, (start.x, start.y))
+
 
 class ListPanelController(NSViewController):
     """Holds a list controller's outline view in a scroll view, with a top and a bottom bar.
 
     The owner is the list controller's owner (see AgentSessionListController); the panel also
-    calls its open_settings() and list_sort_order_chosen(list_sort_order).
+    calls its open_settings(), list_sort_order_chosen(list_sort_order) and
+    top_bar_dragged(list_panel_controller, start_point_on_screen).
     """
 
     def initWithListController_(self, list_controller):
@@ -104,16 +126,11 @@ class ListPanelController(NSViewController):
         self.list_sort_order_popup.setFrameOrigin_((0, height - TOP_BAR_HEIGHT + 3))  # fit_top_bar_to_width sets x
         self.list_sort_order_popup.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.list_sort_order_popup)
-        self.settings_button = make_symbol_button("gearshape", "Settings", "Settings", self, "settingsClicked:")
-        self.settings_button.setFrameOrigin_((width - 6 - self.settings_button.frame().size.width, height - TOP_BAR_HEIGHT + 3))
-        self.settings_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)  # stays at the top right
-        root_view.addSubview_(self.settings_button)
         self.expand_or_collapse_all_button = make_symbol_button(*EXPAND_OR_COLLAPSE_ALL_LOOKS[False], self,
                                                                 "expandOrCollapseAllClicked:")
-        self.expand_or_collapse_all_button.setFrameOrigin_((self.settings_button.frame().origin.x - 2
-                                                            - self.expand_or_collapse_all_button.frame().size.width,
+        self.expand_or_collapse_all_button.setFrameOrigin_((width - 6 - self.expand_or_collapse_all_button.frame().size.width,
                                                             height - TOP_BAR_HEIGHT + 3))
-        self.expand_or_collapse_all_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)
+        self.expand_or_collapse_all_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)  # stays at the top right
         root_view.addSubview_(self.expand_or_collapse_all_button)
         self.list_controller.on_expansion_changed = self.update_expand_or_collapse_all_button
         self.message_text_field = NSTextField.labelWithString_("")
@@ -122,12 +139,20 @@ class ListPanelController(NSViewController):
         self.message_text_field.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.message_text_field)
 
-        # Bottom bar: a new window with an agent session (R13.1).
-        self.new_window_button = make_symbol_button("plus", "+", "New iTerm2 window with an agent session", self,
-                                                    "newWindowClicked:")
-        self.new_window_button.setFrameOrigin_((6, 3))
-        self.new_window_button.setAutoresizingMask_(NSViewMaxYMargin)
-        root_view.addSubview_(self.new_window_button)
+        # Bottom bar: a Settings button with its name, at the left, easier to see than an icon (R34);
+        # a new window with an agent session (R13.1) is the "+" row at the end of the list (user
+        # requests, 2026-10-19).
+        self.settings_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 22))
+        self.settings_button.setTitle_("Settings")
+        self.settings_button.setBezelStyle_(NSBezelStyleRounded)
+        self.settings_button.setControlSize_(NSControlSizeSmall)
+        self.settings_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.settings_button.setTarget_(self)
+        self.settings_button.setAction_("settingsClicked:")
+        self.settings_button.sizeToFit()
+        self.settings_button.setFrameOrigin_((6, (BOTTOM_BAR_HEIGHT - self.settings_button.frame().size.height) / 2))
+        self.settings_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMaxXMargin)  # stays at the bottom left
+        root_view.addSubview_(self.settings_button)
         self.setView_(root_view)
         root_view.controller = self
         self.fit_top_bar_to_width()
@@ -135,18 +160,16 @@ class ListPanelController(NSViewController):
 
     @objc.python_method
     def fit_top_bar_to_width(self):
-        """Fits the sort control between the panel's left edge and the buttons on the right (the
-        expand or collapse button, when shown, then the settings button): with its "Sort:" label
-        when there is room, without it in a narrow sidebar, and hidden when even the pop-up
-        doesn't fit (the dropdown, at least 320 points wide, always shows both). The message line
-        takes the room left before those buttons, so it never covers them; while it shows a
-        message (iTerm2 can't be reached, so there are no rows to sort) the sort control steps
-        aside for it."""
+        """Fits the sort control between the panel's left edge and the expand or collapse button
+        at the right (or the right edge, while that button is hidden): with its "Sort:" label when
+        there is room, without it in a narrow sidebar, and hidden when even the pop-up doesn't fit
+        (the dropdown, at least 320 points wide, always shows both). The message line takes the
+        room left before that button, so it never covers it; while it shows a message (iTerm2
+        can't be reached, so there are no rows to sort) the sort control steps aside for it."""
         label_x, label_width = self.sort_label.frame().origin.x, self.sort_label.frame().size.width
         popup_frame = self.list_sort_order_popup.frame()
-        first_right_button = (self.settings_button if self.expand_or_collapse_all_button.isHidden()
-                              else self.expand_or_collapse_all_button)
-        right_buttons_x = first_right_button.frame().origin.x
+        right_buttons_x = (self.view().bounds().size.width - 6 if self.expand_or_collapse_all_button.isHidden()
+                           else self.expand_or_collapse_all_button.frame().origin.x)
         room_right_edge = right_buttons_x - 2
         popup_x_after_label = label_x + label_width + 2
         is_showing_a_message = bool(self.message_text_field.stringValue())
@@ -195,19 +218,6 @@ class ListPanelController(NSViewController):
 
     def settingsClicked_(self, sender):
         self.list_controller.owner.open_settings()
-
-    def newWindowClicked_(self, sender):
-        menu = NSMenu.alloc().initWithTitle_("")
-        for agent_tool_name in self.list_controller.owner.list_agent_tool_names():
-            menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                f"New iTerm2 window with {agent_tool_name} session…", "newWindowMenuItemChosen:", "")
-            menu_item.setTarget_(self)
-            menu_item.setRepresentedObject_(agent_tool_name)
-            menu.addItem_(menu_item)
-        menu.popUpMenuPositioningItem_atLocation_inView_(None, (0, sender.frame().size.height), sender)
-
-    def newWindowMenuItemChosen_(self, sender):
-        self.list_controller.owner.start_agent_session_from_menu(None, None, sender.representedObject())
 
     @objc.python_method
     def show_message(self, message):

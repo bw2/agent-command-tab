@@ -23,6 +23,7 @@ WINDOW_WIDTH = 540
 LABEL_WIDTH = 180  # fits "Claude Code command:"
 ROW_SPACING = 30
 GAP_BETWEEN_RADIO_BUTTONS = 16
+INDENT_UNDER_A_CHECKBOX = 20  # where a checkbox's title starts
 SHOW_AS_TITLES = {"window": "Window", "sidebar": "Sidebar", "popup": "Popup"}  # settings_store.SHOW_AS_CHOICES
 SIDEBAR_MODE_TITLES = {
     "auto_hide": "Auto-hide",
@@ -37,6 +38,8 @@ LIST_COLUMN_TITLES = {
     "context_tokens": "Used Token Count",
     "created_time": "Created Time",
     "existence_duration": "Time Since Created",
+    "memory_usage": "Memory Usage",
+    "cpu_usage": "CPU Usage",
 }
 # A titled section of the window, drawn as a bold title and a line to the right edge (user request, 2026-10-19).
 SettingsSection = collections.namedtuple("SettingsSection", ["title"])
@@ -106,12 +109,17 @@ class SettingsWindowController(NSObject):
         rows += [SettingsSection("Sidebar"), ("Show", self.sidebar_mode_popup, None), ("Window Edge", self.edge_popup, None),
                  ("Width", self.sidebar_width_field, "points"),
                  (None, self.edge_note, None), (None, None, None)]  # the note may take two lines
-        rows.append(SettingsSection("Commands"))
+        # Each agent tool: whether it is included, and below that, indented, its launch command (user request, 2026-10-19).
+        rows.append(SettingsSection("Harnesses"))
+        self.include_checkboxes = []
         self.launch_command_fields = []
-        for agent_tool in self.settings["agent_tools"]:
-            launch_command_field = self.make_text_field(agent_tool["launch_command"], WINDOW_WIDTH - LABEL_WIDTH - 40)
+        for index, agent_tool in enumerate(self.settings["agent_tools"]):
+            include_checkbox = self.make_checkbox(agent_tool["agent_tool_name"], agent_tool["is_included"])
+            self.include_checkboxes.append(include_checkbox)
+            launch_command_field = self.make_text_field(agent_tool["launch_command"], 10)
             self.launch_command_fields.append(launch_command_field)
-            rows.append((f"{agent_tool['agent_tool_name']} command", launch_command_field, None))
+            rows += [("Include" if index == 0 else None, include_checkbox, None),
+                     (None, self.make_labeled_field_row(f"{agent_tool['agent_tool_name']} command:", launch_command_field), None)]
         rows.append((None, None, None))
 
         height = 24 + ROW_SPACING * len(rows)
@@ -167,6 +175,21 @@ class SettingsWindowController(NSObject):
         line = NSBox.alloc().initWithFrame_(NSMakeRect(12 + title_width + 8, y + 11, WINDOW_WIDTH - 12 - title_width - 8 - 12, 1))
         line.setBoxType_(NSBoxSeparator)
         content_view.addSubview_(line)
+
+    @objc.python_method
+    def make_labeled_field_row(self, label_text, text_field):
+        """Returns a row control: a label, then text_field reaching to the window's right margin,
+        indented under the checkbox above it."""
+        row_width = WINDOW_WIDTH - LABEL_WIDTH - 24
+        row_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, row_width, 22))
+        label_field = NSTextField.labelWithString_(label_text)
+        label_width = label_field.fittingSize().width
+        label_field.setFrame_(NSMakeRect(INDENT_UNDER_A_CHECKBOX, 3, label_width, 18))
+        row_view.addSubview_(label_field)
+        field_x = INDENT_UNDER_A_CHECKBOX + label_width + 6
+        text_field.setFrame_(NSMakeRect(field_x, 0, row_width - field_x, 22))
+        row_view.addSubview_(text_field)
+        return row_view
 
     @objc.python_method
     def make_radio_button(self, title, is_on):
@@ -263,6 +286,11 @@ class SettingsWindowController(NSObject):
             agent_tools[tool_index]["launch_command"] = launch_command
             new_settings["agent_tools"] = agent_tools
             self.check_launch_command(sender)
+        elif sender in self.include_checkboxes:
+            tool_index = self.include_checkboxes.index(sender)
+            agent_tools = [dict(agent_tool) for agent_tool in new_settings["agent_tools"]]
+            agent_tools[tool_index]["is_included"] = bool(sender.state())
+            new_settings["agent_tools"] = agent_tools
         self.owner.settings_changed(new_settings)
 
     @objc.python_method

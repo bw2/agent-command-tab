@@ -172,6 +172,8 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         running_command_started_at=running_command[1] if running_command else None,
         preview_line=choose_preview_text(state, (screen_reading or {}).get("conversation_preview")),
         context_tokens=(screen_reading or {}).get("context_tokens"),
+        memory_bytes=(screen_reading or {}).get("memory_bytes"),
+        cpu_percent=(screen_reading or {}).get("cpu_percent"),
         started_at=agent_session.get("started_at"),
     )
 

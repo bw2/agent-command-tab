@@ -5,10 +5,11 @@ A titled window you can move, resize and minimize, holding its own list controll
 """
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSFloatingWindowLevel, NSIntersectsRect, NSMakeRect, NSNormalWindowLevel,
-                    NSScreen, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable,
+from AppKit import (NSApp, NSBackingStoreBuffered, NSEvent, NSEventMaskLeftMouseDragged, NSEventMaskLeftMouseUp,
+                    NSEventTrackingRunLoopMode, NSEventTypeLeftMouseUp, NSFloatingWindowLevel, NSIntersectsRect, NSMakeRect,
+                    NSNormalWindowLevel, NSScreen, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable,
                     NSWindowStyleMaskResizable, NSWindowStyleMaskTitled)
-from Foundation import NSObject
+from Foundation import NSDate, NSObject
 
 from llm_sidebar_dashboard.settings_store import SMALLEST_LIST_WINDOW_SIZE
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import AgentSessionListController
@@ -27,7 +28,9 @@ class ListWindowController(NSObject):
     """Owns the list window, its own list controller and panel.
 
     The owner is the app controller (see AgentSessionListController for the methods it has); the
-    window also calls its list_window_frame_changed(frame) after it is moved or resized.
+    window also calls its list_window_frame_changed(frame) after it is moved or resized, and
+    list_window_drag_started(), list_window_is_being_dragged() and list_window_drag_ended() around
+    a drag (dropped on the menu bar icon, the window turns back into the dropdown).
     """
 
     def initWithOwner_(self, owner):
@@ -76,6 +79,26 @@ class ListWindowController(NSObject):
     def report_frame(self):
         frame = self.window.frame()
         self.owner.list_window_frame_changed([frame.origin.x, frame.origin.y, frame.size.width, frame.size.height])
+
+    @objc.python_method
+    def follow_the_pointer_until_the_button_comes_up(self, pointer_offset):
+        """Moves the window with the pointer, keeping the pointer pointer_offset (x, y) from the
+        window's bottom-left corner, until the mouse button comes up: the drag that detached the
+        dropdown goes on in this window (user request, 2026-10-19)."""
+        while True:
+            event = NSApp.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp, NSDate.distantFuture(), NSEventTrackingRunLoopMode, True)
+            pointer = NSEvent.mouseLocation()
+            self.window.setFrameOrigin_((pointer.x - pointer_offset[0], pointer.y - pointer_offset[1]))
+            self.owner.list_window_is_being_dragged()
+            if event.type() == NSEventTypeLeftMouseUp:
+                break
+        self.report_frame()
+        self.owner.list_window_drag_ended()
+
+    def windowWillMove_(self, notification):
+        # Its title bar is being dragged: the owner watches whether it is dropped on the menu bar icon.
+        self.owner.list_window_drag_started()
 
     def windowDidMove_(self, notification):
         self.report_frame()

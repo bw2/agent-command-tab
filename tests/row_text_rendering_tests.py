@@ -7,7 +7,7 @@ from llm_sidebar_dashboard.user_interface.row_text_rendering import (build_agent
                                                                      build_tree_connector_text,
                                                                      build_tree_continuation_text,
                                                                      build_window_row_text_parts,
-                                                                     format_elapsed_time)
+                                                                     format_elapsed_time, format_memory_size)
 
 
 def make_entry(status, tab_title="reviews", status_since=0.0):
@@ -24,6 +24,8 @@ def make_window(statuses):
 
 class FormatElapsedTimeTests(unittest.TestCase):
     def test_ranges(self):
+        self.assertEqual(format_memory_size(512 * 1024 ** 2), "512M")
+        self.assertEqual(format_memory_size(int(1.43 * 1024 ** 3)), "1.4G")
         self.assertEqual(format_elapsed_time(-3), "0s")
         self.assertEqual(format_elapsed_time(45), "45s")
         self.assertEqual(format_elapsed_time(185), "3m")

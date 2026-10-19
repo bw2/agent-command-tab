@@ -1,4 +1,4 @@
-"""Actions that change iTerm2: focus, rename, tab moves and new agent sessions (PLAN.md sections 8 and 9).
+"""Actions that change iTerm2: focus, rename, tab moves, new agent sessions and typed slash commands (PLAN.md sections 8 and 9).
 
 Each function takes the connection's iterm2.App and returns an ActionResult. After any action
 the core re-reads iTerm2 and publishes a new snapshot; the views never guess the result.
@@ -12,6 +12,7 @@ import iterm2
 from llm_sidebar_dashboard.dashboard_core_api import ActionResult
 from llm_sidebar_dashboard.monitor_assignment import (assign_windows_to_monitors_by_largest_overlap,
                                                       compute_window_frame_on_another_monitor)
+from llm_sidebar_dashboard.screen_readings import input_area_is_empty
 from llm_sidebar_dashboard.tab_order_computation import compute_full_tab_order_after_move
 
 SECONDS_FOR_FULL_SCREEN_ANIMATION = 1.0
@@ -211,4 +212,40 @@ async def move_tab_to_new_window(app, tab_id):
     if window is not None and len(window.tabs) < 2:
         return ActionResult(False, "the tab is already its window's only tab")
     await tab.async_move_to_window()
+    return ActionResult(True)
+
+
+async def read_screen_lines_with_faint_flags(session):
+    """Returns the session's visible lines as (text, faint_flags), for screen_readings.input_area_is_empty."""
+    contents = await session.async_get_screen_contents()
+    screen_lines_with_faint_flags = []
+    for index in range(contents.number_of_lines):
+        line = contents.line(index)
+        screen_lines_with_faint_flags.append(
+            (line.string, [bool(style is not None and style.faint) for style in map(line.style_at, range(len(line.string)))]))
+    return screen_lines_with_faint_flags
+
+
+async def type_slash_command(app, session_id, command, adapter):
+    """Types a slash command into the agent's empty input box, then Enter after the adapter's
+    pause (R15.1; PLAN.md section 8, "Sending /compact and /clear"). Refuses when the box holds
+    unsent text or can't be found on screen, since the command would join the draft.
+
+    Args:
+        app: The iterm2.App.
+        session_id: The tab's first session.
+        command: One of the adapter's slash_commands, for example "/compact".
+        adapter: The session's agent tool adapter (its input line marker, input area end and pause).
+    """
+    session = app.get_session_by_id(session_id)
+    if session is None:
+        return ActionResult(False, "that tab no longer exists")
+    if command not in adapter.slash_commands:
+        return ActionResult(False, f"{command} can't be sent to {adapter.agent_tool_name or 'this agent'}")
+    if not input_area_is_empty(await read_screen_lines_with_faint_flags(session), adapter.input_line_marker,
+                               adapter.input_area_end_pattern):
+        return ActionResult(False, "the tab has unsent text in its input box, or the input box isn't on screen")
+    await session.async_send_text(command, suppress_broadcast=True)
+    await asyncio.sleep(adapter.seconds_before_enter)
+    await session.async_send_text("\r", suppress_broadcast=True)
     return ActionResult(True)

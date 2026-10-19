@@ -11,6 +11,10 @@ import hashlib
 import re
 
 LINES_IN_FINGERPRINT = 20
+LONGEST_INPUT_AREA_LINES = 12  # a draft longer than this counts as not empty
+# Cells an empty input box may hold besides faint text: blanks, iTerm2's empty cells, a
+# no-break space, and Codex's braille-dot idle animation.
+EMPTY_INPUT_CELL_PATTERN = re.compile(r"[ \x00 ⠀-⣿]")
 # Changes in every redraw of any tool: clocks (also in status lines) and braille-dot animations.
 COMMON_PROGRESS_NOISE_PATTERNS = [
     re.compile(r"\d{1,2}:\d{2}(?::\d{2})?\s?(?:AM|PM)?"),
@@ -33,6 +37,42 @@ def screen_shows_permission_dialog(screen_lines, permission_dialog_screen_patter
     """
     bottom_lines = [line for line in map(clean_screen_line, screen_lines) if line.strip()][-30:]
     return all(any(pattern.search(line) for line in bottom_lines) for pattern in permission_dialog_screen_patterns)
+
+
+def input_area_is_empty(screen_lines_with_faint_flags, input_line_marker, input_area_end_pattern):
+    """Returns whether the agent's input box holds no typed text, so a command typed into it
+    can't join a draft (PLAN.md section 8, "Sending /compact and /clear").
+
+    The input line is the last line starting with the marker; the input area runs from it to
+    the line just below it that matches input_area_end_pattern (a multi-line draft continues on
+    the lines in between). Empty means nothing after the marker but faint cells (the tool's
+    placeholder or suggested prompt) and EMPTY_INPUT_CELL_PATTERN cells. Fails safe: False when
+    the input line or the end of the area can't be found.
+
+    Args:
+        screen_lines_with_faint_flags: For each visible line, (text, faint_flags): its
+            characters and, for each, whether it is drawn faint.
+        input_line_marker: The character that starts the input line ("❯", "›").
+        input_area_end_pattern: Compiled pattern of the line just below the input area.
+    """
+    marker_line_indexes = [index for index, (text, _) in enumerate(screen_lines_with_faint_flags)
+                           if text.lstrip(" \x00").startswith(input_line_marker)]
+    if not marker_line_indexes:
+        return False
+    input_line_index = marker_line_indexes[-1]
+    last_index_to_look_at = min(input_line_index + LONGEST_INPUT_AREA_LINES, len(screen_lines_with_faint_flags) - 1)
+    end_index = next((index for index in range(input_line_index + 1, last_index_to_look_at + 1)
+                      if input_area_end_pattern.search(clean_screen_line(screen_lines_with_faint_flags[index][0]))), None)
+    if end_index is None:
+        return False
+    for index in range(input_line_index, end_index):
+        text, faint_flags = screen_lines_with_faint_flags[index]
+        first_input_position = text.index(input_line_marker) + 1 if index == input_line_index else 0
+        for position in range(first_input_position, len(text)):
+            is_faint = position < len(faint_flags) and faint_flags[position]
+            if not is_faint and not EMPTY_INPUT_CELL_PATTERN.match(text[position]):
+                return False
+    return True
 
 
 def count_lines_matching(screen_lines, pattern):

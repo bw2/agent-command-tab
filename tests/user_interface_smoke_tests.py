@@ -21,6 +21,7 @@ from llm_sidebar_dashboard.user_interface.popover_container import (BOTTOM_BAR_H
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
                                                                              AgentSessionListController, RowButton)
 from llm_sidebar_dashboard.user_interface.list_window import ListWindowController, frame_is_on_a_screen
+from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
 from llm_sidebar_dashboard.user_interface.menu_bar_status_item import ICON_COLORS_BY_NAME, choose_automatic_icon_color_name
 from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
 from llm_sidebar_dashboard.user_interface.sidebar_panel import (SidebarController,
@@ -36,6 +37,8 @@ class RecordingOwner:
         self.started_agent_sessions = []
         self.windows_asked_about_closing = []
         self.answer_to_closing_window = False
+        self.confirmation_questions = []
+        self.answer_to_confirmation = False
         self.peeks = []
         self.chosen_list_sort_orders = []
 
@@ -66,6 +69,13 @@ class RecordingOwner:
     def confirm_closing_window(self, window_entry):
         self.windows_asked_about_closing.append(window_entry.window_id)
         return self.answer_to_closing_window
+
+    def ask_for_confirmation(self, explanation):
+        self.confirmation_questions.append(explanation)
+        return self.answer_to_confirmation
+
+    def submit_action_and_report_failure(self, action_request, failure_title):
+        self.submitted_actions.append(action_request)
 
     def list_sort_order_chosen(self, list_sort_order):
         self.chosen_list_sort_orders.append(list_sort_order)
@@ -120,25 +130,26 @@ class UserInterfaceSmokeTests(unittest.TestCase):
     def test_rows_follow_the_snapshot_and_keep_their_items(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         outline_view = self.list_controller.outline_view
-        self.assertEqual(outline_view.numberOfRows(), 7)  # 2 windows + 5 tabs, all expanded
+        self.assertEqual(outline_view.numberOfRows(), 8)  # 2 windows + 5 tabs, all expanded, then the "+" row
+        self.assertIs(outline_view.itemAtRow_(7), self.list_controller.new_window_row_item)
         first_tab_item = outline_view.itemAtRow_(1)
         self.assertEqual(first_tab_item.kind, "tab")
         self.list_controller.toggle_expansion(outline_view.itemAtRow_(4))  # collapse the second window
-        self.assertEqual(outline_view.numberOfRows(), 5)
+        self.assertEqual(outline_view.numberOfRows(), 6)
         self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=3))  # structure changes
-        self.assertEqual(outline_view.numberOfRows(), 5)  # the second window stays collapsed
+        self.assertEqual(outline_view.numberOfRows(), 6)  # the second window stays collapsed
         self.assertIs(outline_view.itemAtRow_(1), first_tab_item)  # same item object, so selection survives
 
     def test_collapse_all_and_expand_all(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.list_controller.set_all_expanded(False)
-        self.assertEqual(self.list_controller.outline_view.numberOfRows(), 2)
+        self.assertEqual(self.list_controller.outline_view.numberOfRows(), 3)  # 2 windows and the "+" row
         self.list_controller.set_all_expanded(True)
-        self.assertEqual(self.list_controller.outline_view.numberOfRows(), 7)
+        self.assertEqual(self.list_controller.outline_view.numberOfRows(), 8)
 
     def test_two_monitors_start_fully_expanded(self):
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))
-        self.assertEqual(self.list_controller.outline_view.numberOfRows(), 9)  # 2 monitors, 2 windows, 5 tabs
+        self.assertEqual(self.list_controller.outline_view.numberOfRows(), 10)  # 2 monitors, 2 windows, 5 tabs, "+"
 
     def test_collapsing_a_monitor_leaves_its_windows_own_state_alone(self):
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))
@@ -147,7 +158,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.list_controller.collapsed_item_keys, {("monitor", "1")})
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot(second_window_tabs=3)))
         self.list_controller.toggle_expansion(outline_view.itemAtRow_(0))
-        self.assertEqual(outline_view.numberOfRows(), 10)  # everything expanded again, w2 now has 3 tabs
+        self.assertEqual(outline_view.numberOfRows(), 11)  # everything expanded again, w2 now has 3 tabs; then "+"
 
     def test_collapsing_through_the_outline_view_itself_is_recorded(self):
         # NSOutlineView's own Left arrow handling calls collapseItem_ like this.
@@ -158,7 +169,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.list_controller.build_row_text_parts(outline_view.itemAtRow_(0)).details_text,
                          "1 asking, 1 working, 1 done")
         self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=3))
-        self.assertEqual(outline_view.numberOfRows(), 5)  # w1 stays collapsed: 2 windows + 3 tabs of w2
+        self.assertEqual(outline_view.numberOfRows(), 6)  # w1 stays collapsed: 2 windows + 3 tabs of w2 + "+"
 
     def test_selection_survives_a_structural_reload(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -219,26 +230,44 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(snapshot)
         self.window.contentView().layoutSubtreeIfNeeded()
         row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
-        self.assertEqual(self.list_controller.created_time_column_width, 0)  # off by default
+        self.assertEqual(self.list_controller.column_widths["created_time"], 0)  # off by default
         self.list_controller.set_shown_columns(["created_time", "existence_duration", "state_duration"])
         row_view.layoutSubtreeIfNeeded()
-        self.assertEqual([not view.isHidden() for view in (row_view.created_time_text_field, row_view.existence_duration_text_field,
-                                                            row_view.state_text_field, row_view.elapsed_time_text_field)],
+        self.assertEqual([not row_view.column_views[column_name].isHidden()
+                          for column_name in ("created_time", "existence_duration", "state", "state_duration")],
                          [True, True, False, True])
-        self.assertEqual(row_view.existence_duration_text_field.stringValue(), "1h 1m")
+        self.assertEqual(row_view.column_views["existence_duration"].stringValue(), "1h 1m")
         self.list_controller.set_shown_columns([])
         row_view.layoutSubtreeIfNeeded()
-        self.assertTrue(row_view.elapsed_time_text_field.isHidden())
+        self.assertTrue(row_view.column_views["state_duration"].isHidden())
         # Only the tool icon column is left: it shows by itself, since Claude Code and Codex both run.
-        self.assertEqual(self.list_controller.measure_right_columns_width(), self.list_controller.icon_column_width)
+        self.assertEqual(self.list_controller.measure_right_columns_width(), self.list_controller.column_widths["agent_tool_icon"])
+
+    def test_memory_and_cpu_columns_show_the_agents_use(self):
+        snapshot = make_sample_snapshot()
+        window_one = snapshot.monitors[0].windows[0]
+        measured_entry = window_one.agent_sessions[0]._replace(memory_bytes=512 * 1024 ** 2, cpu_percent=12)
+        snapshot = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(
+            window_one._replace(agent_sessions=(measured_entry,) + window_one.agent_sessions[1:]),
+            snapshot.monitors[0].windows[1])),))
+        self.list_controller.apply_snapshot(snapshot)
+        self.list_controller.set_shown_columns(["memory_usage", "cpu_usage", "state"])
+        self.window.setContentSize_((POPOVER_WIDTH + 200, 260))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
+        row_view.layoutSubtreeIfNeeded()
+        memory_view, cpu_view, state_view = (row_view.column_views[column_name] for column_name in ("memory_usage", "cpu_usage", "state"))
+        self.assertEqual((memory_view.stringValue(), cpu_view.stringValue()), ("512M", "12%"))
+        self.assertLess(memory_view.frame().origin.x, cpu_view.frame().origin.x)  # left to right as in the settings
+        self.assertLess(cpu_view.frame().origin.x, state_view.frame().origin.x)
 
     def test_top_bar_drops_the_sort_label_then_the_sort_popup_when_narrow(self):
         panel = self.dropdown_panel_controller
         self.list_controller.apply_snapshot(make_sample_snapshot())  # two windows: the expand or collapse button shows
         # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's
-        # smallest width and 200 the sidebar's (180 can't happen, but checks the last step).
-        for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (220, True, True), (210, False, True),
-                                                (200, False, True), (180, False, False), (460, True, True)):
+        # smallest width and 200 the sidebar's (185 and 150 can't happen, but check the later steps).
+        for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (200, True, True), (185, False, True),
+                                                (150, False, False), (460, True, True)):
             self.window.setContentSize_((width, 260))
             self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden()),
                              (label_shown, popup_shown), width)
@@ -287,7 +316,35 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ["Collapse", "---", "Show window", "Rename", "---", "New tab with Claude Code session…",
                           "New tab with Codex session…", "---", "Close window"])
         self.assertEqual(self.build_right_click_menu_titles(1),
-                         ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Extract to new window"])
+                         ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Extract to new window", "---",
+                          "/compact", "/clear", "Kill Session"])
+
+    def test_slash_commands_only_at_the_prompt_and_clear_and_kill_ask_first(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+
+        def build_right_click_menu_items_by_title(row):
+            item = outline_view.itemAtRow_(row)
+            self.list_controller.find_clicked_item = lambda: item
+            menu = NSMenu.alloc().initWithTitle_("")
+            self.list_controller.menuNeedsUpdate_(menu)
+            return {menu_item.title(): menu_item for menu_item in menu.itemArray()}
+        menu_items_by_title = build_right_click_menu_items_by_title(1)  # "planning" is working
+        self.assertFalse(menu_items_by_title["/compact"].isEnabled())
+        self.assertTrue(menu_items_by_title["Kill Session"].isEnabled())
+        menu_items_by_title = build_right_click_menu_items_by_title(5)  # analysis-0 is idle
+        self.assertTrue(menu_items_by_title["/compact"].isEnabled())
+        self.list_controller.menuSendSlashCommand_(menu_items_by_title["/compact"])
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].arguments),
+                         ("send_slash_command", {"command": "/compact"}))
+        self.list_controller.menuSendSlashCommand_(menu_items_by_title["/clear"])  # the user says No
+        self.list_controller.menuKillSession_(menu_items_by_title["Kill Session"])
+        self.assertEqual(len(self.owner.confirmation_questions), 2)
+        self.assertEqual(len(self.submitted_actions), 1)
+        self.owner.answer_to_confirmation = True
+        self.list_controller.menuKillSession_(menu_items_by_title["Kill Session"])
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                         ("end_agent_process", {"session_id": "s10"}))
 
     def test_double_click_on_a_window_shows_it_without_renaming_or_collapsing(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -402,12 +459,13 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.width_is_set_by_the_user = True
         self.window.setContentSize_((560, 260))
         self.list_controller.apply_snapshot(snapshot)
-        self.assertGreater(self.list_controller.context_column_width, 0)
-        self.assertGreater(self.list_controller.icon_column_width, 0)
+        self.assertGreater(self.list_controller.column_widths["context_tokens"], 0)
+        self.assertGreater(self.list_controller.column_widths["agent_tool_icon"], 0)
         self.window.setContentSize_((200, 260))  # the narrowest sidebar
         self.window.contentView().layoutSubtreeIfNeeded()
         self.list_controller.measure_right_columns()
-        self.assertEqual((self.list_controller.context_column_width, self.list_controller.icon_column_width), (0, 0))
+        self.assertEqual((self.list_controller.column_widths["context_tokens"], self.list_controller.column_widths["agent_tool_icon"]),
+                         (0, 0))
 
     def test_duplicate_is_greyed_out_for_a_tool_without_a_launch_command(self):
         snapshot = make_sample_snapshot()
@@ -542,7 +600,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(preview_frame.origin.x, row_view.name_text_field.frame().origin.x)  # starts under the name
         self.assertLessEqual(preview_frame.origin.y + preview_frame.size.height, row_view.name_text_field.frame().origin.y)
         self.assertEqual(row_view.preview_connector_text_field.stringValue(), "│  \n│  ")  # the window's tree line carries on
-        self.assertEqual(self.list_controller.measure_fully_expanded_list_height(), 6 * ROW_HEIGHT + TAB_ROW_HEIGHT_WITH_PREVIEW)
+        self.assertEqual(self.list_controller.measure_fully_expanded_list_height(), 7 * ROW_HEIGHT + TAB_ROW_HEIGHT_WITH_PREVIEW)
         self.assertEqual(self.lay_out_row_view(1).disclosure_button.image().accessibilityDescription(), "Close")
         self.click_row_arrow(1)
         self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)
@@ -553,13 +611,13 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             item = outline_view.itemAtRow_(row)
             self.list_controller.find_clicked_item = lambda: item
             self.list_controller.rowClicked_(None)
-        self.assertEqual((outline_view.numberOfRows(), outline_view.rectOfRow_(1).size.height), (7, ROW_HEIGHT))
+        self.assertEqual((outline_view.numberOfRows(), outline_view.rectOfRow_(1).size.height), (8, ROW_HEIGHT))
 
     def test_the_arrow_on_a_window_collapses_just_that_window(self):
         outline_view = self.apply_snapshot_with_previews()
         self.click_row_arrow(5)  # a preview in the second window
         self.click_row_arrow(4)  # the second window
-        self.assertEqual((outline_view.numberOfRows(), self.list_controller.collapsed_item_keys), (5, {("window", "w2")}))
+        self.assertEqual((outline_view.numberOfRows(), self.list_controller.collapsed_item_keys), (6, {("window", "w2")}))
         self.click_row_arrow(4)
         self.assertEqual(outline_view.rectOfRow_(5).size.height, TAB_ROW_HEIGHT_WITH_PREVIEW)  # comes back as it was
 
@@ -567,7 +625,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         outline_view = self.apply_snapshot_with_previews()
         self.click_row_arrow(1)  # opens one preview
         self.list_controller.set_all_expanded(False)
-        self.assertEqual(outline_view.numberOfRows(), 2)
+        self.assertEqual(outline_view.numberOfRows(), 3)  # 2 windows and the "+" row
         self.list_controller.set_all_expanded(True)
         self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 5, 6)],
                          [TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT, ROW_HEIGHT])
@@ -576,14 +634,18 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel = self.dropdown_panel_controller
         self.list_controller.apply_snapshot(make_sample_snapshot())
         button = panel.expand_or_collapse_all_button
-        self.assertLess(button.frame().origin.x, panel.settings_button.frame().origin.x)  # beside the settings button
+        panel_width = panel.view().bounds().size.width
+        self.assertEqual(button.frame().origin.x + button.frame().size.width, panel_width - 6)  # the top right corner
+        settings_frame = panel.settings_button.frame()  # a button with its name, at the bottom left
+        self.assertEqual((panel.settings_button.title(), settings_frame.origin.x), ("Settings", 6))
+        self.assertLess(settings_frame.origin.y + settings_frame.size.height, BOTTOM_BAR_HEIGHT)
         self.assertEqual(button.toolTip(), "Collapse all")  # fully expanded: a click collapses
         panel.expandOrCollapseAllClicked_(button)
-        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (2, "Expand all"))
+        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (3, "Expand all"))
         self.list_controller.toggle_expansion(self.list_controller.outline_view.itemAtRow_(0))  # one window expanded
         self.assertEqual(button.toolTip(), "Expand all")
         panel.expandOrCollapseAllClicked_(button)
-        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (7, "Collapse all"))
+        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (8, "Collapse all"))
 
     def test_a_collapsed_monitor_left_without_windows_doesnt_count_as_collapsed(self):
         two_monitor_snapshot = make_two_monitor_snapshot(make_sample_snapshot())
@@ -602,10 +664,34 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertIs(arrow.target(), self.list_controller)
         self.list_controller.row_press_in_progress = True  # what RowButton.mouseDown_ sets while the button is down
         self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=3))
-        self.assertEqual(outline_view.numberOfRows(), 7)  # held
+        self.assertEqual(outline_view.numberOfRows(), 8)  # held
         self.list_controller.row_press_in_progress = False
         self.list_controller.apply_held_snapshot()
-        self.assertEqual(outline_view.numberOfRows(), 8)
+        self.assertEqual(outline_view.numberOfRows(), 9)
+
+    def test_the_plus_row_ends_the_list_on_the_tree_line_and_offers_a_new_window_per_included_tool(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        outline_view = self.list_controller.outline_view
+        plus_row = outline_view.numberOfRows() - 1
+        plus_row_view = self.lay_out_row_view(plus_row)
+        plus_button = plus_row_view.new_window_button
+        self.assertFalse(plus_button.isHidden())
+        self.assertTrue(self.lay_out_row_view(1).new_window_button.isHidden())  # only on the "+" row
+        tab_row_view = self.lay_out_row_view(plus_row - 1)  # the last tab: "└─ "
+        connector_frame = tab_row_view.prefix_text_field.frame()
+        plus_center_x = plus_button.frame().origin.x + plus_button.frame().size.width / 2
+        self.assertLess(abs(plus_center_x - self.list_controller.measure_tree_line_x()), 0.5)
+        self.assertLess(connector_frame.origin.x, plus_center_x)
+        self.assertLess(plus_center_x, connector_frame.origin.x + connector_frame.size.width / 3)  # under the "└"
+        self.assertEqual(self.build_right_click_menu_titles(plus_row), ["New Claude Code Window", "New Codex Window"])
+        # Every clickable icon shows the pointing hand.
+        for button in (plus_button, tab_row_view.disclosure_button, self.dropdown_panel_controller.settings_button,
+                       self.dropdown_panel_controller.expand_or_collapse_all_button):
+            self.assertIsInstance(button, PointingHandButton)
+            self.assertTrue(button.trackingAreas())
+        self.assertEqual(outline_view.rectOfRow_(plus_row).size.height, ROW_HEIGHT)
+        self.assertEqual(self.list_controller.outline_view.itemAtRow_(plus_row).kind, "new_window")
 
     def test_the_expand_or_collapse_button_shows_only_with_two_or_more_windows(self):
         panel = self.dropdown_panel_controller
@@ -617,8 +703,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(one_window_snapshot)
         self.assertTrue(button.isHidden())
         self.window.setContentSize_((320, 260))
-        message_frame = panel.message_text_field.frame()  # the message line reaches the settings button instead
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, panel.settings_button.frame().origin.x - 8)
+        message_frame = panel.message_text_field.frame()  # the message line reaches the right edge instead
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, panel.view().bounds().size.width - 6 - 8)
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertFalse(button.isHidden())
         message_frame = panel.message_text_field.frame()
@@ -665,9 +751,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_tool_icon_state_and_time_columns_line_up_when_two_tools_run(self):
         row_views = self.lay_out_tab_row_views(make_sample_snapshot())  # Claude Code and Codex
-        column_views_by_name = {"icon": [row_view.icon_image_view for row_view in row_views],
-                                "state": [row_view.state_text_field for row_view in row_views],
-                                "time": [row_view.elapsed_time_text_field for row_view in row_views]}
+        column_views_by_name = {"icon": [row_view.column_views["agent_tool_icon"] for row_view in row_views],
+                                "state": [row_view.column_views["state"] for row_view in row_views],
+                                "time": [row_view.column_views["state_duration"] for row_view in row_views]}
         for column_name, views in column_views_by_name.items():
             self.assertEqual(len({(view.frame().origin.x, view.frame().size.width) for view in views}), 1, column_name)
             self.assertTrue(all(not view.isHidden() for view in views), column_name)
@@ -683,8 +769,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             attributed_text = text_field.attributedStringValue()
             paragraph_style = attributed_text.attribute_atIndex_effectiveRange_(NSParagraphStyleAttributeName, 0, None)[0]
             return paragraph_style.alignment() if paragraph_style is not None else None
-        self.assertEqual(read_text_alignment(row_views[0].elapsed_time_text_field), NSTextAlignmentRight)
-        self.assertNotEqual(read_text_alignment(row_views[0].state_text_field), NSTextAlignmentRight)
+        self.assertEqual(read_text_alignment(row_views[0].column_views["state_duration"]), NSTextAlignmentRight)
+        self.assertNotEqual(read_text_alignment(row_views[0].column_views["state"]), NSTextAlignmentRight)
         self.list_controller.toggle_expansion(self.list_controller.outline_view.itemAtRow_(0))  # only a collapsed window has counts
         window_row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 0, True)
         self.assertEqual(window_row_view.details_text_field.stringValue(), "1 asking, 1 working, 1 done")
@@ -697,8 +783,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         snapshot = snapshot._replace(monitors=(snapshot.monitors[0]._replace(
             windows=(claude_only_window, snapshot.monitors[0].windows[1])),))
         row_views = self.lay_out_tab_row_views(snapshot)
-        self.assertEqual(self.list_controller.icon_column_width, 0)
-        self.assertTrue(all(row_view.icon_image_view.isHidden() for row_view in row_views))
+        self.assertEqual(self.list_controller.column_widths["agent_tool_icon"], 0)
+        self.assertTrue(all(row_view.column_views["agent_tool_icon"].isHidden() for row_view in row_views))
 
     def test_dropdown_keeps_its_fully_expanded_size_when_rows_collapse(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -715,7 +801,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
         self.assertGreater(row_view.frame().size.width, POPOVER_WIDTH - 60)  # the column fills the dropdown
         self.assertEqual(row_view.name_text_field.stringValue(), "planning")
-        self.assertEqual(row_view.state_text_field.stringValue(), "working")
+        self.assertEqual(row_view.column_views["state"].stringValue(), "working")
         self.assertIsNone(row_view.toolTip())  # no hover popups on rows (user request, 2026-10-19)
         self.assertTrue(row_view.prefix_text_field.stringValue().startswith("├─ "))
         image_path = os.environ.get("LLM_SIDEBAR_DASHBOARD_SMOKE_TEST_IMAGE")
@@ -908,7 +994,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_column_checkboxes_choose_the_shown_columns_in_their_left_to_right_order(self):
         checkboxes = self.controller.column_checkboxes
         self.assertEqual([title for title in (checkbox.title() for checkbox in checkboxes.values())],
-                         ["State", "State Duration", "Used Token Count", "Created Time", "Time Since Created"])
+                         ["State", "State Duration", "Used Token Count", "Created Time", "Time Since Created", "Memory Usage",
+                          "CPU Usage"])
         checkboxes["state"].setState_(0)
         self.controller.controlChanged_(checkboxes["state"])
         checkboxes["created_time"].setState_(1)
@@ -960,9 +1047,18 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         texts_top_to_bottom = [subview.stringValue() for subview in sorted(
             (subview for subview in self.controller.window.contentView().subviews() if isinstance(subview, NSTextField)),
             key=lambda subview: -subview.frame().origin.y)]
-        for earlier, later in (("Show as:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Commands"),
-                               ("Commands", "Claude Code command:")):
+        for earlier, later in (("Show as:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Harnesses"),
+                               ("Harnesses", "Include:")):
             self.assertLess(texts_top_to_bottom.index(earlier), texts_top_to_bottom.index(later), (earlier, later))
+
+    def test_harnesses_can_be_left_out_and_keep_their_commands(self):
+        self.assertEqual([checkbox.title() for checkbox in self.controller.include_checkboxes], ["Claude Code", "Codex"])
+        command_field = self.controller.launch_command_fields[1]
+        self.assertEqual(command_field.superview().subviews()[0].stringValue(), "Codex command:")  # indented under its checkbox
+        self.controller.include_checkboxes[1].setState_(0)
+        self.controller.controlChanged_(self.controller.include_checkboxes[1])
+        self.assertEqual([agent_tool["is_included"] for agent_tool in self.owner.settings["agent_tools"]], [True, False])
+        self.assertEqual(self.owner.settings["agent_tools"][1]["launch_command"], "codex")
 
     def test_icon_color_popup_offers_auto_first_and_stores_lowercase_names(self):
         self.assertEqual(self.controller.icon_color_popup.titleOfSelectedItem(), "Auto")

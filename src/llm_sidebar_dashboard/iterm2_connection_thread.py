@@ -10,6 +10,7 @@ import glob
 import json
 import os
 import shutil
+import signal
 import socket
 import threading
 import time
@@ -21,9 +22,10 @@ from iterm2 import api_pb2
 from iterm2.notifications import async_subscribe_to_variable_change_notification
 
 from llm_sidebar_dashboard import iterm2_actions
-from llm_sidebar_dashboard.agent_process_tree import (choose_command_the_agent_is_waiting_on, list_descendant_processes,
-                                                      process_is_alive, read_name_the_process_was_started_as,
-                                                      read_process_current_folder, read_process_info)
+from llm_sidebar_dashboard.agent_process_tree import (choose_command_the_agent_is_waiting_on, compute_cpu_percent,
+                                                      list_descendant_processes, process_is_alive,
+                                                      read_name_the_process_was_started_as, read_process_current_folder,
+                                                      read_process_info, read_process_tree_resource_usage)
 from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
 from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.dashboard_core_api import ActionRegistry, ActionResult
@@ -48,6 +50,8 @@ FINGERPRINT_INTERVAL_SECONDS = 30
 SECONDS_AN_AGENT_TAKES_TO_START_ITS_HELPERS = 30
 SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS = 30  # while a session is idle
 CONTEXT_USAGE_CHECK_INTERVAL_SECONDS = 5
+RESOURCE_USAGE_CHECK_INTERVAL_SECONDS = 3  # the Memory and CPU columns
+SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED = 5  # "Kill Session": SIGTERM, then SIGKILL
 CONVERSATION_FILE_RETRY_SECONDS = 15  # a conversation file not found yet (Codex writes it at the first prompt)
 CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up again in case the conversation changed
 DEFAULT_STUCK_THRESHOLD_SECONDS = 600
@@ -188,6 +192,7 @@ class DashboardCore:
         self.reserved_area_was_received = False  # until the main thread says whether the sidebar is docked
         self.window_room_lock = asyncio.Lock()
         self.stuck_threshold_seconds = DEFAULT_STUCK_THRESHOLD_SECONDS
+        self.left_out_agent_tool_names = frozenset()  # the settings' Harnesses section
         self.claude_agents_by_process_id = {}
         self.key_terminal_window_id = None  # None while no terminal window (for example iTerm2's Settings) has keyboard focus
         self.last_seen_session_id = None
@@ -220,6 +225,8 @@ class DashboardCore:
         register("duplicate_agent_session", self.handle_duplicate_agent_session, True, False)
         register("peek_agent_session", self.handle_peek_agent_session, False, False)
         register("end_peek", self.handle_end_peek, False, False)
+        register("send_slash_command", self.handle_send_slash_command, True, True)
+        register("end_agent_process", self.handle_end_agent_process, False, False)
 
     async def perform_action(self, action_request):
         """Runs an action request, then asks for a fresh gather and snapshot.
@@ -261,6 +268,41 @@ class DashboardCore:
         return await iterm2_actions.start_agent_session(
             self.connection, self.app, action_request.target.get("window_id"), action_request.arguments["folder"],
             action_request.arguments["launch_command"])
+
+    async def handle_send_slash_command(self, action_request):
+        """Types /compact or /clear into an agent session that waits at its prompt, idle or done
+        as its row shows it (R15.1; iterm2_actions.type_slash_command checks its input box)."""
+        session_id = action_request.target["session_id"]
+        agent_session = self.agent_sessions.get(session_id)
+        if agent_session is None:
+            return ActionResult(False, "that tab no longer runs an agent")
+        state, _ = self.displayed_state_by_session_id.get(session_id, ("unknown", 0))
+        if state not in ("idle", "done"):
+            return ActionResult(False, f"the agent is {state}; commands are typed only while it waits at its prompt")
+        return await iterm2_actions.type_slash_command(self.app, session_id, action_request.arguments["command"],
+                                                       agent_session["adapter"])
+
+    async def handle_end_agent_process(self, action_request):
+        """Ends a tab's agent process ("Kill Session"; the tab and its shell stay): SIGTERM, and
+        SIGKILL if it is still running SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later."""
+        agent_session = self.agent_sessions.get(action_request.target["session_id"])
+        if agent_session is None or not agent_session["process_id"]:
+            return ActionResult(False, "that tab no longer runs an agent")
+        process_id = agent_session["process_id"]
+        try:
+            os.kill(process_id, signal.SIGTERM)
+        except ProcessLookupError:
+            return ActionResult(True)  # it had ended already
+        deadline = time.time() + SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED
+        while time.time() < deadline:
+            await asyncio.sleep(0.2)
+            if not process_is_alive(process_id):
+                return ActionResult(True)
+        try:
+            os.kill(process_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return ActionResult(True)
 
     def set_reserved_screen_area(self, reserved_area):
         """Receives the docked sidebar's area, {"frame": (x, y, width, height), "edge": "right" or
@@ -454,6 +496,11 @@ class DashboardCore:
     def set_stuck_threshold_seconds(self, stuck_threshold_seconds):
         """Receives the stuck time limit from the settings."""
         self.stuck_threshold_seconds = stuck_threshold_seconds
+        self.snapshot_needed.set()
+
+    def set_left_out_agent_tool_names(self, left_out_agent_tool_names):
+        """Receives the agent tools the settings' Harnesses section leaves out of the list."""
+        self.left_out_agent_tool_names = frozenset(left_out_agent_tool_names)
         self.snapshot_needed.set()
 
     def set_dashboard_is_active(self, dashboard_is_active):
@@ -653,8 +700,10 @@ class DashboardCore:
             gathered_window["selected_tab_id"] = window.current_tab.tab_id if window and window.current_tab else None
         self.agent_sessions = resolve_agent_sessions(
             self.gathered_windows, self.agent_sessions, self.specific_adapters, self.generic_adapter, process_is_alive)
+        listed_agent_sessions = {session_id: agent_session for session_id, agent_session in self.agent_sessions.items()
+                                 if agent_session["agent_tool_name"] not in self.left_out_agent_tool_names}
         snapshot = build_computer_snapshot(
-            self.gathered_windows, self.agent_sessions, self.monitors, self.window_order,
+            self.gathered_windows, listed_agent_sessions, self.monitors, self.window_order,
             self.session_tracking_by_session_id, self.displayed_state_by_session_id, self.screen_readings_by_session_id,
             self.stuck_threshold_seconds, self.claude_agents_by_process_id, self.find_seen_session_id(),
             self.find_highlighted_session_id(), self.computer_id, self.computer_name, now)
@@ -816,16 +865,16 @@ class DashboardCore:
                         conversation_file = {"key": conversation_key, "path": path, "looked_up_at": now, "modified_at": None}
                         self.conversation_files_by_session_id[session_id] = conversation_file
                         # The old conversation's size and preview no longer apply.
-                        self.note_conversation_reading(session_id, "context_tokens", None)
-                        self.note_conversation_reading(session_id, "conversation_preview", None)
+                        self.note_reading_value(session_id, "context_tokens", None)
+                        self.note_reading_value(session_id, "conversation_preview", None)
                 if conversation_file["path"] is None:
                     continue
                 try:
                     modified_at = os.path.getmtime(conversation_file["path"])
                 except OSError:
                     conversation_file["path"] = None
-                    self.note_conversation_reading(session_id, "context_tokens", None)
-                    self.note_conversation_reading(session_id, "conversation_preview", None)
+                    self.note_reading_value(session_id, "context_tokens", None)
+                    self.note_reading_value(session_id, "conversation_preview", None)
                     continue
                 if modified_at != conversation_file["modified_at"]:
                     conversation_file["modified_at"] = modified_at
@@ -835,16 +884,50 @@ class DashboardCore:
                         continue  # the tab closed during the reads
                     # None means no usage in the file's end (one huge line), so the last size stays.
                     if context_tokens is not None:
-                        self.note_conversation_reading(session_id, "context_tokens", context_tokens)
-                    self.note_conversation_reading(session_id, "conversation_preview", preview_fields)
+                        self.note_reading_value(session_id, "context_tokens", context_tokens)
+                    self.note_reading_value(session_id, "conversation_preview", preview_fields)
 
-    def note_conversation_reading(self, session_id, reading_name, value):
-        """Stores what was read from a session's conversation file ("context_tokens" or
-        "conversation_preview") in its screen reading, asking for a snapshot when it changed."""
+    def note_reading_value(self, session_id, reading_name, value):
+        """Stores a value read for a session, from its conversation file ("context_tokens",
+        "conversation_preview") or its processes ("memory_bytes", "cpu_percent"), in its screen
+        reading, asking for a snapshot when it changed."""
         reading = self.screen_readings_by_session_id.setdefault(session_id, {})
         if value != reading.get(reading_name):
             reading[reading_name] = value
             self.snapshot_needed.set()
+
+    async def read_resource_usage_periodically(self):
+        """Keeps each agent session's memory and CPU use ("memory_bytes", "cpu_percent" in its
+        screen reading) current: its agent process and every process below it, read every
+        RESOURCE_USAGE_CHECK_INTERVAL_SECONDS in a worker thread (a few system calls per process,
+        no subprocess). Both are rounded (to the megabyte, to a whole percent) so that an idle
+        session's row and the snapshot don't change at every reading."""
+        cpu_time_readings_by_session_id = {}  # (process ID, CPU seconds, read at) from the last reading
+        while True:
+            await asyncio.sleep(RESOURCE_USAGE_CHECK_INTERVAL_SECONDS)
+            process_ids_by_session_id = {session_id: agent_session["process_id"]
+                                         for session_id, agent_session in self.agent_sessions.items() if agent_session["process_id"]}
+            usages_by_session_id = await asyncio.to_thread(
+                lambda: {session_id: read_process_tree_resource_usage(process_id)
+                         for session_id, process_id in process_ids_by_session_id.items()})
+            now = time.time()
+            for session_id in set(cpu_time_readings_by_session_id) - set(usages_by_session_id):
+                del cpu_time_readings_by_session_id[session_id]
+            for session_id, usage in usages_by_session_id.items():
+                if session_id not in self.agent_sessions:
+                    continue  # the tab closed during the reading
+                memory_bytes = cpu_percent = None
+                if usage is not None:
+                    process_id = process_ids_by_session_id[session_id]
+                    previous_reading = cpu_time_readings_by_session_id.get(session_id)
+                    # A new agent process in the tab starts its CPU time over.
+                    if previous_reading is not None and previous_reading[0] == process_id:
+                        cpu_percent = compute_cpu_percent(previous_reading[1:], (usage[1], now))
+                    cpu_time_readings_by_session_id[session_id] = (process_id, usage[1], now)
+                    memory_bytes = round(usage[0] / 1024 ** 2) * 1024 ** 2
+                    cpu_percent = round(cpu_percent) if cpu_percent is not None else None
+                self.note_reading_value(session_id, "memory_bytes", memory_bytes)
+                self.note_reading_value(session_id, "cpu_percent", cpu_percent)
 
     async def note_command_the_agent_is_waiting_on(self, session_id, agent_session, reading, state, is_effectively_working, now):
         """Records in the session's screen reading the command a working agent started in this
@@ -1012,7 +1095,7 @@ class DashboardCore:
         coroutines = [self.watch_layout_changes(), self.watch_new_sessions(), self.watch_session_terminations(),
                       self.watch_focus_changes(), self.poll_window_frames_when_they_matter(),
                       self.read_agent_screens_periodically(), self.read_context_window_usage_periodically(),
-                      self.publish_when_needed()]
+                      self.read_resource_usage_periodically(), self.publish_when_needed()]
         if self.claude_command_path:
             coroutines.append(self.refresh_claude_agents_periodically())
         background_tasks = [asyncio.ensure_future(coroutine) for coroutine in coroutines]
@@ -1076,6 +1159,11 @@ class Iterm2ConnectionThread(threading.Thread):
         """Thread-safe: passes the stuck time limit from the settings to the core."""
         self.core_ready.wait()
         self.event_loop.call_soon_threadsafe(self.core.set_stuck_threshold_seconds, stuck_threshold_seconds)
+
+    def send_left_out_agent_tool_names(self, left_out_agent_tool_names):
+        """Thread-safe: passes the agent tools the settings leave out of the list to the core."""
+        self.core_ready.wait()
+        self.event_loop.call_soon_threadsafe(self.core.set_left_out_agent_tool_names, left_out_agent_tool_names)
 
     def send_dashboard_is_active(self, dashboard_is_active):
         """Thread-safe: tells the core whether the dashboard is the active app."""

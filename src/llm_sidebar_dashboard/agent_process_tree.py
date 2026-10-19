@@ -5,6 +5,8 @@
 - The agent's descendant processes, to tell an agent that is waiting on a command it started
   (a pipeline, a test run) from one that is thinking (PLAN.md section 6, "stuck"), and the
   name that command was started as.
+- The memory and CPU time the agent and all its descendants use (the Memory and CPU columns,
+  user request, 2026-10-19).
 """
 
 import collections
@@ -30,6 +32,8 @@ SECONDS_OF_SLACK_AT_TURN_START = 2
 # tool call) and status line commands, which end within a second, never show as "running".
 SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS = 2
 
+RUSAGE_INFO_V2 = 2  # proc_pid_rusage flavor that returns struct rusage_info_v2
+
 ProcessInfo = collections.namedtuple("ProcessInfo", ["process_id", "parent_process_id", "name", "started_at"])
 ProcessInfo.__doc__ = "One process: its executable's name and when it started (seconds since the epoch)."
 
@@ -47,6 +51,68 @@ class ProcessBsdInfo(ctypes.Structure):
         ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32), ("pbi_start_tvsec", ctypes.c_uint64),
         ("pbi_start_tvusec", ctypes.c_uint64),
     ]
+
+
+class ResourceUsageInfoV2(ctypes.Structure):
+    """struct rusage_info_v2 from <sys/resource.h>; the times are in mach absolute time units."""
+
+    _fields_ = [("ri_uuid", ctypes.c_uint8 * 16)] + [(field_name, ctypes.c_uint64) for field_name in (
+        "ri_user_time", "ri_system_time", "ri_pkg_idle_wkups", "ri_interrupt_wkups", "ri_pageins", "ri_wired_size",
+        "ri_resident_size", "ri_phys_footprint", "ri_proc_start_abstime", "ri_proc_exit_abstime", "ri_child_user_time",
+        "ri_child_system_time", "ri_child_pkg_idle_wkups", "ri_child_interrupt_wkups", "ri_child_pageins",
+        "ri_child_elapsed_abstime", "ri_diskio_bytesread", "ri_diskio_byteswritten")]
+
+
+class MachTimebaseInfo(ctypes.Structure):
+    """struct mach_timebase_info: mach absolute time units times numer / denom are nanoseconds."""
+
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+
+def read_seconds_per_mach_time_unit():
+    """Returns how many seconds one mach absolute time unit is (1 ns on Intel, 1/24 µs on Apple silicon)."""
+    timebase = MachTimebaseInfo()
+    LIBC.mach_timebase_info(ctypes.byref(timebase))
+    return timebase.numer / timebase.denom / 1e9
+
+
+SECONDS_PER_MACH_TIME_UNIT = read_seconds_per_mach_time_unit()
+
+
+def read_process_resource_usage(process_id):
+    """Returns (memory in bytes, CPU time in seconds) for one process: its physical footprint,
+    the number Activity Monitor shows as Memory, and the user plus system time it has used; or
+    None if it is gone or can't be read."""
+    usage = ResourceUsageInfoV2()
+    if LIBPROC.proc_pid_rusage(process_id, RUSAGE_INFO_V2, ctypes.byref(usage)) != 0:
+        return None
+    return usage.ri_phys_footprint, (usage.ri_user_time + usage.ri_system_time) * SECONDS_PER_MACH_TIME_UNIT
+
+
+def read_process_tree_resource_usage(process_id):
+    """Returns (memory in bytes, CPU time in seconds) summed over a process and all its
+    descendants (an agent with the commands, servers and helpers it started), or None if the
+    process is gone. A descendant that ends while it is being read is left out."""
+    own_usage = read_process_resource_usage(process_id)
+    if own_usage is None:
+        return None
+    usages = [own_usage] + [read_process_resource_usage(process.process_id) for process in list_descendant_processes(process_id)]
+    usages = [usage for usage in usages if usage is not None]
+    return sum(memory for memory, _ in usages), sum(cpu_seconds for _, cpu_seconds in usages)
+
+
+def compute_cpu_percent(previous_reading, reading):
+    """Returns the share of one CPU core used between two readings, in percent (200 means two
+    cores' worth), or None for the first reading. A descendant that ended in between takes its
+    CPU time with it, so a drop counts as 0.
+
+    Args:
+        previous_reading: (CPU seconds, read at) from the last reading, or None.
+        reading: (CPU seconds, read at) now.
+    """
+    if previous_reading is None or reading[1] <= previous_reading[1]:
+        return None
+    return max(reading[0] - previous_reading[0], 0) / (reading[1] - previous_reading[1]) * 100
 
 
 def read_process_current_folder(process_id):
