@@ -4,6 +4,7 @@ Set LLM_SIDEBAR_DASHBOARD_SMOKE_TEST_IMAGE=/path/to/file.png to also save what t
 """
 
 import os
+import time
 import unittest
 
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered,
@@ -30,6 +31,7 @@ class RecordingOwner:
         self.started_agent_sessions = []
         self.windows_asked_about_closing = []
         self.answer_to_closing_window = False
+        self.peeks = []
 
     def submit_action(self, action_request):
         self.submitted_actions.append(action_request)
@@ -45,6 +47,15 @@ class RecordingOwner:
 
     def start_agent_session_from_menu(self, window_id, folder, agent_tool_name):
         self.started_agent_sessions.append((window_id, folder, agent_tool_name))
+
+    def find_launch_command(self, agent_tool_name):
+        return {"Claude Code": "claude", "Codex": "codex"}.get(agent_tool_name, "")
+
+    def start_peek(self, session_id):
+        self.peeks.append(("start", session_id))
+
+    def end_peek(self):
+        self.peeks.append(("end",))
 
     def confirm_closing_window(self, window_entry):
         self.windows_asked_about_closing.append(window_entry.window_id)
@@ -178,10 +189,10 @@ class UserInterfaceSmokeTests(unittest.TestCase):
     def test_window_and_tab_right_click_menus(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertEqual(self.build_right_click_menu_titles(0),
-                         ["Collapse", "---", "Rename", "Show window", "---", "New tab with Claude Code session…",
+                         ["Collapse", "---", "Show window", "Rename", "---", "New tab with Claude Code session…",
                           "New tab with Codex session…", "---", "Close window"])
         self.assertEqual(self.build_right_click_menu_titles(1),
-                         ["Rename", "Show tab", "Move to window", "Extract to new window"])
+                         ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Extract to new window"])
 
     def test_double_click_on_a_window_shows_it_without_renaming_or_collapsing(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -191,7 +202,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertIn(("window", "w1"), self.list_controller.collapsed_item_keys)  # the first click toggles at once
         self.list_controller.rowDoubleClicked_(None)
         self.assertEqual([(request.action, request.target) for request in self.submitted_actions],
-                         [("focus_agent_session", {"session_id": "s1"})])  # its selected tab, else its first one
+                         [("focus_window", {"window_id": "w1"})])  # with the tab it already shows
         self.assertFalse(self.list_controller.rename_in_progress)
         self.assertNotIn(("window", "w1"), self.list_controller.collapsed_item_keys)  # put back
 
@@ -232,6 +243,56 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(row_view.name_text_field.stringValue(), "new name")
         self.assertEqual(tab_item.entry.tab_title, "new name")
         self.assertEqual(self.submitted_actions[-1].action, "rename_tab")
+
+    def test_holding_a_tab_row_peeks_and_releasing_ends_it_but_a_click_does_not(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.list_controller.row_pressed(1)
+        self.list_controller.row_released()  # a click: released before the hold time
+        self.assertEqual(self.owner.peeks, [])
+        self.list_controller.row_pressed(1)
+        self.list_controller.peekTimerFired_(self.list_controller.peek_timer)  # held long enough
+        self.list_controller.row_released()
+        self.assertEqual(self.owner.peeks, [("start", "s1"), ("end",)])
+        self.list_controller.row_pressed(0)  # a window row doesn't peek
+        self.assertIsNone(self.list_controller.peek_timer)
+
+    def test_a_narrow_sidebar_drops_the_context_then_the_icon_column_to_keep_room_for_names(self):
+        snapshot = make_sample_snapshot()
+        window_one = snapshot.monitors[0].windows[0]
+        window_one = window_one._replace(agent_sessions=tuple(entry._replace(context_tokens=40_546) for entry in window_one.agent_sessions))
+        snapshot = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, snapshot.monitors[0].windows[1])),))
+        self.list_controller.width_is_set_by_the_user = True
+        self.window.setContentSize_((560, 260))
+        self.list_controller.apply_snapshot(snapshot)
+        self.assertGreater(self.list_controller.context_column_width, 0)
+        self.assertGreater(self.list_controller.icon_column_width, 0)
+        self.window.setContentSize_((200, 260))  # the narrowest sidebar
+        self.window.contentView().layoutSubtreeIfNeeded()
+        self.list_controller.measure_right_columns()
+        self.assertEqual((self.list_controller.context_column_width, self.list_controller.icon_column_width), (0, 0))
+
+    def test_duplicate_is_greyed_out_for_a_tool_without_a_launch_command(self):
+        snapshot = make_sample_snapshot()
+        window_two = snapshot.monitors[0].windows[1]
+        window_two = window_two._replace(agent_sessions=(window_two.agent_sessions[0]._replace(agent_tool_name="aider"),)
+                                         + window_two.agent_sessions[1:])
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(snapshot.monitors[0].windows[0], window_two)),)))
+        item = self.list_controller.outline_view.itemAtRow_(5)  # the "aider" tab
+        self.list_controller.find_clicked_item = lambda: item
+        menu = NSMenu.alloc().initWithTitle_("")
+        self.list_controller.menuNeedsUpdate_(menu)
+        duplicate_item = next(menu_item for menu_item in menu.itemArray() if menu_item.title() == "Duplicate this tab")
+        self.assertFalse(duplicate_item.isEnabled())
+
+    def test_closing_the_dropdown_cancels_an_open_rename_so_the_list_keeps_updating(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        self.list_controller.begin_rename(self.list_controller.outline_view.itemAtRow_(1))
+        self.assertTrue(self.list_controller.rename_in_progress)
+        self.list_controller.cancel_rename()
+        self.assertFalse(self.list_controller.rename_in_progress)
+        self.assertEqual(self.submitted_actions, [])  # nothing was renamed
 
     def test_expand_or_collapse_from_the_right_click_menu(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -416,6 +477,28 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.controller.start_width_drag(1100)
         self.controller.finish_width_drag()
         self.assertEqual(self.owner.saved_widths, [])
+
+    def test_shown_from_the_menu_it_stays_for_the_whole_five_seconds(self):
+        self.controller.keep_shown_until = time.time() + 4
+        self.controller.hideTimerFired_(None)
+        self.assertTrue(self.controller.is_shown)
+        self.assertIsNotNone(self.controller.hide_timer)  # checks again when the 5 seconds are up
+        self.controller.cancel_hide_timer()
+
+    def test_a_turned_off_sidebar_is_parked_just_past_its_edge(self):
+        # So "Show the sidebar" slides it in from that edge. (The shown case isn't tested here:
+        # it would put a real window on the screen.)
+        self.owner.reserve_screen_area = lambda area: None
+        self.controller.settings = dict(self.controller.settings, sidebar_is_on=False)
+        self.controller.is_shown = False
+        self.controller.update_placement()  # the real screens: the sidebar stays hidden
+        self.assertFalse(self.controller.is_shown or self.controller.window.isVisible())
+        # The parked frame for both edges, on this test's own screen (setUp: 1500 wide at x 0, sidebar 400 wide).
+        for edge, parked_x in (("right", 1500), ("left", -400)):
+            self.controller.screens = [{"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)}]
+            self.controller.placement = SidebarPlacement(0, edge, True)
+            self.controller.set_shown(False, animate=False)
+            self.assertEqual(self.controller.window.frame().origin.x, parked_x, edge)
 
     def test_strip_sits_on_the_right_side_of_a_left_edge_sidebar(self):
         self.controller.move_width_drag_strip_to_inner_edge("left")

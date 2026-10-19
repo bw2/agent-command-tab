@@ -44,12 +44,53 @@ class AgentToolAdapter:
             without real progress (screen_readings.compute_screen_fingerprint).
         interrupted_turn_screen_pattern: Compiled pattern for the line the tool prints when a
             permission prompt is denied or the turn is interrupted, or None.
+        helper_process_names: Names of processes the tool starts for itself during a turn, which
+            are not commands the agent waits on (agent_process_tree).
     """
 
     agent_tool_name = ""
     permission_dialog_screen_patterns = ()
     progress_noise_patterns = ()
     interrupted_turn_screen_pattern = None
+    helper_process_names = frozenset()
+
+    async def find_conversation_id(self, agent_process_id, claude_agent_record):
+        """Returns the ID of the conversation the agent process is in, or None if unknown.
+
+        Args:
+            agent_process_id: The agent's process ID (iTerm2's jobPid).
+            claude_agent_record: The process's record from `claude agents --json`, or None.
+        """
+        return None
+
+    async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
+        """Returns the path of the file the tool writes the conversation to, or None if unknown.
+
+        Args:
+            agent_process_id: The agent's process ID (iTerm2's jobPid).
+            claude_agent_record: The process's record from `claude agents --json`, or None.
+            claude_config_folders: Folders that may hold Claude Code transcripts.
+        """
+        return None
+
+    def read_context_tokens(self, conversation_file_path):
+        """Returns how many tokens the conversation's context holds, from its file, or None."""
+        return None
+
+    def read_turn_started_at(self, conversation_file_path):
+        """Returns when the current turn began, from the conversation file, or None."""
+        return None
+
+    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
+        """Returns the command that starts a copy of a session (Duplicate): one that continues a
+        copy of the conversation where the tool can fork it, else a fresh session.
+
+        Args:
+            launch_command: The tool's launch command from the settings.
+            conversation_id: From find_conversation_id, or None.
+            claude_agent_record: The original's record from `claude agents --json`, or None.
+        """
+        return launch_command
 
     def matches_command_line(self, command_line):
         """Returns whether a tab whose foreground job has this command line runs this tool.

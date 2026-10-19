@@ -48,6 +48,12 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual((parts.agent_tool_name, parts.details_text, parts.state_text, parts.elapsed_time_text),
                          ("Claude Code", "", "working", "3m"))
 
+    def test_a_session_waiting_on_its_command_shows_running_and_the_commands_time(self):
+        entry = make_entry("working", status_since=100.0)._replace(running_command_name="python3",
+                                                                    running_command_started_at=220.0)
+        parts = build_agent_session_row_text_parts(entry, [True], 280.0)
+        self.assertEqual((parts.state_text, parts.elapsed_time_text), ("running", "1m"))
+
     def test_asking_dot(self):
         parts = build_agent_session_row_text_parts(make_entry("asking"), [False], 1.0)
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "purple", False))

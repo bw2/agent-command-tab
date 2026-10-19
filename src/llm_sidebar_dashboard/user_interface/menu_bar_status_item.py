@@ -4,7 +4,7 @@ import objc
 from AppKit import (NSApp, NSAttributedString, NSColor, NSEventMaskLeftMouseUp, NSEventMaskRightMouseUp,
                     NSEventTypeRightMouseUp, NSFont, NSFontAttributeName, NSFontWeightBold,
                     NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSMinYEdge, NSMutableAttributedString,
-                    NSStatusBar, NSVariableStatusItemLength)
+                    NSStatusBar, NSVariableStatusItemLength, NSWorkspace)
 from Foundation import NSObject
 
 from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_state
@@ -34,7 +34,8 @@ def choose_automatic_icon_color_name(snapshot):
 class MenuBarStatusItemController(NSObject):
     """Owns the NSStatusItem. A left click toggles the dropdown; a right click shows a small menu.
 
-    The owner (the app controller) has settings, open_settings(), toggle_sidebar() and quit().
+    The owner (the app controller) has settings, open_settings(), show_sidebar_for_a_few_seconds(),
+    quit() and note_application_in_front_before_dropdown(application).
     """
 
     def initWithPopover_owner_(self, popover, owner):
@@ -97,6 +98,7 @@ class MenuBarStatusItemController(NSObject):
 
     @objc.python_method
     def show_popover(self):
+        self.owner.note_application_in_front_before_dropdown(NSWorkspace.sharedWorkspace().frontmostApplication())
         NSApp.activateIgnoringOtherApps_(True)  # so the list can take typing (rename)
         list_panel_controller = self.popover.contentViewController()
         list_panel_controller.list_controller.prepare_to_appear()  # the list skips redraws while closed
@@ -107,8 +109,7 @@ class MenuBarStatusItemController(NSObject):
     @objc.python_method
     def show_right_click_menu(self):
         menu = NSMenu.alloc().initWithTitle_("")
-        sidebar_title = "Hide the sidebar" if self.owner.settings["sidebar_is_on"] else "Show the sidebar"
-        for title, action_name in ((sidebar_title, "toggleSidebarClicked:"), ("Settings…", "settingsClicked:"),
+        for title, action_name in (("Show the sidebar", "showSidebarClicked:"), ("Settings…", "settingsClicked:"),
                                    (None, None), ("Quit LLM Sidebar Dashboard", "quitClicked:")):
             if title is None:
                 menu.addItem_(NSMenuItem.separatorItem())
@@ -118,8 +119,8 @@ class MenuBarStatusItemController(NSObject):
             menu.addItem_(menu_item)
         self.status_item.popUpStatusItemMenu_(menu)
 
-    def toggleSidebarClicked_(self, sender):
-        self.owner.toggle_sidebar()
+    def showSidebarClicked_(self, sender):
+        self.owner.show_sidebar_for_a_few_seconds()
 
     def settingsClicked_(self, sender):
         self.owner.open_settings()

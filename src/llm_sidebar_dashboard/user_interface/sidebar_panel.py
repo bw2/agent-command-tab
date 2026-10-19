@@ -15,6 +15,8 @@ No window sits on the edge while the sidebar is hidden: a global mouse-moved mon
 needs no Accessibility permission and only watches) tests the pointer position.
 """
 
+import time
+
 import objc
 from AppKit import (NSAnimationContext, NSBackingStoreBuffered, NSCursor, NSEvent, NSEventMaskMouseMoved,
                     NSMakeRect, NSPanel, NSStatusWindowLevel, NSTrackingActiveAlways, NSTrackingArea,
@@ -34,6 +36,7 @@ from llm_sidebar_dashboard.user_interface.sidebar_placement import (choose_sideb
                                                                     compute_sidebar_frame, pointer_is_at_edge)
 
 SECONDS_BEFORE_HIDING = 0.5
+SECONDS_SHOWN_FROM_THE_MENU = 5
 SLIDE_ANIMATION_SECONDS = 0.15
 SMALLEST_WIDTH = 200
 LARGEST_WIDTH = 1200
@@ -113,9 +116,12 @@ class SidebarController(NSObject):
         self.screens = []
         self.is_shown = False
         self.hide_timer = None
+        self.keep_shown_until = 0  # set by "Show the sidebar" in the menu bar item's menu
+        self.shown_from_the_menu = False  # out because of that menu item (until it next hides)
         self.mouse_monitors = []
         self.width_drag_start = None  # (pointer x, width) while the inner edge is dragged
         self.list_controller = AgentSessionListController.alloc().initWithOwner_(owner)
+        self.list_controller.width_is_set_by_the_user = True
         self.list_panel_controller = ListPanelController.alloc().initWithListController_(self.list_controller)
         self.window = self.build_window()
         return self
@@ -175,14 +181,22 @@ class SidebarController(NSObject):
             return
         self.screens = read_monitors_from_screens()
         self.placement = choose_sidebar_edge(self.settings["sidebar_monitor_name"], self.settings["sidebar_edge"], self.screens)
-        if not self.settings["sidebar_is_on"] or self.placement is None:
+        if self.placement is None:
             self.stop_tracking_the_pointer()
+            self.cancel_hide_timer()
             self.window.orderOut_(None)
             self.is_shown = False
             self.owner.reserve_screen_area(None)
             return
         visible_frame = self.screens[self.placement.screen_index]["visible_frame"]
         self.move_width_drag_strip_to_inner_edge(self.placement.edge)
+        if not self.settings["sidebar_is_on"]:
+            # Turned off: parked just past its edge, so "Show the sidebar" slides it in from there.
+            # While that keeps it out, a settings change (a width dragged meanwhile) leaves it out.
+            self.stop_tracking_the_pointer()
+            self.owner.reserve_screen_area(None)
+            self.set_shown(self.is_shown and self.shown_from_the_menu, animate=False)
+            return
         if self.settings["sidebar_mode"] == "auto_hide":
             self.start_tracking_the_pointer()
             # Keep the current visibility: a settings change (for example a width just dragged
@@ -190,6 +204,7 @@ class SidebarController(NSObject):
             self.set_shown(self.is_shown, animate=False)
         else:
             self.stop_tracking_the_pointer()
+            self.cancel_hide_timer()
             self.set_shown(True, animate=False)
         # Docked: iTerm2 windows on this monitor are kept out of the sidebar's area.
         if self.settings["sidebar_mode"] == "docked":
@@ -207,24 +222,46 @@ class SidebarController(NSObject):
 
     @objc.python_method
     def set_shown(self, is_shown, animate=True):
+        """Slides the sidebar in or out. Once out of sight it is ordered out too, which gives up
+        keyboard focus (after a rename) and lets its list skip redraws while hidden."""
         screen = self.screens[self.placement.screen_index]
         frame = compute_sidebar_frame(screen["visible_frame"], screen["frame"], self.placement.edge,
                                       self.settings["sidebar_width"], is_shown)
         was_on_screen = self.window.isVisible()
         self.is_shown = is_shown
+        if not is_shown:
+            self.shown_from_the_menu = False
         if is_shown:
             self.window.orderFrontRegardless()
             if not was_on_screen:
                 self.list_controller.prepare_to_appear()  # the list skips redraws while hidden
+
+        def order_out_unless_shown_again():
+            if not self.is_shown:
+                self.window.orderOut_(None)
+
         if animate:
-            NSAnimationContext.beginGrouping()
-            NSAnimationContext.currentContext().setDuration_(SLIDE_ANIMATION_SECONDS)
-            self.window.animator().setFrame_display_(NSMakeRect(*frame), True)
-            NSAnimationContext.endGrouping()
+            def slide(context):
+                context.setDuration_(SLIDE_ANIMATION_SECONDS)
+                self.window.animator().setFrame_display_(NSMakeRect(*frame), True)
+            NSAnimationContext.runAnimationGroup_completionHandler_(slide, order_out_unless_shown_again)
         else:
             self.window.setFrame_display_(NSMakeRect(*frame), True)
-        if not is_shown and not animate:
-            self.window.orderOut_(None)
+            order_out_unless_shown_again()
+
+    @objc.python_method
+    def show_for_a_few_seconds(self):
+        """The menu bar item's "Show the sidebar" (user request, milestone 2): shows the sidebar,
+        also when it is turned off in the settings, for SECONDS_SHOWN_FROM_THE_MENU, then hides
+        it once the pointer isn't on it. A sidebar that is always shown stays as it is."""
+        if self.settings is None or self.placement is None:
+            return
+        if self.settings["sidebar_is_on"] and self.settings["sidebar_mode"] != "auto_hide":
+            return
+        self.keep_shown_until = time.time() + SECONDS_SHOWN_FROM_THE_MENU
+        self.set_shown(True)
+        self.shown_from_the_menu = True
+        self.check_whether_to_hide_in(SECONDS_SHOWN_FROM_THE_MENU)
 
     @objc.python_method
     def something_belonging_to_the_sidebar_is_open(self):
@@ -249,38 +286,58 @@ class SidebarController(NSObject):
 
     @objc.python_method
     def stop_tracking_the_pointer(self):
+        """Removes the mouse monitors; a pending hide check stays (it hides a sidebar shown from the menu)."""
         for mouse_monitor in self.mouse_monitors:
             NSEvent.removeMonitor_(mouse_monitor)
         self.mouse_monitors = []
-        self.cancel_hide_timer()
 
     @objc.python_method
     def pointer_moved(self):
         if self.settings is None or self.settings["sidebar_mode"] != "auto_hide" or self.placement is None:
             return
         pointer = NSEvent.mouseLocation()
-        pointer_location = (pointer.x, pointer.y)
         if not self.is_shown:
-            if pointer_is_at_edge(pointer_location, self.screens[self.placement.screen_index]["frame"], self.placement.edge):
+            if pointer_is_at_edge((pointer.x, pointer.y), self.screens[self.placement.screen_index]["frame"],
+                                  self.placement.edge):
                 self.set_shown(True)
             return
-        frame = self.window.frame()
-        pointer_is_over_sidebar = (frame.origin.x - 1 <= pointer.x <= frame.origin.x + frame.size.width + 1
-                                   and frame.origin.y <= pointer.y <= frame.origin.y + frame.size.height)
-        if pointer_is_over_sidebar:
+        if self.pointer_is_over_sidebar():
             self.cancel_hide_timer()
         elif self.hide_timer is None:
-            self.hide_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                SECONDS_BEFORE_HIDING, self, "hideTimerFired:", None, False)
+            self.check_whether_to_hide_in(SECONDS_BEFORE_HIDING)
+
+    @objc.python_method
+    def pointer_is_over_sidebar(self):
+        """Counts the strip between the sidebar and the screen's edge (a Dock on that side) as
+        part of the sidebar, since the pointer that showed it touched that edge."""
+        pointer = NSEvent.mouseLocation()
+        frame = self.window.frame()
+        screen_frame = self.screens[self.placement.screen_index]["frame"]
+        left, right = frame.origin.x - 1, frame.origin.x + frame.size.width + 1
+        if self.placement.edge == "right":
+            right = max(right, screen_frame[0] + screen_frame[2])
+        else:
+            left = min(left, screen_frame[0])
+        return left <= pointer.x <= right and frame.origin.y <= pointer.y <= frame.origin.y + frame.size.height
+
+    @objc.python_method
+    def check_whether_to_hide_in(self, seconds):
+        self.cancel_hide_timer()
+        self.hide_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            seconds, self, "hideTimerFired:", None, False)
 
     def hideTimerFired_(self, timer):
+        """Hides the sidebar unless it was shown from the menu less than SECONDS_SHOWN_FROM_THE_MENU
+        ago, the pointer is on it, or anything of it is open; otherwise checks again later
+        (without pointer tracking, a sidebar shown from the menu while turned off relies on this)."""
         self.hide_timer = None
-        if self.something_belonging_to_the_sidebar_is_open():
-            # Try again later; the sidebar stays while anything of it is open.
-            self.hide_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                SECONDS_BEFORE_HIDING, self, "hideTimerFired:", None, False)
-            return
-        self.set_shown(False)
+        seconds_still_shown_from_the_menu = self.keep_shown_until - time.time()
+        if seconds_still_shown_from_the_menu > 0:
+            self.check_whether_to_hide_in(seconds_still_shown_from_the_menu)
+        elif self.something_belonging_to_the_sidebar_is_open() or self.pointer_is_over_sidebar():
+            self.check_whether_to_hide_in(SECONDS_BEFORE_HIDING)
+        else:
+            self.set_shown(False)
 
     @objc.python_method
     def cancel_hide_timer(self):

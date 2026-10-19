@@ -38,6 +38,38 @@ async def focus_agent_session(app, session_id):
     return ActionResult(True)
 
 
+async def focus_window(app, window_id):
+    """Brings a window to the front with the tab it already shows (which may run no agent),
+    without raising iTerm2's other windows."""
+    window = app.get_window_by_id(window_id)
+    if window is None:
+        return ActionResult(False, "that window no longer exists")
+    await window.async_activate()
+    await app.async_activate(raise_all_windows=False)
+    return ActionResult(True)
+
+
+async def put_back_tabs_and_window_after_peek(app, selected_tab_id_by_window_id, window_id_to_bring_back):
+    """Undoes a peek (pressing and holding a tab row): each window gets back the tab it had
+    selected, and, when iTerm2 was in front before, its front window comes back to the front.
+
+    Args:
+        app: The iterm2.App.
+        selected_tab_id_by_window_id: {window ID: selected tab ID} from before the peek.
+        window_id_to_bring_back: The window that was in front before, or None when another app was.
+    """
+    for window in app.terminal_windows:
+        tab_id_before = selected_tab_id_by_window_id.get(window.window_id)
+        if tab_id_before and window.current_tab is not None and window.current_tab.tab_id != tab_id_before:
+            tab_before = app.get_tab_by_id(tab_id_before)
+            if tab_before is not None:
+                await tab_before.async_select(order_window_front=False)
+    window_to_bring_back = app.get_window_by_id(window_id_to_bring_back) if window_id_to_bring_back else None
+    if window_to_bring_back is not None:
+        await window_to_bring_back.async_activate()
+    return ActionResult(True)
+
+
 async def rename_tab(app, tab_id, new_title):
     """Sets a tab's title as iTerm2's Edit Tab Title does; an empty title restores the default name."""
     tab = app.get_tab_by_id(tab_id)
@@ -133,7 +165,7 @@ def build_new_agent_session_profile(folder, launch_command):
     return profile
 
 
-async def start_agent_session(connection, app, window_id, folder, launch_command):
+async def start_agent_session(connection, app, window_id, folder, launch_command, tab_index=None):
     """Opens a new tab in a window (or a new window when window_id is None) running an agent tool.
 
     Args:
@@ -142,6 +174,7 @@ async def start_agent_session(connection, app, window_id, folder, launch_command
         window_id: The window for the new tab, or None for a new window.
         folder: The folder the agent starts in ("~" is expanded).
         launch_command: The shell command that starts the agent tool, for example "claude".
+        tab_index: Where the new tab goes among the window's tabs; None puts it last.
     """
     folder = os.path.expanduser(folder)
     if not os.path.isdir(folder):
@@ -155,8 +188,18 @@ async def start_agent_session(connection, app, window_id, folder, launch_command
     window = app.get_window_by_id(window_id)
     if window is None:
         return ActionResult(False, "that window no longer exists")
-    await window.async_create_tab(profile_customizations=profile)
+    await window.async_create_tab(profile_customizations=profile, index=tab_index)
     return ActionResult(True)
+
+
+async def duplicate_agent_session(connection, app, tab_id, folder, launch_command_for_the_copy):
+    """Opens a tab right after tab_id, in its window, running launch_command_for_the_copy in folder
+    (like Chrome's Duplicate; the core builds the command that continues a copy of the conversation)."""
+    window = app.get_window_for_tab(tab_id)
+    if window is None:
+        return ActionResult(False, "that tab no longer exists")
+    tab_index = [tab.tab_id for tab in window.tabs].index(tab_id)
+    return await start_agent_session(connection, app, window.window_id, folder, launch_command_for_the_copy, tab_index + 1)
 
 
 async def move_tab_to_new_window(app, tab_id):

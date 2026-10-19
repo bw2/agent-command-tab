@@ -8,6 +8,7 @@ login gets a minimal PATH (PLAN.md section 8, "Settings").
 import json
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ import tempfile
 SETTINGS_FOLDER = os.path.expanduser("~/Library/Application Support/llm-sidebar-dashboard")
 SETTINGS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "settings.json")
 SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL = 5
+ENVIRONMENT_SETTING_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # "ANTHROPIC_MODEL=x claude"
 
 # "auto" follows the most urgent agent session: light blue while one is asking, red for an
 # error, orange when one is stuck, otherwise green.
@@ -134,13 +136,20 @@ def command_is_known_to_the_login_shell(command_name):
 
 def find_launch_command_problem(launch_command, find_command_path=shutil.which,
                                 ask_the_login_shell=command_is_known_to_the_login_shell):
-    """Returns "" when the launch command's first word can be run, else a short explanation.
+    """Returns "" when the launch command's program can be run, else a short explanation.
 
-    A path must be an executable file; a bare name must be on PATH or known to the login shell.
+    Leading NAME=value words (environment settings) are skipped. A path must be an executable
+    file; a bare name must be on PATH or known to the login shell. A program written with a
+    shell variable or quotes ("$HOME/bin/claude") can't be checked without running the shell's
+    expansion, so it counts as fine.
     """
     words = launch_command.split()
+    while words and ENVIRONMENT_SETTING_PATTERN.match(words[0]):
+        words = words[1:]
     if not words:
         return "No command"
+    if any(character in words[0] for character in "$`'\""):
+        return ""
     first_word = os.path.expanduser(words[0])
     if "/" in first_word:
         if not os.path.isfile(first_word):

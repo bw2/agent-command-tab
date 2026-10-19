@@ -148,6 +148,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         )
         status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
                                                      previous_displayed_state, now)
+    running_command = (screen_reading or {}).get("running_command") if state == "working" else None
     return AgentSessionEntry(
         tab_id=gathered_tab["tab_id"],
         session_id=session_id,
@@ -162,6 +163,9 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         is_in_front=session_id == highlighted_session_id,
         peer_messaging_address=agent_session_name,
         last_time_tab_was_seen=session_tracking.get("last_time_tab_was_seen"),
+        running_command_name=running_command[0] if running_command else "",
+        running_command_started_at=running_command[1] if running_command else None,
+        context_tokens=(screen_reading or {}).get("context_tokens"),
     )
 
 

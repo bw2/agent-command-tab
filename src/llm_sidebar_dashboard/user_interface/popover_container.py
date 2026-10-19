@@ -1,4 +1,4 @@
-"""The panel around the list: expand and collapse all at the top, settings and "+" at the bottom.
+"""The panel around the list: expand and collapse all and settings at the top, "+" at the bottom.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item) and in
 the sidebar, each with its own list controller.
@@ -77,28 +77,30 @@ class ListPanelController(NSViewController):
         scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         root_view.addSubview_(scroll_view)
 
-        # Top bar: a message line on the left, expand and collapse all on the right (R8.1).
+        # Top bar (user request, milestone 2): expand and collapse all on the left (R8.1), the
+        # settings button on the right (R34), and a message line between them.
+        x = 8
+        for title, action_name in (("Expand all", "expandAll:"), ("Collapse all", "collapseAll:")):
+            button = make_small_button(title, self, action_name)
+            button.setFrameOrigin_((x, height - TOP_BAR_HEIGHT + 3))
+            button.setAutoresizingMask_(NSViewMinYMargin)  # stays at the top left
+            root_view.addSubview_(button)
+            x += button.frame().size.width + 6
+        settings_button = make_symbol_button("gearshape", "Settings", "Settings", self, "settingsClicked:")
+        settings_button.setFrameOrigin_((width - 6 - settings_button.frame().size.width, height - TOP_BAR_HEIGHT + 3))
+        settings_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)  # stays at the top right
+        root_view.addSubview_(settings_button)
         self.message_text_field = NSTextField.labelWithString_("")
-        self.message_text_field.setFrame_(NSMakeRect(8, height - TOP_BAR_HEIGHT + 4, width - 180, 18))
+        self.message_text_field.setFrame_(NSMakeRect(x + 2, height - TOP_BAR_HEIGHT + 4,
+                                                     max(settings_button.frame().origin.x - x - 8, 0), 18))
         self.message_text_field.setTextColor_(NSColor.secondaryLabelColor())
         self.message_text_field.setAutoresizingMask_(NSViewMinYMargin | NSViewWidthSizable)
         root_view.addSubview_(self.message_text_field)
-        x = width - 8
-        for title, action_name in (("Collapse all", "collapseAll:"), ("Expand all", "expandAll:")):
-            button = make_small_button(title, self, action_name)
-            x -= button.frame().size.width + 6
-            button.setFrameOrigin_((x, height - TOP_BAR_HEIGHT + 3))
-            button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)  # stay at the top right
-            root_view.addSubview_(button)
 
-        # Bottom bar: settings (R34) and a new window with an agent session (R13.1).
-        settings_button = make_symbol_button("gearshape", "Settings", "Settings", self, "settingsClicked:")
-        settings_button.setFrameOrigin_((6, 3))
-        settings_button.setAutoresizingMask_(NSViewMaxYMargin)
-        root_view.addSubview_(settings_button)
+        # Bottom bar: a new window with an agent session (R13.1).
         self.new_window_button = make_symbol_button("plus", "+", "New iTerm2 window with an agent session", self,
                                                     "newWindowClicked:")
-        self.new_window_button.setFrameOrigin_((34, 3))
+        self.new_window_button.setFrameOrigin_((6, 3))
         self.new_window_button.setAutoresizingMask_(NSViewMaxYMargin)
         root_view.addSubview_(self.new_window_button)
         self.setView_(root_view)

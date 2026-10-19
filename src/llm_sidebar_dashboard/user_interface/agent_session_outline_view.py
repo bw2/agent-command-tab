@@ -17,14 +17,15 @@ import time
 
 import objc
 from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSColor, NSDragOperationMove, NSDragOperationNone,
-                    NSFont, NSFontAttributeName, NSFontWeightBold, NSFontWeightRegular,
+                    NSEventModifierFlagControl, NSFont, NSFontAttributeName, NSFontWeightBold, NSFontWeightRegular,
                     NSForegroundColorAttributeName, NSImageScaleNone, NSImageView, NSLineBreakByTruncatingTail,
                     NSMakeRect, NSMenu, NSMenuItem, NSMutableAttributedString, NSMutableParagraphStyle, NSOutlineView,
                     NSParagraphStyleAttributeName, NSPasteboardItem,
                     NSTableCellView, NSTableColumn, NSTableColumnAutoresizingMask,
                     NSTableViewLastColumnOnlyAutoresizingStyle, NSTableViewSelectionHighlightStyleNone,
-                    NSTableViewStylePlain, NSTextAlignmentRight, NSTextField, NSZeroRect)
-from Foundation import NSMutableIndexSet, NSObject, NSTimer
+                    NSTableViewStylePlain, NSTextAlignmentRight, NSTextField, NSWindowStyleMaskNonactivatingPanel,
+                    NSZeroRect)
+from Foundation import NSMutableIndexSet, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
 from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
@@ -43,6 +44,8 @@ GAP_BETWEEN_COLUMNS = 6  # between the tool icon, state and elapsed time columns
 ROW_RIGHT_MARGIN = 8
 TEXT_FIELD_INSETS = 5  # a label's text sits a few points inside its field
 ROOM_FOR_GROWING_DETAILS = "0000"  # elapsed times grow ("9m" becomes "10m") without a refit
+SECONDS_TO_HOLD_BEFORE_PEEKING = 0.15
+SMALLEST_TAB_NAME_WIDTH = 80  # a narrower sidebar drops the context and icon columns first
 TAB_DRAG_TYPE = "org.llm-sidebar-dashboard.tab-id"
 WINDOW_DRAG_TYPE = "org.llm-sidebar-dashboard.window-id"
 COLUMN_IDENTIFIER = "main"
@@ -77,10 +80,20 @@ class OutlineListItem(NSObject):
 
 
 class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
-    """An NSOutlineView that draws no disclosure triangles; rows are expanded by clicking them."""
+    """An NSOutlineView that draws no disclosure triangles (rows are expanded by clicking them),
+    and that tells its delegate when the button goes down on a row and comes back up, so holding
+    a tab row can show that tab for a moment."""
 
     def frameOfOutlineCellAtRow_(self, row):
         return NSZeroRect
+
+    def mouseDown_(self, event):
+        is_plain_press = event.clickCount() == 1 and not event.modifierFlags() & NSEventModifierFlagControl
+        if is_plain_press:
+            self.delegate().row_pressed(self.rowAtPoint_(self.convertPoint_fromView_(event.locationInWindow(), None)))
+        objc.super(OutlineViewWithoutDisclosureTriangles, self).mouseDown_(event)  # returns once the button is up
+        if is_plain_press:
+            self.delegate().row_released()
 
 
 def build_index_set(indexes):
@@ -104,9 +117,10 @@ def make_label_text_field():
 
 
 class AgentListRowView(NSTableCellView):
-    """A row: [connector + dot] [name] [details] ... [tool icon] [state] [elapsed time], the last
-    three in columns at the right edge whose widths the list controller sets, so they line up
-    from row to row. The state is left-aligned in its column and the time right-aligned."""
+    """A row: [connector + dot] [name] [details] ... [context size] [tool icon] [state] [elapsed
+    time], the last four in columns at the right edge whose widths the list controller sets, so
+    they line up from row to row. The state is left-aligned in its column; the context size and
+    the time are right-aligned."""
 
     def initWithFrame_(self, frame):
         self = objc.super(AgentListRowView, self).initWithFrame_(frame)
@@ -115,14 +129,16 @@ class AgentListRowView(NSTableCellView):
         self.prefix_text_field = make_label_text_field()
         self.name_text_field = make_label_text_field()
         self.details_text_field = make_label_text_field()
+        self.context_text_field = make_label_text_field()
         self.state_text_field = make_label_text_field()
         self.elapsed_time_text_field = make_label_text_field()
         self.icon_image_view = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, ROW_HEIGHT))
         self.icon_image_view.setImageScaling_(NSImageScaleNone)
-        for subview in (self.prefix_text_field, self.name_text_field, self.details_text_field, self.state_text_field,
-                        self.elapsed_time_text_field, self.icon_image_view):
+        for subview in (self.prefix_text_field, self.name_text_field, self.details_text_field, self.context_text_field,
+                        self.state_text_field, self.elapsed_time_text_field, self.icon_image_view):
             self.addSubview_(subview)
         self.setTextField_(self.name_text_field)
+        self.context_column_width = 0  # 0 while no agent session's context size is known
         self.icon_column_width = 0  # 0 while the icon column is hidden
         self.state_column_width = 0
         self.elapsed_time_column_width = 0
@@ -142,14 +158,17 @@ class AgentListRowView(NSTableCellView):
         if row_has_state:
             elapsed_time_x = bounds.size.width - ROW_RIGHT_MARGIN - self.elapsed_time_column_width
             self.elapsed_time_text_field.setFrame_(NSMakeRect(elapsed_time_x, y, self.elapsed_time_column_width, text_height))
-            state_x = elapsed_time_x - GAP_BETWEEN_COLUMNS - self.state_column_width
+            state_x = elapsed_time_x - self.state_column_width - (GAP_BETWEEN_COLUMNS if self.state_column_width else 0)
             self.state_text_field.setFrame_(NSMakeRect(state_x, y, self.state_column_width, text_height))
             icon_x = state_x - self.icon_column_width - (GAP_BETWEEN_COLUMNS if self.icon_column_width else 0)
             self.icon_image_view.setFrame_(NSMakeRect(icon_x, 0, self.icon_column_width, bounds.size.height))
-            text_right_limit = icon_x - GAP_BEFORE_DETAILS
-        self.state_text_field.setHidden_(not row_has_state)
+            context_x = icon_x - self.context_column_width - (GAP_BETWEEN_COLUMNS if self.context_column_width else 0)
+            self.context_text_field.setFrame_(NSMakeRect(context_x, y, self.context_column_width, text_height))
+            text_right_limit = context_x - GAP_BEFORE_DETAILS
+        self.state_text_field.setHidden_(not row_has_state or not self.state_column_width)
         self.elapsed_time_text_field.setHidden_(not row_has_state)
         self.icon_image_view.setHidden_(not row_has_state or not self.icon_column_width)
+        self.context_text_field.setHidden_(not row_has_state or not self.context_column_width)
         available_width = max(text_right_limit - name_x, 0)
         name_fitting_width = self.name_text_field.fittingSize().width + NAME_FIELD_PADDING
         details_fitting_width = self.details_text_field.fittingSize().width
@@ -179,6 +198,10 @@ class AgentSessionListController(NSObject):
             owner chooses the folder).
         confirm_closing_window(window_entry): asks the user whether to close that window;
             returns True for yes.
+        duplicate_agent_session(tab_id, folder, agent_tool_name): opens a copy of the tab's agent
+            session right after it.
+        find_launch_command(agent_tool_name): the tool's launch command from the settings, or "".
+        start_peek(session_id), end_peek(): a tab row is held (shown for a moment), then released.
     """
 
     def initWithOwner_(self, owner):
@@ -199,6 +222,9 @@ class AgentSessionListController(NSObject):
         self.drag_in_progress = False
         self.menu_is_open = False
         self.blink_phase_is_dim = False
+        self.peek_timer = None
+        self.peek_in_progress = False
+        self.item_toggled_by_last_click = None
         self.applying_expansion_state = False
         self.item_whose_expansion_is_changing = None
         self.item_being_renamed = None
@@ -209,7 +235,9 @@ class AgentSessionListController(NSObject):
         self.right_aligned_paragraph_style.setAlignment_(NSTextAlignmentRight)
         self.right_aligned_paragraph_style.setLineBreakMode_(NSLineBreakByTruncatingTail)
         self.agent_tool_icons_by_name = build_agent_tool_icons()
+        self.context_column_width = 0  # 0 while no agent session's context size is known
         self.icon_column_width = 0  # 0 unless two or more agent tools are running
+        self.width_is_set_by_the_user = False  # True for the sidebar's list; the dropdown fits its width to the rows
         self.state_column_width = 0
         self.elapsed_time_column_width = 0
         self.outline_view = self.build_outline_view()
@@ -478,10 +506,11 @@ class AgentSessionListController(NSObject):
             return  # never overwrite text the user is typing
         parts = self.build_row_text_parts(item)
         is_in_front = item.kind == "tab" and item.entry.is_in_front
+        status_reason = item.entry.status_reason if item.kind == "tab" else ""  # for example "running python3"
         # Everything the row's look depends on: an unchanged row is neither refilled nor laid out
         # again, which keeps the 0.6-second refresh cheap with many rows.
-        look = (parts, item.kind, is_in_front, parts.dot_blinks and self.blink_phase_is_dim,
-                self.icon_column_width, self.state_column_width, self.elapsed_time_column_width)
+        look = (parts, item.kind, is_in_front, status_reason, parts.dot_blinks and self.blink_phase_is_dim,
+                self.context_column_width, self.icon_column_width, self.state_column_width, self.elapsed_time_column_width)
         if look == row_view.look:
             return
         row_view.look = look
@@ -511,12 +540,16 @@ class AgentSessionListController(NSObject):
             parts.state_text, secondary_text_attributes))
         row_view.elapsed_time_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             parts.elapsed_time_text, right_aligned_secondary_text_attributes))
+        row_view.context_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
+            parts.context_text, right_aligned_secondary_text_attributes))
         row_view.icon_image_view.setImage_(self.find_agent_tool_icon(parts.agent_tool_name) if parts.agent_tool_name else None)
+        row_view.context_column_width = self.context_column_width
         row_view.icon_column_width = self.icon_column_width
         row_view.state_column_width = self.state_column_width
         row_view.elapsed_time_column_width = self.elapsed_time_column_width
         # The full text, with the tool's name, for when a narrow sidebar cuts it or the icon column is hidden.
         tooltip_details = " · ".join(text for text in (parts.agent_tool_name, f"{parts.state_text} {parts.elapsed_time_text}".strip(),
+                                                       status_reason, parts.context_text and f"{parts.context_text} tokens in context",
                                                        parts.details_text) if text)
         row_view.setToolTip_(f"{parts.name_text}  {tooltip_details}".strip())
         row_view.setNeedsLayout_(True)
@@ -534,20 +567,43 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def measure_right_columns(self):
-        """Sets the state and elapsed time columns' widths to fit their widest text, and the icon
-        column's to fit the widest tool icon, or 0 when all agent sessions use the same tool."""
+        """Sets the context size, state and elapsed time columns' widths to fit their widest text
+        (the context column is 0 while no size is known), and the icon column's to fit the
+        widest tool icon, or 0 when all agent sessions use the same tool."""
         agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)] if self.snapshot else []
         now = time.time()
         all_parts = [build_agent_session_row_text_parts(entry, [], now) for entry in agent_session_entries]
-        # Each distinct text is measured once; many sessions share "idle" or "2m".
-        self.state_column_width = TEXT_FIELD_INSETS + max(
-            (self.measure_text_width(text, self.regular_font) for text in {parts.state_text for parts in all_parts}), default=0)
-        self.elapsed_time_column_width = TEXT_FIELD_INSETS + max(
-            (self.measure_text_width(text, self.regular_font) for text in {parts.elapsed_time_text for parts in all_parts}),
-            default=0)
+
+        def measure_widest(texts):
+            # Each distinct text is measured once; many sessions share "idle" or "2m".
+            return max((self.measure_text_width(text, self.regular_font) for text in set(texts) if text), default=0)
+        self.state_column_width = TEXT_FIELD_INSETS + measure_widest(parts.state_text for parts in all_parts)
+        self.elapsed_time_column_width = TEXT_FIELD_INSETS + measure_widest(parts.elapsed_time_text for parts in all_parts)
+        widest_context_text_width = measure_widest(parts.context_text for parts in all_parts)
+        self.context_column_width = TEXT_FIELD_INSETS + widest_context_text_width if widest_context_text_width else 0
         agent_tool_names = {entry.agent_tool_name for entry in agent_session_entries}
         self.icon_column_width = (max(self.find_agent_tool_icon(name).size().width for name in agent_tool_names)
                                   if len(agent_tool_names) >= 2 else 0)
+        if self.width_is_set_by_the_user:
+            # A narrow sidebar keeps room for names: the context column goes first, then the icons,
+            # then the state words (the dot's color still shows the state; the tooltip has it all).
+            for column_name in ("context_column_width", "icon_column_width", "state_column_width"):
+                if self.measure_room_left_for_tab_names() < SMALLEST_TAB_NAME_WIDTH:
+                    setattr(self, column_name, 0)
+
+    @objc.python_method
+    def measure_room_left_for_tab_names(self):
+        """Returns the width left for a tab row's name and details beside the right-hand columns."""
+        deepest_tab_prefix = "│  ├─ ● " if self.snapshot is not None and len(self.snapshot.monitors) > 1 else "├─ ● "
+        return (self.outline_view.bounds().size.width - ROW_LEFT_MARGIN - GAP_AFTER_PREFIX
+                - self.measure_text_width(deepest_tab_prefix, self.regular_font) - GAP_BEFORE_DETAILS
+                - self.measure_right_columns_width() - ROW_RIGHT_MARGIN)
+
+    @objc.python_method
+    def measure_right_columns_width(self):
+        """Returns the width of a tab row's right-hand columns with the gaps between them (0-width columns are hidden)."""
+        return sum(width + GAP_BETWEEN_COLUMNS for width in (self.context_column_width, self.icon_column_width,
+                                                             self.state_column_width) if width) + self.elapsed_time_column_width
 
     @objc.python_method
     def choose_name_font(self, item):
@@ -588,9 +644,7 @@ class AgentSessionListController(NSObject):
                              + measure_text_width(parts.details_text + ROOM_FOR_GROWING_DETAILS, self.regular_font)
                              + 3 * TEXT_FIELD_INSETS + ROW_RIGHT_MARGIN)
                 if parts.state_text:  # the columns at the right edge
-                    row_width += (GAP_BEFORE_DETAILS + self.icon_column_width
-                                  + (GAP_BETWEEN_COLUMNS if self.icon_column_width else 0)
-                                  + self.state_column_width + GAP_BETWEEN_COLUMNS + self.elapsed_time_column_width)
+                    row_width += GAP_BEFORE_DETAILS + self.measure_right_columns_width()
                 widest_row_width = max(widest_row_width, row_width)
         return widest_row_width
 
@@ -602,22 +656,60 @@ class AgentSessionListController(NSObject):
         return self.outline_view.itemAtRow_(clicked_row) if clicked_row >= 0 else None
 
     def rowClicked_(self, sender):
-        item = self.find_clicked_item()
-        if item is None:
-            return
-        if item.kind == "tab":
-            return  # a tab is shown by a double-click (user request, milestone 2)
         current_event = NSApp.currentEvent()
         if current_event is not None and current_event.clickCount() > 1:
             return  # the second click of a double-click: rowDoubleClicked_ handles it
+        item = self.find_clicked_item()
+        self.item_toggled_by_last_click = None
+        if item is None or item.kind == "tab":
+            return  # a tab is shown by a double-click (user request, milestone 2)
         # At once, so it feels instant; a double-click puts the row back (rowDoubleClicked_).
         self.toggle_expansion(item)
+        self.item_toggled_by_last_click = item
+
+    # Pressing and holding a tab row shows that tab until the button comes up (user request,
+    # milestone 2). The short wait tells a hold from a click.
+
+    @objc.python_method
+    def row_pressed(self, row):
+        self.cancel_peek_timer()
+        item = self.outline_view.itemAtRow_(row) if row >= 0 else None
+        if item is None or item.kind != "tab":
+            return
+        self.peek_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            SECONDS_TO_HOLD_BEFORE_PEEKING, self, "peekTimerFired:", item, False)
+        # Common modes, so it fires while the outline view tracks the held button.
+        NSRunLoop.currentRunLoop().addTimer_forMode_(self.peek_timer, NSRunLoopCommonModes)
+
+    def peekTimerFired_(self, timer):
+        self.peek_timer = None
+        item = timer.userInfo()
+        if self.drag_in_progress or item.entry is None:
+            return
+        self.peek_in_progress = True
+        self.owner.start_peek(item.entry.session_id)
+
+    @objc.python_method
+    def row_released(self):
+        self.cancel_peek_timer()
+        if self.peek_in_progress:
+            self.peek_in_progress = False
+            self.owner.end_peek()
+
+    @objc.python_method
+    def cancel_peek_timer(self):
+        if self.peek_timer is not None:
+            self.peek_timer.invalidate()
+            self.peek_timer = None
 
     def rowDoubleClicked_(self, sender):
-        item = self.find_clicked_item()
+        # The row the first click toggled, not the one under the pointer now: collapsing it can
+        # scroll the list, which moves another row under the second click.
+        toggled_item, self.item_toggled_by_last_click = self.item_toggled_by_last_click, None
+        item = toggled_item or self.find_clicked_item()
         if item is None:
             return
-        if item.kind == "window":
+        if item is toggled_item and item.kind == "window":
             self.toggle_expansion(item)  # undoes the first click's toggle
         if item.kind in ("window", "tab"):
             self.show_item(item)
@@ -676,9 +768,22 @@ class AgentSessionListController(NSObject):
         name_text_field.setDrawsBackground_(True)
         name_text_field.setBezeled_(True)
         row_view.setNeedsLayout_(True)
-        self.outline_view.window().makeKeyWindow()
-        self.outline_view.window().makeFirstResponder_(name_text_field)
+        window = self.outline_view.window()
+        if not window.styleMask() & NSWindowStyleMaskNonactivatingPanel:
+            # The dropdown takes typing only while the dashboard is the active app, which it may
+            # no longer be (after a peek); otherwise the new name would go to an agent's prompt.
+            NSApp.activateIgnoringOtherApps_(True)
+        window.makeKeyWindow()
+        window.makeFirstResponder_(name_text_field)
         name_text_field.currentEditor().selectAll_(None)
+
+    @objc.python_method
+    def cancel_rename(self):
+        """Ends an open rename without renaming, as Esc does (the dropdown calls it as it closes,
+        or the list would keep holding back snapshots)."""
+        if self.rename_in_progress:
+            self.item_being_renamed = None
+            self.outline_view.window().makeFirstResponder_(self.outline_view)
 
     def control_textView_doCommandBySelector_(self, control, text_view, command_selector):
         # Esc cancels the rename. AppKit's calls arrive with the selector as str; direct Python calls may pass bytes.
@@ -705,11 +810,13 @@ class AgentSessionListController(NSObject):
                 self.submit_action(ActionRequest("rename_tab", {"tab_id": item.item_id}, {"new_title": new_title}))
             else:
                 self.submit_action(ActionRequest("rename_window", {"window_id": item.item_id}, {"new_title": new_title}))
-            if new_title.strip():
-                # Shown at once; the next snapshot confirms it (or puts the old name back if iTerm2 refused).
-                item.entry = item.entry._replace(**{"tab_title" if item.kind == "tab" else "title": new_title.strip()})
         name_text_field.superview().look = None
-        self.apply_held_snapshot()
+        self.apply_held_snapshot()  # first, so a snapshot held during the rename doesn't bring the old name back
+        renamed_item = self.items_by_key.get((item.kind, item.item_id)) if item is not None else None
+        if renamed_item is not None and renamed_item.entry is not None and new_title.strip():
+            # Shown at once; the next snapshot confirms it (or puts the old name back if iTerm2 refused).
+            renamed_item.entry = renamed_item.entry._replace(
+                **{"tab_title" if renamed_item.kind == "tab" else "title": new_title.strip()})
         self.redraw_visible_rows()
 
     @objc.python_method
@@ -747,8 +854,8 @@ class AgentSessionListController(NSObject):
                 return
             menu.addItem_(NSMenuItem.separatorItem())
         if item.kind == "window":
-            self.add_menu_item(menu, "Rename", "menuRename:")
             self.add_menu_item(menu, "Show window", "menuFocus:")
+            self.add_menu_item(menu, "Rename", "menuRename:")
             menu.addItem_(NSMenuItem.separatorItem())
             # A new tab in this window, in the folder of its selected tab's agent session (R13).
             for agent_tool_name in self.owner.list_agent_tool_names():
@@ -768,8 +875,12 @@ class AgentSessionListController(NSObject):
             self.add_menu_item(menu, "Close window", "menuCloseWindow:")
             return
         if item.kind == "tab":
-            self.add_menu_item(menu, "Rename", "menuRename:")
             self.add_menu_item(menu, "Show tab", "menuFocus:")
+            self.add_menu_item(menu, "Rename", "menuRename:")
+            duplicate_item = self.add_menu_item(menu, "Duplicate this tab", "menuDuplicate:")
+            if not self.owner.find_launch_command(item.entry.agent_tool_name):
+                duplicate_item.setEnabled_(False)
+                duplicate_item.setToolTip_(f"Settings has no launch command for {item.entry.agent_tool_name}")
             other_window_items = [window_item for window_item in self.list_window_items() if window_item is not item.parent_item]
             if other_window_items:
                 submenu = NSMenu.alloc().initWithTitle_("Move to window")
@@ -814,9 +925,11 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def show_item(self, item):
-        """Brings a tab, or a window with its selected tab, to the front."""
-        agent_session_entry = item.entry if item.kind == "tab" else self.choose_selected_agent_session_of_window(item)
-        self.submit_action(ActionRequest("focus_agent_session", {"session_id": agent_session_entry.session_id}))
+        """Brings a tab to the front, or a window with the tab it already shows (even one without an agent)."""
+        if item.kind == "tab":
+            self.submit_action(ActionRequest("focus_agent_session", {"session_id": item.entry.session_id}))
+        else:
+            self.submit_action(ActionRequest("focus_window", {"window_id": item.item_id}))
         self.on_tab_focused()
 
     def menuNewAgentSessionInWindow_(self, sender):
@@ -849,6 +962,10 @@ class AgentSessionListController(NSObject):
     def menuMoveToNewWindow_(self, sender):
         self.submit_action(ActionRequest("move_tab_to_new_window", {"tab_id": self.menu_target_item.item_id}))
 
+    def menuDuplicate_(self, sender):
+        tab_entry = self.menu_target_item.entry
+        self.owner.duplicate_agent_session(tab_entry.tab_id, tab_entry.working_folder, tab_entry.agent_tool_name)
+
     # ----- drag and drop (PLAN.md section 9) -----
 
     def outlineView_pasteboardWriterForItem_(self, outline_view, item):
@@ -861,6 +978,10 @@ class AgentSessionListController(NSObject):
     def outlineView_draggingSession_willBeginAtPoint_forItems_(self, outline_view, session, point, items):
         self.drag_in_progress = True
         self.dragged_item = items[0] if items else None
+        self.cancel_peek_timer()  # a drag, not a hold
+        if self.peek_in_progress:  # the drag began after the hold had already shown the tab
+            self.peek_in_progress = False
+            self.owner.end_peek()
 
     def outlineView_draggingSession_endedAtPoint_operation_(self, outline_view, session, point, operation):
         self.drag_in_progress = False

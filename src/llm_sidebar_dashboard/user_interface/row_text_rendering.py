@@ -6,15 +6,17 @@ when important), then gray details. Colors are names that the view maps to syste
 
 import collections
 
+from llm_sidebar_dashboard.context_window_usage import format_token_count
 from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
 
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
-                     "agent_tool_name", "state_text", "elapsed_time_text"],
-    defaults=["", "", ""])
+                     "agent_tool_name", "state_text", "elapsed_time_text", "context_text"],
+    defaults=["", "", "", ""])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
-                        "in three columns that line up from row to row: the icon for agent_tool_name, state_text "
-                        "(left-aligned) and elapsed_time_text (right-aligned).")
+                        "in columns that line up from row to row: context_text (the context's size, \"425k\", "
+                        "right-aligned), the icon for agent_tool_name, state_text (left-aligned) and "
+                        "elapsed_time_text (right-aligned).")
 
 DOT_GLYPH_AND_COLOR_BY_STATE = {
     "asking": ("●", "purple"),
@@ -72,8 +74,12 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         name_text=agent_session_entry.tab_title,
         details_text=agent_session_entry.preview_line,
         agent_tool_name=agent_session_entry.agent_tool_name,
-        state_text=agent_session_entry.status,
-        elapsed_time_text=format_elapsed_time(now - agent_session_entry.status_since),
+        # While it waits on a command it started, a working agent shows "running" and the command's time.
+        state_text="running" if agent_session_entry.running_command_name else agent_session_entry.status,
+        elapsed_time_text=format_elapsed_time(now - (agent_session_entry.running_command_started_at
+                                                     if agent_session_entry.running_command_name
+                                                     else agent_session_entry.status_since)),
+        context_text=format_token_count(agent_session_entry.context_tokens) if agent_session_entry.context_tokens else "",
     )
 
 

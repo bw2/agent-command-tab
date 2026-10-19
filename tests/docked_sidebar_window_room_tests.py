@@ -109,6 +109,31 @@ class DockedSidebarWindowRoomTests(unittest.TestCase):
             self.assertEqual(restored_window.frame, (100, 50, 1800, 1000))
             self.assertEqual(load_docked_window_frames(file_path), {})
 
+    def test_after_a_restart_with_docking_off_owed_room_is_given_back_once_the_app_says_so(self):
+        with tempfile.TemporaryDirectory() as folder:
+            file_path = os.path.join(folder, "docked_window_frames.json")
+            window = StandInWindow("w1", (100, 50, 1800, 1000))
+            asyncio.run(self.make_core([window], docked_window_frames_file_path=file_path)
+                        .change_reserved_screen_area(RESERVED_AREA))
+            core_after_restart = self.make_core([window], docked_window_frames_file_path=file_path)
+            asyncio.run(core_after_restart.make_room_for_reserved_area())  # a gather before the app said anything
+            self.assertEqual(window.frame, (100, 50, 1500, 1000))
+            asyncio.run(core_after_restart.change_reserved_screen_area(None))  # the app: not docked
+            self.assertEqual(window.frame, (100, 50, 1800, 1000))
+            self.assertEqual(load_docked_window_frames(file_path), {})
+
+    def test_a_new_window_never_takes_over_the_record_of_a_window_closed_meanwhile(self):
+        closed_window = StandInWindow("w1", (100, 50, 1800, 1000))
+        core = self.make_core([closed_window])
+        asyncio.run(core.change_reserved_screen_area(RESERVED_AREA))
+        new_window = StandInWindow("w2", (100, 50, 1500, 1000))  # the same size, for example a tab moved out
+        core.app = StandInApp([new_window])
+        core.gathered_windows = [{"window_id": "w2", "frame": new_window.frame, "tabs": []}]
+        asyncio.run(core.make_room_for_reserved_area())
+        asyncio.run(core.change_reserved_screen_area(None))
+        self.assertEqual(new_window.frame, (100, 50, 1500, 1000))
+        self.assertEqual(core.frames_before_making_room_by_window_id, {})
+
     def test_a_window_that_closes_while_being_resized_does_not_stop_the_others(self):
         closing_window = StandInWindow("w1", (100, 50, 1800, 1000), closes_when_set=True)
         other_window = StandInWindow("w2", (200, 60, 1700, 900))

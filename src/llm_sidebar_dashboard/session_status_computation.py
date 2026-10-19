@@ -1,7 +1,8 @@
 """Agent session states, their urgency order, and how a session's state is worked out (PLAN.md section 6).
 
-Version 1, phase 1 uses iTerm2's `status` variable only; hook events and screen readings are
-added as further arguments of compute_session_status_from_sources in phase 2.
+A state comes from iTerm2's `status` variable plus the core's readings of the session: whether
+the permission dialog is still on screen, a screen fingerprint (for "stuck"), and the command
+the agent runs (agent_process_tree). Hook events are added as a further source in phase 2.
 """
 
 STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "done", "idle", "unknown", "exited"]
@@ -88,7 +89,8 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
     - "asking" ends when a screen check made after the status changed no longer finds the
       tool's permission dialog: Claude Code reports nothing when a prompt is answered, and
       iTerm2's status stays "waiting" until the approved tool finishes (Phase 0).
-    - "stuck" is working with no screen change (progress noise masked) for the threshold.
+    - "stuck" is working with no screen change (progress noise masked) for the threshold while
+      running no command of its own: an agent waiting on a long command it started is working.
     - "done" means the turn ended after the tab was last seen (selected in the key iTerm2
       window while iTerm2 was the active app); a turn that ended while the tab was seen counts
       as idle.
@@ -100,7 +102,8 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         tab_is_seen_now: Whether the tab is being seen at this moment.
         screen_reading: {"permission_dialog_is_showing": bool, "permission_dialog_checked_at":
             float, "permission_dialog_gone_since": float, "turn_was_interrupted": bool,
-            "fingerprint_changed_at": float} (any key may be missing), or None.
+            "fingerprint_changed_at": float, "running_command": (name, started at) or None,
+            "command_last_seen_running_at": float} (any key may be missing), or None.
         stuck_threshold_seconds: How long a working session may show no screen change.
         now: The current time.
 
@@ -119,9 +122,13 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         state = "working"
         working_since = screen_reading["permission_dialog_gone_since"]
     if state == "working":
-        quiet_since = max(screen_reading.get("fingerprint_changed_at", working_since), working_since)
+        if screen_reading.get("running_command"):
+            return "working", f"running {screen_reading['running_command'][0]}"  # waiting on its command, never stuck
+        # Stuck means thinking with nothing new on screen, so the clock also restarts when a command ends.
+        quiet_since = max(screen_reading.get("fingerprint_changed_at", working_since), working_since,
+                          screen_reading.get("command_last_seen_running_at", 0))
         if now - quiet_since >= stuck_threshold_seconds:
-            return "stuck", f"no screen change for {max(1, round((now - quiet_since) / 60))} min"
+            return "stuck", f"thinking with no screen change for {max(1, round((now - quiet_since) / 60))} min"
         return "working", ""
     if state == "done":
         if tab_is_seen_now or (last_time_tab_was_seen is not None and last_time_tab_was_seen >= iterm2_status_change_time):

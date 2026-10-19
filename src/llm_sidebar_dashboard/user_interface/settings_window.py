@@ -55,7 +55,9 @@ class SettingsWindowController(NSObject):
     @objc.python_method
     def build_window(self):
         rows = []  # (label or None, control or None, units after the control or None) from top to bottom
-        self.sidebar_is_on_checkbox = self.make_checkbox("Show the sidebar at the edge of the screen", self.settings["sidebar_is_on"])
+        # Turned off, the sidebar still appears for a few seconds from the menu bar icon's "Show the sidebar".
+        self.sidebar_is_on_checkbox = self.make_checkbox("Enable the sidebar at the edge of the screen",
+                                                         self.settings["sidebar_is_on"])
         self.sidebar_mode_popup = self.make_popup(list(SIDEBAR_MODE_TITLES.values()), SIDEBAR_MODE_TITLES[self.settings["sidebar_mode"]])
         screens = read_monitors_from_screens()
         self.monitor_popup = self.make_popup([MENU_BAR_MONITOR_TITLE] + [screen["name"] for screen in screens],
@@ -73,7 +75,8 @@ class SettingsWindowController(NSObject):
                  ("Monitor", self.monitor_popup, None), ("Edge", self.edge_popup, None),
                  ("Width", self.sidebar_width_field, "points"), (None, None, None),
                  ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None),
-                 (None, None, None), ("Stuck after", self.stuck_minutes_field, "minutes"), (None, None, None)]
+                 (None, None, None), ("Agent is stuck if it's thinking for more than", self.stuck_minutes_field, "minutes"),
+                 (None, None, None)]
         self.launch_command_fields = []
         for agent_tool in self.settings["agent_tools"]:
             launch_command_field = self.make_text_field(agent_tool["launch_command"], WINDOW_WIDTH - LABEL_WIDTH - 40)
@@ -93,20 +96,26 @@ class SettingsWindowController(NSObject):
         content_view = window.contentView()
         y = height - 12 - ROW_SPACING
         for label, control, units in rows:
+            control_x = LABEL_WIDTH + 12
             if label is not None:
                 label_field = NSTextField.labelWithString_(label + ":")
-                label_field.setAlignment_(2)  # right
-                label_field.setFrame_(NSMakeRect(12, y + 3, LABEL_WIDTH - 8, 18))
+                label_width = label_field.fittingSize().width
+                if label_width <= LABEL_WIDTH - 8:
+                    label_field.setAlignment_(2)  # right, in the label column
+                    label_field.setFrame_(NSMakeRect(12, y + 3, LABEL_WIDTH - 8, 18))
+                else:  # too long for the column: the row reads as one sentence from the left edge
+                    label_field.setFrame_(NSMakeRect(12, y + 3, label_width, 18))
+                    control_x = 12 + label_width + 6
                 content_view.addSubview_(label_field)
             if control is not None:
-                control.setFrameOrigin_((LABEL_WIDTH + 12, y))
+                control.setFrameOrigin_((control_x, y))
                 if control is self.edge_note:  # reaches down into the empty row below it
                     control.setFrame_(NSMakeRect(LABEL_WIDTH + 12, y - ROW_SPACING + 4, WINDOW_WIDTH - LABEL_WIDTH - 24,
                                                  ROW_SPACING + 16))
                 content_view.addSubview_(control)
             if units is not None:
                 units_field = NSTextField.labelWithString_(units)
-                units_field.setFrame_(NSMakeRect(LABEL_WIDTH + 12 + control.frame().size.width + 6, y + 3, 80, 18))
+                units_field.setFrame_(NSMakeRect(control_x + control.frame().size.width + 6, y + 3, 80, 18))
                 content_view.addSubview_(units_field)
             y -= ROW_SPACING
         self.update_edge_choices()
@@ -169,7 +178,7 @@ class SettingsWindowController(NSObject):
     def controlChanged_(self, sender):
         """Changes only the setting that sender controls, on top of the app's current settings, so
         a saved monitor or edge that isn't shown (an unplugged monitor) and changes made elsewhere
-        (the menu bar's sidebar toggle, a dragged width) are kept."""
+        (a width dragged at the sidebar's edge) are kept."""
         new_settings = dict(self.owner.settings)
         if sender is self.sidebar_is_on_checkbox:
             new_settings["sidebar_is_on"] = bool(sender.state())
@@ -236,8 +245,8 @@ class SettingsWindowController(NSObject):
 
     @objc.python_method
     def reflect_settings(self, settings):
-        """Shows settings changed elsewhere (the menu bar's sidebar toggle, a dragged width) in an
-        open window; does nothing before the window was first opened."""
+        """Shows settings changed elsewhere (a width dragged at the sidebar's edge) in an open
+        window; does nothing before the window was first opened."""
         self.settings = dict(settings)
         if self.window is None:
             return

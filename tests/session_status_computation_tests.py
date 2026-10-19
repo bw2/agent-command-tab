@@ -73,6 +73,17 @@ class ComputeSessionStatusTests(unittest.TestCase):
         self.assertEqual(compute_state("working", 100, screen_reading={"fingerprint_changed_at": 150}, now=749), "working")
         self.assertEqual(compute_state("working", 100, screen_reading={"fingerprint_changed_at": 150}, now=750), "stuck")
 
+    def test_waiting_on_a_long_command_is_never_stuck(self):
+        reading = {"fingerprint_changed_at": 150, "running_command": ("python3", 160), "command_last_seen_running_at": 2000}
+        self.assertEqual(compute_session_status_from_sources("working", 100, None, False, reading, 600, 2000),
+                         ("working", "running python3"))
+
+    def test_the_stuck_clock_restarts_when_the_command_ends(self):
+        # A silent 30-minute command ended at 1900; the agent has been thinking for 100 seconds since.
+        reading = {"fingerprint_changed_at": 150, "running_command": None, "command_last_seen_running_at": 1900}
+        self.assertEqual(compute_state("working", 100, screen_reading=reading, now=2000), "working")
+        self.assertEqual(compute_state("working", 100, screen_reading=reading, now=2500), "stuck")
+
     def test_a_new_working_period_starts_the_stuck_clock_again(self):
         self.assertEqual(compute_state("working", 1000, screen_reading={"fingerprint_changed_at": 100}, now=1100), "working")
 

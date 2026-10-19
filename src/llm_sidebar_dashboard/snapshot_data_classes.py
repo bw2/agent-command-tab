@@ -16,11 +16,15 @@ AgentSessionEntry = collections.namedtuple(
         "working_folder", "status", "status_reason", "status_since", "preview_line", "details",
         "context_fill_percent", "importance_level", "background_task_count", "last_user_interaction_time",
         "ended_abnormally_at", "is_in_front", "peer_messaging_address", "last_time_tab_was_seen",
+        "running_command_name", "running_command_started_at", "context_tokens",
     ],
-    defaults=["", 0.0, "", "", None, 0, 0, None, None, False, "", None],
+    defaults=["", 0.0, "", "", None, 0, 0, None, None, False, "", None, "", None, None],
 )
 AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent session. last_time_tab_was_seen is when "
-                             "the tab was last selected in the key iTerm2 window while iTerm2 was active, or None.")
+                             "the tab was last selected in the key iTerm2 window while iTerm2 was active, or None. "
+                             "running_command_name is the command a working agent started in this turn and waits "
+                             "on (for example \"python3\"), or \"\" while it thinks. context_tokens is how many "
+                             "tokens its context holds, from its conversation file, or None if unknown.")
 
 WindowEntry = collections.namedtuple(
     "WindowEntry",

@@ -3,8 +3,9 @@ import os
 import tempfile
 import unittest
 
-from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, load_settings, merge_settings_with_defaults,
-                                                  resolve_launch_command_paths, save_settings)
+from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, find_launch_command_problem, load_settings,
+                                                  merge_settings_with_defaults, resolve_launch_command_paths,
+                                                  save_settings)
 
 
 class MergeSettingsTests(unittest.TestCase):
@@ -53,6 +54,25 @@ class ResolveLaunchCommandPathsTests(unittest.TestCase):
                          ["/Users/someone/.local/bin/claude --model opus", "/opt/codex/bin/codex", "not-installed"])
         self.assertEqual(settings["agent_tools"][0]["launch_command"], "claude --model opus")  # input unchanged
         json.dumps(resolved)
+
+
+class LaunchCommandProblemTests(unittest.TestCase):
+    def check(self, launch_command, known_names=("claude",), login_shell_names=("yc",)):
+        return find_launch_command_problem(launch_command, lambda name: name in known_names,
+                                           lambda name: name in login_shell_names)
+
+    def test_programs_on_path_aliases_and_paths(self):
+        self.assertEqual(self.check("claude --model opus"), "")
+        self.assertEqual(self.check("yc"), "")  # an alias the login shell knows
+        self.assertEqual(self.check("/bin/sh -c true"), "")
+        self.assertIn("command not found", self.check("not-installed"))
+        self.assertIn("doesn't exist", self.check("/no/such/program"))
+        self.assertEqual(self.check("   "), "No command")
+
+    def test_environment_settings_are_skipped_and_shell_expansions_are_not_judged(self):
+        self.assertEqual(self.check("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude"), "")
+        self.assertIn("command not found", self.check("FOO=1 not-installed"))
+        self.assertEqual(self.check("$HOME/bin/claude"), "")
 
 
 if __name__ == "__main__":

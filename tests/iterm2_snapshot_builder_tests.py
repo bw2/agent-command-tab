@@ -90,7 +90,7 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="working")])], tracking=tracking,
                                   screen_readings={"session-1": {"fingerprint_changed_at": 200.0}})
         entry = snapshot.monitors[0].windows[0].agent_sessions[0]
-        self.assertEqual((entry.status, entry.status_reason), ("stuck", "no screen change for 13 min"))
+        self.assertEqual((entry.status, entry.status_reason), ("stuck", "thinking with no screen change for 13 min"))
 
     def test_snapshot_converts_to_json(self):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="waiting")])])

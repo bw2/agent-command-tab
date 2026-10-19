@@ -6,7 +6,7 @@ action requests (through the thread-safe methods of Iterm2ConnectionThread).
 """
 
 import asyncio
-import ctypes
+import glob
 import json
 import os
 import shutil
@@ -21,6 +21,8 @@ from iterm2 import api_pb2
 from iterm2.notifications import async_subscribe_to_variable_change_notification
 
 from llm_sidebar_dashboard import iterm2_actions
+from llm_sidebar_dashboard.agent_process_tree import (choose_command_the_agent_is_waiting_on, list_descendant_processes,
+                                                      process_is_alive, read_process_current_folder, read_process_info)
 from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
 from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.dashboard_core_api import ActionRegistry, ActionResult
@@ -39,6 +41,13 @@ from llm_sidebar_dashboard.window_list_ordering import move_window_in_window_lis
 FRAME_POLL_INTERVAL_SECONDS = 2
 SCREEN_CHECK_INTERVAL_SECONDS = 2
 FINGERPRINT_INTERVAL_SECONDS = 30
+# When the dashboard first sees a session mid-turn, processes started this long after the agent
+# itself count as commands; MCP servers and other helpers start before that.
+SECONDS_AN_AGENT_TAKES_TO_START_ITS_HELPERS = 30
+SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS = 30  # while a session is idle
+CONTEXT_USAGE_CHECK_INTERVAL_SECONDS = 5
+CONVERSATION_FILE_RETRY_SECONDS = 15  # a conversation file not found yet (Codex writes it at the first prompt)
+CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up again in case the conversation changed
 DEFAULT_STUCK_THRESHOLD_SECONDS = 600
 SMALLEST_WINDOW_WIDTH = 400  # a docked sidebar never makes an iTerm2 window narrower than this
 FRAME_TOLERANCE_POINTS = 20  # iTerm2 rounds window sizes to whole character cells
@@ -57,19 +66,30 @@ def find_claude_command_path():
         (path for path in [os.path.expanduser("~/.local/bin/claude")] if os.path.exists(path)), None)
 
 
-def list_claude_config_folders():
-    """Returns the Claude Code config folders to ask `claude agents --json` about.
+def list_folders_that_may_hold_claude_code_transcripts():
+    """Returns CLAUDE_CONFIG_DIR, ~/.claude, and other ~/.claude* folders with a projects folder
+    (a Claude Code started with its own CLAUDE_CONFIG_DIR, for example ~/.claude_work)."""
+    home_folder = os.path.expanduser("~")
+    candidate_folders = ([os.environ["CLAUDE_CONFIG_DIR"]] if os.environ.get("CLAUDE_CONFIG_DIR") else []) + \
+        [os.path.join(home_folder, ".claude")] + sorted(glob.glob(os.path.join(home_folder, ".claude*")))
+    return [folder for folder in dict.fromkeys(candidate_folders) if os.path.isdir(os.path.join(folder, "projects"))]
 
-    None stands for the default folder (the command runs without CLAUDE_CONFIG_DIR).
+
+def list_claude_config_folders():
+    """Returns the Claude Code config folders to ask `claude agents --json` about: the default
+    folder (None: the command runs without CLAUDE_CONFIG_DIR), the dashboard's own
+    CLAUDE_CONFIG_DIR, and every other ~/.claude* folder with a sessions folder, since a Claude
+    Code started with its own CLAUDE_CONFIG_DIR (for example ~/.claude_work) is listed only there.
     """
-    config_folders = [None]
-    if os.environ.get("CLAUDE_CONFIG_DIR"):
-        config_folders.append(os.environ["CLAUDE_CONFIG_DIR"])
-    return config_folders
+    default_folder = os.path.expanduser("~/.claude")
+    other_folders = ([os.environ["CLAUDE_CONFIG_DIR"]] if os.environ.get("CLAUDE_CONFIG_DIR") else []) + sorted(
+        folder for folder in glob.glob(os.path.expanduser("~/.claude*")) if os.path.isdir(os.path.join(folder, "sessions")))
+    return [None] + [folder for folder in dict.fromkeys(other_folders) if os.path.realpath(folder) != os.path.realpath(default_folder)]
 
 
 async def read_claude_agents_by_process_id(claude_command_path, config_folders):
-    """Runs `claude agents --json` once per config folder; returns {process ID: record}.
+    """Runs `claude agents --json` once per config folder; returns {process ID: record}, each
+    record with "config_folder" added (None for the default folder).
 
     Failures (no command, a timeout, unreadable output) give an empty result for that folder.
     """
@@ -87,45 +107,13 @@ async def read_claude_agents_by_process_id(claude_command_path, config_folders):
             standard_output, _ = await asyncio.wait_for(process.communicate(), timeout=CLAUDE_AGENTS_TIMEOUT_SECONDS)
             for record in json.loads(standard_output or b"[]"):
                 if isinstance(record, dict) and record.get("pid"):
-                    claude_agents_by_process_id[int(record["pid"])] = record
+                    claude_agents_by_process_id[int(record["pid"])] = dict(record, config_folder=config_folder)
         except (OSError, ValueError, asyncio.TimeoutError) as error:
             print(f"claude agents --json failed for config folder {config_folder or '(default)'}: {error!r}")
             if process is not None and process.returncode is None:
                 process.kill()
                 await process.wait()
     return claude_agents_by_process_id
-
-
-LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
-PROC_PIDVNODEPATHINFO = 9  # proc_pidinfo flavor that returns struct proc_vnodepathinfo
-VNODE_INFO_SIZE = 152  # sizeof(struct vnode_info); the current folder's path follows it
-MAXIMUM_PATH_LENGTH = 1024
-
-
-def read_process_current_folder(process_id):
-    """Returns a process's current folder (from macOS's libproc, no subprocess), or "" if unknown.
-
-    PLAN.md section 5: the working folder comes from the agent process, because iTerm2's `path`
-    variable can be empty or stale.
-    """
-    if not process_id:
-        return ""
-    buffer_size = 2 * (VNODE_INFO_SIZE + MAXIMUM_PATH_LENGTH)  # current folder, then root folder
-    buffer = ctypes.create_string_buffer(buffer_size)
-    if LIBPROC.proc_pidinfo(process_id, PROC_PIDVNODEPATHINFO, ctypes.c_uint64(0), buffer, buffer_size) <= 0:
-        return ""
-    return buffer.raw[VNODE_INFO_SIZE:VNODE_INFO_SIZE + MAXIMUM_PATH_LENGTH].split(b"\0", 1)[0].decode(errors="replace")
-
-
-def process_is_alive(process_id):
-    """Returns whether a process with this ID exists (one owned by another user counts as alive)."""
-    try:
-        os.kill(process_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def parse_job_process_id(job_pid_value):
@@ -194,6 +182,8 @@ class DashboardCore:
         self.frames_before_making_room_by_window_id = (load_docked_window_frames(docked_window_frames_file_path)
                                                        if docked_window_frames_file_path else {})
         self.saved_docked_window_frames = dict(self.frames_before_making_room_by_window_id)
+        self.records_loaded_from_file_await_adoption = bool(self.frames_before_making_room_by_window_id)
+        self.reserved_area_was_received = False  # until the main thread says whether the sidebar is docked
         self.window_room_lock = asyncio.Lock()
         self.stuck_threshold_seconds = DEFAULT_STUCK_THRESHOLD_SECONDS
         self.claude_agents_by_process_id = {}
@@ -204,6 +194,9 @@ class DashboardCore:
         self.snapshot_needed = asyncio.Event()
         self.regather_needed = asyncio.Event()
         self.screen_check_needed = asyncio.Event()
+        self.conversation_files_by_session_id = {}  # {"key", "path", "looked_up_at", "modified_at"}
+        self.peek_lock = asyncio.Lock()  # a quick release must not undo a peek that hasn't happened yet
+        self.iterm2_state_before_peek = None
         self.action_registry = ActionRegistry()
         self.register_actions()
 
@@ -213,6 +206,7 @@ class DashboardCore:
         """Registers every action with its flags (PLAN.md section 4)."""
         register = self.action_registry.register_action
         register("focus_agent_session", self.handle_focus_agent_session, True, False)
+        register("focus_window", self.handle_focus_window, True, False)
         register("rename_tab", self.handle_rename_tab, True, False)
         register("rename_window", self.handle_rename_window, True, False)
         register("move_tab", self.handle_move_tab, False, False)
@@ -221,6 +215,9 @@ class DashboardCore:
         register("start_agent_session", self.handle_start_agent_session, True, False)
         register("move_window_to_monitor", self.handle_move_window_to_monitor, False, False)
         register("close_window", self.handle_close_window, False, False)
+        register("duplicate_agent_session", self.handle_duplicate_agent_session, True, False)
+        register("peek_agent_session", self.handle_peek_agent_session, False, False)
+        register("end_peek", self.handle_end_peek, False, False)
 
     async def perform_action(self, action_request):
         """Runs an action request, then asks for a fresh gather and snapshot.
@@ -238,6 +235,9 @@ class DashboardCore:
 
     async def handle_focus_agent_session(self, action_request):
         return await iterm2_actions.focus_agent_session(self.app, action_request.target["session_id"])
+
+    async def handle_focus_window(self, action_request):
+        return await iterm2_actions.focus_window(self.app, action_request.target["window_id"])
 
     async def handle_rename_tab(self, action_request):
         return await iterm2_actions.rename_tab(self.app, action_request.target["tab_id"], action_request.arguments["new_title"])
@@ -270,7 +270,10 @@ class DashboardCore:
         """Gives the room back for the old area, then makes room for the new one, holding the
         lock so a regather can't resize windows in between."""
         async with self.window_room_lock:
+            self.reserved_area_was_received = True
             if new_reserved_area == self.reserved_screen_area:
+                if new_reserved_area is None and self.app is not None and self.frames_before_making_room_by_window_id:
+                    await self.give_room_back_while_holding_the_lock()  # restores still pending from before
                 return
             if self.app is not None:
                 await self.give_room_back_while_holding_the_lock()  # both handle each window's errors themselves
@@ -279,9 +282,16 @@ class DashboardCore:
                 await self.make_room_while_holding_the_lock()
 
     async def make_room_for_reserved_area(self):
-        """Docked sidebar: narrows (or moves) iTerm2 windows that reach into the reserved area."""
+        """After each gather: while docked, narrows (or moves) iTerm2 windows that reach into the
+        reserved area; while not, retries restores still pending (after a restart with docking
+        off, or a window that was full screen when docking ended). Pending restores wait until
+        the main thread has said whether the sidebar is docked, so a docked start doesn't widen
+        windows only to narrow them again."""
         async with self.window_room_lock:
-            await self.make_room_while_holding_the_lock()
+            if self.reserved_screen_area is not None:
+                await self.make_room_while_holding_the_lock()
+            elif self.reserved_area_was_received and self.frames_before_making_room_by_window_id:
+                await self.give_room_back_while_holding_the_lock()
 
     async def make_room_while_holding_the_lock(self):
         """Narrows or moves each window that reaches into the reserved area, remembering its frame
@@ -350,12 +360,22 @@ class DashboardCore:
         self.save_docked_window_frames()
 
     def adopt_records_of_restored_windows(self):
-        """Moves remembered frames of windows that are gone to windows iTerm2 restored after a
-        restart, which get new IDs but keep the narrowed frame."""
-        self.frames_before_making_room_by_window_id = adopt_records_of_restored_windows(
-            self.frames_before_making_room_by_window_id,
-            {gathered_window["window_id"]: gathered_window["frame"] for gathered_window in self.gathered_windows},
-            FRAME_TOLERANCE_POINTS)
+        """On the first pass after start-up, moves frames remembered from the file for windows
+        that are gone to windows iTerm2 restored after a restart, which get new IDs but keep the
+        narrowed frame. Later, the records of windows that closed are dropped instead, so a new
+        window of the same size never takes over a closed window's record."""
+        if not self.gathered_windows:
+            return
+        if self.records_loaded_from_file_await_adoption:
+            self.records_loaded_from_file_await_adoption = False
+            self.frames_before_making_room_by_window_id = adopt_records_of_restored_windows(
+                self.frames_before_making_room_by_window_id,
+                {gathered_window["window_id"]: gathered_window["frame"] for gathered_window in self.gathered_windows},
+                FRAME_TOLERANCE_POINTS)
+        else:
+            self.frames_before_making_room_by_window_id = {
+                window_id: frames for window_id, frames in self.frames_before_making_room_by_window_id.items()
+                if self.app.get_window_by_id(window_id) is not None}
 
     def save_docked_window_frames(self):
         """Writes the remembered frames to their file when they changed since the last write."""
@@ -366,6 +386,49 @@ class DashboardCore:
             self.saved_docked_window_frames = dict(self.frames_before_making_room_by_window_id)
         except OSError as error:
             print(f"could not save the docked windows' frames: {error!r}")
+
+    async def handle_peek_agent_session(self, action_request):
+        """Press and hold on a tab row: shows the tab, first remembering what to put back."""
+        async with self.peek_lock:
+            current_window = self.app.current_terminal_window
+            self.iterm2_state_before_peek = {
+                # The App's current window, not the key window: while the dropdown is open the
+                # dashboard is active and no iTerm2 window is key.
+                "key_window_id": current_window.window_id if current_window is not None else None,
+                "selected_tab_id_by_window_id": {window.window_id: window.current_tab.tab_id
+                                                 for window in self.app.terminal_windows if window.current_tab is not None},
+            }
+            return await iterm2_actions.focus_agent_session(self.app, action_request.target["session_id"])
+
+    async def handle_end_peek(self, action_request):
+        """The button was released: arguments {"bring_back_iterm2_window": bool}, true when iTerm2
+        was in front before the peek (otherwise the main thread brings back the app that was)."""
+        async with self.peek_lock:
+            state, self.iterm2_state_before_peek = self.iterm2_state_before_peek, None
+            if state is None:
+                return ActionResult(False, "no peek to end")
+            return await iterm2_actions.put_back_tabs_and_window_after_peek(
+                self.app, state["selected_tab_id_by_window_id"],
+                state["key_window_id"] if action_request.arguments["bring_back_iterm2_window"] else None)
+
+    async def handle_duplicate_agent_session(self, action_request):
+        """Target {"tab_id": ...}; arguments {"folder": ..., "launch_command": ...}. The copy continues
+        a copy of the conversation when the agent tool can fork it, else it starts fresh."""
+        session_id = self.find_first_session_id_of_tab(action_request.target["tab_id"])
+        agent_session = self.agent_sessions.get(session_id)
+        if agent_session is None:
+            return ActionResult(False, "that tab no longer runs an agent session")
+        process_id = agent_session["process_id"]
+        claude_agent_record = self.claude_agents_by_process_id.get(process_id)
+        conversation_id = await agent_session["adapter"].find_conversation_id(process_id, claude_agent_record)
+        launch_command_for_the_copy = agent_session["adapter"].build_launch_command_for_a_copy(
+            action_request.arguments["launch_command"], conversation_id, claude_agent_record)
+        action_result = await iterm2_actions.duplicate_agent_session(
+            self.connection, self.app, action_request.target["tab_id"], action_request.arguments["folder"],
+            launch_command_for_the_copy)
+        if action_result.succeeded and not conversation_id:
+            return ActionResult(True, "the conversation's ID wasn't found, so the copy starts a new conversation")
+        return action_result
 
     async def handle_close_window(self, action_request):
         return await iterm2_actions.close_window(self.app, action_request.target["window_id"])
@@ -481,9 +544,13 @@ class DashboardCore:
                     first_session["session_id"],
                     {"status_value": first_session["status"], "status_change_time": now, "last_time_tab_was_seen": None})
                 if tracking["status_value"] != first_session["status"]:
+                    previous_state = map_iterm2_status_value_to_state(tracking["status_value"])
+                    new_state = map_iterm2_status_value_to_state(first_session["status"])
                     tracking["status_value"] = first_session["status"]
                     tracking["status_change_time"] = now
-                    if map_iterm2_status_value_to_state(first_session["status"]) == "asking":
+                    if new_state == "working" and previous_state not in ("working", "asking"):
+                        tracking["turn_started_at"] = now  # a permission prompt in between doesn't start a new turn
+                    if new_state == "asking":
                         self.screen_check_needed.set()
         for session_id in set(self.session_tracking_by_session_id) - live_session_ids:
             del self.session_tracking_by_session_id[session_id]
@@ -692,6 +759,7 @@ class DashboardCore:
                 needs_dialog_check = state == "asking" and bool(adapter.permission_dialog_screen_patterns)
                 # An approved tool runs while iTerm2 still says waiting, so it is fingerprinted like "working".
                 is_effectively_working = state == "working" or permission_dialog_was_answered(state, status_change_time, reading)
+                self.note_command_the_agent_is_waiting_on(session_id, agent_session, reading, state, is_effectively_working, now)
                 needs_fingerprint = is_effectively_working and now - reading.get("fingerprint_checked_at", 0) >= FINGERPRINT_INTERVAL_SECONDS
                 if not (needs_dialog_check or needs_fingerprint):
                     continue
@@ -715,6 +783,98 @@ class DashboardCore:
                         reading["fingerprint_changed_at"] = now
                     reading["fingerprint_checked_at"] = now
                 self.snapshot_needed.set()  # also lets "stuck" appear once its time has come
+
+    async def read_context_window_usage_periodically(self):
+        """Keeps each agent session's context size ("context_tokens" in its screen reading) current
+        from the end of its conversation file (context_window_usage). The file is looked up
+        (Claude Code: from `claude agents --json`; Codex: by its folder and start time) for each new process or Claude
+        Code conversation and again every minute, and read again only when it changed."""
+        claude_config_folders = list_folders_that_may_hold_claude_code_transcripts()
+        while True:
+            await asyncio.sleep(CONTEXT_USAGE_CHECK_INTERVAL_SECONDS)
+            for session_id in set(self.conversation_files_by_session_id) - set(self.agent_sessions):
+                del self.conversation_files_by_session_id[session_id]
+            for session_id, agent_session in list(self.agent_sessions.items()):
+                process_id = agent_session["process_id"]
+                claude_agent_record = self.claude_agents_by_process_id.get(process_id) or {}
+                # Looked up again for a new process or Claude Code conversation (/clear), and every
+                # so often anyway: Codex's /new starts a new file inside the same process.
+                conversation_key = (process_id, claude_agent_record.get("sessionId"))
+                conversation_file = self.conversation_files_by_session_id.get(session_id)
+                now = time.time()
+                seconds_between_lookups = (CONVERSATION_FILE_RETRY_SECONDS if conversation_file is None or conversation_file["path"] is None
+                                           else CONVERSATION_FILE_RECHECK_SECONDS)
+                if (conversation_file is None or conversation_file["key"] != conversation_key
+                        or now - conversation_file["looked_up_at"] >= seconds_between_lookups):
+                    path = await agent_session["adapter"].find_conversation_file(process_id, claude_agent_record, claude_config_folders)
+                    if conversation_file is not None and conversation_file["key"] == conversation_key and conversation_file["path"] == path:
+                        conversation_file["looked_up_at"] = now
+                    else:
+                        conversation_file = {"key": conversation_key, "path": path, "looked_up_at": now, "modified_at": None}
+                        self.conversation_files_by_session_id[session_id] = conversation_file
+                        self.note_context_tokens(session_id, None)  # the old conversation's size no longer applies
+                if conversation_file["path"] is None:
+                    continue
+                try:
+                    modified_at = os.path.getmtime(conversation_file["path"])
+                except OSError:
+                    conversation_file["path"] = None
+                    self.note_context_tokens(session_id, None)
+                    continue
+                if modified_at != conversation_file["modified_at"]:
+                    conversation_file["modified_at"] = modified_at
+                    context_tokens = agent_session["adapter"].read_context_tokens(conversation_file["path"])
+                    if context_tokens is not None:  # none in the file's end (one huge line): keep the last size
+                        self.note_context_tokens(session_id, context_tokens)
+
+    def note_context_tokens(self, session_id, context_tokens):
+        reading = self.screen_readings_by_session_id.setdefault(session_id, {})
+        if context_tokens != reading.get("context_tokens"):
+            reading["context_tokens"] = context_tokens
+            self.snapshot_needed.set()
+
+    def note_command_the_agent_is_waiting_on(self, session_id, agent_session, reading, state, is_effectively_working, now):
+        """Records in the session's screen reading the command a working agent started in this
+        turn and still runs ("running_command": (name, started at)), and when one was last seen
+        running, so "stuck" means thinking with nothing new on screen (user request, milestone 2).
+        Between turns it records the processes running then ("helper_process_ids", for example
+        MCP servers), which are not commands. A few system calls, no subprocess."""
+        running_command = None
+        if state in ("idle", "done") and agent_session["process_id"] and \
+                now - reading.get("helper_process_ids_recorded_at", 0) >= SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS:
+            reading["helper_process_ids"] = frozenset(
+                process.process_id for process in list_descendant_processes(agent_session["process_id"]))
+            reading["helper_process_ids_recorded_at"] = now
+        if is_effectively_working and agent_session["process_id"]:
+            turn_started_at = self.find_turn_start(session_id, agent_session, now)
+            running_command = choose_command_the_agent_is_waiting_on(
+                list_descendant_processes(agent_session["process_id"]), turn_started_at,
+                agent_session["adapter"].helper_process_names, reading.get("helper_process_ids", frozenset()))
+        if running_command is not None:
+            reading["command_last_seen_running_at"] = now
+        if running_command != reading.get("running_command"):
+            reading["running_command"] = running_command
+            self.snapshot_needed.set()
+
+    def find_turn_start(self, session_id, agent_session, now):
+        """Returns when the session's current turn began. It is known when the dashboard saw the
+        status turn working; for a turn already under way when the dashboard started, it is read
+        once from the conversation file (the latest prompt), so a command started in this turn
+        counts and a dev server left from an earlier turn doesn't. Until that file is found, the
+        agent's own start plus SECONDS_AN_AGENT_TAKES_TO_START_ITS_HELPERS stands in."""
+        tracking = self.session_tracking_by_session_id.get(session_id) or {}  # set up by update_session_tracking
+        if tracking.get("turn_started_at") is not None:
+            return tracking["turn_started_at"]
+        conversation_file_path = (self.conversation_files_by_session_id.get(session_id) or {}).get("path")
+        if (session_id in self.session_tracking_by_session_id and conversation_file_path
+                and not tracking.get("turn_start_was_read_from_the_conversation_file")):
+            tracking["turn_start_was_read_from_the_conversation_file"] = True
+            turn_started_at = agent_session["adapter"].read_turn_started_at(conversation_file_path)
+            if turn_started_at is not None:
+                tracking["turn_started_at"] = turn_started_at
+                return turn_started_at
+        agent_process = read_process_info(agent_session["process_id"])
+        return agent_process.started_at + SECONDS_AN_AGENT_TAKES_TO_START_ITS_HELPERS if agent_process is not None else now
 
     async def handle_title_change(self, connection, notification):
         """A tab or window title changed (here, in iTerm2's own dialogs, or by a program): re-read."""
@@ -833,7 +993,8 @@ class DashboardCore:
             return
         coroutines = [self.watch_layout_changes(), self.watch_new_sessions(), self.watch_session_terminations(),
                       self.watch_focus_changes(), self.poll_window_frames_when_they_matter(),
-                      self.read_agent_screens_periodically(), self.publish_when_needed()]
+                      self.read_agent_screens_periodically(), self.read_context_window_usage_periodically(),
+                      self.publish_when_needed()]
         if self.claude_command_path:
             coroutines.append(self.refresh_claude_agents_periodically())
         background_tasks = [asyncio.ensure_future(coroutine) for coroutine in coroutines]
@@ -878,9 +1039,10 @@ class Iterm2ConnectionThread(threading.Thread):
             print(f"could not give the iTerm2 windows their room back before exiting: {error!r}")
 
     def submit_action(self, action_request):
-        """Thread-safe: schedules an action on the core's loop (the core prints failures)."""
+        """Thread-safe: schedules an action on the core's loop (the core prints failures); returns
+        a concurrent.futures.Future that completes with its ActionResult."""
         self.core_ready.wait()
-        asyncio.run_coroutine_threadsafe(self.core.perform_action(action_request), self.event_loop)
+        return asyncio.run_coroutine_threadsafe(self.core.perform_action(action_request), self.event_loop)
 
     def send_monitors(self, monitors):
         """Thread-safe: passes the monitor rectangles to the core."""

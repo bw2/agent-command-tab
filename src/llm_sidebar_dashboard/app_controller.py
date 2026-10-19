@@ -14,7 +14,8 @@ import time
 from AppKit import (NSAlert, NSAlertSecondButtonReturn, NSAlertStyleWarning, NSApp, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSApplicationDidBecomeActiveNotification,
                     NSApplicationDidChangeScreenParametersNotification, NSApplicationDidResignActiveNotification,
-                    NSApplicationWillTerminateNotification, NSRunningApplication)
+                    NSApplicationWillTerminateNotification, NSPopoverBehaviorApplicationDefined, NSPopoverBehaviorTransient,
+                    NSRunningApplication, NSWorkspace)
 from Foundation import NSNotificationCenter, NSObject
 from PyObjCTools import AppHelper
 import objc
@@ -47,12 +48,16 @@ class AppController(NSObject):
         self.verbose = verbose
         self.settings = load_settings_resolving_paths_at_first_run()
         self.reserved_screen_area = None
+        self.application_in_front_before_dropdown = None
+        self.peek_in_progress = None  # {"application_in_front", "dropdown_was_open"} while a tab row is held
+        self.peek_waiting_for_put_back = None  # a released peek until the app in front before is back
         self.latest_snapshot_lock = threading.Lock()
         self.latest_snapshot = None
         self.snapshot_delivery_is_scheduled = False
         self.dropdown_list_controller = AgentSessionListController.alloc().initWithOwner_(self)
         self.dropdown_panel_controller = ListPanelController.alloc().initWithListController_(self.dropdown_list_controller)
         self.popover = build_dropdown_popover(self.dropdown_panel_controller)
+        self.popover.setDelegate_(self)  # popoverWillClose_
         self.status_item_controller = MenuBarStatusItemController.alloc().initWithPopover_owner_(self.popover, self)
         self.sidebar_controller = SidebarController.alloc().initWithOwner_(self)
         self.settings_window_controller = SettingsWindowController.alloc().initWithOwner_(self)
@@ -74,6 +79,9 @@ class AppController(NSObject):
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.connection_thread.send_stuck_threshold_seconds(self.settings["stuck_minutes"] * 60)
         self.sidebar_controller.apply_settings(self.settings)
+        # Always once at start, also when not docked (reserve_screen_area only sends changes): the
+        # core waits for it before giving back room still owed from before a restart.
+        self.connection_thread.send_reserved_screen_area(self.reserved_screen_area)
 
     # ----- background thread to main thread -----
 
@@ -123,11 +131,67 @@ class AppController(NSObject):
 
     @objc.python_method
     def submit_action(self, action_request):
-        if action_request.action == "focus_agent_session":
+        """Sends an action to the core; returns a future that completes with its ActionResult."""
+        if action_request.action in ("focus_agent_session", "focus_window", "peek_agent_session"):
             # macOS may refuse another app's activation while the dashboard is active, so hand it over first.
             for iterm2_application in NSRunningApplication.runningApplicationsWithBundleIdentifier_(ITERM2_BUNDLE_IDENTIFIER):
                 NSApplication.sharedApplication().yieldActivationToApplication_(iterm2_application)
-        self.connection_thread.submit_action(action_request)
+        return self.connection_thread.submit_action(action_request)
+
+    def popoverWillClose_(self, notification):
+        self.dropdown_list_controller.cancel_rename()  # an open rename would keep the list from updating
+
+    @objc.python_method
+    def note_application_in_front_before_dropdown(self, application):
+        """The dropdown activates the dashboard; a peek ends by bringing back what was in front before."""
+        self.application_in_front_before_dropdown = application
+
+    @objc.python_method
+    def start_peek(self, session_id):
+        """Pressing and holding a tab row: shows the tab until the button is released (user request,
+        milestone 2). The dropdown stays open meanwhile, though iTerm2 becomes the active app."""
+        peek_still_being_put_back, self.peek_waiting_for_put_back = self.peek_waiting_for_put_back, None
+        if peek_still_being_put_back is not None:
+            # Held again before the last peek was put back: iTerm2 is still in front, so take over
+            # what that peek was to bring back (its own put-back now does nothing).
+            self.peek_in_progress = dict(peek_still_being_put_back)
+        else:
+            application_in_front = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if application_in_front is not None and application_in_front.processIdentifier() == os.getpid():
+                # The dashboard is in front: with the dropdown open, bring back what was in front before
+                # it opened; otherwise (Settings or a rename is open) bring back nothing.
+                application_in_front = self.application_in_front_before_dropdown if self.popover.isShown() else None
+            self.peek_in_progress = {"application_in_front": application_in_front, "dropdown_was_open": self.popover.isShown()}
+        if self.popover.isShown():
+            self.popover.setBehavior_(NSPopoverBehaviorApplicationDefined)
+        self.submit_action(ActionRequest("peek_agent_session", {"session_id": session_id}))
+
+    @objc.python_method
+    def end_peek(self):
+        """The button was released: puts back whatever tab, window or app was in front before."""
+        peek, self.peek_in_progress = self.peek_in_progress, None
+        if peek is None:
+            return
+        application = peek["application_in_front"]
+        iterm2_was_in_front = application is not None and application.bundleIdentifier() == ITERM2_BUNDLE_IDENTIFIER
+        self.peek_waiting_for_put_back = peek
+        end_peek_future = self.submit_action(ActionRequest("end_peek", {}, {"bring_back_iterm2_window": iterm2_was_in_front}))
+        # Only once the core is done (after the peek's own activation of iTerm2, which may still
+        # be under way), or iTerm2 would come back in front of the app brought back here.
+        end_peek_future.add_done_callback(
+            lambda future: AppHelper.callAfter(self.bring_back_application_after_peek, peek, iterm2_was_in_front))
+
+    @objc.python_method
+    def bring_back_application_after_peek(self, peek, iterm2_was_in_front):
+        if self.peek_waiting_for_put_back is not peek:
+            return  # a newer hold took over; its own release puts things back
+        self.peek_waiting_for_put_back = None
+        application = peek["application_in_front"]
+        if application is not None and not iterm2_was_in_front:
+            NSApp.yieldActivationToApplication_(application)
+            application.activateWithOptions_(0)
+        if peek["dropdown_was_open"]:
+            self.popover.setBehavior_(NSPopoverBehaviorTransient)
 
     @objc.python_method
     def tab_was_focused(self, list_controller):
@@ -165,12 +229,23 @@ class AppController(NSObject):
         return alert.runModal() == NSAlertSecondButtonReturn
 
     @objc.python_method
+    def find_launch_command(self, agent_tool_name):
+        return next((agent_tool["launch_command"] for agent_tool in self.settings["agent_tools"]
+                     if agent_tool["agent_tool_name"] == agent_tool_name), "")
+
+    @objc.python_method
+    def duplicate_agent_session(self, tab_id, folder, agent_tool_name):
+        """Opens a copy of a tab's agent session right after it, continuing a copy of its
+        conversation where the tool allows (like Chrome's Duplicate, user request, milestone 2)."""
+        self.submit_action(ActionRequest("duplicate_agent_session", {"tab_id": tab_id},
+                                         {"folder": folder or "~", "launch_command": self.find_launch_command(agent_tool_name)}))
+
+    @objc.python_method
     def start_agent_session_from_menu(self, window_id, folder, agent_tool_name):
         """Starts an agent tool in a new tab of a window (R13), or in a new window (R13.1) in the
         folder of the tab in front, else of the tab used most recently within a day, else the
         home folder (no folder picker: user request, milestone 2)."""
-        launch_command = next((agent_tool["launch_command"] for agent_tool in self.settings["agent_tools"]
-                               if agent_tool["agent_tool_name"] == agent_tool_name), "")
+        launch_command = self.find_launch_command(agent_tool_name)
         if window_id is not None:
             self.submit_action(ActionRequest("start_agent_session", {"window_id": window_id},
                                              {"folder": folder or "~", "launch_command": launch_command}))
@@ -200,8 +275,9 @@ class AppController(NSObject):
         self.connection_thread.send_stuck_threshold_seconds(new_settings["stuck_minutes"] * 60)
 
     @objc.python_method
-    def toggle_sidebar(self):
-        self.settings_changed(dict(self.settings, sidebar_is_on=not self.settings["sidebar_is_on"]))
+    def show_sidebar_for_a_few_seconds(self):
+        """"Show the sidebar" in the menu bar item's menu: 5 seconds, then it hides unless the pointer is on it."""
+        self.sidebar_controller.show_for_a_few_seconds()
 
     @objc.python_method
     def reserve_screen_area(self, frame):
