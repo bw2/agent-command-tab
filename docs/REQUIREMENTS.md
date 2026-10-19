@@ -42,9 +42,9 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
 - R7. One row per iTerm2 window that has at least one agent session. Windows without one are not listed.
 - R8. Each window row expands and collapses to show its agent session tabs as a sublist.
-- R8.1. All rows start expanded, including rows that appear later. Collapse choices are kept until the app restarts. "Expand all" and "collapse all" controls sit near the top right, above the list.
+- R8.1. All rows start expanded, including rows that appear later. Collapse choices are kept until the app restarts. "Expand all" and "collapse all" controls sit near the top right, above the list (since 2026-10-19 one button that does either, beside the settings button).
 - R8.2. Gestures:
-  - click a window or monitor row: expand or collapse it;
+  - click a window or monitor row's arrow (› or ⌄): expand or collapse it; a tab row's arrow opens or closes its preview (since 2026-10-19; before, a click anywhere on the row did this);
   - double-click a name, or choose Rename in the right-click menu: rename;
   - the right-click menu also has "Focus window";
   - drag a window row within its monitor group: reorder the list (R12);
@@ -110,7 +110,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
 ### Preview
 
-- R23. Each tab row shows a one-line preview, in this order of preference: what it is asking (the tool asking permission, or the question), the tool it is running, the start of its last message, the user's last prompt. It is two gray lines under the tab's row, opened and closed by a single click on the tab, like one more level of the tree (user requests, 2026-10-19).
+- R23. Each tab row shows a one-line preview, in this order of preference: what it is asking (the tool asking permission, or the question), the tool it is running, the start of its last message, the user's last prompt. It is two gray lines under the tab's row, opened and closed by the row's arrow like one more level of the tree (user requests, 2026-10-19).
 - R24. Hovering a tab row shows more: the last prompt, the last message (long text shortened), the current tool, the time in the current state, the working folder.
 - R25. An optional AI-written one-line summary per agent session, off by default (later version).
 

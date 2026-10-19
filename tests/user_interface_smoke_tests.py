@@ -232,19 +232,20 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_top_bar_drops_the_sort_label_then_the_sort_popup_when_narrow(self):
         panel = self.dropdown_panel_controller
-        # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's smallest width.
-        for width, label_shown, popup_shown in ((460, True, True), (350, True, True), (320, False, True), (310, False, True),
-                                                (292, False, False), (200, False, False), (460, True, True)):
+        # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's
+        # smallest width and 200 the sidebar's (180 can't happen, but checks the last step).
+        for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (220, True, True), (210, False, True),
+                                                (200, False, True), (180, False, False), (460, True, True)):
             self.window.setContentSize_((width, 260))
             self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden()),
                              (label_shown, popup_shown), width)
-            settings_button_x = panel.settings_button.frame().origin.x
+            right_buttons_x = panel.expand_or_collapse_all_button.frame().origin.x  # then the settings button
             if popup_shown:
                 popup_frame = panel.list_sort_order_popup.frame()
-                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, settings_button_x)
+                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, right_buttons_x)
             message_frame = panel.message_text_field.frame()
-            self.assertTrue(message_frame.size.width == 0 or message_frame.origin.x + message_frame.size.width <= settings_button_x,
-                            width)  # never covers the settings button
+            self.assertTrue(message_frame.size.width == 0 or message_frame.origin.x + message_frame.size.width <= right_buttons_x,
+                            width)  # never covers the buttons
         self.assertGreater(panel.message_text_field.frame().size.width, 100)  # room again for a connection message
         self.window.setContentSize_((320, 260))
         panel.show_message("iTerm2 can't be reached; retrying")  # the sort control steps aside for it
@@ -290,14 +291,14 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         window_item = self.list_controller.outline_view.itemAtRow_(0)
         self.list_controller.find_clicked_item = lambda: window_item
         self.list_controller.rowClicked_(None)
-        self.assertIn(("window", "w1"), self.list_controller.collapsed_item_keys)  # the first click toggles at once
+        self.assertEqual(self.list_controller.collapsed_item_keys, set())  # a single click doesn't collapse
         self.list_controller.rowDoubleClicked_(None)
         self.assertEqual([(request.action, request.target) for request in self.submitted_actions],
                          [("focus_window", {"window_id": "w1"})])  # with the tab it already shows
         self.assertFalse(self.list_controller.rename_in_progress)
-        self.assertNotIn(("window", "w1"), self.list_controller.collapsed_item_keys)  # put back
+        self.assertEqual(self.list_controller.collapsed_item_keys, set())
 
-    def test_single_click_on_a_tab_without_a_preview_does_nothing_and_double_click_shows_it(self):
+    def test_single_click_on_a_tab_does_nothing_and_double_click_shows_it(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         tab_item = self.list_controller.outline_view.itemAtRow_(1)
         self.list_controller.find_clicked_item = lambda: tab_item
@@ -488,18 +489,31 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(snapshot)
         return self.list_controller.outline_view
 
-    def click_row(self, row):
-        item = self.list_controller.outline_view.itemAtRow_(row)
-        self.list_controller.find_clicked_item = lambda: item
-        self.list_controller.rowClicked_(None)
+    def click_row_arrow(self, row):
+        outline_view = self.list_controller.outline_view
+        row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, row, True)
+        with unittest.mock.patch.object(outline_view, "rowForView_", return_value=row):
+            self.list_controller.disclosureButtonClicked_(row_view.disclosure_button)
 
-    def test_a_click_on_a_tab_opens_its_preview_under_the_name_and_another_click_closes_it(self):
+    def lay_out_row_view(self, row):
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, row, True)
+        row_view.layoutSubtreeIfNeeded()
+        return row_view
+
+    def test_the_arrow_on_a_tab_opens_its_preview_under_the_name_and_closes_it_again(self):
         outline_view = self.apply_snapshot_with_previews()
         self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)  # closed at first
-        self.click_row(1)
+        self.window.contentView().layoutSubtreeIfNeeded()
+        arrow = self.lay_out_row_view(1).disclosure_button
+        self.assertFalse(arrow.isHidden())
+        self.assertEqual(arrow.image().accessibilityDescription(), "Open")
+        self.assertTrue(self.lay_out_row_view(2).disclosure_button.isHidden())  # no preview: no arrow, names still line up
+        self.assertEqual(self.lay_out_row_view(1).name_text_field.frame().origin.x,
+                         self.lay_out_row_view(2).name_text_field.frame().origin.x)
+        self.click_row_arrow(1)
         self.assertEqual([outline_view.rectOfRow_(row).size.height for row in range(3)],
                          [ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT])
-        self.assertEqual(self.submitted_actions, [])  # a single click doesn't show the tab
+        self.assertEqual(self.submitted_actions, [])  # opening doesn't show the tab
         self.window.setContentSize_((POPOVER_WIDTH + 200, 400))
         self.window.contentView().layoutSubtreeIfNeeded()
         row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
@@ -512,56 +526,72 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertLessEqual(preview_frame.origin.y + preview_frame.size.height, row_view.name_text_field.frame().origin.y)
         self.assertEqual(row_view.preview_connector_text_field.stringValue(), "│  \n│  ")  # the window's tree line carries on
         self.assertEqual(self.list_controller.measure_fully_expanded_list_height(), 6 * ROW_HEIGHT + TAB_ROW_HEIGHT_WITH_PREVIEW)
-        self.click_row(1)
-        self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)
-        self.click_row(2)  # a tab without a preview has nothing to open
-        self.assertEqual(outline_view.rectOfRow_(2).size.height, ROW_HEIGHT)
-
-    def test_a_double_click_on_a_tab_shows_it_and_puts_its_preview_back(self):
-        outline_view = self.apply_snapshot_with_previews()
-        self.click_row(1)  # the first click opens the preview at once
-        self.list_controller.rowDoubleClicked_(None)
-        self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)
-        self.assertEqual(self.submitted_actions[-1].action, "focus_agent_session")
-
-    def test_holding_a_tab_to_peek_doesnt_open_its_preview(self):
-        outline_view = self.apply_snapshot_with_previews()
-        self.list_controller.row_pressed(1)
-        self.list_controller.peekTimerFired_(self.list_controller.peek_timer)
-        self.click_row(1)  # the click arrives when the button comes up, before row_released
-        self.list_controller.row_released()
+        self.assertEqual(self.lay_out_row_view(1).disclosure_button.image().accessibilityDescription(), "Close")
+        self.click_row_arrow(1)
         self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)
 
-    def test_expand_all_and_collapse_all_open_and_close_the_previews_too(self):
+    def test_a_single_click_on_a_row_opens_and_closes_nothing(self):
         outline_view = self.apply_snapshot_with_previews()
-        self.list_controller.set_all_expanded(True)
-        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 2, 5, 6)],
-                         [TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW, TAB_ROW_HEIGHT_WITH_PREVIEW])
+        for row in (0, 1):
+            item = outline_view.itemAtRow_(row)
+            self.list_controller.find_clicked_item = lambda: item
+            self.list_controller.rowClicked_(None)
+        self.assertEqual((outline_view.numberOfRows(), outline_view.rectOfRow_(1).size.height), (7, ROW_HEIGHT))
+
+    def test_the_arrow_on_a_window_collapses_just_that_window(self):
+        outline_view = self.apply_snapshot_with_previews()
+        self.click_row_arrow(5)  # a preview in the second window
+        self.click_row_arrow(4)  # the second window
+        self.assertEqual((outline_view.numberOfRows(), self.list_controller.collapsed_item_keys), (5, {("window", "w2")}))
+        self.click_row_arrow(4)
+        self.assertEqual(outline_view.rectOfRow_(5).size.height, TAB_ROW_HEIGHT_WITH_PREVIEW)  # comes back as it was
+
+    def test_expand_all_and_collapse_all_leave_the_previews_as_they_are(self):
+        outline_view = self.apply_snapshot_with_previews()
+        self.click_row_arrow(1)  # opens one preview
         self.list_controller.set_all_expanded(False)
         self.assertEqual(outline_view.numberOfRows(), 2)
-        self.assertEqual(self.list_controller.open_preview_item_keys, set())
+        self.list_controller.set_all_expanded(True)
+        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 5, 6)],
+                         [TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT, ROW_HEIGHT])
 
-    def test_an_expanded_window_row_has_buttons_that_open_and_close_its_tabs_previews(self):
+    def test_the_top_bar_has_one_button_that_expands_or_collapses_all(self):
+        panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        button = panel.expand_or_collapse_all_button
+        self.assertLess(button.frame().origin.x, panel.settings_button.frame().origin.x)  # beside the settings button
+        self.assertEqual(button.toolTip(), "Collapse all")  # fully expanded: a click collapses
+        panel.expandOrCollapseAllClicked_(button)
+        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (2, "Expand all"))
+        self.list_controller.toggle_expansion(self.list_controller.outline_view.itemAtRow_(0))  # one window expanded
+        self.assertEqual(button.toolTip(), "Expand all")
+        panel.expandOrCollapseAllClicked_(button)
+        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (7, "Collapse all"))
+
+    def test_an_expanded_window_row_has_a_button_that_opens_or_closes_its_tabs_previews(self):
         outline_view = self.apply_snapshot_with_previews()
         self.window.contentView().layoutSubtreeIfNeeded()
-        window_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 4, True)  # tandem-repeats
-        window_row_view.layoutSubtreeIfNeeded()
-        self.assertFalse(window_row_view.open_previews_button.isHidden())
+        lay_out_row_view = self.lay_out_row_view
+        window_row_view = lay_out_row_view(4)  # tandem-repeats: both of its tabs have previews
+        button = window_row_view.preview_toggle_button
+        self.assertFalse(button.isHidden())
         self.assertLessEqual(window_row_view.name_text_field.frame().origin.x + window_row_view.name_text_field.frame().size.width,
-                             window_row_view.open_previews_button.frame().origin.x)
+                             button.frame().origin.x)
+        self.assertEqual(button.image().accessibilityDescription(), "Show the tabs' previews")
+        self.click_row_arrow(5)  # one open: the button still opens the rest
         with unittest.mock.patch.object(outline_view, "rowForView_", return_value=4):
-            self.list_controller.openPreviewsButtonClicked_(window_row_view.open_previews_button)
+            self.list_controller.previewToggleButtonClicked_(button)
             self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 5, 6)],
                              [ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW, TAB_ROW_HEIGHT_WITH_PREVIEW])
-            self.list_controller.closePreviewsButtonClicked_(window_row_view.close_previews_button)
+            self.assertEqual(lay_out_row_view(4).preview_toggle_button.image().accessibilityDescription(),
+                             "Hide the tabs' previews")
+            self.list_controller.previewToggleButtonClicked_(button)
         self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (5, 6)], [ROW_HEIGHT, ROW_HEIGHT])
-        self.list_controller.toggle_expansion(outline_view.itemAtRow_(4))  # collapsed: no buttons
-        window_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 4, True)
-        window_row_view.layoutSubtreeIfNeeded()
-        self.assertTrue(window_row_view.open_previews_button.isHidden())
-        tab_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
-        tab_row_view.layoutSubtreeIfNeeded()
-        self.assertTrue(tab_row_view.open_previews_button.isHidden())
+        self.list_controller.toggle_expansion(outline_view.itemAtRow_(4))  # collapsed: no button
+        self.assertTrue(lay_out_row_view(4).preview_toggle_button.isHidden())
+        self.assertTrue(lay_out_row_view(1).preview_toggle_button.isHidden())  # a tab row
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # no previews at all: nothing to open
+        self.assertTrue(lay_out_row_view(0).preview_toggle_button.isHidden())
 
     def lay_out_tab_row_views(self, snapshot):
         self.list_controller.apply_snapshot(snapshot)
