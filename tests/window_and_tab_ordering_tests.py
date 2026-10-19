@@ -1,7 +1,7 @@
 import unittest
 
-from llm_sidebar_dashboard.tab_order_computation import compute_full_tab_order_after_move
-from llm_sidebar_dashboard.window_list_ordering import move_window_in_window_list_order, update_window_list_order
+from agent_command_tab.tab_order_computation import compute_full_tab_order_after_move
+from agent_command_tab.window_list_ordering import move_window_in_window_list_order, update_window_list_order
 
 
 class UpdateWindowListOrderTests(unittest.TestCase):

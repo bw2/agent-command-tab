@@ -1,13 +1,13 @@
 import unittest
 
-from llm_sidebar_dashboard.session_status_computation import (compute_session_status_from_sources,
-                                                              map_iterm2_status_value_to_state,
-                                                              permission_dialog_was_answered,
-                                                              pick_most_urgent_state,
-                                                              status_change_ends_a_turn,
-                                                              summarize_state_counts_in_urgency_order,
-                                                              track_status_value,
-                                                              update_permission_dialog_reading)
+from agent_command_tab.session_status_computation import (compute_session_status_from_sources,
+                                                          map_iterm2_status_value_to_state,
+                                                          permission_dialog_was_answered,
+                                                          pick_most_urgent_state,
+                                                          status_change_ends_a_turn,
+                                                          summarize_state_counts_in_urgency_order,
+                                                          track_status_value,
+                                                          update_permission_dialog_reading)
 
 
 class MapIterm2StatusValueTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-# LLM Sidebar Dashboard
+# AgentCommandTab
 
 A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agents run (Claude Code, OpenAI Codex CLI, and others), shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents. The list shows as a dropdown under the menu bar icon, a sidebar at the edge of the screen, or a regular window.
 
@@ -22,8 +22,8 @@ A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agen
 Not published yet. Once it is:
 
 ```bash
-pipx install llm-sidebar-dashboard        # or: pip install llm-sidebar-dashboard
-brew install bw2/tap/llm-sidebar-dashboard
+pipx install agent-command-tab        # or: pip install agent-command-tab
+brew install bw2/tap/agent-command-tab
 ```
 
 From a clone of this repository:
@@ -35,8 +35,8 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 ## Use
 
 ```bash
-llm-sidebar-dashboard                # the menu bar app; restarts itself if iTerm2's connection drops
-llm-sidebar-dashboard dump-snapshot  # prints the current list as JSON
+agent-command-tab                # the menu bar app; restarts itself if iTerm2's connection drops
+agent-command-tab dump-snapshot  # prints the current list as JSON
 ```
 
 Click the "C" in the menu bar to see the list, right-click it for Settings. The first time, iTerm2 asks whether to allow the app to use its Python API.

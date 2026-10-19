@@ -5,7 +5,7 @@ dragging rows stay as they are, so "manual" shows them again unchanged. Python's
 equal rows in their manual order.
 """
 
-from llm_sidebar_dashboard.session_status_computation import STATES_IN_URGENCY_ORDER
+from agent_command_tab.session_status_computation import STATES_IN_URGENCY_ORDER
 
 
 def rank_agent_session_by_activity(agent_session_entry):

@@ -7,10 +7,10 @@ from AppKit import (NSApp, NSAttributedString, NSColor, NSEventMaskLeftMouseUp, 
                     NSStatusBar, NSVariableStatusItemLength, NSWorkspace)
 from Foundation import NSObject
 
-from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_state
-from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
-from llm_sidebar_dashboard.user_interface.named_colors import build_color_from_name
-from llm_sidebar_dashboard.user_interface.row_text_rendering import DOT_GLYPH_AND_COLOR_BY_STATE
+from agent_command_tab.session_status_computation import pick_most_urgent_state
+from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
+from agent_command_tab.user_interface.named_colors import build_color_from_name
+from agent_command_tab.user_interface.row_text_rendering import DOT_GLYPH_AND_COLOR_BY_STATE
 
 # The "auto" icon color of the most urgent state: the rows' dot color for that state, otherwise green.
 AUTOMATIC_ICON_COLOR_NAME_BY_MOST_URGENT_STATE = {state: DOT_GLYPH_AND_COLOR_BY_STATE[state][1]
@@ -128,7 +128,7 @@ class MenuBarStatusItemController(NSObject):
     def show_right_click_menu(self):
         menu = NSMenu.alloc().initWithTitle_("")
         for title, action_name in (("Show the sidebar", "showSidebarClicked:"), ("Settings…", "settingsClicked:"),
-                                   (None, None), ("Quit LLM Sidebar Dashboard", "quitClicked:")):
+                                   (None, None), ("Quit AgentCommandTab", "quitClicked:")):
             if title is None:
                 menu.addItem_(NSMenuItem.separatorItem())
                 continue

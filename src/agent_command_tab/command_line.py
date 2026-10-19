@@ -1,4 +1,4 @@
-"""Command line entry point: `llm-sidebar-dashboard run | app | dump-snapshot`."""
+"""Command line entry point: `agent-command-tab run | app | dump-snapshot`."""
 
 import argparse
 import json
@@ -23,9 +23,9 @@ def dump_snapshot(verbose):
     Waits a few seconds after the first snapshot, so that names from `claude agents --json`
     (read in the background) are included.
     """
-    from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThread
-    from llm_sidebar_dashboard.snapshot_data_classes import convert_snapshot_to_json_ready_dict
-    from llm_sidebar_dashboard.user_interface.screen_layout import read_monitors_from_screens
+    from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+    from agent_command_tab.snapshot_data_classes import convert_snapshot_to_json_ready_dict
+    from agent_command_tab.user_interface.screen_layout import read_monitors_from_screens
 
     first_snapshot_arrived = threading.Event()
     received = {}
@@ -54,7 +54,7 @@ def dump_snapshot(verbose):
 
 def run_app_process(verbose):
     """Runs the menu bar app in this process; returns its exit status."""
-    from llm_sidebar_dashboard.app_controller import run_menu_bar_app
+    from agent_command_tab.app_controller import run_menu_bar_app
     return run_menu_bar_app(verbose)
 
 
@@ -87,20 +87,20 @@ def run_with_restarts(verbose):
     restart_delay_seconds = 1
     while True:
         started_at = time.time()
-        command = [sys.executable, "-m", "llm_sidebar_dashboard.command_line", "app"] + (["--verbose"] if verbose else [])
+        command = [sys.executable, "-m", "agent_command_tab.command_line", "app"] + (["--verbose"] if verbose else [])
         exit_status = wait_for_app_process(subprocess.Popen(command, env=os.environ))
         if exit_status != RECONNECT_EXIT_STATUS:
             return exit_status
         if time.time() - started_at > 60:
             restart_delay_seconds = 1
-        print(f"llm-sidebar-dashboard: reconnecting in {restart_delay_seconds} s")
+        print(f"agent-command-tab: reconnecting in {restart_delay_seconds} s")
         time.sleep(restart_delay_seconds)
         restart_delay_seconds = min(restart_delay_seconds * 2, LONGEST_RESTART_DELAY_SECONDS)
 
 
 def main(arguments=None):
     """Parses the command line and runs the chosen command."""
-    parser = argparse.ArgumentParser(prog="llm-sidebar-dashboard", description=__doc__)
+    parser = argparse.ArgumentParser(prog="agent-command-tab", description=__doc__)
     parser.add_argument("command", choices=["run", "app", "dump-snapshot"], nargs="?", default="run",
                         help="run: the menu bar app, restarted when iTerm2's connection drops (default); "
                              "app: the menu bar app without restarts; dump-snapshot: print the current list as JSON")

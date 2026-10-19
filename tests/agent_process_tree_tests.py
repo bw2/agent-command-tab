@@ -7,13 +7,13 @@ import tempfile
 import time
 import unittest
 
-from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
-from llm_sidebar_dashboard.agent_adapters.codex import CONVERSATION_FILE_PATTERN, CodexAdapter
-from llm_sidebar_dashboard.agent_adapters.generic import GenericAdapter
-from llm_sidebar_dashboard.agent_process_tree import (ProcessInfo, choose_command_the_agent_is_waiting_on, compute_cpu_percent,
-                                                      list_descendant_processes, read_name_the_process_was_started_as,
-                                                      read_process_info, read_process_resource_usage,
-                                                      read_process_tree_resource_usage)
+from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_command_tab.agent_adapters.codex import CONVERSATION_FILE_PATTERN, CodexAdapter
+from agent_command_tab.agent_adapters.generic import GenericAdapter
+from agent_command_tab.agent_process_tree import (ProcessInfo, choose_command_the_agent_is_waiting_on, compute_cpu_percent,
+                                                  list_descendant_processes, read_name_the_process_was_started_as,
+                                                  read_process_info, read_process_resource_usage,
+                                                  read_process_tree_resource_usage)
 
 TURN_STARTED_AT = 1000.0
 NOW = 1100.0

@@ -9,11 +9,11 @@ import os
 
 import iterm2
 
-from llm_sidebar_dashboard.dashboard_core_api import ActionResult
-from llm_sidebar_dashboard.monitor_assignment import (assign_windows_to_monitors_by_largest_overlap,
-                                                      compute_window_frame_on_another_monitor)
-from llm_sidebar_dashboard.screen_readings import input_area_is_empty, read_typed_input_area_text
-from llm_sidebar_dashboard.tab_order_computation import compute_full_tab_order_after_move
+from agent_command_tab.dashboard_core_api import ActionResult
+from agent_command_tab.monitor_assignment import (assign_windows_to_monitors_by_largest_overlap,
+                                                  compute_window_frame_on_another_monitor)
+from agent_command_tab.screen_readings import input_area_is_empty, read_typed_input_area_text
+from agent_command_tab.tab_order_computation import compute_full_tab_order_after_move
 
 SECONDS_FOR_FULL_SCREEN_ANIMATION = 1.0
 SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED = 0.5  # the box empties within a redraw of the Enter

@@ -21,28 +21,28 @@ import iterm2.rpc
 from iterm2 import api_pb2
 from iterm2.notifications import async_subscribe_to_variable_change_notification
 
-from llm_sidebar_dashboard import iterm2_actions
-from llm_sidebar_dashboard.agent_process_tree import (choose_command_the_agent_is_waiting_on, compute_cpu_percent,
-                                                      list_descendant_processes, process_is_alive,
-                                                      read_name_the_process_was_started_as, read_process_current_folder,
-                                                      read_process_info, read_process_tree_resource_usage)
-from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
-from llm_sidebar_dashboard.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
-from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
-from llm_sidebar_dashboard.dashboard_core_api import ActionRegistry, ActionResult
-from llm_sidebar_dashboard.iterm2_snapshot_builder import DisplayedState, build_computer_snapshot, resolve_agent_sessions
-from llm_sidebar_dashboard.docked_window_frames_store import (adopt_records_of_restored_windows,
-                                                              load_docked_window_frames, save_docked_window_frames)
-from llm_sidebar_dashboard.monitor_assignment import compute_frame_clear_of_area, frames_are_within_tolerance
-from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, count_lines_matching,
-                                                   screen_shows_permission_dialog)
-from llm_sidebar_dashboard.session_status_computation import (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT,
-                                                              map_iterm2_status_value_to_state,
-                                                              permission_dialog_was_answered,
-                                                              track_status_value,
-                                                              update_permission_dialog_reading)
-from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
-from llm_sidebar_dashboard.window_list_ordering import move_window_in_window_list_order, update_window_list_order
+from agent_command_tab import iterm2_actions
+from agent_command_tab.agent_process_tree import (choose_command_the_agent_is_waiting_on, compute_cpu_percent,
+                                                  list_descendant_processes, process_is_alive,
+                                                  read_name_the_process_was_started_as, read_process_current_folder,
+                                                  read_process_info, read_process_tree_resource_usage)
+from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
+from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
+from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_command_tab.dashboard_core_api import ActionRegistry, ActionResult
+from agent_command_tab.iterm2_snapshot_builder import DisplayedState, build_computer_snapshot, resolve_agent_sessions
+from agent_command_tab.docked_window_frames_store import (adopt_records_of_restored_windows,
+                                                          load_docked_window_frames, save_docked_window_frames)
+from agent_command_tab.monitor_assignment import compute_frame_clear_of_area, frames_are_within_tolerance
+from agent_command_tab.screen_readings import (compute_screen_fingerprint, count_lines_matching,
+                                               screen_shows_permission_dialog)
+from agent_command_tab.session_status_computation import (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT,
+                                                          map_iterm2_status_value_to_state,
+                                                          permission_dialog_was_answered,
+                                                          track_status_value,
+                                                          update_permission_dialog_reading)
+from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
+from agent_command_tab.window_list_ordering import move_window_in_window_list_order, update_window_list_order
 
 FRAME_POLL_INTERVAL_SECONDS = 2
 SCREEN_CHECK_INTERVAL_SECONDS = 2

@@ -4,13 +4,13 @@ and the settings name the agent tools as the adapters do."""
 
 import unittest
 
-from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
-from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, LIST_COLUMNS, LIST_SORT_ORDERS, SHOW_AS_CHOICES,
-                                                  SIDEBAR_EDGES, SIDEBAR_MODES)
-from llm_sidebar_dashboard.user_interface.agent_session_outline_view import COLUMN_NAMES_IN_DROP_ORDER, TAB_ROW_COLUMNS
-from llm_sidebar_dashboard.user_interface.popover_container import LIST_SORT_ORDER_TITLES
-from llm_sidebar_dashboard.user_interface.settings_window import (LIST_COLUMN_TITLES, SHOW_AS_TITLES, SIDEBAR_EDGE_TITLES,
-                                                                  SIDEBAR_MODE_TITLES)
+from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
+from agent_command_tab.settings_store import (DEFAULT_SETTINGS, LIST_COLUMNS, LIST_SORT_ORDERS, SHOW_AS_CHOICES,
+                                              SIDEBAR_EDGES, SIDEBAR_MODES)
+from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_NAMES_IN_DROP_ORDER, TAB_ROW_COLUMNS
+from agent_command_tab.user_interface.popover_container import LIST_SORT_ORDER_TITLES
+from agent_command_tab.user_interface.settings_window import (LIST_COLUMN_TITLES, SHOW_AS_TITLES, SIDEBAR_EDGE_TITLES,
+                                                              SIDEBAR_MODE_TITLES)
 
 
 class SettingChoiceTitlesTests(unittest.TestCase):

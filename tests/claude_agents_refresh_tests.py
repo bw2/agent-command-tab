@@ -4,8 +4,8 @@ import asyncio
 import unittest
 import unittest.mock
 
-from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
-from llm_sidebar_dashboard.iterm2_connection_thread import DashboardCore
+from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_command_tab.iterm2_connection_thread import DashboardCore
 
 
 class ClaudeAgentsRefreshTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class ClaudeAgentsRefreshTests(unittest.TestCase):
 
         async def read_with_one_config_folder_timing_out(claude_command_path, config_folders):
             return {43: {"sessionId": "b-after-clear"}}
-        with unittest.mock.patch("llm_sidebar_dashboard.iterm2_connection_thread.read_claude_agents_by_process_id",
+        with unittest.mock.patch("agent_command_tab.iterm2_connection_thread.read_claude_agents_by_process_id",
                                  read_with_one_config_folder_timing_out):
             asyncio.run(core.refresh_claude_agents())
         # 42 still runs, so its record stays (its conversation would look new without it); 99's process is gone.

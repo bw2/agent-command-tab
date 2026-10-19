@@ -1,6 +1,6 @@
 """Builds the list from a sample snapshot in an off-screen window (PLAN.md section 17, UI smoke test).
 
-Set LLM_SIDEBAR_DASHBOARD_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the list looks like.
+Set AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the list looks like.
 """
 
 import os
@@ -14,21 +14,21 @@ from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBac
                     NSTextField, NSWindow, NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
 
-from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES, SMALLEST_WINDOW_SIZES
-from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
-from llm_sidebar_dashboard.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, PANEL_SIDE_MARGIN, POPOVER_WIDTH,
-                                                                    TOP_BAR_HEIGHT, ListPanelController)
-from llm_sidebar_dashboard.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
-                                                                             AgentSessionListController, RowButton)
-from llm_sidebar_dashboard.user_interface.list_window import ListWindowController
-from llm_sidebar_dashboard.user_interface.screen_layout import frame_is_on_a_screen, grow_frame_to_smallest_size
-from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
-from llm_sidebar_dashboard.user_interface.menu_bar_status_item import choose_automatic_icon_color_name
-from llm_sidebar_dashboard.user_interface.named_colors import COLOR_MAKERS_BY_NAME
-from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
-from llm_sidebar_dashboard.user_interface.sidebar_panel import (SidebarController,
-                                                                allow_pointer_changes_while_another_app_is_in_front)
-from llm_sidebar_dashboard.user_interface.sidebar_placement import SidebarPlacement
+from agent_command_tab.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES, SMALLEST_WINDOW_SIZES
+from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
+from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, PANEL_SIDE_MARGIN, POPOVER_WIDTH,
+                                                                TOP_BAR_HEIGHT, ListPanelController)
+from agent_command_tab.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
+                                                                         AgentSessionListController, RowButton)
+from agent_command_tab.user_interface.list_window import ListWindowController
+from agent_command_tab.user_interface.screen_layout import frame_is_on_a_screen, grow_frame_to_smallest_size
+from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
+from agent_command_tab.user_interface.menu_bar_status_item import choose_automatic_icon_color_name
+from agent_command_tab.user_interface.named_colors import COLOR_MAKERS_BY_NAME
+from agent_command_tab.user_interface.settings_window import SettingsWindowController
+from agent_command_tab.user_interface.sidebar_panel import (SidebarController,
+                                                            allow_pointer_changes_while_another_app_is_in_front)
+from agent_command_tab.user_interface.sidebar_placement import SidebarPlacement
 
 
 class RecordingOwner:
@@ -90,7 +90,7 @@ def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False, sla
 
 
 def make_sample_snapshot(second_window_tabs=2):
-    window_one = WindowEntry("w1", "llm-sidebar-dashboard", False, (0, 0, 800, 600), None, 4, (
+    window_one = WindowEntry("w1", "agent-command-tab", False, (0, 0, 800, 600), None, 4, (
         make_entry("1", "planning", "working", is_in_front=True),
         make_entry("2", "phase0-tests", "asking"),
         make_entry("3", "codex-review", "done", tool="Codex"),
@@ -862,7 +862,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(row_view.column_views["state"].stringValue(), "working")
         self.assertIsNone(row_view.toolTip())  # no hover popups on rows (user request, 2026-10-19)
         self.assertTrue(row_view.prefix_text_field.stringValue().startswith("├─ "))
-        image_path = os.environ.get("LLM_SIDEBAR_DASHBOARD_SMOKE_TEST_IMAGE")
+        image_path = os.environ.get("AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE")
         if image_path:
             bitmap = content_view.bitmapImageRepForCachingDisplayInRect_(content_view.bounds())
             content_view.cacheDisplayInRect_toBitmapImageRep_(content_view.bounds(), bitmap)
@@ -1054,7 +1054,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             {"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)},
             {"name": "Dell", "frame": (-1920, 0, 1920, 1080), "visible_frame": (-1920, 0, 1920, 1080)},
             {"name": "Studio", "frame": (1500, -200, 2500, 1400), "visible_frame": (1500, -200, 2500, 1400)}]
-        with unittest.mock.patch("llm_sidebar_dashboard.user_interface.settings_window.read_monitors_from_screens",
+        with unittest.mock.patch("agent_command_tab.user_interface.settings_window.read_monitors_from_screens",
                                  return_value=three_monitors_in_a_row):
             self.controller.update_edge_choices()
         self.assertEqual([menu_item.isEnabled() for menu_item in self.controller.edge_popup.itemArray()], [True, True])
@@ -1062,7 +1062,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_window_edge_popup_shows_capitalized_titles_and_saves_the_edge_name(self):
         self.assertEqual(self.controller.edge_popup.itemTitles(), ["Right", "Left"])
         self.assertEqual(self.controller.edge_popup.titleOfSelectedItem(), "Right")  # the default edge
-        with unittest.mock.patch("llm_sidebar_dashboard.user_interface.settings_window.read_monitors_from_screens",
+        with unittest.mock.patch("agent_command_tab.user_interface.settings_window.read_monitors_from_screens",
                                  return_value=[{"name": "Built-in", "frame": (0, 0, 1500, 1000),
                                                 "visible_frame": (0, 0, 1500, 970)}]):
             self.controller.edge_popup.selectItemWithTitle_("Left")

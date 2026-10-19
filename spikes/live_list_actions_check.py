@@ -29,11 +29,11 @@ import iterm2
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered,
                     NSDragOperationMove, NSMakeRect, NSMenu, NSWindow, NSWindowStyleMaskBorderless)
 
-from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
-from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThread
-from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
-from llm_sidebar_dashboard.user_interface.agent_session_outline_view import AgentSessionListController
-from llm_sidebar_dashboard.user_interface.popover_container import POPOVER_WIDTH, ListPanelController
+from agent_command_tab.dashboard_core_api import ActionRequest
+from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
+from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
+from agent_command_tab.user_interface.popover_container import POPOVER_WIDTH, ListPanelController
 
 CLAUDE_TEST_FOLDER = os.path.realpath(sys.argv[1])
 CLAUDE_LAUNCH_COMMAND = "claude --permission-mode default --model haiku"

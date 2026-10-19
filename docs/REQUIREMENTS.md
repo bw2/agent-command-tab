@@ -1,4 +1,4 @@
-# LLM Sidebar Dashboard: requirements
+# AgentCommandTab: requirements
 
 Version 1, approved 2026-10-18 (with the review fixes of the same day).
 

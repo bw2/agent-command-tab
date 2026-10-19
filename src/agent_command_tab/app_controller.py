@@ -20,21 +20,22 @@ from Foundation import NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommo
 from PyObjCTools import AppHelper
 import objc
 
-from llm_sidebar_dashboard.command_line import RECONNECT_EXIT_STATUS, SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING
-from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
-from llm_sidebar_dashboard.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
-from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThread
-from llm_sidebar_dashboard.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
-                                                  load_settings_resolving_paths_at_first_run, save_settings)
-from llm_sidebar_dashboard.snapshot_data_classes import choose_folder_for_new_agent_window
-from llm_sidebar_dashboard.user_interface.agent_session_outline_view import AgentSessionListController
-from llm_sidebar_dashboard.user_interface.list_window import ListWindowController
-from llm_sidebar_dashboard.user_interface.menu_bar_status_item import MenuBarStatusItemController
-from llm_sidebar_dashboard.user_interface.popover_container import ListPanelController, build_dropdown_popover
-from llm_sidebar_dashboard.user_interface.screen_layout import (convert_rect_to_frame_list, grow_frame_to_smallest_size,
-                                                                read_monitors_from_screens)
-from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
-from llm_sidebar_dashboard.user_interface.sidebar_panel import SidebarController
+from agent_command_tab.command_line import RECONNECT_EXIT_STATUS, SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING
+from agent_command_tab.dashboard_core_api import ActionRequest
+from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
+from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
+                                              load_settings_resolving_paths_at_first_run,
+                                              move_the_settings_folder_of_the_old_name, save_settings)
+from agent_command_tab.snapshot_data_classes import choose_folder_for_new_agent_window
+from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
+from agent_command_tab.user_interface.list_window import ListWindowController
+from agent_command_tab.user_interface.menu_bar_status_item import MenuBarStatusItemController
+from agent_command_tab.user_interface.popover_container import ListPanelController, build_dropdown_popover
+from agent_command_tab.user_interface.screen_layout import (convert_rect_to_frame_list, grow_frame_to_smallest_size,
+                                                            read_monitors_from_screens)
+from agent_command_tab.user_interface.settings_window import SettingsWindowController
+from agent_command_tab.user_interface.sidebar_panel import SidebarController
 
 ITERM2_BUNDLE_IDENTIFIER = "com.googlecode.iterm2"
 SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING = 10
@@ -49,6 +50,7 @@ class AppController(NSObject):
         if self is None:
             return None
         self.verbose = verbose
+        move_the_settings_folder_of_the_old_name()  # before the settings and the docked window frames are read
         self.settings = load_settings_resolving_paths_at_first_run()
         self.reserved_screen_area = None
         self.application_in_front_before_dropdown = None
@@ -123,7 +125,7 @@ class AppController(NSObject):
 
         The `iterm2` package can't reconnect within one process (PLAN.md section 4).
         """
-        print(f"llm-sidebar-dashboard: {message}; exiting so the supervisor reconnects", flush=True)
+        print(f"agent-command-tab: {message}; exiting so the supervisor reconnects", flush=True)
         explanation = f"{message}. Retrying soon. Is iTerm2 running, with Settings > General > Magic > Enable Python API on?"
         for list_panel_controller in self.list_all_list_panel_controllers():
             list_panel_controller.show_message(explanation)

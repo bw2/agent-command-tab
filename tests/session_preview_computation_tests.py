@@ -3,10 +3,10 @@ import os
 import tempfile
 import unittest
 
-from llm_sidebar_dashboard.session_preview_computation import (choose_preview_text, describe_claude_code_tool_call,
-                                                               make_one_line, make_one_line_without_markdown,
-                                                               read_preview_fields_from_claude_code_transcript,
-                                                               read_preview_fields_from_codex_conversation_file)
+from agent_command_tab.session_preview_computation import (choose_preview_text, describe_claude_code_tool_call,
+                                                           make_one_line, make_one_line_without_markdown,
+                                                           read_preview_fields_from_claude_code_transcript,
+                                                           read_preview_fields_from_codex_conversation_file)
 
 
 def write_jsonl_file(folder, records):

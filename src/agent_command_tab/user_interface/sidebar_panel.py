@@ -30,11 +30,11 @@ from AppKit import (NSAnimationContext, NSBackingStoreBuffered, NSCursor, NSEven
                     NSWindowStyleMaskNonactivatingPanel)
 from Foundation import NSObject, NSTimer
 
-from llm_sidebar_dashboard.user_interface.agent_session_outline_view import AgentSessionListController
-from llm_sidebar_dashboard.user_interface.popover_container import ListPanelController
-from llm_sidebar_dashboard.user_interface.screen_layout import read_monitors_from_screens
-from llm_sidebar_dashboard.user_interface.sidebar_placement import (choose_sidebar_edge, compute_dragged_sidebar_width,
-                                                                    compute_sidebar_frame, pointer_is_at_edge)
+from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
+from agent_command_tab.user_interface.popover_container import ListPanelController
+from agent_command_tab.user_interface.screen_layout import read_monitors_from_screens
+from agent_command_tab.user_interface.sidebar_placement import (choose_sidebar_edge, compute_dragged_sidebar_width,
+                                                                compute_sidebar_frame, pointer_is_at_edge)
 
 SECONDS_BEFORE_HIDING = 0.5
 SECONDS_SHOWN_FROM_THE_MENU = 5

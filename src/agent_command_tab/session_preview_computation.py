@@ -10,9 +10,9 @@ the last prompt, and the last prompt itself ("You: ...").
 import json
 import re
 
-from llm_sidebar_dashboard.claude_code_transcript_records import (classify_user_record, describe_typed_command,
-                                                                 join_text_blocks, list_message_blocks)
-from llm_sidebar_dashboard.context_window_usage import read_last_records
+from agent_command_tab.claude_code_transcript_records import (classify_user_record, describe_typed_command,
+                                                              join_text_blocks, list_message_blocks)
+from agent_command_tab.context_window_usage import read_last_records
 
 LONGEST_PREVIEW_TEXT = 300  # the row cuts it to its width anyway
 TOOL_INPUT_KEYS_IN_PREFERENCE_ORDER = ("command", "file_path", "notebook_path", "path", "pattern", "url", "query",

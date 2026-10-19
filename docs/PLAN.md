@@ -1,4 +1,4 @@
-# LLM Sidebar Dashboard: implementation plan
+# AgentCommandTab: implementation plan
 
 2026-10-18. Matches [REQUIREMENTS.md](REQUIREMENTS.md) as approved on 2026-10-18. Reviewed with `/code-review-until-done` for 6 rounds (96 consensus findings fixed; stopped by decision after round 6, with the remaining open questions moved into Phase 0). Approved 2026-10-18; Phase 0 in progress. Requirement IDs (R1, C6, Q7, ...) refer to that document.
 
@@ -125,7 +125,7 @@ ComputerSnapshot            computer_id, computer_name, taken_at, codex_usage, h
   - checked in Phase 0 (docs/PHASE0_RESULTS.md): a fresh and a stale token both connected from a background thread's asyncio loop, and the `NSAppleScript` runner was never called.
 - The first run may show a macOS permission prompt. Whether it does depends on how the app was started (from a terminal inside iTerm2, or at login by launchd), which Phase 0 checks.
 - If the Python API is off, the panel shows one line pointing to iTerm2 Settings > General > Magic > Enable Python API.
-- **Reconnecting means restarting.** The `iterm2` package keeps process-wide state (the shared `App` object, delegate pointers, a module-level table of notification handlers) that is reset only inside `Connection.run()`, so a second `async_create()` in the same process would reuse a stale `App` bound to the dead connection. So when the connection drops (iTerm2 quit or restarted), the app process exits with a "reconnect" status. The package gives no usable signal for a drop (with `async_create()` its dispatch task just prints a traceback, and pending requests hang), so a watchdog task awaits `connection.websocket.wait_closed()` and the dispatch task's completion. When either finishes, it posts a message to the main thread, which ends the app with the reconnect status. A connect attempt that fails exits the same way. `llm-sidebar-dashboard run` is a tiny supervisor that starts the app process and restarts it after a backoff (1 s, growing to 30 s) when it exits that way; the login item runs the same supervisor. Hook events arriving while the app restarts are not lost (section 6). Phase 0 tests a restart of iTerm2 with the prototype running.
+- **Reconnecting means restarting.** The `iterm2` package keeps process-wide state (the shared `App` object, delegate pointers, a module-level table of notification handlers) that is reset only inside `Connection.run()`, so a second `async_create()` in the same process would reuse a stale `App` bound to the dead connection. So when the connection drops (iTerm2 quit or restarted), the app process exits with a "reconnect" status. The package gives no usable signal for a drop (with `async_create()` its dispatch task just prints a traceback, and pending requests hang), so a watchdog task awaits `connection.websocket.wait_closed()` and the dispatch task's completion. When either finishes, it posts a message to the main thread, which ends the app with the reconnect status. A connect attempt that fails exits the same way. `agent-command-tab run` is a tiny supervisor that starts the app process and restarts it after a backoff (1 s, growing to 30 s) when it exits that way; the login item runs the same supervisor. Hook events arriving while the app restarts are not lost (section 6). Phase 0 tests a restart of iTerm2 with the prototype running.
 
 ### Subscriptions
 
@@ -162,7 +162,7 @@ States in urgency order (R20), with their dots (R26.1):
 
 Sources, most specific first:
 
-1. **Hook events** (needs Q7). A tiny command, `llm-sidebar-dashboard-hook`, is called by Claude Code and Codex hooks. It reads the event JSON from standard input, adds the session GUID (the part of `ITERM_SESSION_ID` after the colon) and its own timestamp, sends one line to the app's local socket under `~/Library/Application Support/llm-sidebar-dashboard/`, and exits. It never prints (Claude Code feeds some hook output into the conversation) and never fails. It gives: asking (permission requested; for Claude Code, a question through `AskUserQuestion`), working (prompt submitted, tool use), done (turn finished), error (Claude Code's `StopFailure`), and for Codex, turn ended by the user (its `Interrupt` hook, registered for this reason: idle, with open requests closed).
+1. **Hook events** (needs Q7). A tiny command, `agent-command-tab-hook`, is called by Claude Code and Codex hooks. It reads the event JSON from standard input, adds the session GUID (the part of `ITERM_SESSION_ID` after the colon) and its own timestamp, sends one line to the app's local socket under `~/Library/Application Support/agent-command-tab/`, and exits. It never prints (Claude Code feeds some hook output into the conversation) and never fails. It gives: asking (permission requested; for Claude Code, a question through `AskUserQuestion`), working (prompt submitted, tool use), done (turn finished), error (Claude Code's `StopFailure`), and for Codex, turn ended by the user (its `Interrupt` hook, registered for this reason: idle, with open requests closed).
    - **Only the tab's own agent counts.** Agent processes started inside a tab's agent (for example `claude -p` or `codex exec` run by a shell tool, as review and agent-runner workflows do) inherit the tab's `ITERM_SESSION_ID` and fire the same user-level hooks. The forwarder therefore also sends its parent process ID and the payload's `session_id`. The core accepts an event as the tab's own only if its `session_id` belongs to the tab's foreground agent: the agent PID recorded at detection, matched through `claude agents --json` (PID to session ID) or the forwarder's parent PID. Hook state is keyed by (session GUID, agent `session_id`, `agent_id`). Events from other agent sessions in the same tab count at most as background-process lights, never as the row's state. Fixtures include a nested `claude -p` run finishing while the tab's agent keeps working.
    - **Cost and never stalling the agent:**
      - By default Claude Code waits for every command hook to finish. Since the dashboard never returns a decision, the installer registers its entries with `"async": true` and a short `timeout` (Codex accepts the same two fields, Phase 0).
@@ -363,7 +363,7 @@ An `NSStatusItem` showing a "C" in a configurable color, followed by the number 
 
 ### Settings (R34, R35)
 
-Stored as JSON in `~/Library/Application Support/llm-sidebar-dashboard/settings.json`:
+Stored as JSON in `~/Library/Application Support/agent-command-tab/settings.json`:
 
 | Setting | Default |
 |---|---|
@@ -424,7 +424,7 @@ Built-in adapters: Claude Code, Codex, and a generic one. Simple tools (name, pa
 
 ## 12. Packaging, license, conventions
 
-- Install with `pipx install llm-sidebar-dashboard` (or `uv tool install`); run `llm-sidebar-dashboard run`. `install-login-item` writes a per-user launch agent for start at login, with the absolute path to the installed command, and relies on the paths saved in settings (section 8), not on the shell's environment. A py2app `.app` can come later.
+- Install with `pipx install agent-command-tab` (or `uv tool install`); run `agent-command-tab run`. `install-login-item` writes a per-user launch agent for start at login, with the absolute path to the installed command, and relies on the paths saved in settings (section 8), not on the shell's environment. A py2app `.app` can come later.
 - Dependencies: `iterm2` (brings `protobuf` and `websockets`), `pyobjc-framework-Cocoa`, and `pyobjc-framework-Quartz` (for the display UUID that identifies the sidebar's monitor, `CGDisplayCreateUUIDFromDisplayID`, and for the window-order fallback). Global shortcuts (Q8) may need one small extra package for macOS hot keys; Phase 0 decides.
 - License: undecided. `iterm2` is GPL-2.0-or-later. Our files could be MIT, which is compatible with the GPL, but a bundled `.app` that includes `iterm2` would be distributed under GPL terms. GPL-2.0-or-later for the whole project avoids that split. Not legal advice.
 - Conventions: Python 3.10 or later; standard `unittest` with files named `*_tests.py`; Google-style docstrings; no type hints; `print()` for diagnostics behind `--verbose`; logic in pure functions; long descriptive names.
@@ -437,7 +437,7 @@ Built-in adapters: Claude Code, Codex, and a generic one. Simple tools (name, pa
 Line counts are my rough estimates.
 
 ```
-src/llm_sidebar_dashboard/
+src/agent_command_tab/
   command_line.py                          run (the restarting supervisor), install-hooks, uninstall-hooks,
                                            install-login-item, dump-snapshot                                        ~200
   app_controller.py                        starts both threads, routes snapshots and actions                       ~120

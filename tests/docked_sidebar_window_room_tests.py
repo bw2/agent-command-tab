@@ -8,8 +8,8 @@ import unittest
 
 import iterm2
 
-from llm_sidebar_dashboard.docked_window_frames_store import load_docked_window_frames
-from llm_sidebar_dashboard.iterm2_connection_thread import DashboardCore
+from agent_command_tab.docked_window_frames_store import load_docked_window_frames
+from agent_command_tab.iterm2_connection_thread import DashboardCore
 
 Point = collections.namedtuple("Point", ["x", "y"])
 Size = collections.namedtuple("Size", ["width", "height"])

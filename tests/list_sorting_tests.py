@@ -1,7 +1,7 @@
 import unittest
 
-from llm_sidebar_dashboard.list_sorting import sort_agent_session_entries, sort_window_entries
-from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, WindowEntry
+from agent_command_tab.list_sorting import sort_agent_session_entries, sort_window_entries
+from agent_command_tab.snapshot_data_classes import AgentSessionEntry, WindowEntry
 
 
 def make_entry(tab_id, tab_title, status, status_since):

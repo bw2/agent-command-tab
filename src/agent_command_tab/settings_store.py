@@ -1,4 +1,4 @@
-"""Settings, stored as JSON in ~/Library/Application Support/llm-sidebar-dashboard/settings.json (R34, R35).
+"""Settings, stored as JSON in ~/Library/Application Support/agent-command-tab/settings.json (R34, R35).
 
 Settings are added here as the features that use them are built; PLAN.md section 8 lists the
 full set. Command paths are resolved once, at first run, and saved, because an app started at
@@ -13,9 +13,11 @@ import shutil
 import subprocess
 import tempfile
 
-from llm_sidebar_dashboard.list_sorting import LIST_SORT_ORDERS  # the Sort pop-up's choices
+from agent_command_tab.list_sorting import LIST_SORT_ORDERS  # the Sort pop-up's choices
 
-SETTINGS_FOLDER = os.path.expanduser("~/Library/Application Support/llm-sidebar-dashboard")
+SETTINGS_FOLDER = os.path.expanduser("~/Library/Application Support/agent-command-tab")
+# The app's folder before it was renamed from llm-sidebar-dashboard to AgentCommandTab (2026-10-19).
+SETTINGS_FOLDER_OF_THE_OLD_NAME = os.path.expanduser("~/Library/Application Support/llm-sidebar-dashboard")
 SETTINGS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "settings.json")
 SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL = 5
 ENVIRONMENT_SETTING_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # "ANTHROPIC_MODEL=x claude"
@@ -224,6 +226,13 @@ def find_launch_command_problem(launch_command, find_command_path=shutil.which,
     if find_command_path(first_word) or ask_the_login_shell(first_word):
         return ""
     return f"{first_word}: command not found (not on PATH, and not an alias or function in your shell)"
+
+
+def move_the_settings_folder_of_the_old_name(old_folder=SETTINGS_FOLDER_OF_THE_OLD_NAME, new_folder=SETTINGS_FOLDER):
+    """Moves the folder the app kept its settings and docked window frames in under its old name
+    to the new one, once: only while the old one exists and the new one doesn't yet."""
+    if os.path.isdir(old_folder) and not os.path.exists(new_folder):
+        os.rename(old_folder, new_folder)
 
 
 def load_settings_resolving_paths_at_first_run(settings_file_path=SETTINGS_FILE_PATH):

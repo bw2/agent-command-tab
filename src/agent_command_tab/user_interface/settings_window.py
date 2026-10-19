@@ -13,15 +13,15 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxSeparator, NSButt
                     NSWindowStyleMaskTitled)
 from PyObjCTools import AppHelper
 
-from llm_sidebar_dashboard.settings_store import (ICON_COLOR_NAMES, LIST_COLUMNS, SMALLEST_WINDOW_SIZES,
-                                                  find_launch_command_problem, is_valid_setting_value,
-                                                  replace_agent_tool_field)
-from llm_sidebar_dashboard.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
-from llm_sidebar_dashboard.user_interface.screen_layout import (WindowFrameSavingController,
-                                                                place_window_at_saved_frame_or_center,
-                                                                read_monitors_from_screens)
-from llm_sidebar_dashboard.user_interface.sidebar_placement import (describe_sidebar_placement_fallback,
-                                                                    find_outer_screen_edges)
+from agent_command_tab.settings_store import (ICON_COLOR_NAMES, LIST_COLUMNS, SMALLEST_WINDOW_SIZES,
+                                              find_launch_command_problem, is_valid_setting_value,
+                                              replace_agent_tool_field)
+from agent_command_tab.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
+from agent_command_tab.user_interface.screen_layout import (WindowFrameSavingController,
+                                                            place_window_at_saved_frame_or_center,
+                                                            read_monitors_from_screens)
+from agent_command_tab.user_interface.sidebar_placement import (describe_sidebar_placement_fallback,
+                                                                find_outer_screen_edges)
 
 WINDOW_WIDTH = SMALLEST_WINDOW_SIZES["settings_window_frame"][0]  # the rows' layout width; the window only gets wider
 SIDE_MARGIN = 12
@@ -181,7 +181,7 @@ class SettingsWindowController(WindowFrameSavingController):
         window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, WINDOW_WIDTH, rows_height),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable, NSBackingStoreBuffered, False)
-        window.setTitle_("LLM Sidebar Dashboard Settings")
+        window.setTitle_("AgentCommandTab Settings")
         window.setReleasedWhenClosed_(False)
         window.setContentView_(scroll_view)
         window.setMinSize_(SMALLEST_WINDOW_SIZES["settings_window_frame"])

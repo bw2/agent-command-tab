@@ -12,10 +12,10 @@ from AppKit import (NSBezelStyleRecessed, NSBezelStyleRounded, NSColor, NSContro
                     NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
-from llm_sidebar_dashboard.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_NAMES, add_popup_choices,
-                                                                  read_popup_choice, select_popup_choice,
-                                                                  show_symbol_on_button)
-from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
+from agent_command_tab.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_NAMES, add_popup_choices,
+                                                              read_popup_choice, select_popup_choice,
+                                                              show_symbol_on_button)
+from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 
 # The Sort pop-up's titles for settings_store.LIST_SORT_ORDERS.
 LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabetically", "created_time": "Created Time"}

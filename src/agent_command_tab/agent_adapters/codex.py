@@ -6,13 +6,13 @@ import re
 import shlex
 import time
 
-from llm_sidebar_dashboard.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, AgentToolAdapter,
-                                                       split_command_line_into_program_names)
-from llm_sidebar_dashboard.agent_process_tree import read_process_current_folder, read_process_info
-from llm_sidebar_dashboard.context_window_usage import (find_codex_conversation_files,
-                                                        read_context_tokens_from_codex_conversation_file,
-                                                        read_turn_started_at_from_codex_conversation_file)
-from llm_sidebar_dashboard.session_preview_computation import read_preview_fields_from_codex_conversation_file
+from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, AgentToolAdapter,
+                                                   split_command_line_into_program_names)
+from agent_command_tab.agent_process_tree import read_process_current_folder, read_process_info
+from agent_command_tab.context_window_usage import (find_codex_conversation_files,
+                                                    read_context_tokens_from_codex_conversation_file,
+                                                    read_turn_started_at_from_codex_conversation_file)
+from agent_command_tab.session_preview_computation import read_preview_fields_from_codex_conversation_file
 
 # <sessions folder>/2026/10/18/rollout-2026-10-18T15-04-05-<conversation ID>.jsonl
 CONVERSATION_FILE_PATTERN = re.compile(

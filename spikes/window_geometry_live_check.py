@@ -15,9 +15,9 @@ import time
 
 import iterm2
 
-from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
-from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThread
-from llm_sidebar_dashboard.user_interface.screen_layout import read_monitors_from_screens
+from agent_command_tab.dashboard_core_api import ActionRequest
+from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.user_interface.screen_layout import read_monitors_from_screens
 
 
 def main():

@@ -1,13 +1,13 @@
 import time
 import unittest
 
-from llm_sidebar_dashboard.snapshot_data_classes import AgentSessionEntry, MonitorEntry, WindowEntry
-from llm_sidebar_dashboard.user_interface.row_text_rendering import (build_agent_session_row_text_parts,
-                                                                     build_monitor_row_text_parts,
-                                                                     build_tree_connector_text,
-                                                                     build_tree_continuation_text,
-                                                                     build_window_row_text_parts,
-                                                                     format_elapsed_time, format_memory_size)
+from agent_command_tab.snapshot_data_classes import AgentSessionEntry, MonitorEntry, WindowEntry
+from agent_command_tab.user_interface.row_text_rendering import (build_agent_session_row_text_parts,
+                                                                 build_monitor_row_text_parts,
+                                                                 build_tree_connector_text,
+                                                                 build_tree_continuation_text,
+                                                                 build_window_row_text_parts,
+                                                                 format_elapsed_time, format_memory_size)
 
 
 def make_entry(status, tab_title="reviews", status_since=0.0):

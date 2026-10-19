@@ -1,9 +1,9 @@
 import unittest
 
-from llm_sidebar_dashboard.user_interface.sidebar_placement import (choose_sidebar_edge, compute_dragged_sidebar_width,
-                                                                    compute_sidebar_frame,
-                                                                    describe_sidebar_placement_fallback,
-                                                                    find_outer_screen_edges, pointer_is_at_edge)
+from agent_command_tab.user_interface.sidebar_placement import (choose_sidebar_edge, compute_dragged_sidebar_width,
+                                                                compute_sidebar_frame,
+                                                                describe_sidebar_placement_fallback,
+                                                                find_outer_screen_edges, pointer_is_at_edge)
 
 LAPTOP = {"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)}
 RIGHT_DISPLAY = {"name": "Studio", "frame": (1500, -200, 2500, 1400), "visible_frame": (1500, -200, 2500, 1400)}

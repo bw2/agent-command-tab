@@ -1,7 +1,7 @@
 import unittest
 
-from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters, find_agent_tool_adapter_for_tab
-from llm_sidebar_dashboard.agent_adapters.base import command_line_runs_a_shell, split_command_line_into_program_names
+from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters, find_agent_tool_adapter_for_tab
+from agent_command_tab.agent_adapters.base import command_line_runs_a_shell, split_command_line_into_program_names
 
 
 class SplitCommandLineTests(unittest.TestCase):

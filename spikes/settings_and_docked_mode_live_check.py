@@ -23,8 +23,8 @@ import time
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSScreen
 from PyObjCTools import AppHelper
 
-from llm_sidebar_dashboard import app_controller as app_controller_module
-from llm_sidebar_dashboard import settings_store
+from agent_command_tab import app_controller as app_controller_module
+from agent_command_tab import settings_store
 
 TEMPORARY_FOLDER = tempfile.mkdtemp(prefix="settings_and_docked_mode_live_check_")
 TEMPORARY_SETTINGS_PATH = os.path.join(TEMPORARY_FOLDER, "settings.json")

@@ -1,7 +1,7 @@
 import subprocess
 import unittest
 
-from llm_sidebar_dashboard.command_line import SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C, wait_for_app_process
+from agent_command_tab.command_line import SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C, wait_for_app_process
 
 
 class FakeAppProcess:

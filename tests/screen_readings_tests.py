@@ -2,10 +2,10 @@
 
 import unittest
 
-from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
-from llm_sidebar_dashboard.agent_adapters.codex import CodexAdapter
-from llm_sidebar_dashboard.screen_readings import (compute_screen_fingerprint, count_lines_matching, input_area_is_empty,
-                                                   read_typed_input_area_text, screen_shows_permission_dialog)
+from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_command_tab.agent_adapters.codex import CodexAdapter
+from agent_command_tab.screen_readings import (compute_screen_fingerprint, count_lines_matching, input_area_is_empty,
+                                               read_typed_input_area_text, screen_shows_permission_dialog)
 
 CLAUDE_LONG_TURN_AT_6_SECONDS = [
     " ▐▛███▛█\x00\x00\x00Claude Code\x00v2.1.302", "▝▜██████▀\x00\x00Haiku 5.5 · Claude Max",

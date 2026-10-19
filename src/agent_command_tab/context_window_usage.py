@@ -15,8 +15,8 @@ import glob
 import json
 import os
 
-from llm_sidebar_dashboard.claude_code_transcript_records import (RECORD_KINDS_THAT_START_A_TURN, classify_user_record,
-                                                                 list_message_blocks)
+from agent_command_tab.claude_code_transcript_records import (RECORD_KINDS_THAT_START_A_TURN, classify_user_record,
+                                                              list_message_blocks)
 
 BYTES_TO_READ_FROM_THE_END = 512 * 1024
 

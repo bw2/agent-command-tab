@@ -1,9 +1,9 @@
 """Agent tool adapters and the rule that picks one for a tab."""
 
-from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
-from llm_sidebar_dashboard.agent_adapters.codex import CodexAdapter
-from llm_sidebar_dashboard.agent_adapters.generic import GenericAdapter
-from llm_sidebar_dashboard.session_status_computation import map_iterm2_status_value_to_state
+from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_command_tab.agent_adapters.codex import CodexAdapter
+from agent_command_tab.agent_adapters.generic import GenericAdapter
+from agent_command_tab.session_status_computation import map_iterm2_status_value_to_state
 
 
 def build_built_in_agent_tool_adapters():

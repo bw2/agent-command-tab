@@ -3,8 +3,8 @@ import os
 import tempfile
 import unittest
 
-from llm_sidebar_dashboard.docked_window_frames_store import (adopt_records_of_restored_windows,
-                                                              load_docked_window_frames, save_docked_window_frames)
+from agent_command_tab.docked_window_frames_store import (adopt_records_of_restored_windows,
+                                                          load_docked_window_frames, save_docked_window_frames)
 
 
 class DockedWindowFramesFileTests(unittest.TestCase):

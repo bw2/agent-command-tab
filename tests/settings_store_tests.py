@@ -3,10 +3,11 @@ import os
 import tempfile
 import unittest
 
-from llm_sidebar_dashboard.settings_store import (DEFAULT_SETTINGS, build_core_settings, find_launch_command_problem,
-                                                  list_included_agent_tool_names, list_left_out_agent_tool_names,
-                                                  load_settings, merge_settings_with_defaults,
-                                                  resolve_launch_command_paths, save_settings)
+from agent_command_tab.settings_store import (DEFAULT_SETTINGS, build_core_settings, find_launch_command_problem,
+                                              list_included_agent_tool_names, list_left_out_agent_tool_names,
+                                              load_settings, merge_settings_with_defaults,
+                                              move_the_settings_folder_of_the_old_name, resolve_launch_command_paths,
+                                              save_settings)
 
 
 class MergeSettingsTests(unittest.TestCase):
@@ -59,6 +60,18 @@ class MergeSettingsTests(unittest.TestCase):
 
     def test_a_boolean_is_not_a_width(self):
         self.assertEqual(merge_settings_with_defaults({"sidebar_width": True})["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])
+
+    def test_the_settings_folder_of_the_old_name_moves_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old_folder, new_folder = os.path.join(folder, "llm-sidebar-dashboard"), os.path.join(folder, "agent-command-tab")
+            os.makedirs(old_folder)
+            save_settings(dict(DEFAULT_SETTINGS, sidebar_width=555), os.path.join(old_folder, "settings.json"))
+            move_the_settings_folder_of_the_old_name(old_folder, new_folder)
+            self.assertFalse(os.path.exists(old_folder))
+            self.assertEqual(load_settings(os.path.join(new_folder, "settings.json"))["sidebar_width"], 555)
+            os.makedirs(old_folder)  # an old folder appearing again doesn't replace the new one
+            move_the_settings_folder_of_the_old_name(old_folder, new_folder)
+            self.assertTrue(os.path.exists(os.path.join(new_folder, "settings.json")))
 
     def test_defaults_are_not_shared(self):
         merge_settings_with_defaults({})["agent_tools"].append({"agent_tool_name": "x", "launch_command": "x"})

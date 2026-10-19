@@ -5,13 +5,13 @@ import tempfile
 import time
 import unittest
 
-from llm_sidebar_dashboard.context_window_usage import (find_claude_code_transcript, find_codex_conversation_files,
-                                                        format_token_count,
-                                                        read_context_tokens_from_claude_code_transcript,
-                                                        read_context_tokens_from_codex_conversation_file, read_last_lines,
-                                                        read_last_records,
-                                                        read_turn_started_at_from_claude_code_transcript,
-                                                        read_turn_started_at_from_codex_conversation_file)
+from agent_command_tab.context_window_usage import (find_claude_code_transcript, find_codex_conversation_files,
+                                                    format_token_count,
+                                                    read_context_tokens_from_claude_code_transcript,
+                                                    read_context_tokens_from_codex_conversation_file, read_last_lines,
+                                                    read_last_records,
+                                                    read_turn_started_at_from_claude_code_transcript,
+                                                    read_turn_started_at_from_codex_conversation_file)
 
 
 class ContextWindowUsageTests(unittest.TestCase):

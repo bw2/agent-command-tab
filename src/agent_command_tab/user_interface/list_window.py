@@ -12,11 +12,11 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSEvent, NSEventMaskLeftMouse
 from Foundation import NSDate
 from PyObjCTools import AppHelper
 
-from llm_sidebar_dashboard.settings_store import SMALLEST_WINDOW_SIZES
-from llm_sidebar_dashboard.user_interface.agent_session_outline_view import AgentSessionListController
-from llm_sidebar_dashboard.user_interface.popover_container import ListPanelController
-from llm_sidebar_dashboard.user_interface.screen_layout import (WindowFrameSavingController,
-                                                                place_window_at_saved_frame_or_center)
+from agent_command_tab.settings_store import SMALLEST_WINDOW_SIZES
+from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
+from agent_command_tab.user_interface.popover_container import ListPanelController
+from agent_command_tab.user_interface.screen_layout import (WindowFrameSavingController,
+                                                            place_window_at_saved_frame_or_center)
 
 FIRST_LIST_WINDOW_SIZE = (480, 560)
 
@@ -45,7 +45,7 @@ class ListWindowController(WindowFrameSavingController):
             NSMakeRect(0, 0, *FIRST_LIST_WINDOW_SIZE),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable,
             NSBackingStoreBuffered, False)
-        self.window.setTitle_("LLM Sidebar Dashboard")
+        self.window.setTitle_("AgentCommandTab")
         self.window.setReleasedWhenClosed_(False)  # closing only hides it; the menu bar icon brings it back
         self.window.setMinSize_(SMALLEST_WINDOW_SIZES["list_window_frame"])
         self.window.setContentView_(self.list_panel_controller.view())

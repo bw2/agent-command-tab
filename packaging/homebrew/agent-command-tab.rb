@@ -1,13 +1,13 @@
 # Homebrew formula for a personal tap (github.com/bw2/homebrew-tap), not homebrew-core.
 # Not published yet: docs/RELEASING.md lists the steps, which fill in the release's url and
-# sha256 below. Then: brew install bw2/tap/llm-sidebar-dashboard
-class LlmSidebarDashboard < Formula
+# sha256 below. Then: brew install bw2/tap/agent-command-tab
+class AgentCommandTab < Formula
   include Language::Python::Virtualenv
 
   desc "Menu bar list, window or sidebar of the iTerm2 tabs where AI coding agents run"
-  homepage "https://github.com/bw2/llm-sidebar-dashboard"
+  homepage "https://github.com/bw2/agent-command-tab"
   # The release's source archive on PyPI (filled in at release time; see docs/RELEASING.md).
-  url "https://files.pythonhosted.org/packages/source/l/llm-sidebar-dashboard/llm_sidebar_dashboard-0.1.0.tar.gz"
+  url "https://files.pythonhosted.org/packages/source/a/agent-command-tab/agent_command_tab-0.1.0.tar.gz"
   sha256 "REPLACE_WITH_THE_SHA256_OF_THE_PUBLISHED_SDIST"
   license "MIT"
 
@@ -15,7 +15,7 @@ class LlmSidebarDashboard < Formula
   depends_on "python@3.13"
 
   # The Python packages it needs, built from their source archives. Regenerate after a version
-  # change with: brew update-python-resources llm-sidebar-dashboard
+  # change with: brew update-python-resources agent-command-tab
   resource "iterm2" do
     url "https://files.pythonhosted.org/packages/36/a8/e88133c8b7418bd0905859a2f9dd0f5388c5a394434790e46e54cf15678c/iterm2-2.30.tar.gz"
     sha256 "eaa814b64f11d58984dfa02e790016983e7c4eb4f41cceae174ba361708200ec"
@@ -47,13 +47,13 @@ class LlmSidebarDashboard < Formula
 
   def caveats
     <<~EOS
-      LLM Sidebar Dashboard reads iTerm2 through iTerm2's Python API. Turn it on in
+      AgentCommandTab reads iTerm2 through iTerm2's Python API. Turn it on in
       iTerm2 > Settings > General > Magic > Enable Python API, then start the app:
-        llm-sidebar-dashboard
+        agent-command-tab
     EOS
   end
 
   test do
-    assert_match "dump-snapshot", shell_output("#{bin}/llm-sidebar-dashboard --help")
+    assert_match "dump-snapshot", shell_output("#{bin}/agent-command-tab --help")
   end
 end

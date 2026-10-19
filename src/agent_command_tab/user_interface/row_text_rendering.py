@@ -7,8 +7,8 @@ when important), then gray details. Colors are names that the view maps to syste
 import collections
 import time
 
-from llm_sidebar_dashboard.context_window_usage import format_token_count
-from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
+from agent_command_tab.context_window_usage import format_token_count
+from agent_command_tab.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
 
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",

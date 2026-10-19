@@ -4,12 +4,12 @@ import asyncio
 import re
 import shlex
 
-from llm_sidebar_dashboard.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, AgentToolAdapter,
-                                                       split_command_line_into_program_names)
-from llm_sidebar_dashboard.context_window_usage import (find_claude_code_transcript,
-                                                        read_context_tokens_from_claude_code_transcript,
-                                                        read_turn_started_at_from_claude_code_transcript)
-from llm_sidebar_dashboard.session_preview_computation import read_preview_fields_from_claude_code_transcript
+from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, AgentToolAdapter,
+                                                   split_command_line_into_program_names)
+from agent_command_tab.context_window_usage import (find_claude_code_transcript,
+                                                    read_context_tokens_from_claude_code_transcript,
+                                                    read_turn_started_at_from_claude_code_transcript)
+from agent_command_tab.session_preview_computation import read_preview_fields_from_claude_code_transcript
 
 ELAPSED_TIME = r"(?:\d+h )?(?:\d+m )?\d+s"
 

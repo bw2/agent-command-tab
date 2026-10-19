@@ -1,11 +1,11 @@
 import json
 import unittest
 
-from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
-from llm_sidebar_dashboard.iterm2_snapshot_builder import (DisplayedState, build_computer_snapshot,
-                                                           build_folder_display_name, compute_displayed_state_since,
-                                                           resolve_agent_sessions)
-from llm_sidebar_dashboard.snapshot_data_classes import convert_snapshot_to_json_ready_dict, iterate_agent_session_entries
+from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
+from agent_command_tab.iterm2_snapshot_builder import (DisplayedState, build_computer_snapshot,
+                                                       build_folder_display_name, compute_displayed_state_since,
+                                                       resolve_agent_sessions)
+from agent_command_tab.snapshot_data_classes import convert_snapshot_to_json_ready_dict, iterate_agent_session_entries
 
 MONITOR = {"monitor_id": "display-1", "name": "Built-in", "frame": (0, 0, 2000, 1300), "visible_frame": (0, 0, 2000, 1260)}
 

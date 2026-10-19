@@ -16,12 +16,12 @@ Shape of a gathered window (see DashboardCore.gather_iterm2_windows and Dashboar
 import collections
 import os
 
-from llm_sidebar_dashboard.agent_adapters import find_agent_tool_adapter_for_tab
-from llm_sidebar_dashboard.monitor_assignment import assign_windows_to_monitors_by_largest_overlap
-from llm_sidebar_dashboard.session_preview_computation import choose_preview_text
-from llm_sidebar_dashboard.session_status_computation import compute_session_status_from_sources
-from llm_sidebar_dashboard.snapshot_data_classes import (AgentSessionEntry, ComputerSnapshot, MonitorEntry,
-                                                         WindowEntry)
+from agent_command_tab.agent_adapters import find_agent_tool_adapter_for_tab
+from agent_command_tab.monitor_assignment import assign_windows_to_monitors_by_largest_overlap
+from agent_command_tab.session_preview_computation import choose_preview_text
+from agent_command_tab.session_status_computation import compute_session_status_from_sources
+from agent_command_tab.snapshot_data_classes import (AgentSessionEntry, ComputerSnapshot, MonitorEntry,
+                                                     WindowEntry)
 
 PLACEHOLDER_MONITOR = {"monitor_id": "unknown", "name": "", "frame": (0, 0, 0, 0), "visible_frame": (0, 0, 0, 0)}
 

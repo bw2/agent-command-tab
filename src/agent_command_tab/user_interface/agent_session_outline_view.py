@@ -27,21 +27,21 @@ from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSColor, NSDr
                     NSZeroRect)
 from Foundation import NSMutableIndexSet, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
-from llm_sidebar_dashboard.agent_adapters import list_slash_commands_of_the_built_in_agent_tools
-from llm_sidebar_dashboard.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
-from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
-from llm_sidebar_dashboard.list_sorting import sort_agent_session_entries, sort_window_entries
-from llm_sidebar_dashboard.session_status_computation import STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
-from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS
-from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries, replace_title_in_snapshot
-from llm_sidebar_dashboard.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image
-from llm_sidebar_dashboard.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
-from llm_sidebar_dashboard.user_interface.named_colors import build_color_from_name
-from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
-from llm_sidebar_dashboard.user_interface.row_text_rendering import (RowTextParts, build_agent_session_row_text_parts,
-                                                                     build_dot_text, build_monitor_row_text_parts,
-                                                                     build_tree_connector_text,
-                                                                     build_window_row_text_parts)
+from agent_command_tab.agent_adapters import list_slash_commands_of_the_built_in_agent_tools
+from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
+from agent_command_tab.dashboard_core_api import ActionRequest
+from agent_command_tab.list_sorting import sort_agent_session_entries, sort_window_entries
+from agent_command_tab.session_status_computation import STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
+from agent_command_tab.settings_store import DEFAULT_SETTINGS
+from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries, replace_title_in_snapshot
+from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image
+from agent_command_tab.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
+from agent_command_tab.user_interface.named_colors import build_color_from_name
+from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
+from agent_command_tab.user_interface.row_text_rendering import (RowTextParts, build_agent_session_row_text_parts,
+                                                                 build_dot_text, build_monitor_row_text_parts,
+                                                                 build_tree_connector_text,
+                                                                 build_window_row_text_parts)
 
 ROW_HEIGHT = 20
 PREVIEW_LINE_HEIGHT = 16  # the height of a 12-point line, so the tree's lines carry on beside the preview
@@ -90,8 +90,8 @@ LEFT_ALIGNED_COLUMN_NAMES = {"state"}
 COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usage", "cpu_usage", "context_tokens",
                               "agent_tool_icon", "state"]
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
-TAB_DRAG_TYPE = "org.llm-sidebar-dashboard.tab-id"
-WINDOW_DRAG_TYPE = "org.llm-sidebar-dashboard.window-id"
+TAB_DRAG_TYPE = "org.agent-command-tab.tab-id"
+WINDOW_DRAG_TYPE = "org.agent-command-tab.window-id"
 COLUMN_IDENTIFIER = "main"
 ROW_VIEW_IDENTIFIER = "agent-list-row"
 

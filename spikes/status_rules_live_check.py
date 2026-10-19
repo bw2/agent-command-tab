@@ -19,8 +19,8 @@ import time
 
 import iterm2
 
-from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThread
-from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
+from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
 
 OUTPUT_FOLDER = os.path.realpath(sys.argv[1])
 

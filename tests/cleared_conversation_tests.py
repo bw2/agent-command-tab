@@ -6,10 +6,10 @@ import tempfile
 import unittest
 import unittest.mock
 
-from llm_sidebar_dashboard import iterm2_actions
-from llm_sidebar_dashboard.dashboard_core_api import ActionRequest, ActionResult
-from llm_sidebar_dashboard.iterm2_connection_thread import DashboardCore
-from llm_sidebar_dashboard.iterm2_snapshot_builder import DisplayedState
+from agent_command_tab import iterm2_actions
+from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
+from agent_command_tab.iterm2_connection_thread import DashboardCore
+from agent_command_tab.iterm2_snapshot_builder import DisplayedState
 
 
 class StandInAdapter:

@@ -1,8 +1,8 @@
 import unittest
 
-from llm_sidebar_dashboard.monitor_assignment import (assign_windows_to_monitors_by_largest_overlap,
-                                                      compute_frame_clear_of_area,
-                                                      compute_window_frame_on_another_monitor)
+from agent_command_tab.monitor_assignment import (assign_windows_to_monitors_by_largest_overlap,
+                                                  compute_frame_clear_of_area,
+                                                  compute_window_frame_on_another_monitor)
 
 LEFT_MONITOR = (0, 0, 1000, 800)
 RIGHT_MONITOR = (1000, 0, 1000, 800)
