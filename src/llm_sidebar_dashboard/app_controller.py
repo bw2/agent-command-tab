@@ -331,6 +331,10 @@ def run_menu_bar_app(verbose):
     application.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, no Info.plist needed
     app_controller = AppController.alloc().initWithVerbose_(verbose)
     app_controller.start()
-    AppHelper.runEventLoop(installInterrupt=True)
+    # runEventLoop(installInterrupt=True) installs its Ctrl+C handler only when no NSApplication
+    # exists yet, and one was made above, so it is installed here. Ctrl+C then terminates the app,
+    # which calls applicationWillTerminate_.
+    AppHelper.installMachInterrupt()
+    AppHelper.runEventLoop()
     app_controller.give_room_back_before_exiting()  # Ctrl+C can stop the event loop without terminating the app
     return 0

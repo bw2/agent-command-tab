@@ -55,7 +55,7 @@ ROW_VIEW_IDENTIFIER = "agent-list-row"
 def build_color_from_name(color_name):
     """Returns the system color for a RowTextParts color name."""
     return {
-        "purple": NSColor.systemPurpleColor(),
+        "light_blue": NSColor.systemCyanColor(),
         "red": NSColor.systemRedColor(),
         "orange": NSColor.systemOrangeColor(),
         "green": NSColor.systemGreenColor(),
@@ -780,7 +780,7 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def cancel_rename(self):
         """Ends an open rename without renaming, as Esc does (the dropdown calls it as it closes,
-        or the list would keep holding back snapshots)."""
+        and the sidebar when it loses keyboard focus, or the list would keep holding back snapshots)."""
         if self.rename_in_progress:
             self.item_being_renamed = None
             self.outline_view.window().makeFirstResponder_(self.outline_view)

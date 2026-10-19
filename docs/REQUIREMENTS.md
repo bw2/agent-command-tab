@@ -96,7 +96,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
   | State | Dot |
   |---|---|
-  | asking | purple ● |
+  | asking | light blue ● |
   | working on routine work | blinking green ● |
   | working on more important work | blinking ●, shifting from green toward blue as importance rises |
   | error | red ✕ |

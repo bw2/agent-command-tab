@@ -65,6 +65,8 @@ class AgentToolAdapter:
 
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         """Returns the path of the file the tool writes the conversation to, or None if unknown.
+        Runs on the core's event loop, so a lookup that reads folders or files does that in a
+        worker thread (asyncio.to_thread).
 
         Args:
             agent_process_id: The agent's process ID (iTerm2's jobPid).
@@ -74,7 +76,8 @@ class AgentToolAdapter:
         return None
 
     def read_context_tokens(self, conversation_file_path):
-        """Returns how many tokens the conversation's context holds, from its file, or None."""
+        """Returns how many tokens the conversation's context holds, from its file, or None.
+        The core calls this, and read_turn_started_at, in a worker thread."""
         return None
 
     def read_turn_started_at(self, conversation_file_path):

@@ -1,5 +1,6 @@
 """Adapter for OpenAI's Codex CLI."""
 
+import asyncio
 import os
 import re
 import shlex
@@ -39,12 +40,12 @@ class CodexAdapter(AgentToolAdapter):
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         """Returns the conversation ID from the conversation file's name, only when exactly one
         file fits: a Duplicate must not fork another session's conversation."""
-        conversation_files = self.find_conversation_files(agent_process_id)
+        conversation_files = await asyncio.to_thread(self.find_conversation_files, agent_process_id)
         return CONVERSATION_FILE_PATTERN.search(conversation_files[0]).group(1) if len(conversation_files) == 1 else None
 
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         """Returns the most recently written file that fits (see find_conversation_files)."""
-        conversation_files = self.find_conversation_files(agent_process_id)
+        conversation_files = await asyncio.to_thread(self.find_conversation_files, agent_process_id)
         return conversation_files[0] if conversation_files else None
 
     def find_conversation_files(self, agent_process_id):

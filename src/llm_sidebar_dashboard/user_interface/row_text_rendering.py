@@ -19,7 +19,7 @@ RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working sessi
                         "elapsed_time_text (right-aligned).")
 
 DOT_GLYPH_AND_COLOR_BY_STATE = {
-    "asking": ("●", "purple"),
+    "asking": ("●", "light_blue"),  # the same light blue as the menu bar icon's "C" and count (user request, milestone 2)
     "error": ("✕", "red"),
     "stuck": ("◆", "orange"),
     "working": ("●", "green"),

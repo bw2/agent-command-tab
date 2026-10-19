@@ -19,7 +19,8 @@ from llm_sidebar_dashboard.user_interface.popover_container import (BOTTOM_BAR_H
 from llm_sidebar_dashboard.user_interface.agent_session_outline_view import ROW_HEIGHT, AgentSessionListController
 from llm_sidebar_dashboard.user_interface.menu_bar_status_item import choose_automatic_icon_color_name
 from llm_sidebar_dashboard.user_interface.settings_window import SettingsWindowController
-from llm_sidebar_dashboard.user_interface.sidebar_panel import SidebarController
+from llm_sidebar_dashboard.user_interface.sidebar_panel import (SidebarController,
+                                                                allow_pointer_changes_while_another_app_is_in_front)
 from llm_sidebar_dashboard.user_interface.sidebar_placement import SidebarPlacement
 
 
@@ -499,6 +500,24 @@ class SidebarWidthDragTests(unittest.TestCase):
             self.controller.placement = SidebarPlacement(0, edge, True)
             self.controller.set_shown(False, animate=False)
             self.assertEqual(self.controller.window.frame().origin.x, parked_x, edge)
+
+    def test_a_click_in_another_window_cancels_an_open_rename_so_the_list_keeps_updating(self):
+        self.assertIs(self.controller.window.delegate(), self.controller)
+        self.controller.window.setFrame_display_(NSMakeRect(-4000, -4000, 400, 600), False)
+        self.controller.window.orderFrontRegardless()  # "on screen" for the list, though far outside every monitor
+        self.addCleanup(self.controller.window.orderOut_, None)
+        list_controller = self.controller.list_controller
+        list_controller.apply_snapshot(make_sample_snapshot())
+        self.controller.window.contentView().layoutSubtreeIfNeeded()
+        list_controller.begin_rename(list_controller.outline_view.itemAtRow_(1))
+        self.assertTrue(list_controller.rename_in_progress)
+        self.controller.windowDidResignKey_(None)
+        self.assertFalse(list_controller.rename_in_progress)
+        self.assertEqual(self.owner.submitted_actions, [])  # nothing was renamed
+
+    def test_the_window_server_lets_the_strip_change_the_pointer_while_another_app_is_in_front(self):
+        self.assertTrue(allow_pointer_changes_while_another_app_is_in_front())
+        self.assertFalse(self.controller.window.areCursorRectsEnabled())  # they would reset the arrows
 
     def test_strip_sits_on_the_right_side_of_a_left_edge_sidebar(self):
         self.controller.move_width_drag_strip_to_inner_edge("left")

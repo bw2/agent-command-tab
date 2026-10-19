@@ -73,7 +73,7 @@ class MenuBarStatusItemController(NSObject):
     @objc.python_method
     def redraw(self):
         """Draws the "C" in the chosen color, or the most urgent agent session's color with "auto"
-        (gray during a connection problem), plus the asking count in purple."""
+        (gray during a connection problem), plus the asking count in light blue (the color of "asking" everywhere)."""
         settings = self.owner.settings
         color_name = self.automatic_icon_color_name if settings["icon_color"] == "auto" else settings["icon_color"]
         letter_color = (NSColor.secondaryLabelColor() if self.has_connection_problem
@@ -85,7 +85,7 @@ class MenuBarStatusItemController(NSObject):
                   NSForegroundColorAttributeName: letter_color}))
         if self.asking_count and settings["icon_shows_asking_count"] and not self.has_connection_problem:
             title.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
-                f" {self.asking_count}", {NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.systemPurpleColor()}))
+                f" {self.asking_count}", {NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.systemCyanColor()}))
         self.status_item.button().setAttributedTitle_(title)
 
     def statusItemClicked_(self, sender):

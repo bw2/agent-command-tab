@@ -15,6 +15,7 @@ No window sits on the edge while the sidebar is hidden: a global mouse-moved mon
 needs no Accessibility permission and only watches) tests the pointer position.
 """
 
+import ctypes
 import time
 
 import objc
@@ -41,6 +42,31 @@ SLIDE_ANIMATION_SECONDS = 0.15
 SMALLEST_WIDTH = 200
 LARGEST_WIDTH = 1200
 WIDTH_DRAG_STRIP_THICKNESS = 6
+CF_STRING_ENCODING_UTF8 = 0x08000100
+
+
+def allow_pointer_changes_while_another_app_is_in_front():
+    """Lets the dashboard change the pointer while another app is the active one; returns whether that worked.
+
+    macOS ignores pointer changes from an app that isn't active, and the sidebar never makes the
+    dashboard active, so the inner edge's left-right arrows would never show. This turns on the
+    window server's undocumented "SetsCursorInBackground" setting, as other menu bar utilities
+    do. Should a macOS version drop it, the edge still drags, only without the arrows.
+    """
+    try:
+        core_foundation = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        core_graphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        core_foundation.CFStringCreateWithCString.restype = ctypes.c_void_p
+        core_foundation.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        core_graphics._CGSDefaultConnection.restype = ctypes.c_int
+        core_graphics.CGSSetConnectionProperty.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+        core_graphics.CGSSetConnectionProperty.restype = ctypes.c_int
+        setting_name = core_foundation.CFStringCreateWithCString(None, b"SetsCursorInBackground", CF_STRING_ENCODING_UTF8)
+        connection = core_graphics._CGSDefaultConnection()
+        return core_graphics.CGSSetConnectionProperty(
+            connection, connection, setting_name, ctypes.c_void_p.in_dll(core_foundation, "kCFBooleanTrue")) == 0
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 class SidebarWindow(NSPanel):
@@ -57,8 +83,9 @@ class SidebarWidthDragStripView(NSView):
     """A thin strip along the sidebar's inner edge: shows the left-right arrows pointer and drags the width.
 
     Its tracking area stays active while another app is in front, since the sidebar never
-    activates the dashboard. Pointer positions are read in screen coordinates, because the
-    strip moves with the window while the width changes.
+    activates the dashboard (allow_pointer_changes_while_another_app_is_in_front lets it set the
+    pointer then). Pointer positions are read in screen coordinates, because the strip moves with
+    the window while the width changes.
     """
 
     def initWithFrame_controller_(self, frame, controller):
@@ -124,6 +151,7 @@ class SidebarController(NSObject):
         self.list_controller.width_is_set_by_the_user = True
         self.list_panel_controller = ListPanelController.alloc().initWithListController_(self.list_controller)
         self.window = self.build_window()
+        allow_pointer_changes_while_another_app_is_in_front()  # for the width strip's left-right arrows
         return self
 
     @objc.python_method
@@ -137,6 +165,7 @@ class SidebarController(NSObject):
                                       | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle)
         window.setHidesOnDeactivate_(False)
         window.setBecomesKeyOnlyIfNeeded_(True)  # clicks on rows don't take keyboard focus (R6)
+        window.setDelegate_(self)  # windowDidResignKey_
         window.setHasShadow_(True)
         background_view = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 600))
         background_view.setMaterial_(NSVisualEffectMaterialSidebar)
@@ -151,7 +180,15 @@ class SidebarController(NSObject):
             NSMakeRect(0, 0, WIDTH_DRAG_STRIP_THICKNESS, 600), self)
         background_view.addSubview_(self.width_drag_strip)
         window.setContentView_(background_view)
+        # The list's own pointer areas reset the strip's left-right arrows to the plain arrow
+        # right after the pointer enters the strip (a quick pointer often lands there only once).
+        window.disableCursorRects()
         return window
+
+    def windowDidResignKey_(self, notification):
+        # A click in another window (iTerm2, say) ends an open rename without renaming, as closing
+        # the dropdown does; AppKit itself leaves the field open, and the list would stop updating.
+        self.list_controller.cancel_rename()
 
     @objc.python_method
     def move_width_drag_strip_to_inner_edge(self, edge):

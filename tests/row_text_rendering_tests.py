@@ -56,12 +56,12 @@ class RowTextPartsTests(unittest.TestCase):
 
     def test_asking_dot(self):
         parts = build_agent_session_row_text_parts(make_entry("asking"), [False], 1.0)
-        self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "purple", False))
+        self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "light_blue", False))
 
     def test_window_row_expanded_and_collapsed(self):
         window = make_window(["idle", "asking", "idle"])
         expanded_parts = build_window_row_text_parts(window, [], True)
-        self.assertEqual((expanded_parts.dot_color_name, expanded_parts.details_text), ("purple", ""))
+        self.assertEqual((expanded_parts.dot_color_name, expanded_parts.details_text), ("light_blue", ""))
         collapsed_parts = build_window_row_text_parts(window, [], False)
         self.assertEqual(collapsed_parts.details_text, "1 asking, 2 idle")
 

@@ -22,7 +22,8 @@ from iterm2.notifications import async_subscribe_to_variable_change_notification
 
 from llm_sidebar_dashboard import iterm2_actions
 from llm_sidebar_dashboard.agent_process_tree import (choose_command_the_agent_is_waiting_on, list_descendant_processes,
-                                                      process_is_alive, read_process_current_folder, read_process_info)
+                                                      process_is_alive, read_name_the_process_was_started_as,
+                                                      read_process_current_folder, read_process_info)
 from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
 from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.dashboard_core_api import ActionRegistry, ActionResult
@@ -759,7 +760,7 @@ class DashboardCore:
                 needs_dialog_check = state == "asking" and bool(adapter.permission_dialog_screen_patterns)
                 # An approved tool runs while iTerm2 still says waiting, so it is fingerprinted like "working".
                 is_effectively_working = state == "working" or permission_dialog_was_answered(state, status_change_time, reading)
-                self.note_command_the_agent_is_waiting_on(session_id, agent_session, reading, state, is_effectively_working, now)
+                await self.note_command_the_agent_is_waiting_on(session_id, agent_session, reading, state, is_effectively_working, now)
                 needs_fingerprint = is_effectively_working and now - reading.get("fingerprint_checked_at", 0) >= FINGERPRINT_INTERVAL_SECONDS
                 if not (needs_dialog_check or needs_fingerprint):
                     continue
@@ -807,6 +808,8 @@ class DashboardCore:
                 if (conversation_file is None or conversation_file["key"] != conversation_key
                         or now - conversation_file["looked_up_at"] >= seconds_between_lookups):
                     path = await agent_session["adapter"].find_conversation_file(process_id, claude_agent_record, claude_config_folders)
+                    if session_id not in self.agent_sessions:
+                        continue  # the tab closed during the lookup
                     if conversation_file is not None and conversation_file["key"] == conversation_key and conversation_file["path"] == path:
                         conversation_file["looked_up_at"] = now
                     else:
@@ -823,8 +826,9 @@ class DashboardCore:
                     continue
                 if modified_at != conversation_file["modified_at"]:
                     conversation_file["modified_at"] = modified_at
-                    context_tokens = agent_session["adapter"].read_context_tokens(conversation_file["path"])
-                    if context_tokens is not None:  # none in the file's end (one huge line): keep the last size
+                    context_tokens = await asyncio.to_thread(agent_session["adapter"].read_context_tokens, conversation_file["path"])
+                    # None means no usage in the file's end (one huge line), so the last size stays.
+                    if context_tokens is not None and session_id in self.agent_sessions:
                         self.note_context_tokens(session_id, context_tokens)
 
     def note_context_tokens(self, session_id, context_tokens):
@@ -833,12 +837,13 @@ class DashboardCore:
             reading["context_tokens"] = context_tokens
             self.snapshot_needed.set()
 
-    def note_command_the_agent_is_waiting_on(self, session_id, agent_session, reading, state, is_effectively_working, now):
+    async def note_command_the_agent_is_waiting_on(self, session_id, agent_session, reading, state, is_effectively_working, now):
         """Records in the session's screen reading the command a working agent started in this
-        turn and still runs ("running_command": (name, started at)), and when one was last seen
-        running, so "stuck" means thinking with nothing new on screen (user request, milestone 2).
-        Between turns it records the processes running then ("helper_process_ids", for example
-        MCP servers), which are not commands. A few system calls, no subprocess."""
+        turn and still runs ("running_command": (the name it was started as, started at)), and
+        when one was last seen running, so "stuck" means thinking with nothing new on screen (user
+        request, milestone 2). Between turns it records the processes running then
+        ("helper_process_ids", for example MCP servers), which are not commands. A few system
+        calls, no subprocess."""
         running_command = None
         if state in ("idle", "done") and agent_session["process_id"] and \
                 now - reading.get("helper_process_ids_recorded_at", 0) >= SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS:
@@ -846,17 +851,21 @@ class DashboardCore:
                 process.process_id for process in list_descendant_processes(agent_session["process_id"]))
             reading["helper_process_ids_recorded_at"] = now
         if is_effectively_working and agent_session["process_id"]:
-            turn_started_at = self.find_turn_start(session_id, agent_session, now)
-            running_command = choose_command_the_agent_is_waiting_on(
+            turn_started_at = await self.find_turn_start(session_id, agent_session, now)
+            command = choose_command_the_agent_is_waiting_on(
                 list_descendant_processes(agent_session["process_id"]), turn_started_at,
-                agent_session["adapter"].helper_process_names, reading.get("helper_process_ids", frozenset()))
+                agent_session["adapter"].helper_process_names, now, reading.get("helper_process_ids", frozenset()))
+            if command is not None:
+                command_process, command_started_at = command
+                running_command = (read_name_the_process_was_started_as(command_process.process_id) or command_process.name,
+                                   command_started_at)
         if running_command is not None:
             reading["command_last_seen_running_at"] = now
         if running_command != reading.get("running_command"):
             reading["running_command"] = running_command
             self.snapshot_needed.set()
 
-    def find_turn_start(self, session_id, agent_session, now):
+    async def find_turn_start(self, session_id, agent_session, now):
         """Returns when the session's current turn began. It is known when the dashboard saw the
         status turn working; for a turn already under way when the dashboard started, it is read
         once from the conversation file (the latest prompt), so a command started in this turn
@@ -869,7 +878,7 @@ class DashboardCore:
         if (session_id in self.session_tracking_by_session_id and conversation_file_path
                 and not tracking.get("turn_start_was_read_from_the_conversation_file")):
             tracking["turn_start_was_read_from_the_conversation_file"] = True
-            turn_started_at = agent_session["adapter"].read_turn_started_at(conversation_file_path)
+            turn_started_at = await asyncio.to_thread(agent_session["adapter"].read_turn_started_at, conversation_file_path)
             if turn_started_at is not None:
                 tracking["turn_started_at"] = turn_started_at
                 return turn_started_at

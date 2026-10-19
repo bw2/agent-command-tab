@@ -75,7 +75,7 @@ class SettingsWindowController(NSObject):
                  ("Monitor", self.monitor_popup, None), ("Edge", self.edge_popup, None),
                  ("Width", self.sidebar_width_field, "points"), (None, None, None),
                  ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None),
-                 (None, None, None), ("Agent is stuck if it's thinking for more than", self.stuck_minutes_field, "minutes"),
+                 (None, None, None), ("Agent is stuck if it thinks for more than", self.stuck_minutes_field, "minutes"),
                  (None, None, None)]
         self.launch_command_fields = []
         for agent_tool in self.settings["agent_tools"]:

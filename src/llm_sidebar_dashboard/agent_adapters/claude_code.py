@@ -1,5 +1,6 @@
 """Adapter for Anthropic's Claude Code."""
 
+import asyncio
 import re
 import shlex
 
@@ -42,7 +43,9 @@ class ClaudeCodeAdapter(AgentToolAdapter):
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         """Returns the transcript named after the record's `sessionId` in one of the config folders."""
         conversation_id = await self.find_conversation_id(agent_process_id, claude_agent_record)
-        return find_claude_code_transcript(claude_config_folders, conversation_id) if conversation_id else None
+        if not conversation_id:
+            return None
+        return await asyncio.to_thread(find_claude_code_transcript, claude_config_folders, conversation_id)
 
     def read_context_tokens(self, conversation_file_path):
         return read_context_tokens_from_claude_code_transcript(conversation_file_path)

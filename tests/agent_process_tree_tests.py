@@ -1,4 +1,6 @@
 import os
+import subprocess
+import tempfile
 import time
 import unittest
 
@@ -6,9 +8,11 @@ from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.agent_adapters.codex import CONVERSATION_FILE_PATTERN, CodexAdapter
 from llm_sidebar_dashboard.agent_adapters.generic import GenericAdapter
 from llm_sidebar_dashboard.agent_process_tree import (ProcessInfo, choose_command_the_agent_is_waiting_on,
-                                                      list_descendant_processes, read_process_info)
+                                                      list_descendant_processes, read_name_the_process_was_started_as,
+                                                      read_process_info)
 
 TURN_STARTED_AT = 1000.0
+NOW = 1100.0
 
 
 def make_process(process_id, parent_process_id, name, started_at):
@@ -17,30 +21,39 @@ def make_process(process_id, parent_process_id, name, started_at):
 
 class CommandTheAgentIsWaitingOnTests(unittest.TestCase):
     def test_a_command_started_in_this_turn_is_named_below_its_shell(self):
+        python_process = make_process(5, 4, "python3", 1030.2)
         descendants = [make_process(2, 1, "node", 10.0),  # an MCP server started with the session
                        make_process(3, 1, "caffeinate", 1000.5),  # Claude Code's own helper
-                       make_process(4, 1, "zsh", 1030.0), make_process(5, 4, "python3", 1030.2)]
-        self.assertEqual(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, {"caffeinate"}),
-                         ("python3", 1030.0))
+                       make_process(4, 1, "zsh", 1030.0), python_process]
+        self.assertEqual(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, {"caffeinate"}, NOW),
+                         (python_process, 1030.0))
 
     def test_only_helpers_and_older_processes_means_thinking(self):
         descendants = [make_process(2, 1, "node", 10.0), make_process(3, 1, "caffeinate", 1000.5)]
-        self.assertIsNone(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, {"caffeinate"}))
+        self.assertIsNone(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, {"caffeinate"}, NOW))
 
     def test_a_shell_with_nothing_running_in_it_is_not_a_command(self):
         # Codex keeps a terminal open between commands.
         descendants = [make_process(4, 1, "bash", 1030.0)]
-        self.assertIsNone(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, frozenset()))
+        self.assertIsNone(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, frozenset(), NOW))
+
+    def test_a_hook_that_has_run_for_under_two_seconds_is_not_a_command(self):
+        # iTerm2's Claude Code integration runs cc-status (with it2 and osascript) on every tool call.
+        descendants = [make_process(6, 1, "cc-status", NOW - 0.4), make_process(7, 6, "osascript", NOW - 0.3)]
+        self.assertIsNone(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, {"caffeinate"}, NOW))
+        self.assertEqual(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, {"caffeinate"}, NOW + 2)[0].name,
+                         "cc-status")
 
     def test_helpers_and_everything_below_them_are_not_commands(self):
         # Codex 0.163: its code mode host and an MCP server started around the turn's start.
+        pytest_process = make_process(7, 6, "pytest", 1040.1)
         descendants = [make_process(2, 1, "codex-code-mode-host", 1006.9), make_process(3, 2, "node", 1007.0),
                        make_process(4, 1, "npm", 999.7), make_process(5, 4, "node", 999.8)]
         self.assertIsNone(choose_command_the_agent_is_waiting_on(
-            descendants, TURN_STARTED_AT, {"codex-code-mode-host"}, helper_process_ids={4, 5}))
+            descendants, TURN_STARTED_AT, {"codex-code-mode-host"}, NOW, helper_process_ids={4, 5}))
         self.assertEqual(choose_command_the_agent_is_waiting_on(
-            descendants + [make_process(6, 1, "zsh", 1040.0), make_process(7, 6, "pytest", 1040.1)],
-            TURN_STARTED_AT, {"codex-code-mode-host"}, helper_process_ids={4, 5}), ("pytest", 1040.0))
+            descendants + [make_process(6, 1, "zsh", 1040.0), pytest_process],
+            TURN_STARTED_AT, {"codex-code-mode-host"}, NOW, helper_process_ids={4, 5}), (pytest_process, 1040.0))
 
 
 class ProcessTreeReadingTests(unittest.TestCase):
@@ -52,6 +65,20 @@ class ProcessTreeReadingTests(unittest.TestCase):
 
     def test_a_process_that_is_gone(self):
         self.assertIsNone(read_process_info(999999))
+        self.assertEqual(read_name_the_process_was_started_as(999999), "")
+
+    def test_a_program_started_through_a_symbolic_link_is_named_as_typed(self):
+        # As ~/.local/bin/claude links to an executable named after its version.
+        with tempfile.TemporaryDirectory() as folder:
+            link_path = os.path.join(folder, "my-tool")
+            os.symlink("/bin/sleep", link_path)
+            process = subprocess.Popen([link_path, "30"])
+            try:
+                self.assertEqual(read_process_info(process.pid).name, "sleep")
+                self.assertEqual(read_name_the_process_was_started_as(process.pid), "my-tool")
+            finally:
+                process.kill()
+                process.wait()
 
 
 class DuplicateLaunchCommandTests(unittest.TestCase):

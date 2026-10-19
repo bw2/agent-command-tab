@@ -11,6 +11,7 @@ import time
 RECONNECT_EXIT_STATUS = 75
 LONGEST_RESTART_DELAY_SECONDS = 30
 SECONDS_TO_WAIT_FOR_AGENT_NAMES = 2
+SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C = 10
 
 
 def dump_snapshot(verbose):
@@ -54,6 +55,24 @@ def run_app_process(verbose):
     return run_menu_bar_app(verbose)
 
 
+def wait_for_app_process(process):
+    """Returns the app process's exit status.
+
+    Ctrl+C in the terminal reaches the app process too, which then gives docked windows their
+    room back (up to 3 s) before exiting, so this waits for that rather than killing it at once
+    (subprocess.call would kill it after a quarter of a second). It kills the app only if it
+    hasn't exited after SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C.
+    """
+    try:
+        return process.wait()
+    except KeyboardInterrupt:
+        try:
+            return process.wait(timeout=SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return process.wait()
+
+
 def run_with_restarts(verbose):
     """Starts the app process and restarts it, with a growing delay, whenever it exits to reconnect.
 
@@ -65,7 +84,7 @@ def run_with_restarts(verbose):
     while True:
         started_at = time.time()
         command = [sys.executable, "-m", "llm_sidebar_dashboard.command_line", "app"] + (["--verbose"] if verbose else [])
-        exit_status = subprocess.call(command, env=os.environ)
+        exit_status = wait_for_app_process(subprocess.Popen(command, env=os.environ))
         if exit_status != RECONNECT_EXIT_STATUS:
             return exit_status
         if time.time() - started_at > 60:
