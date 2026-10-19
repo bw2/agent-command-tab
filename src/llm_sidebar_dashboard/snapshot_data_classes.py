@@ -9,17 +9,19 @@ with the origin at the bottom-left of the main monitor.
 
 import collections
 
+# Each optional field beside its default, so a field added or moved can't take another's default.
+AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD = {
+    "status_reason": "", "status_since": 0.0, "preview_line": "", "details": "", "context_fill_percent": None,
+    "importance_level": 0, "background_task_count": 0, "last_user_interaction_time": None, "ended_abnormally_at": None,
+    "is_in_front": False, "peer_messaging_address": "", "last_time_tab_was_seen": None, "running_command_name": "",
+    "running_command_started_at": None, "context_tokens": None, "started_at": None, "memory_bytes": None,
+    "cpu_percent": None, "slash_commands": (),
+}
 AgentSessionEntry = collections.namedtuple(
     "AgentSessionEntry",
-    [
-        "tab_id", "session_id", "tab_title", "tab_title_set_by_user", "agent_session_name", "agent_tool_name",
-        "working_folder", "status", "status_reason", "status_since", "preview_line", "details",
-        "context_fill_percent", "importance_level", "background_task_count", "last_user_interaction_time",
-        "ended_abnormally_at", "is_in_front", "peer_messaging_address", "last_time_tab_was_seen",
-        "running_command_name", "running_command_started_at", "context_tokens", "started_at", "memory_bytes",
-        "cpu_percent", "slash_commands",
-    ],
-    defaults=["", 0.0, "", "", None, 0, 0, None, None, False, "", None, "", None, None, None, None, None, ()],
+    ["tab_id", "session_id", "tab_title", "tab_title_set_by_user", "agent_session_name", "agent_tool_name",
+     "working_folder", "status"] + list(AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD),
+    defaults=list(AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD.values()),
 )
 AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent session. last_time_tab_was_seen is when "
                              "the tab was last selected in the key iTerm2 window while iTerm2 was active, or None. "
@@ -69,6 +71,20 @@ def convert_snapshot_to_json_ready_dict(snapshot):
     if isinstance(snapshot, (tuple, list)):
         return [convert_snapshot_to_json_ready_dict(value) for value in snapshot]
     return snapshot
+
+
+def replace_title_in_snapshot(snapshot, kind, item_id, new_title):
+    """Returns the snapshot with one window's title (kind "window") or one tab's title (kind
+    "tab") replaced, for a rename the list shows before a snapshot from the core confirms it."""
+
+    def replace_title_in_window(window_entry):
+        if kind == "window":
+            return window_entry._replace(title=new_title) if window_entry.window_id == item_id else window_entry
+        return window_entry._replace(agent_sessions=tuple(
+            entry._replace(tab_title=new_title) if entry.tab_id == item_id else entry for entry in window_entry.agent_sessions))
+    return snapshot._replace(monitors=tuple(
+        monitor_entry._replace(windows=tuple(replace_title_in_window(window_entry) for window_entry in monitor_entry.windows))
+        for monitor_entry in snapshot.monitors))
 
 
 def iterate_agent_session_entries(snapshot):

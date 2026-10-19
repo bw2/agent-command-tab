@@ -4,7 +4,8 @@ import tempfile
 import unittest
 
 from llm_sidebar_dashboard.session_preview_computation import (choose_preview_text, describe_claude_code_tool_call,
-                                                               make_one_line, read_preview_fields_from_claude_code_transcript,
+                                                               make_one_line, make_one_line_without_markdown,
+                                                               read_preview_fields_from_claude_code_transcript,
                                                                read_preview_fields_from_codex_conversation_file)
 
 
@@ -33,12 +34,16 @@ def codex_response_item(payload):
 
 
 class MakeOneLineTests(unittest.TestCase):
-    def test_drops_a_bracketed_time_line_and_markdown_markers(self):
-        self.assertEqual(make_one_line("[10/19/2026 09:19:52 AM EDT]\n\n## Done\n- **Fixed** the bug\n  in two places"),
-                         "Done Fixed the bug in two places")
+    def test_a_message_loses_a_bracketed_time_line_and_markdown_markers(self):
+        self.assertEqual(make_one_line_without_markdown(
+            "[10/19/2026 09:19:52 AM EDT]\n\n## Done\n- **Fixed** the bug\n  in two places"), "Done Fixed the bug in two places")
+
+    def test_a_command_keeps_its_characters(self):
+        self.assertEqual(make_one_line("rm -rf **/dist\n- not a list"), "rm -rf **/dist - not a list")
 
     def test_cuts_long_text(self):
         self.assertEqual(len(make_one_line("word " * 200)), 300)
+        self.assertEqual(len(make_one_line_without_markdown("word " * 200)), 300)
 
 
 class DescribeToolCallTests(unittest.TestCase):
@@ -46,6 +51,7 @@ class DescribeToolCallTests(unittest.TestCase):
         self.assertEqual(describe_claude_code_tool_call("Bash", {"command": "python3 -m unittest\necho done"}),
                          "Bash: python3 -m unittest echo done")
         self.assertEqual(describe_claude_code_tool_call("Read", {"file_path": "/x/y.py", "limit": 20}), "Read: /x/y.py")
+        self.assertEqual(describe_claude_code_tool_call("Glob", {"pattern": "**/*.py"}), "Glob: **/*.py")  # as asked to run
         self.assertEqual(describe_claude_code_tool_call("AskUserQuestion", {"questions": [{"question": "Which one?"}]}),
                          "Which one?")
         self.assertEqual(describe_claude_code_tool_call("TodoWrite", {"todos": []}), "TodoWrite")

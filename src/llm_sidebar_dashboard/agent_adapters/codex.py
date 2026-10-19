@@ -6,7 +6,8 @@ import re
 import shlex
 import time
 
-from llm_sidebar_dashboard.agent_adapters.base import AgentToolAdapter, split_command_line_into_program_names
+from llm_sidebar_dashboard.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, AgentToolAdapter,
+                                                       split_command_line_into_program_names)
 from llm_sidebar_dashboard.agent_process_tree import read_process_current_folder, read_process_info
 from llm_sidebar_dashboard.context_window_usage import (find_codex_conversation_files,
                                                         read_context_tokens_from_codex_conversation_file,
@@ -28,7 +29,7 @@ class CodexAdapter(AgentToolAdapter):
     agent_tool_name = "Codex"
     progress_noise_patterns = (re.compile(r"\((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)"),)
     helper_process_names = frozenset({"codex-code-mode-host"})  # stays running for the whole session
-    slash_commands = ("/compact", "/clear")
+    slash_commands = COMPACT_AND_CLEAR_SLASH_COMMANDS
     # The input box: "›", then the input, above the line with the model and the folder
     # ("  GPT-6-Astra low fast · /private/tmp/…", Phase 0).
     input_line_marker = "›"

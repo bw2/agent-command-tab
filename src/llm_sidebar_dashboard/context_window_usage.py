@@ -51,8 +51,13 @@ def read_last_records(file_path):
 
 
 def read_context_tokens_from_claude_code_transcript(file_path):
-    """Returns the tokens in context after the latest reply in a Claude Code transcript, or None."""
+    """Returns the tokens in context after the latest reply in a Claude Code transcript, or after
+    the latest compaction (/compact, or an automatic one) when no reply came since, or None."""
     for record in read_last_records(file_path):
+        if record.get("type") == "system" and record.get("subtype") == "compact_boundary" and not record.get("isSidechain"):
+            post_compaction_tokens = (record.get("compactMetadata") or {}).get("postTokens")
+            if isinstance(post_compaction_tokens, int):
+                return post_compaction_tokens
         message = (record.get("message") or {}) if record.get("type") == "assistant" else {}
         usage = message.get("usage")
         if not isinstance(usage, dict) or message.get("model") == "<synthetic>":

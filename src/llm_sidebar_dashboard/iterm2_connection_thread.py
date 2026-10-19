@@ -30,7 +30,7 @@ from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapt
 from llm_sidebar_dashboard.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
 from llm_sidebar_dashboard.agent_adapters.claude_code import ClaudeCodeAdapter
 from llm_sidebar_dashboard.dashboard_core_api import ActionRegistry, ActionResult
-from llm_sidebar_dashboard.iterm2_snapshot_builder import build_computer_snapshot, resolve_agent_sessions
+from llm_sidebar_dashboard.iterm2_snapshot_builder import DisplayedState, build_computer_snapshot, resolve_agent_sessions
 from llm_sidebar_dashboard.docked_window_frames_store import (adopt_records_of_restored_windows,
                                                               load_docked_window_frames, save_docked_window_frames)
 from llm_sidebar_dashboard.monitor_assignment import compute_frame_clear_of_area, frames_are_within_tolerance
@@ -126,6 +126,15 @@ async def read_claude_agents_by_process_id(claude_command_path, config_folders):
     return claude_agents_by_process_id
 
 
+def build_conversation_file_record(conversation_key, path, looked_up_at, cleared_path):
+    """Returns what the core keeps about a session's conversation file: the conversation it is for
+    (DashboardCore.find_conversation_key), its path or None while not found, when it was looked
+    up, the modification time of its last reading (None until read), and the file of a
+    conversation /clear ended, which lookups skip (or None)."""
+    return {"key": conversation_key, "path": path, "looked_up_at": looked_up_at, "modified_at": None,
+            "cleared_path": cleared_path}
+
+
 def parse_job_process_id(job_pid_value):
     """Returns iTerm2's `jobPid` variable as an int, or None."""
     try:
@@ -206,7 +215,7 @@ class DashboardCore:
         self.snapshot_needed = asyncio.Event()
         self.regather_needed = asyncio.Event()
         self.screen_check_needed = asyncio.Event()
-        self.conversation_files_by_session_id = {}  # {"key", "path", "looked_up_at", "modified_at", "cleared_path"}
+        self.conversation_files_by_session_id = {}  # build_conversation_file_record's records
         self.folders_that_may_hold_claude_code_transcripts = list_folders_that_may_hold_claude_code_transcripts()
         self.peek_lock = asyncio.Lock()  # a quick release must not undo a peek that hasn't happened yet
         self.iterm2_state_before_peek = None
@@ -285,7 +294,8 @@ class DashboardCore:
         if agent_session["is_in_background"]:
             # Its row keeps the state from before, but keys would go to the shell or editor in front.
             return ActionResult(False, "the agent is suspended or another program is in front of it")
-        state, _ = self.displayed_state_by_session_id.get(session_id, ("unknown", 0))
+        displayed_state = self.displayed_state_by_session_id.get(session_id)
+        state = displayed_state.state if displayed_state is not None else "unknown"
         if state not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
             return ActionResult(False, f"the agent is {state}; commands are typed only while it waits at its prompt")
         command = action_request.arguments["command"]
@@ -312,24 +322,27 @@ class DashboardCore:
         a new one: Codex keeps its process and starts the new chat's file only with its first
         prompt, so looking the file up again finds the old one. Claude Code's new session ID is
         asked for at the gather that follows this action."""
-        conversation_file = self.conversation_files_by_session_id.setdefault(session_id, {
-            "key": self.find_conversation_key(agent_session), "path": None, "looked_up_at": time.time(),
-            "modified_at": None, "cleared_path": None})
-        conversation_file.update(path=None, modified_at=None, cleared_path=cleared_path or conversation_file.get("cleared_path"))
+        conversation_file = self.conversation_files_by_session_id.setdefault(session_id, build_conversation_file_record(
+            self.find_conversation_key(agent_session), None, time.time(), None))
+        conversation_file.update(path=None, modified_at=None, cleared_path=cleared_path or conversation_file["cleared_path"])
         self.forget_conversation_file_readings(session_id)
         if session_id in self.session_tracking_by_session_id:
-            self.session_tracking_by_session_id[session_id]["last_time_tab_was_seen"] = time.time()
+            # The finished turn no longer waits to be seen; the tab itself wasn't seen, so its seen time stays.
+            self.session_tracking_by_session_id[session_id]["finished_turn_cleared_at"] = time.time()
         self.process_ids_asked_about_in_claude_agents.discard(agent_session["process_id"])
 
     async def handle_end_agent_process(self, action_request):
-        """Ends a tab's agent process ("Kill Session"; the tab and its shell stay): SIGTERM, and
-        SIGKILL if it is still running SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later."""
+        """Ends a tab's agent process ("Kill Session"; the tab and its shell stay): SIGTERM, then
+        SIGCONT so an agent suspended with Ctrl+Z wakes up to handle it (as a shell's kill does
+        for a stopped job), and SIGKILL if it is still running
+        SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later."""
         agent_session = self.agent_sessions.get(action_request.target["session_id"])
         if agent_session is None or not agent_session["process_id"]:
             return ActionResult(False, "that tab no longer runs an agent")
         process_id = agent_session["process_id"]
         try:
             os.kill(process_id, signal.SIGTERM)
+            os.kill(process_id, signal.SIGCONT)
         except ProcessLookupError:
             return ActionResult(True)  # it had ended already
         deadline = time.time() + SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED
@@ -716,12 +729,18 @@ class DashboardCore:
         """
         self.claude_agents_refresh_is_running = True
         try:
-            self.claude_agents_by_process_id = await read_claude_agents_by_process_id(
-                self.claude_command_path, list_claude_config_folders())
+            claude_agents_read_now = await read_claude_agents_by_process_id(self.claude_command_path, list_claude_config_folders())
         finally:
             self.claude_agents_refresh_is_running = False
+        # A run that failed or timed out for a config folder leaves its agents out; their last
+        # records stay while their processes run, or their conversation would look new.
+        claude_code_process_ids = self.list_claude_code_process_ids()
+        self.claude_agents_by_process_id = {
+            **{process_id: record for process_id, record in self.claude_agents_by_process_id.items()
+               if process_id in claude_code_process_ids},
+            **claude_agents_read_now}
         retry_is_due = False
-        for process_id in self.list_claude_code_process_ids() - set(self.claude_agents_by_process_id):
+        for process_id in claude_code_process_ids - set(self.claude_agents_by_process_id):
             self.claude_agents_retry_count_by_process_id[process_id] = self.claude_agents_retry_count_by_process_id.get(process_id, 0) + 1
             if self.claude_agents_retry_count_by_process_id[process_id] <= CLAUDE_AGENTS_RETRIES_FOR_A_NEW_PROCESS:
                 self.process_ids_asked_about_in_claude_agents.discard(process_id)
@@ -742,20 +761,26 @@ class DashboardCore:
             gathered_window["selected_tab_id"] = window.current_tab.tab_id if window and window.current_tab else None
         self.agent_sessions = resolve_agent_sessions(
             self.gathered_windows, self.agent_sessions, self.specific_adapters, self.generic_adapter, process_is_alive)
+        seen_session_id, highlighted_session_id = self.find_seen_session_id(), self.find_highlighted_session_id()
+
+        def build_snapshot_of(agent_sessions):
+            return build_computer_snapshot(
+                self.gathered_windows, agent_sessions, self.monitors, self.window_order, self.session_tracking_by_session_id,
+                self.displayed_state_by_session_id, self.screen_readings_by_session_id, self.stuck_threshold_seconds,
+                self.claude_agents_by_process_id, seen_session_id, highlighted_session_id, self.computer_id,
+                self.computer_name, now)
         listed_agent_sessions = {session_id: agent_session for session_id, agent_session in self.agent_sessions.items()
                                  if agent_session["agent_tool_name"] not in self.left_out_agent_tool_names}
-        snapshot = build_computer_snapshot(
-            self.gathered_windows, listed_agent_sessions, self.monitors, self.window_order,
-            self.session_tracking_by_session_id, self.displayed_state_by_session_id, self.screen_readings_by_session_id,
-            self.stuck_threshold_seconds, self.claude_agents_by_process_id, self.find_seen_session_id(),
-            self.find_highlighted_session_id(), self.computer_id, self.computer_name, now)
-        # Sessions left out of the list (Harnesses) keep what they showed, for when they are listed again.
+        snapshot = build_snapshot_of(listed_agent_sessions)
+        # Sessions left out of the list (Harnesses) keep their shown state current too, so a
+        # suspended agent's state and every state's start are right when they are listed again.
+        snapshot_of_every_session = (snapshot if len(listed_agent_sessions) == len(self.agent_sessions)
+                                     else build_snapshot_of(self.agent_sessions))
         self.displayed_state_by_session_id = {
-            session_id: displayed_state for session_id, displayed_state in self.displayed_state_by_session_id.items()
-            if session_id in self.agent_sessions}
-        self.displayed_state_by_session_id.update({
-            agent_session_entry.session_id: (agent_session_entry.status, agent_session_entry.status_since)
-            for _, _, agent_session_entry in iterate_agent_session_entries(snapshot)})
+            agent_session_entry.session_id: DisplayedState(
+                agent_session_entry.status, agent_session_entry.status_since,
+                self.session_tracking_by_session_id.get(agent_session_entry.session_id, {}).get("status_change_time", now))
+            for _, _, agent_session_entry in iterate_agent_session_entries(snapshot_of_every_session)}
         snapshot_without_time = snapshot._replace(taken_at=0)
         if snapshot_without_time != self.last_published_snapshot_without_time:
             self.last_published_snapshot_without_time = snapshot_without_time
@@ -911,13 +936,13 @@ class DashboardCore:
                 return  # the tab closed during the lookup
             conversation_file = self.conversation_files_by_session_id.get(session_id)
             is_same_conversation = conversation_file is not None and conversation_file["key"] == conversation_key
-            if is_same_conversation and path == conversation_file.get("cleared_path"):
+            if is_same_conversation and path == conversation_file["cleared_path"]:
                 path = None  # the conversation /clear ended; the agent hasn't written its next one yet
             if is_same_conversation and conversation_file["path"] == path:
                 conversation_file["looked_up_at"] = now
             else:
-                conversation_file = {"key": conversation_key, "path": path, "looked_up_at": now, "modified_at": None,
-                                     "cleared_path": conversation_file.get("cleared_path") if is_same_conversation else None}
+                conversation_file = build_conversation_file_record(
+                    conversation_key, path, now, conversation_file["cleared_path"] if is_same_conversation else None)
                 self.conversation_files_by_session_id[session_id] = conversation_file
                 self.forget_conversation_file_readings(session_id)
         path = conversation_file["path"]

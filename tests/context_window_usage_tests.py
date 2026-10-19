@@ -43,6 +43,16 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(find_claude_code_transcript(["/no/such/folder", self.folder.name], "abc"), path)
         self.assertIsNone(find_claude_code_transcript([self.folder.name], "other"))
 
+    def test_after_a_compaction_the_size_is_the_compacted_one_until_the_next_reply(self):
+        reply_before = {"type": "assistant", "message": {"usage": {"input_tokens": 709217}}}
+        compaction = {"type": "system", "subtype": "compact_boundary", "compactMetadata": {"preTokens": 709217, "postTokens": 20183}}
+        path = self.write_lines("compacted.jsonl", [reply_before, compaction,
+                                                    {"type": "user", "isCompactSummary": True, "message": {"content": "Summary"}}])
+        self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 20183)
+        path = self.write_lines("replied.jsonl", [reply_before, compaction,
+                                                  {"type": "assistant", "message": {"usage": {"input_tokens": 73525}}}])
+        self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 73525)
+
     def test_codex_conversation_file_uses_the_latest_token_count(self):
         path = self.write_lines("rollout.jsonl", [
             {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"total_tokens": 100}}}},

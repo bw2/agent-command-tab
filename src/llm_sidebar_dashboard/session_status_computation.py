@@ -8,6 +8,8 @@ the agent runs (agent_process_tree). Hook events are added as a further source i
 STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "done", "idle", "unknown", "exited"]
 # Between turns: the agent waits at its prompt, so /compact and /clear can be typed into it.
 STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done"})
+# During a turn, as iTerm2's status shows it: a permission prompt in between doesn't end the turn.
+STATES_OF_A_TURN_UNDER_WAY = frozenset({"working", "asking"})
 
 ITERM2_STATUS_WORDS_TO_STATES = {
     "idle": "idle",
@@ -88,7 +90,7 @@ def status_change_ends_a_turn(previous_state, new_state):
     """Returns whether iTerm2's status changing from previous_state to new_state (as mapped by
     map_iterm2_status_value_to_state) ends a turn: done, or idle after working or asking (Codex
     reports only idle when its turn ends)."""
-    return new_state == "done" or (new_state == "idle" and previous_state in ("working", "asking"))
+    return new_state == "done" or (new_state == "idle" and previous_state in STATES_OF_A_TURN_UNDER_WAY)
 
 
 def track_status_value(session_tracking, iterm2_status_value, now):
@@ -121,7 +123,7 @@ def track_status_value(session_tracking, iterm2_status_value, now):
         return session_tracking
     previous_state = map_iterm2_status_value_to_state(session_tracking["status_value"])
     tracking = dict(session_tracking, status_value=iterm2_status_value, status_change_time=now)
-    if new_state == "working" and previous_state not in ("working", "asking"):
+    if new_state == "working" and previous_state not in STATES_OF_A_TURN_UNDER_WAY:
         tracking["turn_started_at"] = now
     if status_change_ends_a_turn(previous_state, new_state):
         tracking["last_turn_ended_at"] = now
@@ -146,7 +148,8 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         iterm2_status_value: iTerm2's `status` variable for the session's first pane.
         iterm2_status_change_time: When that value was first observed (seconds since the epoch).
         last_turn_ended_at: When the status last changed in a way that ends a turn
-            (status_change_ends_a_turn), or None if it hasn't since the session was first seen.
+            (status_change_ends_a_turn), or None if it hasn't since the session was first seen;
+            track_status_value sets it for a session first seen as done.
         last_time_tab_was_seen: When the tab was last seen, or None if never.
         tab_is_seen_now: Whether the tab is being seen at this moment.
         screen_reading: {"permission_dialog_is_showing": bool, "permission_dialog_checked_at":
@@ -179,9 +182,7 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         if now - quiet_since >= stuck_threshold_seconds:
             return "stuck", f"thinking with no screen change for {max(1, round((now - quiet_since) / 60))} min"
         return "working", ""
-    if state == "done" and last_turn_ended_at is None:
-        last_turn_ended_at = iterm2_status_change_time  # a session first seen as done: its turn ended by then
-    if state in ("done", "idle") and last_turn_ended_at is not None:
+    if state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT and last_turn_ended_at is not None:
         if tab_is_seen_now or (last_time_tab_was_seen is not None and last_time_tab_was_seen >= last_turn_ended_at):
             return "idle", "turn finished and seen"
         return "done", "turn finished"

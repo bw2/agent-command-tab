@@ -11,7 +11,10 @@ import time
 RECONNECT_EXIT_STATUS = 75
 LONGEST_RESTART_DELAY_SECONDS = 30
 SECONDS_TO_WAIT_FOR_AGENT_NAMES = 2
-SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C = 10
+# Before it exits, the app waits at most this long for docked windows to get their room back
+# (app_controller); after Ctrl+C the supervisor gives it that and more before killing it.
+SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING = 3
+SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C = SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING + 7
 
 
 def dump_snapshot(verbose):
@@ -59,7 +62,8 @@ def wait_for_app_process(process):
     """Returns the app process's exit status.
 
     Ctrl+C in the terminal reaches the app process too, which then gives docked windows their
-    room back (up to 3 s) before exiting, so this waits for that rather than killing it at once
+    room back (up to SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING) before exiting, so this waits
+    for that rather than killing it at once
     (subprocess.call would kill it after a quarter of a second). It kills the app only if it
     hasn't exited after SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C.
     """

@@ -9,6 +9,7 @@ import unittest.mock
 from llm_sidebar_dashboard import iterm2_actions
 from llm_sidebar_dashboard.dashboard_core_api import ActionRequest, ActionResult
 from llm_sidebar_dashboard.iterm2_connection_thread import DashboardCore
+from llm_sidebar_dashboard.iterm2_snapshot_builder import DisplayedState
 
 
 class StandInAdapter:
@@ -16,6 +17,7 @@ class StandInAdapter:
 
     def __init__(self, path):
         self.path = path
+        self.paths_that_fit = [path]  # the files that may be the process's conversation, newest first
         self.read_paths = []
         self.while_reading = None  # run during the first read, as a /clear finishing meanwhile would
 
@@ -33,7 +35,8 @@ class StandInAdapter:
         return {"last_prompt": os.path.basename(conversation_file_path)}
 
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
-        return os.path.basename(self.path)  # Codex still finds the old file until the new chat's first prompt
+        # As CodexAdapter: only when exactly one file fits, so a copy never forks another conversation.
+        return os.path.basename(self.paths_that_fit[0]) if len(self.paths_that_fit) == 1 else None
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
         return f"{launch_command} fork {conversation_id}" if conversation_id else launch_command
@@ -104,17 +107,18 @@ class ClearedConversationTests(unittest.TestCase):
                 ActionRequest("duplicate_agent_session", {"tab_id": "t1"}, {"folder": "/x", "launch_command": "codex"})))
         return launch_commands[-1]
 
-    def test_duplicating_a_cleared_tab_starts_a_new_conversation_until_the_next_one_has_a_file(self):
+    def test_duplicating_a_cleared_tab_starts_a_new_conversation(self):
         self.assertEqual(self.duplicate(), "codex fork old.jsonl")
         self.clear()
-        self.assertEqual(self.duplicate(), "codex")  # forked the cleared conversation before
-        self.adapter.path = self.write_file("new.jsonl")
+        self.assertEqual(self.duplicate(), "codex")  # Codex's lookup still finds the old file: it forked that before
+        self.adapter.path = self.write_file("new.jsonl")  # the new chat's first prompt
+        self.adapter.paths_that_fit = [self.adapter.path, self.old_path]
         self.update_readings_with_a_lookup_due()
-        self.assertEqual(self.duplicate(), "codex fork new.jsonl")
+        self.assertEqual(self.duplicate(), "codex")  # both files fit the process, so which one is its isn't known
 
     def test_commands_are_not_typed_into_a_suspended_agent(self):
         self.agent_session["is_in_background"] = True
-        self.core.displayed_state_by_session_id["s1"] = ("idle", 0)  # what its row still shows
+        self.core.displayed_state_by_session_id["s1"] = DisplayedState("idle", 0, 0)  # what its row still shows
         action_result = asyncio.run(self.core.handle_send_slash_command(
             ActionRequest("send_slash_command", {"session_id": "s1"}, {"command": "/clear"})))
         self.assertFalse(action_result.succeeded)

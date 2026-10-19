@@ -25,15 +25,22 @@ CODEX_EXEC_COMMAND = re.compile(r'\bcmd\s*:\s*"((?:[^"\\]|\\.)*)"')
 
 
 def make_one_line(text):
-    """Returns text as one line for a preview: blank lines and lines holding only a bracketed
-    time are dropped, Markdown heading, quote and list markers and bold markers are removed,
-    runs of whitespace become one space, and the result is cut to LONGEST_PREVIEW_TEXT."""
+    """Returns text as one line for a preview, unchanged otherwise (a command or a pattern such as
+    "**/*.py" must show as the agent asks to run it): runs of whitespace become one space, and the
+    result is cut to LONGEST_PREVIEW_TEXT."""
+    return " ".join(str(text).split())[:LONGEST_PREVIEW_TEXT]
+
+
+def make_one_line_without_markdown(text):
+    """Returns a prompt or a message as one line for a preview (make_one_line): blank lines and
+    lines holding only a bracketed time are dropped first, and Markdown heading, quote and list
+    markers and bold markers are removed."""
     kept_lines = []
     for line in str(text).replace("**", "").split("\n"):
         line = MARKDOWN_LINE_START.sub("", line.strip())
         if line and not BRACKETED_TIME_LINE.match(line):
             kept_lines.append(line)
-    return " ".join(" ".join(kept_lines).split())[:LONGEST_PREVIEW_TEXT]
+    return make_one_line(" ".join(kept_lines))
 
 
 def describe_claude_code_tool_call(tool_name, tool_input):
@@ -43,7 +50,7 @@ def describe_claude_code_tool_call(tool_name, tool_input):
         return tool_name
     questions = tool_input.get("questions")
     if tool_name == "AskUserQuestion" and isinstance(questions, list) and questions and isinstance(questions[0], dict):
-        return make_one_line(questions[0].get("question") or "") or tool_name
+        return make_one_line_without_markdown(questions[0].get("question") or "") or tool_name
     for key in TOOL_INPUT_KEYS_IN_PREFERENCE_ORDER:
         if isinstance(tool_input.get(key), str) and tool_input[key].strip():
             return f"{tool_name}: {make_one_line(tool_input[key])}"
@@ -100,7 +107,8 @@ def read_preview_fields_from_claude_code_transcript(file_path):
 
     Returns:
         {"last_prompt": str, "message_since_prompt": str, "open_tool_call": str}, each "" when
-        not found; texts are one line (make_one_line).
+        not found; texts are one line: prompts and messages without Markdown markers
+        (make_one_line_without_markdown), tool calls as the agent asks to run them (make_one_line).
     """
     answered_tool_use_ids = set()
     message_since_prompt = ""
@@ -111,7 +119,7 @@ def read_preview_fields_from_claude_code_transcript(file_path):
         if record.get("isSidechain"):
             continue
         if record.get("type") == "last-prompt":
-            saved_last_prompt = saved_last_prompt or make_one_line(record.get("lastPrompt") or "")
+            saved_last_prompt = saved_last_prompt or make_one_line_without_markdown(record.get("lastPrompt") or "")
             if turn_started_with_a_notification:
                 break
             continue
@@ -123,7 +131,7 @@ def read_preview_fields_from_claude_code_transcript(file_path):
             return build_preview_fields(make_one_line(describe_typed_command(join_text_blocks(blocks))), message_since_prompt,
                                         open_tool_call)
         elif user_record_kind == "prompt":
-            return build_preview_fields(make_one_line(join_text_blocks(blocks)), message_since_prompt, open_tool_call)
+            return build_preview_fields(make_one_line_without_markdown(join_text_blocks(blocks)), message_since_prompt, open_tool_call)
         elif user_record_kind == "notification":
             turn_started_with_a_notification = True
             if saved_last_prompt:
@@ -131,7 +139,7 @@ def read_preview_fields_from_claude_code_transcript(file_path):
         elif record.get("type") == "assistant" and not turn_started_with_a_notification:
             for block in reversed(blocks):
                 if block.get("type") == "text" and not message_since_prompt and str(block.get("text") or "").strip():
-                    message_since_prompt = make_one_line(block["text"])
+                    message_since_prompt = make_one_line_without_markdown(block["text"])
                 elif (block.get("type") == "tool_use" and not open_tool_call and not message_since_prompt
                       and block.get("id") not in answered_tool_use_ids):
                     open_tool_call = describe_claude_code_tool_call(block.get("name") or "tool", block.get("input"))
@@ -149,7 +157,8 @@ def read_preview_fields_from_codex_conversation_file(file_path):
 
     Returns:
         {"last_prompt": str, "message_since_prompt": str, "open_tool_call": str}, each "" when
-        not found; texts are one line (make_one_line).
+        not found; texts are one line: prompts and messages without Markdown markers
+        (make_one_line_without_markdown), tool calls as the agent asks to run them (make_one_line).
     """
     answered_call_ids = set()
     message_since_prompt = ""
@@ -164,11 +173,11 @@ def read_preview_fields_from_codex_conversation_file(file_path):
             prompt_text = (str(payload.get("message") or "") if payload_type == "user_message"
                            else join_codex_item_texts(item) if item.get("type") == "UserMessage" else "")
             if prompt_text.strip():
-                return build_preview_fields(make_one_line(prompt_text), message_since_prompt, open_tool_call)
+                return build_preview_fields(make_one_line_without_markdown(prompt_text), message_since_prompt, open_tool_call)
             agent_text = (str(payload.get("message") or "") if payload_type == "agent_message"
                           else join_codex_item_texts(item) if item.get("type") == "AgentMessage" else "")
             if agent_text.strip() and not message_since_prompt:
-                message_since_prompt = make_one_line(agent_text)
+                message_since_prompt = make_one_line_without_markdown(agent_text)
         elif record.get("type") == "response_item":
             if payload_type in ("function_call_output", "custom_tool_call_output"):
                 answered_call_ids.add(payload.get("call_id"))

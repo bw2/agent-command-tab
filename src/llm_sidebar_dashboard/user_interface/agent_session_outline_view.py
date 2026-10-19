@@ -33,13 +33,14 @@ from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
 from llm_sidebar_dashboard.list_sorting import sort_agent_session_entries, sort_window_entries
 from llm_sidebar_dashboard.session_status_computation import STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
 from llm_sidebar_dashboard.settings_store import DEFAULT_SETTINGS
-from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
+from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries, replace_title_in_snapshot
 from llm_sidebar_dashboard.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image
 from llm_sidebar_dashboard.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
 from llm_sidebar_dashboard.user_interface.named_colors import build_color_from_name
 from llm_sidebar_dashboard.user_interface.pointing_hand_button import PointingHandButton
 from llm_sidebar_dashboard.user_interface.row_text_rendering import (RowTextParts, build_agent_session_row_text_parts,
-                                                                     build_monitor_row_text_parts,
+                                                                     build_dot_text, build_monitor_row_text_parts,
+                                                                     build_tree_connector_text,
                                                                      build_window_row_text_parts)
 
 ROW_HEIGHT = 20
@@ -96,8 +97,9 @@ ROW_VIEW_IDENTIFIER = "agent-list-row"
 
 
 class OutlineListItem(NSObject):
-    """One row's item: kind is "monitor", "window" or "tab"; entry is its snapshot record; key,
-    (kind, item ID), finds it in the controller's records (expansion, open previews, items)."""
+    """One row's item: kind is "monitor", "window", "tab", or "new_window" for the "+" row at the
+    end of the list (it has no entry); entry is its snapshot record; key, (kind, item ID), finds
+    it in the controller's records (expansion, open previews, items)."""
 
     def initWithKind_itemId_(self, kind, item_id):
         self = objc.super(OutlineListItem, self).init()
@@ -124,9 +126,16 @@ class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
         is_plain_press = event.clickCount() == 1 and not event.modifierFlags() & NSEventModifierFlagControl
         if is_plain_press:
             self.delegate().row_pressed(self.rowAtPoint_(self.convertPoint_fromView_(event.locationInWindow(), None)))
-        objc.super(OutlineViewWithoutDisclosureTriangles, self).mouseDown_(event)  # returns once the button is up
-        if is_plain_press:
-            self.delegate().row_released()
+        try:
+            objc.super(OutlineViewWithoutDisclosureTriangles, self).mouseDown_(event)  # returns once the button is up
+        finally:
+            if is_plain_press:  # always, or the list would hold back every snapshot from then on
+                self.delegate().row_released()
+
+
+def snapshot_shows_monitor_rows(snapshot):
+    """Whether the list groups windows under monitor rows: only with two or more monitors."""
+    return len(snapshot.monitors) > 1
 
 
 def build_index_set(indexes):
@@ -182,12 +191,11 @@ class RowButton(PointingHandButton):
         # A double-click that starts here isn't the row's: its second click must not show the row
         # an earlier single click hit.
         list_controller.item_under_first_click = None
-        list_controller.row_press_in_progress = True
+        list_controller.row_pressed(-1)  # held as a press on a row is, without peeking (no row)
         try:
             objc.super(RowButton, self).mouseDown_(event)  # returns once the button is up, after the action
         finally:
-            list_controller.row_press_in_progress = False
-        list_controller.apply_held_snapshot()
+            list_controller.row_released()
 
 
 def make_row_icon_button():
@@ -424,7 +432,7 @@ class AgentSessionListController(NSObject):
             return
         self.snapshot = snapshot
         self.measure_right_columns()
-        show_monitor_rows = len(snapshot.monitors) > 1
+        show_monitor_rows = snapshot_shows_monitor_rows(snapshot)
         new_top_level_items = []
         live_keys = set()
         for monitor_entry in snapshot.monitors:
@@ -713,8 +721,7 @@ class AgentSessionListController(NSObject):
         if item.kind == "tab":
             return build_agent_session_row_text_parts(item.entry, is_last_child_at_each_level, time.time())
         if item.kind == "window":
-            is_expanded = item.key not in self.collapsed_item_keys
-            return build_window_row_text_parts(item.entry, is_last_child_at_each_level, is_expanded)
+            return build_window_row_text_parts(item.entry, is_last_child_at_each_level, self.row_is_open(item))
         if item.kind == "new_window":  # the "+" row draws only its button
             return RowTextParts("", "", "gray", False, "", "")
         return build_monitor_row_text_parts(item.entry)
@@ -726,7 +733,7 @@ class AgentSessionListController(NSObject):
         parts = self.build_row_text_parts(item)
         is_in_front = item.kind == "tab" and item.entry.is_in_front
         tabs_with_previews = self.list_tabs_with_previews(item) if item.kind == "window" else []
-        shows_preview_toggle_button = bool(tabs_with_previews) and item.key not in self.collapsed_item_keys
+        shows_preview_toggle_button = bool(tabs_with_previews) and self.row_is_open(item)
         all_previews_are_open = all(self.preview_is_open(tab_item) for tab_item in tabs_with_previews)
         shows_disclosure_button = self.row_can_open(item)
         # Everything the row's look depends on: an unchanged row is neither refilled nor laid out
@@ -748,8 +755,7 @@ class AgentSessionListController(NSObject):
         if parts.dot_blinks and self.blink_phase_is_dim:
             dot_color = dot_color.colorWithAlphaComponent_(0.25)
         row_view.dot_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
-            parts.dot_glyph + (" " if parts.dot_glyph else ""),
-            {NSFontAttributeName: self.regular_font, NSForegroundColorAttributeName: dot_color}))
+            build_dot_text(parts.dot_glyph), {NSFontAttributeName: self.regular_font, NSForegroundColorAttributeName: dot_color}))
         name_color = NSColor.controlAccentColor() if is_in_front else NSColor.labelColor()
         row_view.name_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             parts.name_text, {NSFontAttributeName: self.choose_name_font(item), NSForegroundColorAttributeName: name_color}))
@@ -771,7 +777,7 @@ class AgentSessionListController(NSObject):
                     else right_aligned_secondary_text_attributes))
         row_view.column_widths = dict(self.column_widths)
         row_view.has_preview_line = self.preview_is_open(item)
-        row_view.tree_line_x = self.measure_tree_line_x() if item is self.new_window_row_item else None
+        row_view.tree_line_x = self.measure_tree_line_x() if item.kind == "new_window" else None
         row_view.shows_preview_toggle_button = shows_preview_toggle_button
         if shows_preview_toggle_button:  # it shows whether all are open; a click then closes them all
             show_symbol_on_button(row_view.preview_toggle_button, *PREVIEW_BUTTON_LOOKS[all_previews_are_open])
@@ -793,9 +799,10 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def measure_tree_line_x(self):
-        """Returns the x of the tree's vertical line, the middle of a connector's "├" (a label's
-        text starts half its insets inside the field)."""
-        return ROW_LEFT_MARGIN + TEXT_FIELD_INSETS / 2 + self.measure_text_width("├", self.regular_font) / 2
+        """Returns the x of the tree's vertical line, the middle of a top-level row's child's
+        connector's first character, "├" (a label's text starts half its insets inside the field)."""
+        return ROW_LEFT_MARGIN + TEXT_FIELD_INSETS / 2 + self.measure_text_width(
+            build_tree_connector_text([False])[0], self.regular_font) / 2
 
     @objc.python_method
     def measure_text_width(self, text, font):
@@ -806,11 +813,10 @@ class AgentSessionListController(NSObject):
         """Returns where a row's name starts, as AgentListRowView.layout places it: after the
         left margin, the tree connector's field, the arrow's room and the dot's field (each field
         its text and TEXT_FIELD_INSETS, which is up to a point more than AppKit adds, so this
-        never falls short; the dot's text is as fill_row_view writes it)."""
-        dot_text = dot_glyph + (" " if dot_glyph else "")
+        never falls short)."""
         return (ROW_LEFT_MARGIN + self.measure_text_width(connector_text, self.regular_font) + TEXT_FIELD_INSETS
-                + DISCLOSURE_ARROW_SLOT_WIDTH + self.measure_text_width(dot_text, self.regular_font) + TEXT_FIELD_INSETS
-                + GAP_AFTER_PREFIX)
+                + DISCLOSURE_ARROW_SLOT_WIDTH + self.measure_text_width(build_dot_text(dot_glyph), self.regular_font)
+                + TEXT_FIELD_INSETS + GAP_AFTER_PREFIX)
 
     @objc.python_method
     def measure_right_columns(self):
@@ -839,7 +845,9 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def measure_room_left_for_tab_names(self):
         """Returns the width left for a tab row's name and details beside the right-hand columns."""
-        deepest_tab_connector = "│  ├─ " if self.snapshot is not None and len(self.snapshot.monitors) > 1 else "├─ "
+        # A tab under a window, under a monitor row while there are several monitors.
+        tab_levels_below_the_top = 2 if self.snapshot is not None and snapshot_shows_monitor_rows(self.snapshot) else 1
+        deepest_tab_connector = build_tree_connector_text([False] * tab_levels_below_the_top)
         return (self.outline_view.bounds().size.width - self.measure_name_x(deepest_tab_connector, "●") - GAP_BEFORE_DETAILS
                 - self.measure_right_columns_width() - ROW_RIGHT_MARGIN)
 
@@ -1103,11 +1111,12 @@ class AgentSessionListController(NSObject):
                 self.submit_action(ActionRequest("rename_window", {"window_id": item.item_id}, {"new_title": new_title}))
         name_text_field.superview().look = None
         self.apply_held_snapshot()  # first, so a snapshot held during the rename doesn't bring the old name back
-        if item is not None and self.held_snapshot is not None:
+        if item is not None and self.held_snapshot is not None and new_title.strip():
             # Held again (the rename ended with a click on another row, whose button is still
-            # down): it predates the rename and would bring the old name back on release. The
-            # core sends a fresh one after the rename.
-            self.held_snapshot = None
+            # down): it predates the rename, so it gets the new name, or it would bring the old
+            # one back on release. It is kept rather than dropped, since the core sends another
+            # only when something changes.
+            self.held_snapshot = replace_title_in_snapshot(self.held_snapshot, item.kind, item.item_id, new_title.strip())
         renamed_item = self.items_by_key.get(item.key) if item is not None else None
         if renamed_item is not None and renamed_item.entry is not None and new_title.strip():
             # Shown at once; the next snapshot confirms it (or puts the old name back if iTerm2 refused).
@@ -1137,7 +1146,7 @@ class AgentSessionListController(NSObject):
         menu.setAutoenablesItems_(False)
         item = self.find_clicked_item()
         self.menu_target_item = item
-        if item is None or item is self.new_window_row_item:
+        if item is None or item.kind == "new_window":
             self.add_new_window_menu_items(menu)  # empty space, or the "+" row
             return
         if item.child_items:  # monitor and window rows (tab rows have nothing to expand)

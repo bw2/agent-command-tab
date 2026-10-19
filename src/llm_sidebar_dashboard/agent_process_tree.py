@@ -99,7 +99,9 @@ def read_process_tree_resource_usage(process_id):
     own_usage = read_process_resource_usage(process_id)
     if own_usage is None:
         return None
-    usages = [own_usage] + [read_process_resource_usage(process.process_id) for process in list_descendant_processes(process_id)]
+    # Every level: agents start launchers that start agents, which start shells and commands.
+    usages = [own_usage] + [read_process_resource_usage(process.process_id)
+                            for process in list_descendant_processes(process_id, maximum_depth=None)]
     usages = [usage for usage in usages if usage is not None]
     return sum(memory for memory, _ in usages), sum(cpu_seconds for _, cpu_seconds in usages)
 
@@ -174,19 +176,25 @@ def list_child_process_ids(process_id):
 
 
 def list_descendant_processes(process_id, maximum_depth=6):
-    """Returns the ProcessInfo of every process below process_id (children, their children, ...)."""
+    """Returns the ProcessInfo of every process below process_id (children, their children, ...),
+    down to maximum_depth levels, or all of them for None. Each process is listed once, even if
+    a process ID is reused while the tree is read."""
     descendants = []
+    listed_process_ids = {process_id}
     parent_process_ids = [process_id]
-    for _ in range(maximum_depth):
+    depth = 0
+    while parent_process_ids and (maximum_depth is None or depth < maximum_depth):
+        depth += 1
         next_parent_process_ids = []
         for parent_process_id in parent_process_ids:
             for child_process_id in list_child_process_ids(parent_process_id):
+                if child_process_id in listed_process_ids:
+                    continue
+                listed_process_ids.add(child_process_id)
                 child = read_process_info(child_process_id)
                 if child is not None:
                     descendants.append(child)
                     next_parent_process_ids.append(child_process_id)
-        if not next_parent_process_ids:
-            break
         parent_process_ids = next_parent_process_ids
     return descendants
 

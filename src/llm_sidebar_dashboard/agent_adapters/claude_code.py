@@ -4,7 +4,8 @@ import asyncio
 import re
 import shlex
 
-from llm_sidebar_dashboard.agent_adapters.base import AgentToolAdapter, split_command_line_into_program_names
+from llm_sidebar_dashboard.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, AgentToolAdapter,
+                                                       split_command_line_into_program_names)
 from llm_sidebar_dashboard.context_window_usage import (find_claude_code_transcript,
                                                         read_context_tokens_from_claude_code_transcript,
                                                         read_turn_started_at_from_claude_code_transcript)
@@ -31,7 +32,7 @@ class ClaudeCodeAdapter(AgentToolAdapter):
         re.compile(r"\(ctrl\+b to run in background\)"),
     )
     helper_process_names = frozenset({"caffeinate"})  # keeps the Mac awake while a turn runs
-    slash_commands = ("/compact", "/clear")
+    slash_commands = COMPACT_AND_CLEAR_SLASH_COMMANDS
     # The input box: "❯" and a no-break space, then the input, between two rules of "─" (Phase 0).
     input_line_marker = "❯"
     input_area_end_pattern = re.compile(r"^─{10,}\s*$")

@@ -13,6 +13,7 @@ Shape of a gathered window (see DashboardCore.gather_iterm2_windows and Dashboar
                                  "status": str or None, "path": str}}]}
 """
 
+import collections
 import os
 
 from llm_sidebar_dashboard.agent_adapters import find_agent_tool_adapter_for_tab
@@ -23,6 +24,10 @@ from llm_sidebar_dashboard.snapshot_data_classes import (AgentSessionEntry, Comp
                                                          WindowEntry)
 
 PLACEHOLDER_MONITOR = {"monitor_id": "unknown", "name": "", "frame": (0, 0, 0, 0), "visible_frame": (0, 0, 0, 0)}
+
+DisplayedState = collections.namedtuple("DisplayedState", ["state", "since", "status_change_time"])
+DisplayedState.__doc__ = ("What a session's row showed in a snapshot: its state, since when, and when iTerm2's status "
+                          "value had last changed then (compute_displayed_state_since).")
 
 
 def build_folder_display_name(folder_path):
@@ -83,20 +88,20 @@ def compute_displayed_state_since(state, raw_status_change_time, previous_displa
     Args:
         state: The state shown now.
         raw_status_change_time: When iTerm2's status value last changed.
-        previous_displayed_state: (state, since) from the previous snapshot, or None.
+        previous_displayed_state: The DisplayedState from the previous snapshot, or None.
         now: The current time.
 
     Returns:
-        The previous time while the state is unchanged; the status change time when a new status
-        report caused the change; otherwise now (for example "done" became "idle" when the tab
-        was seen).
+        The previous time while the state is unchanged; the status change time when a status
+        report newer than the previous snapshot's caused the change; otherwise now (for example
+        "done" became "idle" when the tab was seen, also when the status had said idle since
+        before then).
     """
     if previous_displayed_state is None:
         return raw_status_change_time
-    previous_state, previous_since = previous_displayed_state
-    if previous_state == state:
-        return previous_since
-    if raw_status_change_time > previous_since:
+    if previous_displayed_state.state == state:
+        return previous_displayed_state.since
+    if raw_status_change_time > previous_displayed_state.status_change_time:
         return raw_status_change_time
     return now
 
@@ -112,9 +117,10 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         claude_agent_record: The tab's entry from `claude agents --json` (matched by the agent's
             process ID), or None.
         session_tracking: {"status_change_time": float, "last_time_tab_was_seen": float or None,
-            "last_turn_ended_at": float (once a turn ended)} for the tab's first session, or None.
-        previous_displayed_state: (state, since) shown for this session in the previous snapshot,
-            or None.
+            "last_turn_ended_at": float (once a turn ended), "finished_turn_cleared_at": float
+            (after a /clear from the list)} for the tab's first session, or None.
+        previous_displayed_state: The DisplayedState shown for this session in the previous
+            snapshot, or None.
         screen_reading: The core's latest screen reading for the session, or None (see
             session_status_computation.compute_session_status_from_sources).
         stuck_threshold_seconds: The stuck time limit from the settings.
@@ -138,14 +144,19 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
     if agent_session["is_in_background"]:
         # Suspended (Ctrl+Z) or another program (an editor opened with Ctrl+G) is in front; iTerm2
         # cleared the status, so the row keeps what it showed before.
-        state, status_since = previous_displayed_state or ("unknown", now)
+        state, status_since = (previous_displayed_state.state, previous_displayed_state.since) if previous_displayed_state \
+            else ("unknown", now)
         reason = "agent suspended or another program in front"
     else:
+        # A finished turn stops waiting to be seen when the tab is seen, or when /clear cleared it.
+        times_the_finished_turn_was_dealt_with = [time_ for time_ in (session_tracking.get("last_time_tab_was_seen"),
+                                                                      session_tracking.get("finished_turn_cleared_at"))
+                                                  if time_ is not None]
         state, reason = compute_session_status_from_sources(
             first_session.get("status"),
             session_tracking.get("status_change_time", now),
             session_tracking.get("last_turn_ended_at"),
-            session_tracking.get("last_time_tab_was_seen"),
+            max(times_the_finished_turn_was_dealt_with, default=None),
             session_id == seen_session_id,
             screen_reading,
             stuck_threshold_seconds,
@@ -215,7 +226,7 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
             layout message. The snapshot lists the monitor groups left to right (R31, Q4).
         window_order: Window IDs in the list's order (window_list_ordering).
         session_tracking_by_session_id: Per-session tracking dicts (see build_agent_session_entry).
-        displayed_state_by_session_id: {session_id: (state, since)} from the previous snapshot.
+        displayed_state_by_session_id: {session_id: DisplayedState} from the previous snapshot.
         screen_readings_by_session_id: The core's latest screen readings (see build_agent_session_entry).
         stuck_threshold_seconds: The stuck time limit from the settings.
         claude_agents_by_process_id: {process ID: record from `claude agents --json`}.

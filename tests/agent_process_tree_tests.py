@@ -1,4 +1,6 @@
 import os
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -96,6 +98,31 @@ class ResourceUsageTests(unittest.TestCase):
             child.kill()
             child.wait()
         self.assertIsNone(read_process_tree_resource_usage(child.pid))  # gone
+
+    def test_resource_totals_reach_a_command_more_than_six_levels_down(self):
+        command = "/bin/sleep 5"
+        for _ in range(8):  # each shell waits on a background child, so none of them is replaced by its command
+            command = f"/bin/sh -c {shlex.quote(command + ' & wait')}"
+        chain = subprocess.Popen(command, shell=True, start_new_session=True)
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline and "sleep" not in [
+                    process.name for process in list_descendant_processes(os.getpid(), maximum_depth=None)]:
+                time.sleep(0.05)
+            deepest_command = next(process for process in list_descendant_processes(os.getpid(), maximum_depth=None)
+                                   if process.name == "sleep")
+            self.assertNotIn(deepest_command.process_id,
+                             [process.process_id for process in list_descendant_processes(os.getpid())])  # below six levels
+            sleep_memory, _ = read_process_resource_usage(deepest_command.process_id)
+            usages_within_six_levels = [read_process_resource_usage(process_id) for process_id in
+                                        [os.getpid()] + [process.process_id for process in list_descendant_processes(os.getpid())]]
+            memory_within_six_levels = sum(usage[0] for usage in usages_within_six_levels if usage is not None)
+            tree_memory, _ = read_process_tree_resource_usage(os.getpid())
+            # The shells below six levels and the sleep at the bottom are counted too (the six-level limit left them out).
+            self.assertGreaterEqual(tree_memory - memory_within_six_levels, sleep_memory)
+        finally:
+            os.killpg(chain.pid, signal.SIGKILL)
+            chain.wait()
 
     def test_a_finished_childs_cpu_time_stays_in_the_tree(self):
         _, cpu_seconds_before = read_process_tree_resource_usage(os.getpid())

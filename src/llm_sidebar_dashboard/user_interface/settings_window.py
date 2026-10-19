@@ -11,13 +11,13 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxSeparator, NSButt
                     NSButtonTypeSwitch, NSColor, NSFont, NSMakeRect, NSNormalWindowLevel, NSPopUpButton, NSScrollView,
                     NSTextField, NSView, NSViewWidthSizable, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskResizable,
                     NSWindowStyleMaskTitled)
-from Foundation import NSObject
 from PyObjCTools import AppHelper
 
 from llm_sidebar_dashboard.settings_store import (ICON_COLOR_NAMES, LIST_COLUMNS, SMALLEST_WINDOW_SIZES,
-                                                  find_launch_command_problem, is_valid_setting_value)
+                                                  find_launch_command_problem, is_valid_setting_value,
+                                                  replace_agent_tool_field)
 from llm_sidebar_dashboard.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
-from llm_sidebar_dashboard.user_interface.screen_layout import (convert_rect_to_frame_list,
+from llm_sidebar_dashboard.user_interface.screen_layout import (WindowFrameSavingController,
                                                                 place_window_at_saved_frame_or_center,
                                                                 read_monitors_from_screens)
 from llm_sidebar_dashboard.user_interface.sidebar_placement import (describe_sidebar_placement_fallback,
@@ -53,6 +53,9 @@ LIST_COLUMN_TITLES = {
 }
 # A titled section of the window, drawn as a bold title and a line to the right edge (user request, 2026-10-19).
 SettingsSection = collections.namedtuple("SettingsSection", ["title"])
+# A control in the control column that takes row_count rows' height and widens with the window
+# (the sidebar's placement note, which may take two lines).
+TallControlRow = collections.namedtuple("TallControlRow", ["control", "row_count"])
 
 
 class FlippedView(NSView):
@@ -62,10 +65,12 @@ class FlippedView(NSView):
         return True
 
 
-class SettingsWindowController(NSObject):
+class SettingsWindowController(WindowFrameSavingController):
     """Builds the settings window and reports each change to the owner's settings_changed(settings),
     its moves and resizes to window_frame_changed("settings_window_frame", frame), and its closing
     to settings_window_closed()."""
+
+    frame_setting_name = "settings_window_frame"
 
     def initWithOwner_(self, owner):
         self = objc.super(SettingsWindowController, self).init()
@@ -97,16 +102,6 @@ class SettingsWindowController(NSObject):
         """Puts the window at this level (above an open dropdown), or back at the normal level for None."""
         if self.window is not None:
             self.window.setLevel_(window_level if window_level is not None else NSNormalWindowLevel)
-
-    @objc.python_method
-    def report_frame(self):
-        self.owner.window_frame_changed("settings_window_frame", convert_rect_to_frame_list(self.window.frame()))
-
-    def windowDidMove_(self, notification):
-        self.report_frame()
-
-    def windowDidEndLiveResize_(self, notification):
-        self.report_frame()
 
     def windowDidResize_(self, notification):
         # A scroll view doesn't widen what it holds, so the rows follow the window's width here
@@ -155,8 +150,7 @@ class SettingsWindowController(NSObject):
         self.list_window_always_on_top_checkbox = self.make_checkbox("Always on top", self.settings["list_window_is_always_on_top"])
         rows += [SettingsSection("Window"), (None, self.list_window_always_on_top_checkbox, None), (None, None, None)]
         rows += [SettingsSection("Sidebar"), ("Show", self.sidebar_mode_popup, None), ("Window Edge", self.edge_popup, None),
-                 ("Width", self.sidebar_width_field, "points"),
-                 (None, self.edge_note, None), (None, None, None)]  # the note may take two lines
+                 ("Width", self.sidebar_width_field, "points"), TallControlRow(self.edge_note, 2)]
         # Each agent tool: whether it is included, and below that, indented, its launch command (user request, 2026-10-19).
         rows.append(SettingsSection("Harnesses"))
         self.include_checkboxes = []
@@ -173,11 +167,12 @@ class SettingsWindowController(NSObject):
 
         # Resizable, with the rows in a scroll view, so a window made shorter than its rows scrolls
         # (user request, 2026-10-19). The rows' view is flipped: rows go from the top down.
-        rows_height = 12 + ROW_SPACING * len(rows) + 12
+        row_counts = [row.row_count if isinstance(row, TallControlRow) else 1 for row in rows]
+        rows_height = 12 + ROW_SPACING * sum(row_counts) + 12
         rows_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, WINDOW_WIDTH, rows_height))
         self.rows_view = rows_view
         for index, row in enumerate(rows):
-            self.add_row(rows_view, row, 20 + ROW_SPACING * index)  # each control's top
+            self.add_row(rows_view, row, 20 + ROW_SPACING * sum(row_counts[:index]))  # each control's top
         scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, WINDOW_WIDTH, rows_height))
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setAutohidesScrollers_(True)
@@ -201,9 +196,16 @@ class SettingsWindowController(NSObject):
     def add_row(self, rows_view, row, top):
         """Adds one row at top (rows_view is flipped): a label in the label column (or, when too
         long for it, from the left edge with the control after it), the control and its units;
-        or a section's title. Text sits 1 point below a control's top, which centers it."""
+        a section's title; or a tall control. Text sits 1 point below a control's top, which
+        centers it."""
         if isinstance(row, SettingsSection):
             self.add_section_title(rows_view, row.title, top)
+            return
+        if isinstance(row, TallControlRow):
+            row.control.setFrame_(NSMakeRect(CONTROL_COLUMN_X, top + 2, CONTROL_COLUMN_WIDTH,
+                                             ROW_SPACING * (row.row_count - 1) + 16))
+            row.control.setAutoresizingMask_(NSViewWidthSizable)
+            rows_view.addSubview_(row.control)
             return
         label, control, units = row
         control_x = CONTROL_COLUMN_X
@@ -219,9 +221,6 @@ class SettingsWindowController(NSObject):
             rows_view.addSubview_(label_field)
         if control is not None:
             control.setFrameOrigin_((control_x, top))
-            if control is self.edge_note:  # reaches down into the empty row below it, and widens with the window
-                control.setFrame_(NSMakeRect(CONTROL_COLUMN_X, top + 2, CONTROL_COLUMN_WIDTH, ROW_SPACING + 16))
-                control.setAutoresizingMask_(NSViewWidthSizable)
             rows_view.addSubview_(control)
         if units is not None:
             units_field = NSTextField.labelWithString_(units)
@@ -347,17 +346,14 @@ class SettingsWindowController(NSObject):
                                              if self.column_checkboxes[column_name].state()]
         elif sender in self.launch_command_fields:
             tool_index = self.launch_command_fields.index(sender)
-            agent_tools = [dict(agent_tool) for agent_tool in new_settings["agent_tools"]]
-            launch_command = sender.stringValue().strip() or agent_tools[tool_index]["launch_command"]
+            launch_command = sender.stringValue().strip() or new_settings["agent_tools"][tool_index]["launch_command"]
             sender.setStringValue_(launch_command)
-            agent_tools[tool_index]["launch_command"] = launch_command
-            new_settings["agent_tools"] = agent_tools
+            new_settings["agent_tools"] = replace_agent_tool_field(new_settings["agent_tools"], tool_index, "launch_command",
+                                                                   launch_command)
             self.check_launch_command(sender)
         elif sender in self.include_checkboxes:
-            tool_index = self.include_checkboxes.index(sender)
-            agent_tools = [dict(agent_tool) for agent_tool in new_settings["agent_tools"]]
-            agent_tools[tool_index]["is_included"] = bool(sender.state())
-            new_settings["agent_tools"] = agent_tools
+            new_settings["agent_tools"] = replace_agent_tool_field(
+                new_settings["agent_tools"], self.include_checkboxes.index(sender), "is_included", bool(sender.state()))
         self.owner.settings_changed(new_settings)
 
     @objc.python_method

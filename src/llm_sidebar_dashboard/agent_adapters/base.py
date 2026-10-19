@@ -7,6 +7,8 @@ SHELL_PROGRAM_NAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"
 # The slash command that ends the conversation and starts a new one: the menu asks first, and
 # the core then forgets the old conversation's readings.
 COMMAND_THAT_STARTS_A_NEW_CONVERSATION = "/clear"
+# The slash commands of Claude Code and Codex alike, in menu order.
+COMPACT_AND_CLEAR_SLASH_COMMANDS = ("/compact", COMMAND_THAT_STARTS_A_NEW_CONVERSATION)
 
 
 def split_command_line_into_program_names(command_line):

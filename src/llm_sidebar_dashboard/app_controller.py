@@ -14,13 +14,13 @@ import time
 from AppKit import (NSAlert, NSAlertSecondButtonReturn, NSAlertStyleWarning, NSApp, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSApplicationDidBecomeActiveNotification,
                     NSApplicationDidChangeScreenParametersNotification, NSApplicationDidResignActiveNotification,
-                    NSApplicationWillTerminateNotification, NSEvent, NSPointInRect, NSPopoverBehaviorApplicationDefined,
+                    NSApplicationWillTerminateNotification, NSEvent, NSMouseInRect, NSPopoverBehaviorApplicationDefined,
                     NSPopoverBehaviorTransient, NSRunningApplication, NSWorkspace)
 from Foundation import NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 from PyObjCTools import AppHelper
 import objc
 
-from llm_sidebar_dashboard.command_line import RECONNECT_EXIT_STATUS
+from llm_sidebar_dashboard.command_line import RECONNECT_EXIT_STATUS, SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING
 from llm_sidebar_dashboard.dashboard_core_api import ActionRequest
 from llm_sidebar_dashboard.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
 from llm_sidebar_dashboard.iterm2_connection_thread import Iterm2ConnectionThread
@@ -38,7 +38,6 @@ from llm_sidebar_dashboard.user_interface.sidebar_panel import SidebarController
 
 ITERM2_BUNDLE_IDENTIFIER = "com.googlecode.iterm2"
 SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING = 10
-SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING = 3
 SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
 
 
@@ -84,12 +83,10 @@ class AppController(NSObject):
     def start(self):
         self.connection_thread.start()
         self.connection_thread.send_monitors(read_monitors_from_screens())
-        self.connection_thread.send_core_settings(build_core_settings(self.settings))
-        self.sidebar_controller.apply_settings(self.settings)
-        self.list_window_controller.apply_settings(self.settings)
-        self.apply_list_settings(self.settings)
+        self.apply_settings_to_the_core_and_every_list(self.settings)
         if self.settings["show_as"] == "window":
-            self.list_window_controller.show(self.settings["list_window_frame"], takes_keyboard_focus=False)
+            self.list_window_controller.show(self.settings["list_window_frame"], takes_keyboard_focus=False,
+                                             stays_behind_other_windows=True)
         # Always once at start, also when not docked (reserve_screen_area only sends changes): the
         # core waits for it before giving back room still owed from before a restart.
         self.connection_thread.send_reserved_screen_area(self.reserved_screen_area)
@@ -158,6 +155,7 @@ class AppController(NSObject):
             self.sidebar_controller.show_for_a_few_seconds()
         elif self.settings["show_as"] == "window":
             self.list_window_controller.show(self.settings["list_window_frame"])
+            self.place_the_settings_window_above_the_lists(self.popover.isShown())
         else:
             self.status_item_controller.toggle_popover()
 
@@ -230,7 +228,9 @@ class AppController(NSObject):
 
     @objc.python_method
     def pointer_is_on_the_menu_bar_icon(self):
-        return NSPointInRect(NSEvent.mouseLocation(), self.status_item_controller.find_icon_frame_on_screen())
+        # NSMouseInRect counts the frame's top edge as inside: a pointer pushed against the top of
+        # the screen, the usual way to aim at the menu bar, is exactly there.
+        return NSMouseInRect(NSEvent.mouseLocation(), self.status_item_controller.find_icon_frame_on_screen(), False)
 
     @objc.python_method
     def submit_action(self, action_request):
@@ -240,6 +240,9 @@ class AppController(NSObject):
             for iterm2_application in NSRunningApplication.runningApplicationsWithBundleIdentifier_(ITERM2_BUNDLE_IDENTIFIER):
                 NSApplication.sharedApplication().yieldActivationToApplication_(iterm2_application)
         return self.connection_thread.submit_action(action_request)
+
+    def popoverDidShow_(self, notification):
+        self.place_the_settings_window_above_the_lists(dropdown_is_open=True)  # an open settings window stays above it
 
     def popoverWillClose_(self, notification):
         self.dropdown_list_controller.cancel_rename()  # an open rename would keep the list from updating
@@ -257,6 +260,11 @@ class AppController(NSObject):
     @objc.python_method
     def settings_window_closed(self):
         self.update_dropdown_closing_behavior()
+
+    @objc.python_method
+    def list_window_closed(self):
+        """The list window's close button hid it: the settings window no longer stays level with it."""
+        self.place_the_settings_window_above_the_lists(self.popover.isShown())
 
     @objc.python_method
     def note_application_in_front_before_dropdown(self, application):
@@ -349,9 +357,15 @@ class AppController(NSObject):
         alert.setInformativeText_(explanation)
         alert.addButtonWithTitle_("No")  # the first button is the default and sits rightmost
         alert.addButtonWithTitle_("Yes")
+        return self.run_alert_in_front(alert) == NSAlertSecondButtonReturn
+
+    @objc.python_method
+    def run_alert_in_front(self, alert):
+        """Shows an alert and returns the button chosen, after closing the dropdown, which (with a
+        settings window kept above it) would cover the alert while it waits for an answer."""
         self.close_dropdown()
         NSApp.activateIgnoringOtherApps_(True)
-        return alert.runModal() == NSAlertSecondButtonReturn
+        return alert.runModal()
 
     @objc.python_method
     def submit_action_and_report_failure(self, action_request, failure_title):
@@ -367,8 +381,7 @@ class AppController(NSObject):
         alert = NSAlert.alloc().init()
         alert.setMessageText_(failure_title)
         alert.setInformativeText_(action_result.message[:1].upper() + action_result.message[1:] + ".")
-        NSApp.activateIgnoringOtherApps_(True)
-        alert.runModal()
+        self.run_alert_in_front(alert)
 
     @objc.python_method
     def find_launch_command(self, agent_tool_name):
@@ -426,25 +439,35 @@ class AppController(NSObject):
         """Saves new settings and applies them to the menu bar item, the sidebar, the list window
         (shown when "Show as" turns to Window, hidden when it turns away) and an open settings window."""
         show_as_before = self.settings["show_as"]
+        list_window_was_always_on_top = self.settings["list_window_is_always_on_top"]
         self.settings = new_settings
         save_settings(new_settings)
         self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
         self.status_item_controller.redraw()
+        list_window_is_shown_now = new_settings["show_as"] == "window" and show_as_before != "window"
         if new_settings["show_as"] != show_as_before:
             self.close_dropdown()
-            if new_settings["show_as"] == "window":
-                self.list_window_controller.show(new_settings["list_window_frame"])
+            if list_window_is_shown_now:
+                # Chosen in the settings window, which keeps the keyboard.
+                self.list_window_controller.show(new_settings["list_window_frame"],
+                                                 takes_keyboard_focus=not self.settings_window_controller.is_open())
             elif show_as_before == "window":
                 self.list_window_controller.hide()
-        self.sidebar_controller.apply_settings(new_settings)
-        self.list_window_controller.apply_settings(new_settings)
-        self.apply_list_settings(new_settings)
+        self.apply_settings_to_the_core_and_every_list(new_settings)
         self.settings_window_controller.reflect_settings(new_settings)
         if self.settings_window_controller.is_open():
             self.place_the_settings_window_above_the_lists(self.popover.isShown())
-            if self.list_window_controller.window.isVisible():  # a list window just shown or put on top stays behind it
-                self.settings_window_controller.window.orderFront_(None)
-        self.connection_thread.send_core_settings(build_core_settings(new_settings))
+            if list_window_is_shown_now or new_settings["list_window_is_always_on_top"] != list_window_was_always_on_top:
+                self.settings_window_controller.window.orderFront_(None)  # the list window just shown or put on top stays behind it
+
+    @objc.python_method
+    def apply_settings_to_the_core_and_every_list(self, settings):
+        """Hands the settings to the core, the sidebar, the list window and the three lists: at
+        the start and after every change."""
+        self.connection_thread.send_core_settings(build_core_settings(settings))
+        self.sidebar_controller.apply_settings(settings)
+        self.list_window_controller.apply_settings(settings)
+        self.apply_list_settings(settings)
 
     @objc.python_method
     def list_sort_order_chosen(self, list_sort_order):
@@ -491,6 +514,11 @@ class AppController(NSObject):
 
     def dashboardResignedActive_(self, notification):
         self.connection_thread.send_dashboard_is_active(False)
+        # An open settings window keeps the dropdown open while you click elsewhere in the dashboard
+        # (update_dropdown_closing_behavior); a click in another app still closes it, unless a peek
+        # brought iTerm2 forward on purpose.
+        if self.peek_in_progress is None and self.peek_waiting_for_put_back is None:
+            self.close_dropdown()
 
     @objc.python_method
     def quit(self):

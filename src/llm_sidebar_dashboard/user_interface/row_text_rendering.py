@@ -24,8 +24,9 @@ RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working sessi
                         "(R23): preview_connector_text continues the tree's lines, and preview_text starts under "
                         "the name.")
 
+# Each state's dot and its color, also the menu bar icon's color for the most urgent state.
 DOT_GLYPH_AND_COLOR_BY_STATE = {
-    "asking": ("●", "light_blue"),  # the same light blue as the menu bar icon's "C" and count (user request, milestone 2)
+    "asking": ("●", "light_blue"),  # also the asking count's color in the menu bar (user request, milestone 2)
     "error": ("✕", "red"),
     "stuck": ("◆", "orange"),
     "working": ("●", "green"),
@@ -34,6 +35,11 @@ DOT_GLYPH_AND_COLOR_BY_STATE = {
     "unknown": ("◌", "gray"),
     "exited": ("⊘", "gray"),
 }
+
+
+def build_dot_text(dot_glyph):
+    """Returns the text of a row's dot field: the glyph and a space, or "" for a row without one."""
+    return dot_glyph + (" " if dot_glyph else "")
 
 
 def format_elapsed_time(elapsed_seconds):

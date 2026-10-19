@@ -25,8 +25,10 @@ class PointingHandButton(NSButton):
         return self
 
     def resetCursorRects(self):
+        # The visible part only: cursor rects aren't clipped to the scroll view, so a row's button
+        # scrolled partly under the top bar would show the hand over the bar.
         if not self.isHiddenOrHasHiddenAncestor():
-            self.addCursorRect_cursor_(self.bounds(), NSCursor.pointingHandCursor())
+            self.addCursorRect_cursor_(self.visibleRect(), NSCursor.pointingHandCursor())
 
     def cursorUpdate_(self, event):
         if not self.isHiddenOrHasHiddenAncestor():

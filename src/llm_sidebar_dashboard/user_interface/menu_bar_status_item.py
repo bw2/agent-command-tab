@@ -10,8 +10,11 @@ from Foundation import NSObject
 from llm_sidebar_dashboard.session_status_computation import pick_most_urgent_state
 from llm_sidebar_dashboard.snapshot_data_classes import iterate_agent_session_entries
 from llm_sidebar_dashboard.user_interface.named_colors import build_color_from_name
+from llm_sidebar_dashboard.user_interface.row_text_rendering import DOT_GLYPH_AND_COLOR_BY_STATE
 
-AUTOMATIC_ICON_COLOR_NAME_BY_MOST_URGENT_STATE = {"asking": "light_blue", "error": "red", "stuck": "orange"}
+# The "auto" icon color of the most urgent state: the rows' dot color for that state, otherwise green.
+AUTOMATIC_ICON_COLOR_NAME_BY_MOST_URGENT_STATE = {state: DOT_GLYPH_AND_COLOR_BY_STATE[state][1]
+                                                  for state in ("asking", "error", "stuck")}
 
 
 def count_asking_agent_sessions(snapshot):
@@ -82,8 +85,8 @@ class MenuBarStatusItemController(NSObject):
                   NSForegroundColorAttributeName: letter_color}))
         if self.asking_count and settings["icon_shows_asking_count"] and not self.has_connection_problem:
             title.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
-                f" {self.asking_count}", {NSFontAttributeName: font,
-                                          NSForegroundColorAttributeName: build_color_from_name("light_blue")}))
+                f" {self.asking_count}", {NSFontAttributeName: font, NSForegroundColorAttributeName: build_color_from_name(
+                    DOT_GLYPH_AND_COLOR_BY_STATE["asking"][1])}))
         self.status_item.button().setAttributedTitle_(title)
 
     def statusItemClicked_(self, sender):

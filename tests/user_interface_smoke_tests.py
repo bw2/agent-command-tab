@@ -222,6 +222,14 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.dragged_item = second_window_item
         self.assertEqual(self.list_controller.outlineView_validateDrop_proposedItem_proposedChildIndex_(
             outline_view, None, None, 0), NSDragOperationNone)  # windows keep the order set in Manual
+        # With two monitors, a window still moves to the other monitor while sorted, but not within its own.
+        self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))
+        first_monitor_item, second_monitor_item = self.list_controller.top_level_items
+        self.list_controller.dragged_item = first_monitor_item.child_items[0]
+        self.assertEqual(self.list_controller.outlineView_validateDrop_proposedItem_proposedChildIndex_(
+            outline_view, None, second_monitor_item, -1), NSDragOperationMove)
+        self.assertEqual(self.list_controller.outlineView_validateDrop_proposedItem_proposedChildIndex_(
+            outline_view, None, first_monitor_item, 0), NSDragOperationNone)
 
     def test_shown_columns_follow_the_settings(self):
         snapshot = make_sample_snapshot()
@@ -411,7 +419,13 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.window.contentView().layoutSubtreeIfNeeded()
         tab_item = self.list_controller.outline_view.itemAtRow_(1)
         self.list_controller.begin_rename(tab_item)
-        self.list_controller.apply_snapshot(make_sample_snapshot())  # arrives during the rename: held
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_one = window_one._replace(agent_sessions=window_one.agent_sessions[:1] + (
+            window_one.agent_sessions[1]._replace(status="idle"),) + window_one.agent_sessions[2:])
+        # Arrives during the rename, with another tab's change: held.
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two)),)))
         row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False)
         row_view.name_text_field.setStringValue_("new name")
         self.list_controller.row_pressed(3)  # the click on another row that ends the rename
@@ -419,6 +433,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.controlTextDidEndEditing_(notification)
         self.list_controller.row_released()
         self.assertEqual(self.list_controller.items_by_key[("tab", "1")].entry.tab_title, "new name")
+        self.assertEqual(self.list_controller.items_by_key[("tab", "2")].entry.status, "idle")  # the held snapshot shows too
 
     def test_holding_a_tab_row_peeks_and_releasing_ends_it_but_a_click_does_not(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())

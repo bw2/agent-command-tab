@@ -2,8 +2,9 @@ import json
 import unittest
 
 from llm_sidebar_dashboard.agent_adapters import build_built_in_agent_tool_adapters
-from llm_sidebar_dashboard.iterm2_snapshot_builder import (build_computer_snapshot, build_folder_display_name,
-                                                           compute_displayed_state_since, resolve_agent_sessions)
+from llm_sidebar_dashboard.iterm2_snapshot_builder import (DisplayedState, build_computer_snapshot,
+                                                           build_folder_display_name, compute_displayed_state_since,
+                                                           resolve_agent_sessions)
 from llm_sidebar_dashboard.snapshot_data_classes import convert_snapshot_to_json_ready_dict, iterate_agent_session_entries
 
 MONITOR = {"monitor_id": "display-1", "name": "Built-in", "frame": (0, 0, 2000, 1300), "visible_frame": (0, 0, 2000, 1260)}
@@ -87,9 +88,16 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual([window.window_id for window in snapshot.monitors[0].windows], ["c", "a", "b"])
 
     def test_done_becomes_idle_once_seen(self):
-        tracking = {"session-1": {"status_change_time": 900.0, "last_time_tab_was_seen": 950.0}}
+        tracking = {"session-1": {"status_change_time": 900.0, "last_turn_ended_at": 900.0, "last_time_tab_was_seen": 950.0}}
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="done")])], tracking=tracking)
         self.assertEqual(snapshot.monitors[0].windows[0].agent_sessions[0].status, "idle")
+
+    def test_a_cleared_finished_turn_is_idle_without_counting_as_seen(self):
+        tracking = {"session-1": {"status_change_time": 900.0, "last_turn_ended_at": 900.0, "last_time_tab_was_seen": None,
+                                  "finished_turn_cleared_at": 950.0}}
+        entry = build_snapshot([make_window("w", [make_tab("1", "claude", status="done")])],
+                               tracking=tracking).monitors[0].windows[0].agent_sessions[0]
+        self.assertEqual((entry.status, entry.last_time_tab_was_seen), ("idle", None))
 
     def test_an_ended_turn_stays_done_until_seen_after_the_status_says_idle(self):
         tab = make_tab("1", "codex", status="idle")
@@ -138,7 +146,7 @@ class BuildComputerSnapshotTests(unittest.TestCase):
     def test_suspended_agent_keeps_its_row_and_state_while_its_process_lives(self):
         running = [make_window("w", [make_tab("1", "claude --model haiku", status="waiting", job_pid=42)])]
         agent_sessions = resolve(running)
-        displayed_states = {"session-1": ("asking", 900.0)}
+        displayed_states = {"session-1": DisplayedState("asking", 900.0, 900.0)}
         # Ctrl+Z: the shell is the foreground job again, and iTerm2 cleared the status.
         suspended = [make_window("w", [make_tab("1", "-zsh", status=None, job_pid=77)])]
         agent_sessions = resolve(suspended, agent_sessions, alive_process_ids={42})
@@ -156,13 +164,17 @@ class DisplayedStateSinceTests(unittest.TestCase):
         self.assertEqual(compute_displayed_state_since("working", 900.0, None, 1000.0), 900.0)
 
     def test_unchanged_state_keeps_its_time(self):
-        self.assertEqual(compute_displayed_state_since("idle", 990.0, ("idle", 950.0), 1000.0), 950.0)
+        self.assertEqual(compute_displayed_state_since("idle", 990.0, DisplayedState("idle", 950.0, 950.0), 1000.0), 950.0)
 
     def test_new_status_report_uses_its_time(self):
-        self.assertEqual(compute_displayed_state_since("working", 980.0, ("idle", 950.0), 1000.0), 980.0)
+        self.assertEqual(compute_displayed_state_since("working", 980.0, DisplayedState("idle", 950.0, 950.0), 1000.0), 980.0)
 
     def test_done_becoming_idle_when_seen_starts_now(self):
-        self.assertEqual(compute_displayed_state_since("idle", 900.0, ("done", 900.0), 950.0), 950.0)
+        self.assertEqual(compute_displayed_state_since("idle", 900.0, DisplayedState("done", 900.0, 900.0), 950.0), 950.0)
+
+    def test_done_seen_after_the_status_already_said_idle_starts_now(self):
+        # Done at 100; the status said idle at 150 while the row stayed done; the tab is seen at 200.
+        self.assertEqual(compute_displayed_state_since("idle", 150.0, DisplayedState("done", 100.0, 150.0), 200.0), 200.0)
 
 
 class FolderDisplayNameTests(unittest.TestCase):

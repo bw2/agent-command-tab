@@ -1,7 +1,9 @@
-"""Reads the monitors from AppKit as plain dicts for the core (PLAN.md section 4), and checks
-saved window frames against them. Main thread only."""
+"""Reads the monitors from AppKit as plain dicts for the core (PLAN.md section 4), checks saved
+window frames against them, and saves the frames of the windows that keep one. Main thread only."""
 
+import objc
 from AppKit import NSIntersectsRect, NSMakeRect, NSScreen
+from Foundation import NSObject
 
 
 def list_screen_frames():
@@ -27,6 +29,25 @@ def grow_frame_to_smallest_size(frame, smallest_size):
     x, y, width, height = frame
     new_width, new_height = max(width, smallest_size[0]), max(height, smallest_size[1])
     return [x, y - (new_height - height), new_width, new_height]
+
+
+class WindowFrameSavingController(NSObject):
+    """The base of the controllers of windows whose frame the settings keep (the list window and
+    the settings window). As the window's delegate it reports the frame to the owner's
+    window_frame_changed(frame_setting_name, frame) after each move and resize; a subclass sets
+    frame_setting_name (a settings_store.SMALLEST_WINDOW_SIZES name) and self.owner and self.window."""
+
+    frame_setting_name = None
+
+    @objc.python_method
+    def report_frame(self):
+        self.owner.window_frame_changed(self.frame_setting_name, convert_rect_to_frame_list(self.window.frame()))
+
+    def windowDidMove_(self, notification):
+        self.report_frame()
+
+    def windowDidEndLiveResize_(self, notification):
+        self.report_frame()
 
 
 def place_window_at_saved_frame_or_center(window, saved_frame):

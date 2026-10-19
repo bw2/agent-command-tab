@@ -41,17 +41,18 @@ class ComputeSessionStatusTests(unittest.TestCase):
     def test_no_status_is_unknown(self):
         self.assertEqual(compute_state(None, 100), "unknown")
 
+    # A status of done always comes with its turn's end (track_status_value), here at 100.
     def test_done_while_never_seen(self):
-        self.assertEqual(compute_state("done", 100), "done")
+        self.assertEqual(compute_state("done", 100, last_turn_ended_at=100), "done")
 
     def test_done_after_last_seen_stays_done(self):
-        self.assertEqual(compute_state("done", 100, last_seen=90), "done")
+        self.assertEqual(compute_state("done", 100, last_seen=90, last_turn_ended_at=100), "done")
 
     def test_done_then_seen_becomes_idle(self):
-        self.assertEqual(compute_state("done", 100, last_seen=110), "idle")
+        self.assertEqual(compute_state("done", 100, last_seen=110, last_turn_ended_at=100), "idle")
 
     def test_done_while_being_seen_is_idle(self):
-        self.assertEqual(compute_state("done", 100, seen_now=True), "idle")
+        self.assertEqual(compute_state("done", 100, seen_now=True, last_turn_ended_at=100), "idle")
 
     def test_done_lasts_until_seen_when_the_status_then_says_idle(self):
         # The turn ended at 100; the status changed to idle at 150 without the tab being seen.

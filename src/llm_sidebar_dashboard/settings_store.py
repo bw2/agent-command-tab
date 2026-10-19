@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import tempfile
 
+from llm_sidebar_dashboard.list_sorting import LIST_SORT_ORDERS  # the Sort pop-up's choices
+
 SETTINGS_FOLDER = os.path.expanduser("~/Library/Application Support/llm-sidebar-dashboard")
 SETTINGS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "settings.json")
 SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL = 5
@@ -32,8 +34,6 @@ SIDEBAR_EDGES = ["right", "left"]
 # auto_hide: slides in when the pointer touches the edge; floating: always visible over windows;
 # docked: always visible, and iTerm2 windows on that monitor are kept out of its area.
 SIDEBAR_MODES = ["auto_hide", "floating", "docked"]
-# The Sort pop-up at the top of the list (list_sorting.py).
-LIST_SORT_ORDERS = ["manual", "activity", "alphabet", "created_time"]
 # A tab row's information columns that the settings can show or hide, in their left-to-right
 # order (the tool icon column, between cpu_usage and state, shows by itself when two or more
 # agent tools run). Memory and CPU usage count the agent and every process below it.
@@ -117,6 +117,13 @@ def list_included_agent_tool_names(settings):
 def list_left_out_agent_tool_names(settings):
     """Returns the agent tools that the Harnesses section leaves out of the list and the menus."""
     return [agent_tool["agent_tool_name"] for agent_tool in settings["agent_tools"] if not agent_tool["is_included"]]
+
+
+def replace_agent_tool_field(agent_tools, tool_index, field_name, value):
+    """Returns a copy of the agent_tools setting with one tool's field (such as "launch_command"
+    or "is_included") set to value; the settings it came from are not changed."""
+    return [dict(agent_tool, **{field_name: value}) if index == tool_index else dict(agent_tool)
+            for index, agent_tool in enumerate(agent_tools)]
 
 
 def build_core_settings(settings):
