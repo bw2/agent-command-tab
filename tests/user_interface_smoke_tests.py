@@ -273,15 +273,17 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_top_bar_drops_the_sort_label_then_the_sort_popup_when_narrow(self):
         panel = self.dropdown_panel_controller
-        self.list_controller.apply_snapshot(make_sample_snapshot())  # two windows: the expand or collapse button shows
+        # Two windows with running agents: the expand or collapse and the pause or resume buttons show.
+        self.list_controller.apply_snapshot(make_sample_snapshot())
         # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's
         # smallest width and 200 the sidebar's (185 and 150 can't happen, but check the later steps).
-        for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (200, True, True), (185, False, True),
-                                                (150, False, False), (460, True, True)):
+        for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (216, False, True), (185, False, True),
+                                                (184, False, False), (150, False, False), (460, True, True)):
             self.window.setContentSize_((width, 260))
             self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden()),
                              (label_shown, popup_shown), width)
-            right_buttons_x = panel.expand_or_collapse_all_button.frame().origin.x  # then the settings button
+            right_buttons_x = panel.pause_or_resume_all_button.frame().origin.x  # left of the expand or collapse button
+            self.assertLess(right_buttons_x, panel.expand_or_collapse_all_button.frame().origin.x)
             if popup_shown:
                 popup_frame = panel.list_sort_order_popup.frame()
                 self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, right_buttons_x)
@@ -331,10 +333,44 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertEqual(self.build_right_click_menu_titles(0),
                          ["Collapse", "---", "Show window", "Rename", "---", "New tab with Claude Code session…",
-                          "New tab with Codex session…", "---", "Close window"])
+                          "New tab with Codex session…", "---", "Pause 3 Sessions", "---", "Close window"])
         self.assertEqual(self.build_right_click_menu_titles(1),
                          ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Extract to new window", "---",
-                          "/compact", "/clear", "Kill Session"])
+                          "/compact", "/clear", "Kill Session", "---", "Pause Session"])
+
+    def test_pause_and_resume_in_the_row_menus_and_the_top_bar(self):
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        with_one_paused = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one._replace(
+            agent_sessions=(window_one.agent_sessions[0]._replace(status="paused", is_paused_with_the_processes_below_it=True),)
+            + window_one.agent_sessions[1:]),
+            window_two)),))
+        self.list_controller.apply_snapshot(with_one_paused)
+        window_menu_titles = self.build_right_click_menu_titles(0)
+        self.assertIn("Pause 2 Sessions", window_menu_titles)
+        self.assertIn("Resume 1 Session", window_menu_titles)
+        tab_menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # "planning", paused
+        self.assertNotIn("Pause Session", tab_menu_items_by_title)
+        self.list_controller.menuResumeSessions_(tab_menu_items_by_title["Resume Session"])
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                         ("resume_agent_sessions", {"session_ids": ["s1"]}))
+        panel = self.dropdown_panel_controller
+        button = panel.pause_or_resume_all_button
+        self.assertEqual((button.isHidden(), button.toolTip()), (False, "Pause all agent sessions"))
+        panel.pauseOrResumeAllClicked_(button)  # pauses the sessions that run
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                         ("pause_agent_sessions", {"session_ids": ["s2", "s3", "s10", "s11"]}))
+        all_paused = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=tuple(
+            window._replace(agent_sessions=tuple(entry._replace(status="paused", is_paused_with_the_processes_below_it=True)
+                                                 for entry in window.agent_sessions))
+            for window in snapshot.monitors[0].windows)),))
+        self.list_controller.apply_snapshot(all_paused)
+        self.assertEqual(button.toolTip(), "Resume all paused agent sessions")
+        panel.pauseOrResumeAllClicked_(button)
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                         ("resume_agent_sessions", {"session_ids": ["s1", "s2", "s3", "s10", "s11"]}))
+        self.list_controller.apply_snapshot(make_two_monitor_snapshot(snapshot))
+        self.assertEqual(self.build_right_click_menu_titles(0)[-1], "Pause 3 Sessions")  # a monitor row's menu
 
     def test_slash_commands_only_at_the_prompt_and_clear_and_kill_ask_first(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -761,12 +797,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(one_window_snapshot)
         self.assertTrue(button.isHidden())
         self.window.setContentSize_((320, 260))
-        message_frame = panel.message_text_field.frame()  # the message line reaches the right edge instead
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, panel.view().bounds().size.width - PANEL_SIDE_MARGIN - 8)
+        pause_button = panel.pause_or_resume_all_button  # at the right edge instead
+        self.assertEqual(pause_button.frame().origin.x + pause_button.frame().size.width,
+                         panel.view().bounds().size.width - PANEL_SIDE_MARGIN)
+        message_frame = panel.message_text_field.frame()
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, pause_button.frame().origin.x - 8)
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertFalse(button.isHidden())
+        self.assertEqual(button.frame().origin.x + button.frame().size.width, panel.view().bounds().size.width - PANEL_SIDE_MARGIN)
         message_frame = panel.message_text_field.frame()
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, button.frame().origin.x - 8)
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, pause_button.frame().origin.x - 8)
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # one window per monitor
         self.assertFalse(button.isHidden())
 

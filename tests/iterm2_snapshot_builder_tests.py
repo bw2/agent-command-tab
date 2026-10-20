@@ -22,19 +22,20 @@ def make_window(window_id, tabs, title="claude", title_override_format=None, fra
             "tabs": tabs}
 
 
-def resolve(gathered_windows, previous_agent_sessions=None, alive_process_ids=()):
+def resolve(gathered_windows, previous_agent_sessions=None, alive_process_ids=(), stopped_process_ids=()):
     specific_adapters, generic_adapter = build_built_in_agent_tool_adapters()
     return resolve_agent_sessions(gathered_windows, previous_agent_sessions or {}, specific_adapters, generic_adapter,
-                                  lambda process_id: process_id in alive_process_ids)
+                                  lambda process_id: process_id in alive_process_ids,
+                                  lambda process_id: process_id in stopped_process_ids)
 
 
 def build_snapshot(gathered_windows, window_order=(), claude_agents_by_process_id=None, tracking=None,
                    seen_session_id=None, monitors=(MONITOR,), agent_sessions=None, displayed_states=None,
-                   screen_readings=None):
+                   screen_readings=None, now=1000.0):
     return build_computer_snapshot(gathered_windows, agent_sessions if agent_sessions is not None else resolve(gathered_windows),
                                    list(monitors), list(window_order), tracking or {}, displayed_states or {},
                                    screen_readings or {}, 600, claude_agents_by_process_id or {}, seen_session_id,
-                                   seen_session_id, "computer-1", "Test Mac", 1000.0)
+                                   seen_session_id, "computer-1", "Test Mac", now)
 
 
 class BuildComputerSnapshotTests(unittest.TestCase):
@@ -143,12 +144,12 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.monitors[0].monitor_id, "unknown")
         self.assertEqual(len(snapshot.monitors[0].windows), 1)
 
-    def test_suspended_agent_keeps_its_row_and_state_while_its_process_lives(self):
+    def test_an_agent_behind_another_program_keeps_its_row_and_state_while_its_process_lives(self):
         running = [make_window("w", [make_tab("1", "claude --model haiku", status="waiting", job_pid=42)])]
         agent_sessions = resolve(running)
         displayed_states = {"session-1": DisplayedState("asking", 900.0, 900.0)}
-        # Ctrl+Z: the shell is the foreground job again, and iTerm2 cleared the status.
-        suspended = [make_window("w", [make_tab("1", "-zsh", status=None, job_pid=77)])]
+        # Ctrl+G: an editor is the foreground job, and iTerm2 cleared the status.
+        suspended = [make_window("w", [make_tab("1", "vim", status=None, job_pid=77)])]
         agent_sessions = resolve(suspended, agent_sessions, alive_process_ids={42})
         self.assertTrue(agent_sessions["session-1"]["is_in_background"])
         snapshot = build_snapshot(suspended, agent_sessions=agent_sessions, displayed_states=displayed_states,
@@ -157,6 +158,24 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual((entry.status, entry.status_since, entry.tab_title), ("asking", 900.0, "reviews-1a"))
         self.assertEqual(entry.agent_tool_name, "Claude Code")
         self.assertEqual(resolve(suspended, agent_sessions, alive_process_ids=()), {})  # the agent process ended
+
+    def test_a_stopped_agent_shows_paused_and_paused_ends_when_it_is_resumed(self):
+        running = [make_window("w", [make_tab("1", "claude", status="working", job_pid=42)])]
+        agent_sessions = resolve(running)
+        # Paused (or Ctrl+Z): the shell is the foreground job again and the agent's process is stopped.
+        at_the_shell = [make_window("w", [make_tab("1", "-zsh", status=None, job_pid=77)])]
+        agent_sessions = resolve(at_the_shell, agent_sessions, alive_process_ids={42}, stopped_process_ids={42})
+        self.assertTrue(agent_sessions["session-1"]["is_stopped"])
+        displayed_states = {"session-1": DisplayedState("working", 900.0, 900.0)}
+        entry = build_snapshot(at_the_shell, agent_sessions=agent_sessions, displayed_states=displayed_states,
+                               now=1000.0).monitors[0].windows[0].agent_sessions[0]
+        self.assertEqual((entry.status, entry.status_since), ("paused", 1000.0))
+        # Resumed, but iTerm2 hasn't seen the agent back in front yet: "paused" isn't kept.
+        agent_sessions = resolve(at_the_shell, agent_sessions, alive_process_ids={42})
+        displayed_states = {"session-1": DisplayedState("paused", 1000.0, 900.0)}
+        entry = build_snapshot(at_the_shell, agent_sessions=agent_sessions, displayed_states=displayed_states,
+                               now=1010.0).monitors[0].windows[0].agent_sessions[0]
+        self.assertEqual(entry.status, "unknown")
 
 
 class DisplayedStateSinceTests(unittest.TestCase):

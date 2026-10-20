@@ -32,6 +32,7 @@ DOT_GLYPH_AND_COLOR_BY_STATE = {
     "working": ("●", "green"),
     "done": ("✔", "green"),
     "idle": ("○", "gray"),
+    "paused": ("‖", "purple"),
     "unknown": ("◌", "gray"),
     "exited": ("⊘", "gray"),
 }

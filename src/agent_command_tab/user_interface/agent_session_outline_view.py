@@ -31,7 +31,8 @@ from agent_command_tab.agent_adapters import list_slash_commands_of_the_built_in
 from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.list_sorting import sort_agent_session_entries, sort_window_entries
-from agent_command_tab.session_status_computation import STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
+from agent_command_tab.session_status_computation import (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT,
+                                                          split_agent_sessions_into_pausable_and_resumable)
 from agent_command_tab.settings_store import DEFAULT_SETTINGS
 from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries, replace_title_in_snapshot
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image
@@ -344,8 +345,9 @@ class AgentSessionListController(NSObject):
         self.submit_action = owner.submit_action
         self.on_tab_focused = lambda: owner.tab_was_focused(self)
         self.on_row_count_changed = lambda: owner.rows_changed(self)
-        # Called after every snapshot and expansion change; the panel sets it so its expand or collapse button follows along.
-        self.on_expansion_changed = lambda: None
+        # Called after every snapshot and expansion change; the panel sets it so its top bar's
+        # buttons (expand or collapse all, pause or resume all) follow along.
+        self.on_snapshot_or_expansion_changed = lambda: None
         self.items_by_key = {}
         self.top_level_items = []
         self.new_window_row_item = OutlineListItem.alloc().initWithKind_itemId_("new_window", "new_window")
@@ -459,7 +461,7 @@ class AgentSessionListController(NSObject):
         else:
             self.row_structure = new_row_structure
             self.reload_and_restore_expansion()
-        self.on_expansion_changed()  # a closed window may be gone
+        self.on_snapshot_or_expansion_changed()  # a closed window may be gone
 
     @objc.python_method
     def update_window_item(self, window_entry, live_keys):
@@ -592,7 +594,7 @@ class AgentSessionListController(NSObject):
             self.apply_expansion_state(item.child_items)  # children come back as they were
         self.redraw_visible_rows()
         self.on_row_count_changed()
-        self.on_expansion_changed()
+        self.on_snapshot_or_expansion_changed()
 
     @objc.python_method
     def list_is_on_screen(self):
@@ -987,7 +989,7 @@ class AgentSessionListController(NSObject):
         run_without_animation(lambda: self.apply_expansion_state(self.top_level_items))
         self.redraw_visible_rows()
         self.on_row_count_changed()
-        self.on_expansion_changed()
+        self.on_snapshot_or_expansion_changed()
 
     @objc.python_method
     def is_fully_expanded(self):
@@ -1153,6 +1155,8 @@ class AgentSessionListController(NSObject):
             self.add_menu_item(menu, "Collapse" if self.outline_view.isItemExpanded_(item) else "Expand",
                                "menuToggleExpansion:")
             if item.kind == "monitor":
+                menu.addItem_(NSMenuItem.separatorItem())
+                self.add_pause_and_resume_menu_items(menu, self.list_agent_session_entries_below(item))
                 return
             menu.addItem_(NSMenuItem.separatorItem())
         if item.kind == "window":
@@ -1163,6 +1167,8 @@ class AgentSessionListController(NSObject):
             for agent_tool_name in self.owner.list_agent_tool_names():
                 self.add_menu_item(menu, f"New tab with {agent_tool_name} session…", "menuNewAgentSessionInWindow:"
                                    ).setRepresentedObject_(agent_tool_name)
+            menu.addItem_(NSMenuItem.separatorItem())
+            self.add_pause_and_resume_menu_items(menu, self.list_agent_session_entries_below(item))
             if item.parent_item is not None:
                 menu.addItem_(NSMenuItem.separatorItem())
                 other_monitor_items = [monitor_item for monitor_item in self.top_level_items if monitor_item is not item.parent_item]
@@ -1208,6 +1214,50 @@ class AgentSessionListController(NSObject):
                     command_item.setEnabled_(False)
                     command_item.setToolTip_(f"Only while the agent waits at its prompt (it is {item.entry.status})")
             self.add_menu_item(menu, "Kill Session", "menuKillSession:")
+            menu.addItem_(NSMenuItem.separatorItem())
+            self.add_pause_and_resume_menu_items(menu, [item.entry])
+
+    @objc.python_method
+    def list_agent_session_entries_below(self, item):
+        """Returns the agent sessions in a window row, or in all window rows of a monitor row."""
+        if item.kind == "window":
+            return list(item.entry.agent_sessions)
+        return [entry for window_item in item.child_items for entry in window_item.entry.agent_sessions]
+
+    @objc.python_method
+    def list_agent_session_entries(self):
+        """Returns every agent session the list shows (the top bar's pause or resume button acts on all of them)."""
+        return [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)] if self.snapshot else []
+
+    @objc.python_method
+    def add_pause_and_resume_menu_items(self, menu, agent_session_entries):
+        """Adds "Pause Session" for those of the agent sessions that run and "Resume Session" for
+        those that are paused, with the count when the row holds several ("Pause 3 Sessions";
+        user request, 2026-10-20)."""
+        sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(agent_session_entries)
+        for verb, entries, action_name in (("Pause", sessions_to_pause, "menuPauseSessions:"),
+                                           ("Resume", sessions_to_resume, "menuResumeSessions:")):
+            if not entries:
+                continue
+            title = (f"{verb} Session" if len(agent_session_entries) == 1
+                     else f"{verb} {len(entries)} Session{'' if len(entries) == 1 else 's'}")
+            self.add_menu_item(menu, title, action_name).setRepresentedObject_([entry.session_id for entry in entries])
+
+    def menuPauseSessions_(self, sender):
+        self.pause_or_resume_agent_sessions(list(sender.representedObject()), pause=True)
+
+    def menuResumeSessions_(self, sender):
+        self.pause_or_resume_agent_sessions(list(sender.representedObject()), pause=False)
+
+    @objc.python_method
+    def pause_or_resume_agent_sessions(self, session_ids, pause):
+        """Asks the core to pause or resume these agent sessions; an alert names those that failed and why."""
+        # A pause that stopped the agent can still fail for processes below it run with sudo.
+        what_failed = "Not everything was paused" if pause else (
+            "The session wasn't resumed" if len(session_ids) == 1 else "Not every session was resumed")
+        self.owner.submit_action_and_report_failure(
+            ActionRequest("pause_agent_sessions" if pause else "resume_agent_sessions", {"session_ids": session_ids}),
+            what_failed)
 
     @objc.python_method
     def add_new_window_menu_items(self, menu):

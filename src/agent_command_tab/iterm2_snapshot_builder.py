@@ -41,7 +41,7 @@ def build_folder_display_name(folder_path):
 
 
 def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_adapters, generic_adapter,
-                           process_is_alive):
+                           process_is_alive, process_is_stopped):
     """Returns which tabs run an agent, keeping an agent whose tab's foreground job changed while it lives.
 
     PLAN.md section 4: a `commandLine` change alone does not mean the agent exited (Claude Code's
@@ -54,11 +54,12 @@ def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_a
         specific_adapters: Adapters tried in order.
         generic_adapter: The generic adapter.
         process_is_alive: function(process ID) -> bool.
+        process_is_stopped: function(process ID) -> bool (paused, or suspended with Ctrl+Z).
 
     Returns:
         {session_id: {"adapter": AgentToolAdapter, "process_id": int or None, "is_in_background": bool,
-                      "agent_tool_name": str, "working_folder": the agent process's current folder or "",
-                      "started_at": when the agent process started, or None}}.
+                      "is_stopped": bool, "agent_tool_name": str, "working_folder": the agent
+                      process's current folder or "", "started_at": when the agent process started, or None}}.
     """
     agent_sessions = {}
     for gathered_window in gathered_windows:
@@ -71,14 +72,17 @@ def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_a
                                                       specific_adapters, generic_adapter)
             previous_agent_session = previous_agent_sessions.get(session_id)
             if adapter is not None:
+                process_id = first_session.get("job_pid")
                 agent_sessions[session_id] = {
-                    "adapter": adapter, "process_id": first_session.get("job_pid"), "is_in_background": False,
+                    "adapter": adapter, "process_id": process_id, "is_in_background": False,
+                    "is_stopped": bool(process_id) and process_is_stopped(process_id),  # until iTerm2 sees the shell in front
                     "agent_tool_name": adapter.name_agent_tool_for_command_line(first_session.get("command_line")),
                     "working_folder": first_session.get("job_folder") or "",
                     "started_at": first_session.get("job_started_at")}
             elif (previous_agent_session is not None and previous_agent_session["process_id"]
                   and process_is_alive(previous_agent_session["process_id"])):
-                agent_sessions[session_id] = dict(previous_agent_session, is_in_background=True)
+                agent_sessions[session_id] = dict(previous_agent_session, is_in_background=True,
+                                                  is_stopped=process_is_stopped(previous_agent_session["process_id"]))
     return agent_sessions
 
 
@@ -141,12 +145,24 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         tab_title = gathered_tab.get("title") or gathered_tab["title_override_format"]
     else:
         tab_title = agent_session_name or build_folder_display_name(working_folder) or gathered_tab.get("title") or ""
-    if agent_session["is_in_background"]:
-        # Suspended (Ctrl+Z) or another program (an editor opened with Ctrl+G) is in front; iTerm2
-        # cleared the status, so the row keeps what it showed before.
-        state, status_since = (previous_displayed_state.state, previous_displayed_state.since) if previous_displayed_state \
-            else ("unknown", now)
-        reason = "agent suspended or another program in front"
+    is_paused_with_the_processes_below_it = agent_session.get("is_paused_with_the_processes_below_it", False)
+    if agent_session["is_stopped"]:
+        # Paused from the list, or suspended with Ctrl+Z by hand, which leaves the processes the
+        # agent started in their own process groups running: stopped until it is resumed.
+        state = "paused"
+        reason = ("paused: the agent and the processes below it are stopped until it is resumed"
+                  if is_paused_with_the_processes_below_it
+                  else "suspended with Ctrl+Z: the agent is stopped, but commands it started may still run")
+        status_since = (previous_displayed_state.since if previous_displayed_state and previous_displayed_state.state == "paused"
+                        else now)
+    elif agent_session["is_in_background"]:
+        # Another program (an editor opened with Ctrl+G) is in front, or a resumed agent is coming
+        # back to the front; iTerm2 cleared the status, so the row keeps what it showed before,
+        # except "paused", which ended when the agent was resumed.
+        state, status_since = (
+            (previous_displayed_state.state, previous_displayed_state.since)
+            if previous_displayed_state and previous_displayed_state.state != "paused" else ("unknown", now))
+        reason = "another program in front of the agent"
     else:
         # A finished turn stops waiting to be seen when the tab is seen, or when /clear cleared it.
         times_the_finished_turn_was_dealt_with = [time_ for time_ in (session_tracking.get("last_time_tab_was_seen"),
@@ -176,6 +192,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         status=state,
         status_reason=reason,
         status_since=status_since,
+        is_paused_with_the_processes_below_it=state == "paused" and is_paused_with_the_processes_below_it,
         is_in_front=session_id == highlighted_session_id,
         peer_messaging_address=agent_session_name,
         last_time_tab_was_seen=session_tracking.get("last_time_tab_was_seen"),

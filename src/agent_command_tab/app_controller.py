@@ -25,6 +25,7 @@ from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
 from agent_command_tab.global_shortcut_key_filter import GlobalShortcutKeyFilter
 from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
 from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
                                               load_settings_resolving_paths_at_first_run,
                                               move_the_settings_folder_of_the_old_name, save_settings)
@@ -74,7 +75,7 @@ class AppController(NSObject):
         self.global_shortcut_key_filter = GlobalShortcutKeyFilter(lambda: AppHelper.callAfter(self.global_shortcut_pressed))
         self.connection_thread = Iterm2ConnectionThread(self.receive_snapshot_on_background_thread,
                                                         self.receive_connection_lost_on_background_thread, verbose,
-                                                        DOCKED_WINDOW_FRAMES_FILE_PATH)
+                                                        DOCKED_WINDOW_FRAMES_FILE_PATH, PAUSE_RECORDS_FILE_PATH)
         notification_center = NSNotificationCenter.defaultCenter()
         for notification_name, selector_name in (
                 (NSApplicationDidChangeScreenParametersNotification, "screenParametersChanged:"),

@@ -24,6 +24,7 @@ def dump_snapshot(verbose):
     (read in the background) are included.
     """
     from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+    from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH, load_pause_records
     from agent_command_tab.snapshot_data_classes import convert_snapshot_to_json_ready_dict
     from agent_command_tab.user_interface.screen_layout import read_monitors_from_screens
 
@@ -38,7 +39,11 @@ def dump_snapshot(verbose):
         received.setdefault("problem", message)
         first_snapshot_arrived.set()
 
-    connection_thread = Iterm2ConnectionThread(publish_snapshot, report_connection_lost, verbose)
+    # The app's pause records, so paused sessions are listed, kept in memory only: this run
+    # never changes the app's file.
+    connection_thread = Iterm2ConnectionThread(
+        publish_snapshot, report_connection_lost, verbose,
+        pause_record_by_tab_and_agent_to_start_with=load_pause_records(PAUSE_RECORDS_FILE_PATH))
     connection_thread.start()
     connection_thread.send_monitors(read_monitors_from_screens())  # the same monitor groups as the dropdown
     if not first_snapshot_arrived.wait(timeout=30):

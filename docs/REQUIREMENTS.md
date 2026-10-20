@@ -66,6 +66,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 - R15.0. Default tab name, until the user renames it: the agent session's own name if the tool has one (Claude Code names each session, for example "profile-photo-3a"), otherwise the folder name. Needed because Claude Code sets every tab's title to "claude".
 - R15.1. Sending a command is allowed only while the agent session is idle or done (sitting at its input prompt). The app re-checks the status just before typing, asks for confirmation before /clear, and otherwise shows the menu item disabled with a gray reason. Each agent tool's adapter defines its own command names (Codex's may differ from Claude Code's).
 - R15.2. The tab row's right-click menu has "Interrupt", which stops the current turn (it sends Esc, the agent tool's own interrupt key). It is enabled while the agent session is working or stuck.
+- R15.3. Pause and resume agent sessions (user request, 2026-10-20), for example before going offline and after coming back: "Pause Session" and "Resume Session" in a tab row's right-click menu, "Pause N Sessions" and "Resume N Sessions" in window and monitor rows' menus, and one button in the list's top bar that pauses all, or resumes all once all are paused. A pause suspends the agent as Ctrl+Z does and stops every process below it; a resume types `fg` at the tab's shell prompt and continues those processes. `fg` is typed only when the shell that runs the agent is in front (not a shell or tmux started at its prompt), its cursor line looks exactly as it did right after the pause, and no other job is suspended in that shell; otherwise an alert says why and what to type. Ctrl+U goes before `fg`, clearing whatever the line held already right after the pause (keys typed while the pause ran, or a terminal reply meant for the agent). Processes below the agent that run as another user (with sudo) can't be stopped; an alert names them. If `fg` is typed by hand instead, or the tab is closed, the processes the pause stopped are continued too. A paused row shows the state "paused", also for an agent suspended with Ctrl+Z by hand. Ctrl+Z leaves the commands the agent started in their own process groups running, so that row still offers Pause, which stops them; Resume can't resume it safely (no pause saw its prompt) and says to type `fg`. Pause records are kept in a file next to the settings, so after the dashboard restarts, paused tabs are listed again, Resume works, and the processes below them are still continued. Time spent paused counts toward the agent's own time limits (a long command may be moved to the background).
 - R16. Rename a tab in place from its row. This sets the real iTerm2 tab title (as iTerm2's Edit Tab Title does). An empty name returns to the default.
 - R17. Click a tab row to bring its window and tab to the front.
 - R18. Drag tab rows to reorder tabs within a window, or drop on another window to move the tab there. This changes the real iTerm2 tab order and window. The agent session keeps running without interruption.
@@ -80,8 +81,9 @@ Make sure to carefully assess the relative complexity and difficulty of features
   4. working;
   5. done (finished a turn, and its tab hasn't been in front since);
   6. idle;
-  7. unknown (no report yet);
-  8. exited (only after an abnormal end, R14.1).
+  7. paused (its process is stopped by Pause or by Ctrl+Z, R15.3);
+  8. unknown (no report yet);
+  9. exited (only after an abnormal end, R14.1).
 - R21. Each state has a distinct status dot: its own shape and color, so it works for color-blind users (R26.1). A window row's dot is the state of its most urgent agent session.
 - R22. Status works for Claude Code and Codex. Other agent tools work if they report status through the terminal status signal (OSC 7501) or have an adapter. Otherwise they are listed with a basic working or idle status based on screen activity.
 
@@ -104,6 +106,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
   | stuck | amber ◆, slow pulse |
   | done | steady green ✔ (not blinking, so it differs from routine work) |
   | idle | gray ○ |
+  | paused | violet ‖ |
   | unknown | gray dotted ◌ |
   | exited after a crash | dim gray ⊘ |
 

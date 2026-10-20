@@ -23,11 +23,15 @@ from iterm2.notifications import async_subscribe_to_variable_change_notification
 
 from agent_command_tab import iterm2_actions
 from agent_command_tab.agent_process_tree import (choose_command_the_agent_is_waiting_on, compute_cpu_percent,
-                                                  list_descendant_processes, process_is_alive,
+                                                  list_descendant_processes, process_has_its_terminal, process_is_alive,
+                                                  process_is_stopped,
                                                   read_name_the_process_was_started_as, read_process_current_folder,
                                                   read_process_info, read_process_tree_resource_usage)
+from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
+                                                     pause_has_ended, resume_agent_session, send_signal_to_processes)
+from agent_command_tab.pause_records_store import load_pause_records, save_pause_records
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
-from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
+from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION, command_line_runs_a_shell
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.dashboard_core_api import ActionRegistry, ActionResult
 from agent_command_tab.iterm2_snapshot_builder import DisplayedState, build_computer_snapshot, resolve_agent_sessions
@@ -173,13 +177,19 @@ class DashboardCore:
         verbose: Print diagnostics.
         docked_window_frames_file_path: Where the frames windows had before a docked sidebar
             narrowed them are kept across restarts; None keeps them in memory only.
+        pause_records_file_path: Where the records of paused agent sessions are kept across
+            restarts (pause_records_store); None keeps them in memory only.
+        pause_record_by_tab_and_agent_to_start_with: The records to start with when
+            pause_records_file_path is None (dump-snapshot reads the app's file but never writes it).
     """
 
-    def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None):
+    def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None,
+                 pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None):
         self.publish_snapshot = publish_snapshot
         self.report_connection_lost = report_connection_lost
         self.verbose = verbose
         self.docked_window_frames_file_path = docked_window_frames_file_path
+        self.pause_records_file_path = pause_records_file_path
         self.connection = None
         self.app = None
         self.specific_adapters, self.generic_adapter = build_built_in_agent_tool_adapters()
@@ -197,6 +207,12 @@ class DashboardCore:
         self.session_tracking_by_session_id = {}
         self.displayed_state_by_session_id = {}
         self.screen_readings_by_session_id = {}
+        # {(session ID, agent process ID): agent_session_pausing.PauseRecord}, until the agent runs
+        # again or is gone; an agent still paused from before a restart is listed again from its
+        # record. By agent too: a tab can hold a paused agent and, at the shell, a newer one.
+        self.pause_record_by_tab_and_agent = (load_pause_records(pause_records_file_path) if pause_records_file_path
+                                              else dict(pause_record_by_tab_and_agent_to_start_with or {}))
+        self.session_ids_being_paused_or_resumed = set()
         self.reserved_screen_area = None
         self.frames_before_making_room_by_window_id = (load_docked_window_frames(docked_window_frames_file_path)
                                                        if docked_window_frames_file_path else {})
@@ -242,6 +258,8 @@ class DashboardCore:
         register("end_peek", self.handle_end_peek, False, False)
         register("send_slash_command", self.handle_send_slash_command, True, True)
         register("end_agent_process", self.handle_end_agent_process, False, False)
+        register("pause_agent_sessions", self.handle_pause_agent_sessions, True, True)
+        register("resume_agent_sessions", self.handle_resume_agent_sessions, True, True)
 
     async def perform_action(self, action_request):
         """Runs an action request, then asks for a fresh gather and snapshot.
@@ -334,17 +352,21 @@ class DashboardCore:
     async def handle_end_agent_process(self, action_request):
         """Ends a tab's agent process ("Kill Session"; the tab and its shell stay): SIGTERM, then
         SIGCONT so an agent suspended with Ctrl+Z wakes up to handle it (as a shell's kill does
-        for a stopped job), and SIGKILL if it is still running
-        SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later."""
+        for a stopped job), also for the stopped processes below a paused agent, and SIGKILL if it
+        is still running SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later."""
         agent_session = self.agent_sessions.get(action_request.target["session_id"])
         if agent_session is None or not agent_session["process_id"]:
             return ActionResult(False, "that tab no longer runs an agent")
         process_id = agent_session["process_id"]
+        # Listed first: once the agent ends, the processes below it are no longer its descendants.
+        stopped_process_ids_below = [process.process_id for process in list_descendant_processes(process_id, maximum_depth=None)
+                                     if process_is_stopped(process.process_id)]
         try:
             os.kill(process_id, signal.SIGTERM)
             os.kill(process_id, signal.SIGCONT)
         except ProcessLookupError:
             return ActionResult(True)  # it had ended already
+        send_signal_to_processes(stopped_process_ids_below, signal.SIGCONT)  # a paused session's: none stays stopped
         deadline = time.time() + SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED
         while time.time() < deadline:
             await asyncio.sleep(0.2)
@@ -355,6 +377,71 @@ class DashboardCore:
         except ProcessLookupError:
             pass
         return ActionResult(True)
+
+    async def handle_pause_agent_sessions(self, action_request):
+        """Pauses the agent sessions of target {"session_ids": [...]}: each agent as Ctrl+Z does,
+        and every process below it (agent_session_pausing; user request, 2026-10-20)."""
+
+        async def pause_one(session_id, agent_session, session):
+            agent_process_id = agent_session["process_id"]
+            # Ctrl+Z goes to the agent only while its group has the terminal (asked of the kernel)
+            # and no other program, such as the editor Claude Code's Ctrl+G opens in the agent's
+            # own group, is in front. iTerm2 still names the shell in front for a while after fg,
+            # so a shell there doesn't count.
+            if not process_is_stopped(agent_process_id) and (
+                    not process_has_its_terminal(agent_process_id)
+                    or (agent_session["is_in_background"]
+                        and not command_line_runs_a_shell(self.find_command_line_of_the_session(session_id)))):
+                return ActionResult(False, "another program is in front of the agent")
+            if (session_id, agent_process_id) in self.pause_record_by_tab_and_agent:
+                return ActionResult(True)  # paused already (a new record would lose the prompt seen then)
+            action_result, pause_record = await pause_agent_session(session, agent_process_id, agent_session["agent_tool_name"])
+            if pause_record is not None:
+                self.pause_record_by_tab_and_agent[(session_id, agent_process_id)] = pause_record
+                self.save_pause_records()
+            return action_result
+        return await self.pause_or_resume_each_agent_session(action_request.target["session_ids"], pause_one)
+
+    async def handle_resume_agent_sessions(self, action_request):
+        """Resumes the paused agent sessions of target {"session_ids": [...]}; one suspended with
+        Ctrl+Z by hand gets an explanation instead, since no pause recorded its prompt."""
+
+        async def resume_one(session_id, agent_session, session):
+            tab_and_agent = (session_id, agent_session["process_id"])
+            action_result = await resume_agent_session(session, agent_session["process_id"],
+                                                       self.pause_record_by_tab_and_agent.get(tab_and_agent))
+            if action_result.succeeded and self.pause_record_by_tab_and_agent.pop(tab_and_agent, None) is not None:
+                self.save_pause_records()
+            return action_result
+        return await self.pause_or_resume_each_agent_session(action_request.target["session_ids"], resume_one)
+
+    async def pause_or_resume_each_agent_session(self, session_ids, pause_or_resume_one):
+        """Runs pause_or_resume_one(session_id, agent_session, session) for every session at once;
+        returns one ActionResult whose message names each tab that failed and why."""
+
+        async def run_for(session_id):
+            agent_session = self.agent_sessions.get(session_id)
+            session = self.app.get_session_by_id(session_id)
+            if agent_session is None or not agent_session["process_id"] or session is None:
+                return ActionResult(False, "that tab no longer runs an agent")
+            if session_id in self.session_ids_being_paused_or_resumed:
+                # A second click while the first is under way (both could see the same empty prompt and type fg twice).
+                return ActionResult(True)
+            self.session_ids_being_paused_or_resumed.add(session_id)
+            try:
+                return await pause_or_resume_one(session_id, agent_session, session)
+            except iterm2.RPCException:
+                return ActionResult(False, "the tab closed meanwhile")
+            finally:
+                self.session_ids_being_paused_or_resumed.discard(session_id)
+        action_results = await asyncio.gather(*(run_for(session_id) for session_id in session_ids))
+        tab_title_by_session_id = {
+            agent_session_entry.session_id: agent_session_entry.tab_title
+            for _, _, agent_session_entry in iterate_agent_session_entries(self.last_published_snapshot_without_time)
+        } if self.last_published_snapshot_without_time is not None else {}
+        failures = [f'"{tab_title_by_session_id.get(session_id, "a tab")}": {action_result.message}'
+                    for session_id, action_result in zip(session_ids, action_results) if not action_result.succeeded]
+        return ActionResult(not failures, "; ".join(failures))
 
     def set_reserved_screen_area(self, reserved_area):
         """Receives the docked sidebar's area, {"frame": (x, y, width, height), "edge": "right" or
@@ -657,6 +744,15 @@ class DashboardCore:
         for session_id in set(self.session_tracking_by_session_id) - live_session_ids:
             del self.session_tracking_by_session_id[session_id]
 
+    def find_command_line_of_the_session(self, session_id):
+        """Returns the gathered commandLine of a tab's first-pane session (its foreground job), or ""."""
+        for gathered_window in self.gathered_windows:
+            for gathered_tab in gathered_window["tabs"]:
+                first_session = gathered_tab["first_session"]
+                if first_session and first_session["session_id"] == session_id:
+                    return first_session.get("command_line") or ""
+        return ""
+
     def find_first_session_id_of_tab(self, tab_id):
         """Returns the first-pane session ID of a gathered tab, or None."""
         for gathered_window in self.gathered_windows:
@@ -749,6 +845,48 @@ class DashboardCore:
             asyncio.get_running_loop().call_later(CLAUDE_AGENTS_RETRY_DELAY_SECONDS, self.regather_needed.set)
         self.snapshot_needed.set()
 
+    def continue_the_processes_of_agents_no_longer_paused(self):
+        """Continues the processes a pause stopped below an agent that runs again without Resume
+        (fg typed by hand) or is gone (its tab closed, also from iTerm2), so none stays stopped,
+        and marks the agent sessions whose pause stopped the processes below them."""
+        ended_tabs_and_agents = [tab_and_agent for tab_and_agent, pause_record in self.pause_record_by_tab_and_agent.items()
+                                 if pause_has_ended(pause_record)]
+        for tab_and_agent in ended_tabs_and_agents:
+            continue_processes_stopped_at_pause(self.pause_record_by_tab_and_agent.pop(tab_and_agent).stopped_processes)
+        if ended_tabs_and_agents:
+            self.save_pause_records()
+        for session_id, agent_session in self.agent_sessions.items():
+            agent_session["is_paused_with_the_processes_below_it"] = (
+                (session_id, agent_session["process_id"]) in self.pause_record_by_tab_and_agent)
+
+    def save_pause_records(self):
+        if self.pause_records_file_path:
+            save_pause_records(self.pause_records_file_path, self.pause_record_by_tab_and_agent)
+
+    def list_again_the_paused_agents_that_lost_their_row(self):
+        """Adds resolve_agent_sessions entries for the agents a pause stopped that are still
+        stopped but no longer listed, in gathered tabs with no other agent: after the dashboard
+        restarted (their tabs show the shell in front, so they are found only through their
+        records), or once a newer agent started at the paused tab's shell has ended
+        (resolve_agent_sessions follows only a tab's latest agent). Their entries are then kept,
+        in the background, while their process lives. A tab whose agents were paused one after
+        another lists the last one paused."""
+        gathered_session_ids = {gathered_tab["first_session"]["session_id"] for gathered_window in self.gathered_windows
+                                for gathered_tab in gathered_window["tabs"] if gathered_tab["first_session"]}
+        for (session_id, agent_process_id), pause_record in sorted(self.pause_record_by_tab_and_agent.items(),
+                                                                   key=lambda item: item[1].agent_process[1], reverse=True):
+            if (session_id in self.agent_sessions or session_id not in gathered_session_ids
+                    or pause_has_ended(pause_record)):  # continue_the_processes_of_agents_no_longer_paused continues its processes
+                continue
+            # By the tool's name the pause recorded: a wrapped agent ("node .../codex") can't be
+            # recognized from its process's name alone.
+            adapter = next((adapter for adapter in self.specific_adapters
+                            if adapter.agent_tool_name == pause_record.agent_tool_name), self.generic_adapter)
+            self.agent_sessions[session_id] = {
+                "adapter": adapter, "process_id": agent_process_id, "is_in_background": True, "is_stopped": True,
+                "agent_tool_name": pause_record.agent_tool_name,
+                "working_folder": read_process_current_folder(agent_process_id), "started_at": pause_record.agent_process[1]}
+
     def publish_snapshot_if_changed(self):
         """Builds the snapshot from the cached state and publishes it unless only its time changed."""
         now = time.time()
@@ -760,7 +898,10 @@ class DashboardCore:
             window = self.app.get_window_by_id(gathered_window["window_id"])
             gathered_window["selected_tab_id"] = window.current_tab.tab_id if window and window.current_tab else None
         self.agent_sessions = resolve_agent_sessions(
-            self.gathered_windows, self.agent_sessions, self.specific_adapters, self.generic_adapter, process_is_alive)
+            self.gathered_windows, self.agent_sessions, self.specific_adapters, self.generic_adapter, process_is_alive,
+            process_is_stopped)
+        self.list_again_the_paused_agents_that_lost_their_row()
+        self.continue_the_processes_of_agents_no_longer_paused()
         seen_session_id, highlighted_session_id = self.find_seen_session_id(), self.find_highlighted_session_id()
 
         def build_snapshot_of(agent_sessions):
@@ -1181,6 +1322,10 @@ class DashboardCore:
         Every way this ends calls report_connection_lost, so the app exits and its supervisor
         restarts it.
         """
+        # Before connecting: once iTerm2 quits, its paused agents are gone, and what their pauses
+        # stopped below them (in sessions of their own, which closing the tabs doesn't reach) is
+        # continued even while no connection can be made.
+        self.continue_the_processes_of_agents_no_longer_paused()
         iterm2.auth.gAppKitAvailable = False  # fetch the token with osascript, never NSAppleScript (PLAN.md section 4)
         try:
             self.connection = await iterm2.Connection.async_create()
@@ -1217,7 +1362,8 @@ class DashboardCore:
 class Iterm2ConnectionThread(threading.Thread):
     """Runs DashboardCore on its own asyncio event loop, and offers thread-safe entry points."""
 
-    def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None):
+    def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None,
+                 pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None):
         super().__init__(name="iterm2-connection", daemon=True)
         self.core_ready = threading.Event()
         self.core = None
@@ -1226,12 +1372,15 @@ class Iterm2ConnectionThread(threading.Thread):
         self.report_connection_lost = report_connection_lost
         self.verbose = verbose
         self.docked_window_frames_file_path = docked_window_frames_file_path
+        self.pause_records_file_path = pause_records_file_path
+        self.pause_record_by_tab_and_agent_to_start_with = pause_record_by_tab_and_agent_to_start_with
 
     def run(self):
         self.event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.event_loop)
         self.core = DashboardCore(self.publish_snapshot, self.report_connection_lost, self.verbose,
-                                  self.docked_window_frames_file_path)
+                                  self.docked_window_frames_file_path, self.pause_records_file_path,
+                                  self.pause_record_by_tab_and_agent_to_start_with)
         self.core_ready.set()
         self.event_loop.run_until_complete(self.core.run())
 

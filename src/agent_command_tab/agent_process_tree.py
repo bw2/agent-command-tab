@@ -1,7 +1,7 @@
 """Facts about an agent's processes, read from macOS's libproc and sysctl without starting a subprocess.
 
 - The agent's current folder (PLAN.md section 5: iTerm2's `path` variable can be empty or stale).
-- Whether a process still exists.
+- Whether a process still exists, and whether it is stopped (a paused agent session).
 - The agent's descendant processes, to tell an agent that is waiting on a command it started
   (a pipeline, a test run) from one that is thinking (PLAN.md section 6, "stuck"), and the
   name that command was started as.
@@ -17,7 +17,9 @@ LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
 LIBC = ctypes.CDLL("/usr/lib/libc.dylib")
 CTL_KERN = 1
 KERN_PROCARGS2 = 49  # sysctl that returns a process's argument count, executable path and arguments (what ps reads)
-PROC_PIDTBSDINFO = 3  # proc_pidinfo flavor that returns struct proc_bsdinfo
+PROC_PIDTBSDINFO = 3  # proc_pidinfo flavor that returns struct proc_bsdinfo (refused for another user's process)
+PROC_PIDT_SHORTBSDINFO = 13  # proc_pidinfo flavor that returns struct proc_bsdshortinfo, also for another user's process
+STOPPED_PROCESS_STATUS = 4  # SSTOP in <sys/proc.h>, proc_bsdinfo's pbi_status of a stopped process
 PROC_PIDVNODEPATHINFO = 9  # proc_pidinfo flavor that returns struct proc_vnodepathinfo
 VNODE_INFO_SIZE = 152  # sizeof(struct vnode_info); the current folder's path follows it
 MAXIMUM_PATH_LENGTH = 1024
@@ -50,6 +52,18 @@ class ProcessBsdInfo(ctypes.Structure):
         ("pbi_pgid", ctypes.c_uint32), ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
         ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32), ("pbi_start_tvsec", ctypes.c_uint64),
         ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+class ProcessShortBsdInfo(ctypes.Structure):
+    """struct proc_bsdshortinfo from <sys/proc_info.h>."""
+
+    _fields_ = [
+        ("pbsi_pid", ctypes.c_uint32), ("pbsi_ppid", ctypes.c_uint32), ("pbsi_pgid", ctypes.c_uint32),
+        ("pbsi_status", ctypes.c_uint32), ("pbsi_comm", ctypes.c_char * 16), ("pbsi_flags", ctypes.c_uint32),
+        ("pbsi_uid", ctypes.c_uint32), ("pbsi_gid", ctypes.c_uint32), ("pbsi_ruid", ctypes.c_uint32),
+        ("pbsi_rgid", ctypes.c_uint32), ("pbsi_svuid", ctypes.c_uint32), ("pbsi_svgid", ctypes.c_uint32),
+        ("pbsi_rfu", ctypes.c_uint32),
     ]
 
 
@@ -142,15 +156,88 @@ def process_is_alive(process_id):
     return True
 
 
-def read_process_info(process_id):
-    """Returns the ProcessInfo of a process, or None if it is gone."""
+def read_process_bsd_info(process_id):
+    """Returns a process's ProcessBsdInfo, or None if it is gone."""
     bsd_info = ProcessBsdInfo()
     size = LIBPROC.proc_pidinfo(process_id, PROC_PIDTBSDINFO, ctypes.c_uint64(0), ctypes.byref(bsd_info),
                                 ctypes.sizeof(bsd_info))
-    if size != ctypes.sizeof(bsd_info):
+    return bsd_info if size == ctypes.sizeof(bsd_info) else None
+
+
+def read_process_info(process_id):
+    """Returns the ProcessInfo of a process, or None if it is gone or belongs to another user
+    (a command run with sudo; read_name_of_any_process still reads its name)."""
+    bsd_info = read_process_bsd_info(process_id)
+    if bsd_info is None:
         return None
     name = (bsd_info.pbi_name or bsd_info.pbi_comm).decode(errors="replace")
     return ProcessInfo(process_id, bsd_info.pbi_ppid, name, bsd_info.pbi_start_tvsec + bsd_info.pbi_start_tvusec / 1e6)
+
+
+def read_process_short_bsd_info(process_id):
+    """Returns a process's ProcessShortBsdInfo, also for a process of another user, or None if it is gone."""
+    short_bsd_info = ProcessShortBsdInfo()
+    size = LIBPROC.proc_pidinfo(process_id, PROC_PIDT_SHORTBSDINFO, ctypes.c_uint64(0), ctypes.byref(short_bsd_info),
+                                ctypes.sizeof(short_bsd_info))
+    return short_bsd_info if size == ctypes.sizeof(short_bsd_info) else None
+
+
+def read_name_of_any_process(process_id):
+    """Returns a process's executable name (at most 16 characters), also for a process of
+    another user, or "" if it is gone."""
+    short_bsd_info = read_process_short_bsd_info(process_id)
+    return short_bsd_info.pbsi_comm.decode(errors="replace") if short_bsd_info is not None else ""
+
+
+def list_the_process_and_its_ancestor_ids(process_id):
+    """Returns process_id and the IDs of its parent, the parent's parent, and so on up to launchd."""
+    process_ids = []
+    while process_id > 0 and process_id not in process_ids:
+        process_ids.append(process_id)
+        short_bsd_info = read_process_short_bsd_info(process_id)
+        if short_bsd_info is None:
+            break
+        process_id = short_bsd_info.pbsi_ppid
+    return process_ids
+
+
+def process_is_stopped(process_id):
+    """Returns whether a process exists and is stopped (by Ctrl+Z, SIGTSTP or SIGSTOP) until it gets a SIGCONT."""
+    bsd_info = read_process_bsd_info(process_id)
+    return bsd_info is not None and bsd_info.pbi_status == STOPPED_PROCESS_STATUS
+
+
+def find_the_shell_running_the_agent(agent_process_id):
+    """Returns the ID of the shell that runs the agent as a job: the parent of the agent's job
+    leader (the process its group is named after), or None if the agent is gone."""
+    agent = read_process_bsd_info(agent_process_id)
+    if agent is None:
+        return None
+    job_leader = read_process_bsd_info(agent.pbi_pgid)
+    return job_leader.pbi_ppid if job_leader is not None else agent.pbi_ppid
+
+
+def list_other_stopped_jobs_of_the_agents_shell(agent_process_id):
+    """Returns the IDs of the stopped processes that the shell running the agent
+    (find_the_shell_running_the_agent) started besides the agent's own job: other suspended
+    jobs, one of which a bare `fg` could bring back instead."""
+    agent = read_process_bsd_info(agent_process_id)
+    shell_process_id = find_the_shell_running_the_agent(agent_process_id)
+    if agent is None or shell_process_id is None:
+        return []
+    other_stopped_job_process_ids = []
+    for child_process_id in list_child_process_ids(shell_process_id):
+        child = read_process_bsd_info(child_process_id)
+        if child is not None and child.pbi_pgid != agent.pbi_pgid and child.pbi_status == STOPPED_PROCESS_STATUS:
+            other_stopped_job_process_ids.append(child_process_id)
+    return other_stopped_job_process_ids
+
+
+def process_has_its_terminal(process_id):
+    """Returns whether the process's group is its terminal's foreground group, the one that gets
+    the keys, as the kernel has it right now (iTerm2's jobPid variable follows only after a while)."""
+    bsd_info = read_process_bsd_info(process_id)
+    return bsd_info is not None and bsd_info.e_tpgid != 0 and bsd_info.pbi_pgid == bsd_info.e_tpgid
 
 
 def read_name_the_process_was_started_as(process_id):
@@ -178,8 +265,17 @@ def list_child_process_ids(process_id):
 def list_descendant_processes(process_id, maximum_depth=6):
     """Returns the ProcessInfo of every process below process_id (children, their children, ...),
     down to maximum_depth levels, or all of them for None. Each process is listed once, even if
-    a process ID is reused while the tree is read."""
+    a process ID is reused while the tree is read. Another user's processes are left out
+    (list_descendant_processes_and_other_users_process_ids)."""
+    return list_descendant_processes_and_other_users_process_ids(process_id, maximum_depth)[0]
+
+
+def list_descendant_processes_and_other_users_process_ids(process_id, maximum_depth=6):
+    """Returns (list_descendant_processes's list, the IDs of the processes below process_id that
+    belong to another user, such as a command run with sudo, which can't be read and whose own
+    children aren't listed)."""
     descendants = []
+    other_users_process_ids = []
     listed_process_ids = {process_id}
     parent_process_ids = [process_id]
     depth = 0
@@ -195,8 +291,10 @@ def list_descendant_processes(process_id, maximum_depth=6):
                 if child is not None:
                     descendants.append(child)
                     next_parent_process_ids.append(child_process_id)
+                elif read_name_of_any_process(child_process_id):  # not gone meanwhile
+                    other_users_process_ids.append(child_process_id)
         parent_process_ids = next_parent_process_ids
-    return descendants
+    return descendants, other_users_process_ids
 
 
 def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at, helper_process_names, now,

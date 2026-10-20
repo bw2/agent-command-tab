@@ -15,7 +15,7 @@ AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD = {
     "importance_level": 0, "background_task_count": 0, "last_user_interaction_time": None, "ended_abnormally_at": None,
     "is_in_front": False, "peer_messaging_address": "", "last_time_tab_was_seen": None, "running_command_name": "",
     "running_command_started_at": None, "context_tokens": None, "started_at": None, "memory_bytes": None,
-    "cpu_percent": None, "slash_commands": (),
+    "cpu_percent": None, "slash_commands": (), "is_paused_with_the_processes_below_it": False,
 }
 AgentSessionEntry = collections.namedtuple(
     "AgentSessionEntry",
@@ -34,7 +34,9 @@ AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent sess
                              "memory_bytes and cpu_percent are what the agent process and all the processes below it "
                              "use (physical memory to the megabyte; percent of one CPU core, a whole number), or "
                              "None until they are read. slash_commands are the commands the tab's menu can type "
-                             "into its agent tool (its adapter's), in menu order.")
+                             "into its agent tool (its adapter's), in menu order. is_paused_with_the_processes_below_it "
+                             "is True for a paused row whose pause also stopped the processes below the agent (Pause "
+                             "from the list), False for an agent suspended with Ctrl+Z by hand.")
 
 WindowEntry = collections.namedtuple(
     "WindowEntry",

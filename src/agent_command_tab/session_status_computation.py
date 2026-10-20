@@ -5,7 +5,8 @@ the permission dialog is still on screen, a screen fingerprint (for "stuck"), an
 the agent runs (agent_process_tree). Hook events are added as a further source in phase 2.
 """
 
-STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "done", "idle", "unknown", "exited"]
+# "paused": the agent process is stopped (Pause from the list, or Ctrl+Z) until it is resumed.
+STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "done", "idle", "paused", "unknown", "exited"]
 # Between turns: the agent waits at its prompt, so /compact and /clear can be typed into it.
 STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done"})
 # During a turn, as iTerm2's status shows it: a permission prompt in between doesn't end the turn.
@@ -193,6 +194,15 @@ def pick_most_urgent_state(states):
     """Returns the most urgent of the given states, or "unknown" when there are none."""
     ranked_states = [state for state in STATES_IN_URGENCY_ORDER if state in set(states)]
     return ranked_states[0] if ranked_states else "unknown"
+
+
+def split_agent_sessions_into_pausable_and_resumable(agent_session_entries):
+    """Returns (the agent sessions a pause would stop, the paused ones a resume would continue).
+    An agent suspended with Ctrl+Z by hand is in both, since a pause still stops the processes
+    below it; an agent whose process has exited is in neither."""
+    return ([entry for entry in agent_session_entries if entry.status != "exited"
+             and not (entry.status == "paused" and entry.is_paused_with_the_processes_below_it)],
+            [entry for entry in agent_session_entries if entry.status == "paused"])
 
 
 def summarize_state_counts_in_urgency_order(states):
