@@ -25,7 +25,7 @@ from agent_command_tab.user_interface.screen_layout import frame_is_on_a_screen,
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 from agent_command_tab.user_interface.menu_bar_status_item import choose_automatic_icon_color_name
 from agent_command_tab.user_interface.named_colors import COLOR_MAKERS_BY_NAME
-from agent_command_tab.user_interface.settings_window import SettingsWindowController
+from agent_command_tab.user_interface.settings_window import ROW_SPACING, SettingsWindowController
 from agent_command_tab.user_interface.sidebar_panel import (SidebarController,
                                                             allow_pointer_changes_while_another_app_is_in_front)
 from agent_command_tab.user_interface.sidebar_placement import SidebarPlacement
@@ -981,10 +981,14 @@ class SettingsRecordingOwner:
     def __init__(self, settings):
         self.settings = settings
         self.changed_settings = []
+        self.shortcut_lacks_permission = False
 
     def settings_changed(self, new_settings):
         self.settings = new_settings
         self.changed_settings.append(new_settings)
+
+    def global_shortcut_lacks_permission(self):
+        return self.shortcut_lacks_permission
 
     def window_frame_changed(self, setting_name, frame):
         pass
@@ -1152,6 +1156,24 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.controlChanged_(self.controller.include_checkboxes[1])
         self.assertEqual([agent_tool["is_included"] for agent_tool in self.owner.settings["agent_tools"]], [True, False])
         self.assertEqual(self.owner.settings["agent_tools"][1]["launch_command"], "codex")
+
+    def test_the_shortcut_popup_offers_both_combinations_and_off_and_saves_the_choice(self):
+        self.assertEqual(self.controller.global_shortcut_popup.itemTitles(), ["Shift-Command-Tab", "Command-Fn-Tab", "Off"])
+        self.assertEqual(self.controller.global_shortcut_popup.titleOfSelectedItem(), "Shift-Command-Tab")  # the default
+        self.controller.global_shortcut_popup.selectItemWithTitle_("Command-Fn-Tab")
+        self.controller.controlChanged_(self.controller.global_shortcut_popup)
+        self.assertEqual(self.owner.settings["global_shortcut"], "command_fn_tab")
+
+    def test_the_accessibility_button_shows_under_the_shortcut_only_while_it_lacks_the_permission(self):
+        button = self.controller.accessibility_settings_button
+        self.assertTrue(button.isHidden())
+        self.assertEqual(button.frame().origin.y - self.controller.global_shortcut_popup.frame().origin.y, ROW_SPACING)
+        self.owner.shortcut_lacks_permission = True
+        self.controller.reflect_settings(self.owner.settings)
+        self.assertFalse(button.isHidden())
+        self.owner.shortcut_lacks_permission = False
+        self.controller.reflect_settings(self.owner.settings)
+        self.assertTrue(button.isHidden())
 
     def test_icon_color_popup_offers_auto_first_and_stores_lowercase_names(self):
         self.assertEqual(self.controller.icon_color_popup.titleOfSelectedItem(), "Auto")

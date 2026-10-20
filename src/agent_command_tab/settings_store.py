@@ -29,6 +29,9 @@ ICON_COLOR_NAMES = ["auto", "teal", "blue", "purple", "pink", "red", "orange", "
 # icon brings it to the front); sidebar, at the edge of the screen (then the icon slides it in);
 # popup, the dropdown under the menu bar icon.
 SHOW_AS_CHOICES = ["window", "sidebar", "popup"]
+# The global shortcut that shows the list from any app (global_shortcut_key_filter; user request,
+# 2026-10-19).
+GLOBAL_SHORTCUT_CHOICES = ["shift_command_tab", "command_fn_tab", "off"]
 # The windows whose frames ([x, y, width, height]) are saved, with their smallest sizes.
 # The settings window is never narrower than the width its rows are laid out for.
 SMALLEST_WINDOW_SIZES = {"list_window_frame": (250, 200), "settings_window_frame": (540, 240)}
@@ -43,6 +46,7 @@ LIST_COLUMNS = ["context_tokens", "created_time", "existence_duration", "memory_
 
 DEFAULT_SETTINGS = {
     "show_as": "popup",
+    "global_shortcut": "shift_command_tab",
     "list_window_frame": None,  # [x, y, width, height] of the "Show as: Window" window, once it has been shown
     "settings_window_frame": None,  # the settings window's, once it has been moved or resized (user request, 2026-10-19)
     "list_window_is_always_on_top": False,
@@ -70,6 +74,8 @@ def is_valid_setting_value(name, value):
         return value in ICON_COLOR_NAMES
     if name == "show_as":
         return value in SHOW_AS_CHOICES
+    if name == "global_shortcut":
+        return value in GLOBAL_SHORTCUT_CHOICES
     if name in SMALLEST_WINDOW_SIZES:
         smallest_width, smallest_height = SMALLEST_WINDOW_SIZES[name]
         return value is None or (isinstance(value, list) and len(value) == 4

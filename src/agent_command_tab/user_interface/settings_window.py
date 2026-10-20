@@ -8,9 +8,10 @@ import threading
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxSeparator, NSButton, NSButtonTypeRadio,
-                    NSButtonTypeSwitch, NSColor, NSFont, NSMakeRect, NSNormalWindowLevel, NSPopUpButton, NSScrollView,
-                    NSTextField, NSView, NSViewWidthSizable, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskResizable,
-                    NSWindowStyleMaskTitled)
+                    NSButtonTypeSwitch, NSColor, NSControlSizeSmall, NSFont, NSMakeRect, NSNormalWindowLevel, NSPopUpButton,
+                    NSScrollView, NSTextField, NSView, NSViewWidthSizable, NSWindow, NSWindowStyleMaskClosable,
+                    NSWindowStyleMaskResizable, NSWindowStyleMaskTitled, NSWorkspace)
+from Foundation import NSURL
 from PyObjCTools import AppHelper
 
 from agent_command_tab.settings_store import (ICON_COLOR_NAMES, LIST_COLUMNS, SMALLEST_WINDOW_SIZES,
@@ -32,9 +33,13 @@ CONTROL_COLUMN_WIDTH = WINDOW_WIDTH - CONTROL_COLUMN_X - SIDE_MARGIN  # to the r
 ROW_SPACING = 30
 GAP_BETWEEN_RADIO_BUTTONS = 16
 INDENT_UNDER_A_CHECKBOX = 20  # where a checkbox's title starts
-# The titles of the choices in settings_store (SHOW_AS_CHOICES, SIDEBAR_MODES, SIDEBAR_EDGES,
-# LIST_COLUMNS); setting_choice_titles_tests checks that each table names every choice.
+# The titles of the choices in settings_store (SHOW_AS_CHOICES, GLOBAL_SHORTCUT_CHOICES,
+# SIDEBAR_MODES, SIDEBAR_EDGES, LIST_COLUMNS); setting_choice_titles_tests checks that each table
+# names every choice.
 SHOW_AS_TITLES = {"window": "Window", "sidebar": "Sidebar", "popup": "Popup"}
+GLOBAL_SHORTCUT_TITLES = {"shift_command_tab": "Shift-Command-Tab", "command_fn_tab": "Command-Fn-Tab", "off": "Off"}
+# System Settings > Privacy & Security > Accessibility, which the global shortcut's key filter needs.
+ACCESSIBILITY_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 SIDEBAR_MODE_TITLES = {
     "auto_hide": "Auto-hide",
     "floating": "Always: Above other windows",
@@ -128,6 +133,20 @@ class SettingsWindowController(WindowFrameSavingController):
             show_as_radio_group.addSubview_(radio_button)
             x += radio_button.frame().size.width + GAP_BETWEEN_RADIO_BUTTONS
         show_as_radio_group.setFrameSize_((x, 22))
+        self.global_shortcut_popup = self.make_popup(GLOBAL_SHORTCUT_TITLES, self.settings["global_shortcut"])
+        self.global_shortcut_popup.setToolTip_("Shows the list from any app. While the app switcher is open "
+                                               "(Command still held after Command-Tab), the keys go to the app switcher")
+        # Shown only while macOS refuses the shortcut's key filter; hidden, its row is the gap below the shortcut.
+        self.accessibility_settings_button = NSButton.buttonWithTitle_target_action_(
+            "Needs Accessibility: Open System Settings…", self, "openAccessibilitySettingsClicked:")
+        self.accessibility_settings_button.setControlSize_(NSControlSizeSmall)
+        self.accessibility_settings_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.accessibility_settings_button.sizeToFit()
+        self.accessibility_settings_button.setToolTip_(
+            "The shortcut sees key presses before the app switcher does, which needs the Accessibility permission. "
+            "Turn it on for the app that starts AgentCommandTab (iTerm2, when you start it from iTerm2), then click "
+            "the menu bar icon")
+        self.update_accessibility_settings_button()
         self.sidebar_mode_popup = self.make_popup(SIDEBAR_MODE_TITLES, self.settings["sidebar_mode"])
         self.edge_popup = self.make_popup(SIDEBAR_EDGE_TITLES, self.settings["sidebar_edge"])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
@@ -143,8 +162,8 @@ class SettingsWindowController(WindowFrameSavingController):
         self.edge_note = NSTextField.wrappingLabelWithString_("")
         self.edge_note.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
-        rows += [("Show as", show_as_radio_group, None), (None, None, None),
-                 ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None), (None, None, None)]
+        rows += [("Show as", show_as_radio_group, None), ("Shortcut", self.global_shortcut_popup, None),
+                 (None, self.accessibility_settings_button, None), ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None), (None, None, None)]
         rows += [("Columns" if index == 0 else None, checkbox, None) for index, checkbox in enumerate(self.column_checkboxes.values())]
         rows.append((None, None, None))
         self.list_window_always_on_top_checkbox = self.make_checkbox("Always on top", self.settings["list_window_is_always_on_top"])
@@ -327,6 +346,8 @@ class SettingsWindowController(WindowFrameSavingController):
         new_settings = dict(self.owner.settings)
         if sender in self.show_as_radio_buttons:
             new_settings["show_as"] = list(SHOW_AS_TITLES)[self.show_as_radio_buttons.index(sender)]
+        elif sender is self.global_shortcut_popup:
+            new_settings["global_shortcut"] = read_popup_choice(sender)
         elif sender is self.sidebar_mode_popup:
             new_settings["sidebar_mode"] = read_popup_choice(sender)
         elif sender is self.edge_popup:
@@ -355,6 +376,15 @@ class SettingsWindowController(WindowFrameSavingController):
             new_settings["agent_tools"] = replace_agent_tool_field(
                 new_settings["agent_tools"], self.include_checkboxes.index(sender), "is_included", bool(sender.state()))
         self.owner.settings_changed(new_settings)
+
+    def openAccessibilitySettingsClicked_(self, sender):
+        NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(ACCESSIBILITY_SETTINGS_URL))
+
+    @objc.python_method
+    def update_accessibility_settings_button(self):
+        """Shows the button that opens the Accessibility settings only while the owner's global
+        shortcut lacks that permission."""
+        self.accessibility_settings_button.setHidden_(not self.owner.global_shortcut_lacks_permission())
 
     @objc.python_method
     def check_launch_command(self, launch_command_field):
@@ -398,6 +428,7 @@ class SettingsWindowController(WindowFrameSavingController):
             return
         for show_as, radio_button in zip(SHOW_AS_TITLES, self.show_as_radio_buttons):
             radio_button.setState_(1 if show_as == settings["show_as"] else 0)
+        self.update_accessibility_settings_button()  # after a shortcut change, or once the permission was given
         self.list_window_always_on_top_checkbox.setState_(1 if settings["list_window_is_always_on_top"] else 0)
         self.sidebar_width_field.setStringValue_(str(int(settings["sidebar_width"])))
         self.show_placement_fallback_note(settings)

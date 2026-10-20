@@ -23,6 +23,7 @@ import objc
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS, SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
+from agent_command_tab.global_shortcut_key_filter import GlobalShortcutKeyFilter
 from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
 from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
                                               load_settings_resolving_paths_at_first_run,
@@ -69,6 +70,8 @@ class AppController(NSObject):
         self.sidebar_controller = SidebarController.alloc().initWithOwner_(self)
         self.list_window_controller = ListWindowController.alloc().initWithOwner_(self)
         self.settings_window_controller = SettingsWindowController.alloc().initWithOwner_(self)
+        # Calls back on the key filter's own thread.
+        self.global_shortcut_key_filter = GlobalShortcutKeyFilter(lambda: AppHelper.callAfter(self.global_shortcut_pressed))
         self.connection_thread = Iterm2ConnectionThread(self.receive_snapshot_on_background_thread,
                                                         self.receive_connection_lost_on_background_thread, verbose,
                                                         DOCKED_WINDOW_FRAMES_FILE_PATH)
@@ -86,6 +89,9 @@ class AppController(NSObject):
         self.connection_thread.start()
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.apply_settings_to_the_core_and_every_list(self.settings)
+        self.global_shortcut_key_filter.use_global_shortcut(self.settings["global_shortcut"])
+        if self.global_shortcut_key_filter.lacks_permission():
+            print("agent-command-tab: the global shortcut needs the Accessibility permission (see Settings)", flush=True)
         if self.settings["show_as"] == "window":
             self.list_window_controller.show(self.settings["list_window_frame"], takes_keyboard_focus=False,
                                              stays_behind_other_windows=True)
@@ -152,14 +158,44 @@ class AppController(NSObject):
     @objc.python_method
     def menu_bar_icon_clicked(self):
         """A left click on the menu bar icon shows the list the way the settings ask: the dropdown
-        opens or closes, the sidebar slides in for a few seconds, or the window comes to the front."""
+        opens or closes, the sidebar slides in for a few seconds, or the window comes to the front.
+        It also retries a global shortcut that lacked the permission, since the sidebar slides in
+        without making the app active (the other retry)."""
+        self.retry_the_global_shortcut_if_it_lacks_permission()
+        self.show_the_list_as_the_settings_ask(closes_an_open_dropdown=True)
+
+    @objc.python_method
+    def global_shortcut_pressed(self):
+        """The global shortcut shows the list as the menu bar icon does, but never hides it: an
+        open dropdown stays open (user request, 2026-10-19)."""
+        self.show_the_list_as_the_settings_ask(closes_an_open_dropdown=False)
+
+    @objc.python_method
+    def show_the_list_as_the_settings_ask(self, closes_an_open_dropdown):
+        """Slides the sidebar in for a few seconds, brings the list window to the front, or opens
+        the dropdown (closing it instead, if it is open and closes_an_open_dropdown)."""
         if self.settings["show_as"] == "sidebar":
             self.sidebar_controller.show_for_a_few_seconds()
         elif self.settings["show_as"] == "window":
             self.list_window_controller.show(self.settings["list_window_frame"])
             self.place_the_settings_window_above_the_lists(self.popover.isShown())
-        else:
+        elif closes_an_open_dropdown:
             self.status_item_controller.toggle_popover()
+        elif not self.popover.isShown():
+            self.status_item_controller.show_popover()
+
+    @objc.python_method
+    def global_shortcut_lacks_permission(self):
+        """Whether a global shortcut is chosen but macOS refuses its key filter (no Accessibility permission)."""
+        return self.global_shortcut_key_filter.lacks_permission()
+
+    @objc.python_method
+    def retry_the_global_shortcut_if_it_lacks_permission(self):
+        """The Accessibility permission may have been given since macOS refused the shortcut's key
+        filter (Settings' button opens its page): tries again, and updates an open settings window."""
+        if self.global_shortcut_key_filter.lacks_permission():
+            self.global_shortcut_key_filter.use_global_shortcut(self.settings["global_shortcut"])
+            self.settings_window_controller.reflect_settings(self.settings)
 
     @objc.python_method
     def window_frame_changed(self, setting_name, frame):
@@ -438,10 +474,13 @@ class AppController(NSObject):
 
     @objc.python_method
     def settings_changed(self, new_settings):
-        """Saves new settings and applies them to the menu bar item, the sidebar, the list window
-        (shown when "Show as" turns to Window, hidden when it turns away) and an open settings window."""
+        """Saves new settings and applies them to the global shortcut, the menu bar item, the
+        sidebar, the list window (shown when "Show as" turns to Window, hidden when it turns away)
+        and an open settings window."""
         show_as_before = self.settings["show_as"]
         list_window_was_always_on_top = self.settings["list_window_is_always_on_top"]
+        if new_settings["global_shortcut"] != self.settings["global_shortcut"]:
+            self.global_shortcut_key_filter.use_global_shortcut(new_settings["global_shortcut"])
         self.settings = new_settings
         save_settings(new_settings)
         self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
@@ -513,6 +552,7 @@ class AppController(NSObject):
 
     def dashboardBecameActive_(self, notification):
         self.connection_thread.send_dashboard_is_active(True)
+        self.retry_the_global_shortcut_if_it_lacks_permission()
 
     def dashboardResignedActive_(self, notification):
         self.connection_thread.send_dashboard_is_active(False)

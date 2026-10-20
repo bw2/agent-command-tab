@@ -11,6 +11,7 @@ A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agen
 - **A preview per tab:** what the agent is asking or running, what it said since your last prompt, or that prompt. Open it with the tab's arrow.
 - **Control:** double-click to bring a window or tab to the front; press and hold to peek at a tab; rename in place; drag tabs between windows and windows between monitors; start a new agent window or tab; duplicate a tab; type `/compact` or `/clear` into an agent waiting at its prompt; end an agent's process.
 - **Your choice of view:** a dropdown under the menu bar icon, a sidebar that hides at the screen's edge or stays visible (optionally keeping iTerm2 windows out of its way), or a regular window (optionally always on top).
+- **A shortcut from any app:** Shift-Command-Tab (or Command-Fn-Tab, chosen in Settings) shows the list. While macOS's app switcher is open, the keys still go to it.
 
 ## Requirements
 
@@ -40,6 +41,8 @@ agent-command-tab dump-snapshot  # prints the current list as JSON
 ```
 
 Click the "C" in the menu bar to see the list, right-click it for Settings. The first time, iTerm2 asks whether to allow the app to use its Python API.
+
+The shortcut needs the Accessibility permission (System Settings > Privacy & Security > Accessibility), because it has to see the keys before macOS's app switcher does. macOS gives it to the app that starts AgentCommandTab, so started from iTerm2, turn it on for iTerm2. Until it is on, Settings show a button that opens that page.
 
 ## Development
 

@@ -31,6 +31,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 - R2. The icon shows the number of agent sessions that are asking (a setting can hide it).
 - R3. Clicking the icon opens a dropdown panel with the window list and everything in R7 to R41.
 - R3.1. Codex usage bars at the bottom: one bar per limit Codex reports (for example the weekly limit), with the percent used and the reset time. The app re-reads Codex's own session files every minute (a setting) and shows the latest numbers Codex recorded; they only change when a Codex session talks to OpenAI. Claude Code usage is left out of version 1: it is only available locally through Claude Code's status line command, and the user prefers not to wrap their existing status line.
+- R3.2. A global shortcut shows the list from any app the way "Show as" asks: it opens the dropdown, slides in the sidebar, or brings the window to the front. It only shows, never hides. Settings offer Shift-Command-Tab (the default), Command-Fn-Tab and Off. While macOS's app switcher is open (Command still held after Command-Tab), the keys go to the app switcher instead. It needs the Accessibility permission; without it, Settings say so and open that page of System Settings (user request, 2026-10-19).
 
 ### Sidebar
 
