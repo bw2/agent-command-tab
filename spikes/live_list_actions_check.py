@@ -74,7 +74,13 @@ def play_back_drag(list_controller, dragged_item, proposed_item, proposed_child_
     """Makes the calls AppKit makes on the list during a drag that ends over proposed_item at
     proposed_child_index (where AppKit proposes a drop between rows); returns whether it was accepted."""
     outline_view = list_controller.outline_view
-    if list_controller.outlineView_pasteboardWriterForItem_(outline_view, dragged_item) is None:
+    # The button goes down on the dragged row first: the list drags only the row under the press.
+    list_controller.row_pressed(outline_view.rowForItem_(dragged_item))
+    try:
+        pasteboard_writer = list_controller.outlineView_pasteboardWriterForItem_(outline_view, dragged_item)
+    finally:
+        list_controller.row_released()
+    if pasteboard_writer is None:
         return False
     list_controller.outlineView_draggingSession_willBeginAtPoint_forItems_(outline_view, None, (0, 0), [dragged_item])
     try:

@@ -4,8 +4,8 @@ import asyncio
 import re
 import shlex
 
-from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, AgentToolAdapter,
-                                                   split_command_line_into_program_names)
+from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL,
+                                                   AgentToolAdapter, split_command_line_into_program_names)
 from agent_command_tab.context_window_usage import (find_claude_code_transcript,
                                                     read_context_tokens_from_claude_code_transcript,
                                                     read_turn_started_at_from_claude_code_transcript)
@@ -36,6 +36,7 @@ class ClaudeCodeAdapter(AgentToolAdapter):
     # The input box: "❯" and a no-break space, then the input, between two rules of "─" (Phase 0).
     input_line_marker = "❯"
     input_area_end_pattern = re.compile(r"^─{10,}\s*$")
+    how_other_agent_sessions_send_it_messages = MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
 
     def matches_command_line(self, command_line):
         """Returns whether the command line's program is `claude` (by base name, so full paths match)."""

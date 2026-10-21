@@ -303,6 +303,15 @@ class SidebarController(NSObject):
         self.check_whether_to_hide_in(SECONDS_SHOWN_FROM_THE_MENU)
 
     @objc.python_method
+    def hide_now(self):
+        """The global shortcut pressed again while an auto-hiding sidebar is in: it slides out at
+        once, even with the pointer on it (user request, 2026-10-21)."""
+        self.cancel_hide_timer()
+        self.keep_shown_until = 0
+        self.list_controller.cancel_rename()  # an open rename would keep the list from updating
+        self.set_shown(False)
+
+    @objc.python_method
     def something_belonging_to_the_sidebar_is_open(self):
         """A rename, drag or right-click menu keeps the sidebar in place (PLAN.md section 8)."""
         return (self.list_controller.rename_in_progress or self.list_controller.drag_in_progress

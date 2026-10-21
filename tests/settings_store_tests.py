@@ -3,7 +3,8 @@ import os
 import tempfile
 import unittest
 
-from agent_command_tab.settings_store import (DEFAULT_SETTINGS, build_core_settings, find_launch_command_problem,
+from agent_command_tab.settings_store import (DEFAULT_SETTINGS, build_core_settings, find_codex_command_path,
+                                              find_launch_command_problem,
                                               list_included_agent_tool_names, list_left_out_agent_tool_names,
                                               load_settings, merge_settings_with_defaults,
                                               move_the_settings_folder_of_the_old_name, resolve_launch_command_paths,
@@ -53,10 +54,21 @@ class MergeSettingsTests(unittest.TestCase):
 
     def test_core_settings_read_memory_and_cpu_only_while_their_columns_are_shown(self):
         settings = merge_settings_with_defaults({"stuck_minutes": 4})
-        self.assertEqual(build_core_settings(settings), {"stuck_threshold_seconds": 240, "left_out_agent_tool_names": [],
-                                                         "resource_usage_is_read": False})
+        self.assertEqual(build_core_settings(settings, {"codex": "/opt/homebrew/bin/codex"}.get),
+                         {"stuck_threshold_seconds": 240, "left_out_agent_tool_names": [], "resource_usage_is_read": False,
+                          "codex_command_path": "/opt/homebrew/bin/codex"})
         settings["shown_columns"] = ["state", "cpu_usage"]
         self.assertTrue(build_core_settings(settings)["resource_usage_is_read"])
+
+    def test_codex_queue_runs_the_codex_of_the_codex_launch_command(self):
+        def codex_command_path_for(launch_command):
+            settings = merge_settings_with_defaults({"agent_tools": [
+                {"agent_tool_name": "Claude Code", "launch_command": "claude", "is_included": True},
+                {"agent_tool_name": "Codex", "launch_command": launch_command, "is_included": True}]})
+            return find_codex_command_path(settings, {"codex": "/usr/local/bin/codex"}.get)
+        self.assertEqual(codex_command_path_for("/opt/codex/bin/codex -s read-only"), "/opt/codex/bin/codex")
+        self.assertEqual(codex_command_path_for("codex"), "/usr/local/bin/codex")  # a bare name, looked up on PATH
+        self.assertEqual(codex_command_path_for("node /opt/codex/codex.js"), "/usr/local/bin/codex")  # a wrapper
 
     def test_a_boolean_is_not_a_width(self):
         self.assertEqual(merge_settings_with_defaults({"sidebar_width": True})["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])

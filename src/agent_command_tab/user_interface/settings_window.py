@@ -134,8 +134,9 @@ class SettingsWindowController(WindowFrameSavingController):
             x += radio_button.frame().size.width + GAP_BETWEEN_RADIO_BUTTONS
         show_as_radio_group.setFrameSize_((x, 22))
         self.global_shortcut_popup = self.make_popup(GLOBAL_SHORTCUT_TITLES, self.settings["global_shortcut"])
-        self.global_shortcut_popup.setToolTip_("Shows the list from any app. While the app switcher is open "
-                                               "(Command still held after Command-Tab), the keys go to the app switcher")
+        self.global_shortcut_popup.setToolTip_("Shows the list from any app, and hides it when pressed again (a sidebar set to "
+                                               "stay visible stays). While the app switcher is open (Command still held "
+                                               "after Command-Tab), the keys go to the app switcher")
         # Shown only while macOS refuses the shortcut's key filter; hidden, its row is the gap below the shortcut.
         self.accessibility_settings_button = NSButton.buttonWithTitle_target_action_(
             "Needs Accessibility: Open System Settings…", self, "openAccessibilitySettingsClicked:")

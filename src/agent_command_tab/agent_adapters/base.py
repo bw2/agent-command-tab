@@ -9,6 +9,11 @@ SHELL_PROGRAM_NAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"
 COMMAND_THAT_STARTS_A_NEW_CONVERSATION = "/clear"
 # The slash commands of Claude Code and Codex alike, in menu order.
 COMPACT_AND_CLEAR_SLASH_COMMANDS = ("/compact", COMMAND_THAT_STARTS_A_NEW_CONVERSATION)
+# How other agent sessions send a tool's sessions messages ("Talk to Each Other"; user request,
+# 2026-10-21): Claude Code's SendMessage tool, addressed by the session's name, which only Claude
+# Code sessions have; or `codex queue --thread <conversation ID>`, which any agent with a shell can run.
+MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL = "send_message_tool"
+MESSAGES_THROUGH_CODEX_QUEUE = "codex_queue"
 
 
 def split_command_line_into_program_names(command_line):
@@ -59,6 +64,8 @@ class AgentToolAdapter:
         input_area_end_pattern: Compiled pattern of the line just below the input area.
         seconds_before_enter: The pause between a typed command and its Enter, so the tool
             doesn't take the two as one paste (PLAN.md section 8, "Sending /compact and /clear").
+        how_other_agent_sessions_send_it_messages: MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL,
+            MESSAGES_THROUGH_CODEX_QUEUE, or None when other sessions have no way to.
     """
 
     agent_tool_name = ""
@@ -70,6 +77,7 @@ class AgentToolAdapter:
     input_line_marker = None
     input_area_end_pattern = None
     seconds_before_enter = 0.15
+    how_other_agent_sessions_send_it_messages = None
 
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         """Returns the ID of the conversation the agent process is in, or None if unknown.

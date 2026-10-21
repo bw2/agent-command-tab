@@ -11,11 +11,13 @@ import sys
 import threading
 import time
 
-from AppKit import (NSAlert, NSAlertSecondButtonReturn, NSAlertStyleWarning, NSApp, NSApplication,
+from AppKit import (NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyleWarning, NSApp, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSApplicationDidBecomeActiveNotification,
                     NSApplicationDidChangeScreenParametersNotification, NSApplicationDidResignActiveNotification,
-                    NSApplicationWillTerminateNotification, NSEvent, NSMouseInRect, NSPopoverBehaviorApplicationDefined,
-                    NSPopoverBehaviorTransient, NSRunningApplication, NSWorkspace)
+                    NSApplicationWillTerminateNotification, NSEvent, NSEventModifierFlagCommand, NSEventModifierFlagShift,
+                    NSMenu, NSMenuItem, NSMouseInRect, NSPopoverBehaviorApplicationDefined,
+                    NSPopoverBehaviorTransient, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
+                    NSWorkspaceDidActivateApplicationNotification)
 from Foundation import NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 from PyObjCTools import AppHelper
 import objc
@@ -38,10 +40,55 @@ from agent_command_tab.user_interface.screen_layout import (convert_rect_to_fram
                                                             read_monitors_from_screens)
 from agent_command_tab.user_interface.settings_window import SettingsWindowController
 from agent_command_tab.user_interface.sidebar_panel import SidebarController
+from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
 
 ITERM2_BUNDLE_IDENTIFIER = "com.googlecode.iterm2"
 SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING = 10
 SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
+
+
+def build_main_menu_with_the_edit_shortcuts():
+    """Returns a main menu holding just an Edit menu: Undo, Redo, Cut, Copy, Paste and Select All.
+
+    The dashboard, an accessory app, never shows a menu bar, but AppKit finds the Command-key
+    editing shortcuts in the main menu's items; without them, Command-C, V, X, A and Z do
+    nothing in its text fields (the Talk to Each Other note, renames, the settings). The items
+    have no target, so each goes to the field being edited.
+    """
+    edit_menu = NSMenu.alloc().initWithTitle_("Edit")
+    for title, action_name, key, modifier_flags in (
+            ("Undo", "undo:", "z", NSEventModifierFlagCommand),
+            ("Redo", "redo:", "z", NSEventModifierFlagCommand | NSEventModifierFlagShift),
+            ("Cut", "cut:", "x", NSEventModifierFlagCommand),
+            ("Copy", "copy:", "c", NSEventModifierFlagCommand),
+            ("Paste", "paste:", "v", NSEventModifierFlagCommand),
+            ("Select All", "selectAll:", "a", NSEventModifierFlagCommand)):
+        menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action_name, key)
+        menu_item.setKeyEquivalentModifierMask_(modifier_flags)
+        edit_menu.addItem_(menu_item)
+    edit_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Edit", None, "")
+    edit_menu_item.setSubmenu_(edit_menu)
+    main_menu = NSMenu.alloc().initWithTitle_("")
+    main_menu.addItem_(edit_menu_item)
+    return main_menu
+
+
+def choose_what_the_global_shortcut_does(show_as, sidebar_mode, sidebar_is_shown, list_window_is_in_front, dropdown_is_open):
+    """Returns what a press of the global shortcut does: it shows the list the way the settings
+    ask, or hides it when it shows (user request, 2026-10-21), except that a sidebar set to stay
+    visible stays.
+
+    Returns:
+        "show_sidebar", "hide_sidebar", "nothing", "show_window", "hide_window",
+        "open_dropdown" or "close_dropdown".
+    """
+    if show_as == "sidebar":
+        if sidebar_mode != "auto_hide":
+            return "nothing"
+        return "hide_sidebar" if sidebar_is_shown else "show_sidebar"
+    if show_as == "window":
+        return "hide_window" if list_window_is_in_front else "show_window"
+    return "close_dropdown" if dropdown_is_open else "open_dropdown"
 
 
 class AppController(NSObject):
@@ -56,6 +103,12 @@ class AppController(NSObject):
         self.settings = load_settings_resolving_paths_at_first_run()
         self.reserved_screen_area = None
         self.application_in_front_before_dropdown = None
+        # The last app other than the dashboard to be active: hiding the list window with the
+        # shortcut gives the keyboard back to it. Noted at the start (the app that started the
+        # dashboard sends no activation notification), when the window is shown, and whenever
+        # another app becomes active (anotherApplicationBecameActive_).
+        self.last_other_active_application = None
+        self.note_application_unless_it_is_the_dashboard(NSWorkspace.sharedWorkspace().frontmostApplication())
         self.peek_in_progress = None  # {"application_in_front"} while a tab row is held
         self.settings_save_is_scheduled = False  # a moved window's frame waits to be written (window_frame_changed)
         self.peek_waiting_for_put_back = None  # a released peek until the app in front before is back
@@ -83,6 +136,8 @@ class AppController(NSObject):
                 (NSApplicationDidResignActiveNotification, "dashboardResignedActive:"),
                 (NSApplicationWillTerminateNotification, "applicationWillTerminate:")):
             notification_center.addObserver_selector_name_object_(self, selector_name, notification_name, None)
+        NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
+            self, "anotherApplicationBecameActive:", NSWorkspaceDidActivateApplicationNotification, None)
         return self
 
     @objc.python_method
@@ -163,27 +218,51 @@ class AppController(NSObject):
         It also retries a global shortcut that lacked the permission, since the sidebar slides in
         without making the app active (the other retry)."""
         self.retry_the_global_shortcut_if_it_lacks_permission()
-        self.show_the_list_as_the_settings_ask(closes_an_open_dropdown=True)
-
-    @objc.python_method
-    def global_shortcut_pressed(self):
-        """The global shortcut shows the list as the menu bar icon does, but never hides it: an
-        open dropdown stays open (user request, 2026-10-19)."""
-        self.show_the_list_as_the_settings_ask(closes_an_open_dropdown=False)
-
-    @objc.python_method
-    def show_the_list_as_the_settings_ask(self, closes_an_open_dropdown):
-        """Slides the sidebar in for a few seconds, brings the list window to the front, or opens
-        the dropdown (closing it instead, if it is open and closes_an_open_dropdown)."""
         if self.settings["show_as"] == "sidebar":
             self.sidebar_controller.show_for_a_few_seconds()
         elif self.settings["show_as"] == "window":
-            self.list_window_controller.show(self.settings["list_window_frame"])
-            self.place_the_settings_window_above_the_lists(self.popover.isShown())
-        elif closes_an_open_dropdown:
+            self.show_the_list_window()
+        else:
             self.status_item_controller.toggle_popover()
-        elif not self.popover.isShown():
+
+    @objc.python_method
+    def global_shortcut_pressed(self):
+        """The global shortcut shows the list as the menu bar icon does and, pressed again, hides
+        it, giving the keyboard back to the app that had it (user request, 2026-10-21)
+        (choose_what_the_global_shortcut_does)."""
+        what_to_do = choose_what_the_global_shortcut_does(
+            self.settings["show_as"], self.settings["sidebar_mode"], self.sidebar_controller.is_shown,
+            self.list_window_controller.is_in_front(), self.popover.isShown())
+        if what_to_do == "show_sidebar":
+            self.sidebar_controller.show_for_a_few_seconds()
+        elif what_to_do == "hide_sidebar":
+            self.sidebar_controller.hide_now()
+        elif what_to_do == "show_window":
+            self.show_the_list_window()
+        elif what_to_do == "hide_window":
+            self.list_window_controller.hide()
+            self.list_window_closed()
+            if NSApp.isActive():  # otherwise (always on top) the app with the keyboard keeps it
+                self.give_activation_to(self.last_other_active_application)
+        elif what_to_do == "open_dropdown":
             self.status_item_controller.show_popover()
+        elif what_to_do == "close_dropdown":
+            self.close_dropdown()
+            self.give_activation_to(self.application_in_front_before_dropdown)
+
+    @objc.python_method
+    def show_the_list_window(self):
+        """Brings the list window to the front with the keyboard (the menu bar icon and the shortcut)."""
+        self.note_application_unless_it_is_the_dashboard(NSWorkspace.sharedWorkspace().frontmostApplication())
+        self.list_window_controller.show(self.settings["list_window_frame"])
+        self.place_the_settings_window_above_the_lists(self.popover.isShown())
+
+    @objc.python_method
+    def give_activation_to(self, application):
+        """Makes an app the active one again (nothing for None)."""
+        if application is not None:
+            NSApp.yieldActivationToApplication_(application)
+            application.activateWithOptions_(0)
 
     @objc.python_method
     def global_shortcut_lacks_permission(self):
@@ -353,10 +432,8 @@ class AppController(NSObject):
         if self.peek_waiting_for_put_back is not peek:
             return  # a newer hold took over; its own release puts things back
         self.peek_waiting_for_put_back = None
-        application = peek["application_in_front"]
-        if application is not None and not iterm2_was_in_front:
-            NSApp.yieldActivationToApplication_(application)
-            application.activateWithOptions_(0)
+        if not iterm2_was_in_front:
+            self.give_activation_to(peek["application_in_front"])
         self.update_dropdown_closing_behavior()
 
     @objc.python_method
@@ -397,6 +474,15 @@ class AppController(NSObject):
         alert.addButtonWithTitle_("No")  # the first button is the default and sits rightmost
         alert.addButtonWithTitle_("Yes")
         return self.run_alert_in_front(alert) == NSAlertSecondButtonReturn
+
+    @objc.python_method
+    def ask_for_note_asking_agent_sessions_to_talk_to_each_other(self, agent_session_entries, left_out_agent_session_entries):
+        """Shows the Talk to Each Other window (user request, 2026-10-21); returns the note as the
+        user left it, or None for Cancel or an empty note."""
+        alert, note_text_view = build_talk_to_each_other_alert(agent_session_entries, left_out_agent_session_entries)
+        if self.run_alert_in_front(alert) != NSAlertFirstButtonReturn:
+            return None
+        return note_text_view.string().strip() or None
 
     @objc.python_method
     def run_alert_in_front(self, alert):
@@ -551,6 +637,16 @@ class AppController(NSObject):
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.sidebar_controller.screen_layout_changed()
 
+    def anotherApplicationBecameActive_(self, notification):
+        if self.peek_in_progress is None and self.peek_waiting_for_put_back is None:  # a peek activates iTerm2 only for a moment
+            self.note_application_unless_it_is_the_dashboard(notification.userInfo()[NSWorkspaceApplicationKey])
+
+    @objc.python_method
+    def note_application_unless_it_is_the_dashboard(self, application):
+        """Notes an active app (an NSRunningApplication, or None) as last_other_active_application, unless it is the dashboard itself."""
+        if application is not None and application.processIdentifier() != os.getpid():
+            self.last_other_active_application = application
+
     def dashboardBecameActive_(self, notification):
         self.connection_thread.send_dashboard_is_active(True)
         self.retry_the_global_shortcut_if_it_lacks_permission()
@@ -586,6 +682,7 @@ def run_menu_bar_app(verbose):
     """Runs the menu bar app until it quits; returns the exit status."""
     application = NSApplication.sharedApplication()
     application.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, no Info.plist needed
+    application.setMainMenu_(build_main_menu_with_the_edit_shortcuts())
     app_controller = AppController.alloc().initWithVerbose_(verbose)
     app_controller.start()
     # runEventLoop(installInterrupt=True) installs its Ctrl+C handler only when no NSApplication

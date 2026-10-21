@@ -31,9 +31,14 @@ from agent_command_tab.agent_session_pausing import (continue_processes_stopped_
                                                      pause_has_ended, resume_agent_session, send_signal_to_processes)
 from agent_command_tab.pause_records_store import load_pause_records, save_pause_records
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
-from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION, command_line_runs_a_shell
+from agent_command_tab.agent_adapters.base import (COMMAND_THAT_STARTS_A_NEW_CONVERSATION, MESSAGES_THROUGH_CODEX_QUEUE,
+                                                   MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, command_line_runs_a_shell)
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.dashboard_core_api import ActionRegistry, ActionResult
+from agent_command_tab.messages_between_agent_sessions import (SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT,
+                                                               AgentSessionForMessages,
+                                                               build_message_asking_agent_session_to_talk_to_the_others)
 from agent_command_tab.iterm2_snapshot_builder import DisplayedState, build_computer_snapshot, resolve_agent_sessions
 from agent_command_tab.docked_window_frames_store import (adopt_records_of_restored_windows,
                                                           load_docked_window_frames, save_docked_window_frames)
@@ -72,6 +77,10 @@ CLAUDE_AGENTS_RETRIES_FOR_A_NEW_PROCESS = 3
 CLAUDE_AGENTS_RETRY_DELAY_SECONDS = 3
 SNAPSHOT_COALESCING_DELAY_SECONDS = 0.1
 SESSION_VARIABLES_TO_WATCH = ("commandLine", "status")
+SECONDS_TO_WAIT_FOR_THE_STATUS_IN_ITERM2S_TAB_BAR = 2
+CODEX_QUEUE_TIMEOUT_SECONDS = 30
+# How often "Talk to Each Other" checks whether a held message can be pasted (user request, 2026-10-21).
+SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT = 3
 
 
 def find_claude_command_path():
@@ -130,6 +139,56 @@ async def read_claude_agents_by_process_id(claude_command_path, config_folders):
     return claude_agents_by_process_id
 
 
+def read_claude_code_session_status(config_folder, process_id):
+    """Returns the status Claude Code keeps for a running session ("idle", "busy", "waiting", or
+    "shell" while it runs a command; seen on 2026-10-21), read now from
+    <config folder>/sessions/<process ID>.json (the file `claude agents --json` reads), or None
+    when it can't be read. Cheap enough to read just before typing into a session,
+    while the record from `claude agents --json` may be a minute old.
+
+    Args:
+        config_folder: The record's "config_folder", or None for the default ~/.claude.
+        process_id: The Claude Code process ID.
+    """
+    path = os.path.join(config_folder or os.path.expanduser("~/.claude"), "sessions", f"{process_id}.json")
+    try:
+        with open(path) as session_file:
+            return json.load(session_file).get("status")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+async def queue_message_for_codex_session(codex_command_path, conversation_id, message):
+    """Runs `codex queue --thread <conversation ID> --message <text>`, which hands the message to
+    the running Codex session; it runs it as its next turn, after any turn under way (checked live
+    with Codex 0.155.1 on 2026-10-21). Returns an ActionResult."""
+    if not codex_command_path:
+        return ActionResult(False, "the codex command wasn't found")
+    process = None
+    try:
+        # The message is attached to its option: on its own, a message starting with "-" (a note
+        # that begins with a bullet) would be read as an unknown option.
+        process = await asyncio.create_subprocess_exec(
+            codex_command_path, "queue", "--thread", conversation_id, f"--message={message}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, standard_error = await asyncio.wait_for(process.communicate(), timeout=CODEX_QUEUE_TIMEOUT_SECONDS)
+    except (OSError, asyncio.TimeoutError) as error:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        return ActionResult(False, f"codex queue failed: {error!r}")
+    if process.returncode != 0:
+        return ActionResult(False, f"codex queue failed: {standard_error.decode(errors='replace').strip()[-300:]}")
+    return ActionResult(True)
+
+
+def convert_exception_to_action_result(result_or_exception):
+    """Returns an ActionResult from asyncio.gather(..., return_exceptions=True): a failed one for an exception."""
+    if isinstance(result_or_exception, Exception):
+        return ActionResult(False, f"it failed: {result_or_exception!r}")
+    return result_or_exception
+
+
 def build_conversation_file_record(conversation_key, path, looked_up_at, cleared_path):
     """Returns what the core keeps about a session's conversation file: the conversation it is for
     (DashboardCore.find_conversation_key), its path or None while not found, when it was looked
@@ -159,6 +218,22 @@ async def read_iterm2_variables(connection, names, session_id=None, tab_id=None,
     if status != api_pb2.VariableResponse.Status.Value("OK"):
         raise iterm2.RPCException(api_pb2.VariableResponse.Status.Name(status))
     return [json.loads(value) for value in response.variable_response.values]
+
+
+async def read_status_shown_in_iterm2s_tab_bar(session):
+    """Returns the status iTerm2 shows for a session in its tab bar ("idle", "working", ...), from
+    its built-in function iterm2.get_session_status (not in iTerm2's documentation), or None.
+
+    After iTerm2 restarts, its tab bar still shows each tab's status, and this function returns
+    it, but the session's `status` variable stays empty until the agent's next hook event (seen
+    with iTerm2 3.7.6; user request, 2026-10-21).
+    """
+    try:
+        result = await session.async_invoke_function(f'iterm2.get_session_status(session_id: "{session.session_id}")',
+                                                     timeout=SECONDS_TO_WAIT_FOR_THE_STATUS_IN_ITERM2S_TAB_BAR)
+    except iterm2.RPCException:
+        return None
+    return result.get("status") if isinstance(result, dict) else None
 
 
 async def read_window_frame(window):
@@ -200,6 +275,8 @@ class DashboardCore:
         self.computer_id = socket.gethostname()
         self.computer_name = socket.gethostname().split(".")[0]
         self.claude_command_path = find_claude_command_path()
+        self.codex_command_path = shutil.which("codex")  # for `codex queue`; the app's settings then name it (set_core_settings)
+        self.message_typing_lock_by_session_id = {}  # two held messages are never pasted into one tab at once
         self.gathered_windows = []
         self.gather_is_in_progress = False
         self.monitors = []
@@ -257,9 +334,12 @@ class DashboardCore:
         register("peek_agent_session", self.handle_peek_agent_session, False, False)
         register("end_peek", self.handle_end_peek, False, False)
         register("send_slash_command", self.handle_send_slash_command, True, True)
+        register("send_slash_command_to_agent_sessions", self.handle_send_slash_command_to_agent_sessions, True, True)
         register("end_agent_process", self.handle_end_agent_process, False, False)
+        register("end_agent_processes", self.handle_end_agent_processes, False, False)
         register("pause_agent_sessions", self.handle_pause_agent_sessions, True, True)
         register("resume_agent_sessions", self.handle_resume_agent_sessions, True, True)
+        register("ask_agent_sessions_to_talk_to_each_other", self.handle_ask_agent_sessions_to_talk_to_each_other, True, True)
 
     async def perform_action(self, action_request):
         """Runs an action request, then asks for a fresh gather and snapshot.
@@ -316,6 +396,8 @@ class DashboardCore:
         state = displayed_state.state if displayed_state is not None else "unknown"
         if state not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
             return ActionResult(False, f"the agent is {state}; commands are typed only while it waits at its prompt")
+        if self.claude_code_reports_the_session_busy(agent_session):
+            return ActionResult(False, "Claude Code reports the session busy; commands are typed only while it waits at its prompt")
         command = action_request.arguments["command"]
         # Known before the conversation ends, since a lookup after /clear can't tell old from new.
         path_of_conversation_to_clear = await self.find_current_conversation_file(session_id, agent_session) \
@@ -324,6 +406,62 @@ class DashboardCore:
         if action_result.succeeded and command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION:
             self.forget_the_cleared_conversation(session_id, agent_session, path_of_conversation_to_clear)
         return action_result
+
+    async def handle_send_slash_command_to_agent_sessions(self, action_request):
+        """send_slash_command for every session of target {"session_ids": [...]} (the menu of
+        several selected rows; user request, 2026-10-21)."""
+        return await self.run_for_each_agent_session(action_request, self.handle_send_slash_command)
+
+    async def run_for_each_agent_session(self, action_request, handle_one):
+        """Runs a one-session action (handle_one, taking target {"session_id": ...}) for every
+        session of target {"session_ids": [...]} at once; returns one ActionResult whose message
+        names each tab that failed and why."""
+        session_ids = action_request.target["session_ids"]
+        action_results = await asyncio.gather(*(handle_one(action_request._replace(target={"session_id": session_id}))
+                                                for session_id in session_ids), return_exceptions=True)
+        return self.combine_results_naming_the_tabs_that_failed(
+            session_ids, [convert_exception_to_action_result(action_result) for action_result in action_results])
+
+    def combine_results_naming_the_tabs_that_failed(self, session_ids, action_results):
+        """Returns one ActionResult for an action on several agent sessions, whose message names
+        each tab that failed and why."""
+        failures = [f'"{self.find_tab_title_of_agent_session(session_id) or "a tab"}": {action_result.message}'
+                    for session_id, action_result in zip(session_ids, action_results) if not action_result.succeeded]
+        return ActionResult(not failures, "; ".join(failures))
+
+    def find_tab_title_of_agent_session(self, session_id):
+        """Returns the title the last snapshot shows for the agent session's tab, or ""."""
+        if self.last_published_snapshot_without_time is None:
+            return ""
+        return next((agent_session_entry.tab_title
+                     for _, _, agent_session_entry in iterate_agent_session_entries(self.last_published_snapshot_without_time)
+                     if agent_session_entry.session_id == session_id), "")
+
+    def claude_code_reports_the_session_busy(self, agent_session):
+        """Whether Claude Code itself reports the agent session as anything but idle right now
+        (read_claude_code_session_status). Checked just before typing into it: a row may take its
+        idle state from a `claude agents --json` record up to a minute old, and Claude Code's input
+        box is empty during a turn too. False when Claude Code reports nothing (another tool)."""
+        claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
+        if claude_agent_record is None:
+            return False
+        status = read_claude_code_session_status(claude_agent_record.get("config_folder"), agent_session["process_id"])
+        return status is not None and status != "idle"
+
+    def another_codex_session_runs_in_the_same_folder(self, session_id, agent_session):
+        """Whether another Codex agent session runs in this one's folder. Codex's conversation
+        files are matched to a process by folder and start time only
+        (find_codex_conversation_files), so the earlier of two such sessions would take the later
+        one's file for its own."""
+        return any(other_session_id != session_id and isinstance(other_agent_session["adapter"], CodexAdapter)
+                   and other_agent_session["working_folder"] == agent_session["working_folder"]
+                   for other_session_id, other_agent_session in self.agent_sessions.items())
+
+    def conversation_was_cleared_and_the_next_has_no_file_yet(self, session_id):
+        """Whether /clear ended the agent session's conversation and the agent hasn't written its
+        next one yet: a lookup by folder and start time would still find the ended one."""
+        conversation_file = self.conversation_files_by_session_id.get(session_id) or {}
+        return bool(conversation_file.get("cleared_path")) and conversation_file["path"] is None
 
     async def find_current_conversation_file(self, session_id, agent_session):
         """Returns the path of the agent session's conversation file: the one last found for its
@@ -377,6 +515,11 @@ class DashboardCore:
         except ProcessLookupError:
             pass
         return ActionResult(True)
+
+    async def handle_end_agent_processes(self, action_request):
+        """end_agent_process for every session of target {"session_ids": [...]} (the menu of
+        several selected rows; user request, 2026-10-21)."""
+        return await self.run_for_each_agent_session(action_request, self.handle_end_agent_process)
 
     async def handle_pause_agent_sessions(self, action_request):
         """Pauses the agent sessions of target {"session_ids": [...]}: each agent as Ctrl+Z does,
@@ -435,13 +578,109 @@ class DashboardCore:
             finally:
                 self.session_ids_being_paused_or_resumed.discard(session_id)
         action_results = await asyncio.gather(*(run_for(session_id) for session_id in session_ids))
-        tab_title_by_session_id = {
-            agent_session_entry.session_id: agent_session_entry.tab_title
-            for _, _, agent_session_entry in iterate_agent_session_entries(self.last_published_snapshot_without_time)
-        } if self.last_published_snapshot_without_time is not None else {}
-        failures = [f'"{tab_title_by_session_id.get(session_id, "a tab")}": {action_result.message}'
-                    for session_id, action_result in zip(session_ids, action_results) if not action_result.succeeded]
-        return ActionResult(not failures, "; ".join(failures))
+        return self.combine_results_naming_the_tabs_that_failed(session_ids, action_results)
+
+    # ----- Talk to Each Other (user request, 2026-10-21) -----
+
+    async def handle_ask_agent_sessions_to_talk_to_each_other(self, action_request):
+        """Sends each agent session of target {"session_ids": [...]} the note of arguments
+        {"note": ...}, followed by what it needs to send each of the others a message
+        (messages_between_agent_sessions). A Codex session gets it through `codex queue`, which it
+        runs after any turn under way. A Claude Code session has no supported way in from outside,
+        so its message is held until the session waits at its prompt with an empty input box, then
+        pasted there, giving up after SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT. Returns
+        once every message was delivered or given up on, naming each tab that didn't get one."""
+        session_ids = action_request.target["session_ids"]
+        agent_session_for_messages_by_session_id = {}
+        action_result_by_session_id = {}
+        for session_id in session_ids:
+            agent_session_for_messages, reason = await self.describe_agent_session_for_messages(session_id)
+            if agent_session_for_messages is None:
+                action_result_by_session_id[session_id] = ActionResult(False, reason)
+            else:
+                agent_session_for_messages_by_session_id[session_id] = agent_session_for_messages
+        if len(agent_session_for_messages_by_session_id) < 2:
+            for session_id in agent_session_for_messages_by_session_id:
+                action_result_by_session_id[session_id] = ActionResult(False, "no other selected session can take part")
+        else:
+            participant_session_ids = list(agent_session_for_messages_by_session_id)
+            delivery_results = await asyncio.gather(*(
+                self.deliver_message_to_agent_session(
+                    session_id, agent_session_for_messages_by_session_id[session_id],
+                    build_message_asking_agent_session_to_talk_to_the_others(
+                        action_request.arguments["note"], agent_session_for_messages_by_session_id[session_id],
+                        [other for other_session_id, other in agent_session_for_messages_by_session_id.items()
+                         if other_session_id != session_id]))
+                for session_id in participant_session_ids), return_exceptions=True)
+            for session_id, delivery_result in zip(participant_session_ids, delivery_results):
+                action_result_by_session_id[session_id] = convert_exception_to_action_result(delivery_result)
+        return self.combine_results_naming_the_tabs_that_failed(
+            session_ids, [action_result_by_session_id[session_id] for session_id in session_ids])
+
+    async def describe_agent_session_for_messages(self, session_id):
+        """Returns (AgentSessionForMessages, None) for an agent session that other sessions can
+        send messages to, else (None, the reason it can't take part)."""
+        agent_session = self.agent_sessions.get(session_id)
+        if agent_session is None or not agent_session["process_id"]:
+            return None, "that tab no longer runs an agent"
+        process_id = agent_session["process_id"]
+        how_other_agent_sessions_send_it_messages = agent_session["adapter"].how_other_agent_sessions_send_it_messages
+        if how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL:
+            address = (self.claude_agents_by_process_id.get(process_id) or {}).get("name")
+            reason_without_address = "its Claude Code session name isn't known yet"
+        elif how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
+            if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
+                return None, "its conversation was just cleared, and its next one starts at its next prompt"
+            if self.another_codex_session_runs_in_the_same_folder(session_id, agent_session):
+                return None, "another Codex session runs in the same folder, so its conversation can't be told apart"
+            address = await agent_session["adapter"].find_conversation_id(process_id, None)
+            reason_without_address = ("its Codex conversation can't be identified: Codex starts it at the first prompt, "
+                                      "and after /new more than one fits")
+        else:
+            return None, f"{agent_session['agent_tool_name']} sessions can't take messages from other sessions"
+        if not address:
+            return None, reason_without_address
+        return AgentSessionForMessages(agent_session["agent_tool_name"], how_other_agent_sessions_send_it_messages, address,
+                                       process_id, agent_session["working_folder"],
+                                       self.find_tab_title_of_agent_session(session_id)), None
+
+    async def deliver_message_to_agent_session(self, session_id, agent_session_for_messages, message):
+        """Queues the message for a Codex session, or pastes it into a Claude Code session once it waits at its prompt."""
+        if agent_session_for_messages.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
+            return await queue_message_for_codex_session(self.codex_command_path, agent_session_for_messages.address, message)
+        return await self.paste_message_once_the_agent_waits_at_its_prompt(session_id, agent_session_for_messages.process_id, message)
+
+    async def paste_message_once_the_agent_waits_at_its_prompt(self, session_id, agent_process_id, message):
+        """Checks every SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT until the agent session
+        waits at its prompt (its row shows idle or done) with an empty input box, then pastes the
+        message there and presses Enter. Gives up after
+        SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT, or once the tab's agent process is no
+        longer agent_process_id."""
+        deadline = time.time() + SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT
+        typing_lock = self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock())
+        while True:
+            # Checked holding the lock: another message held for this session may have just
+            # been pasted, starting a turn.
+            async with typing_lock:
+                agent_session = self.agent_sessions.get(session_id)
+                if agent_session is None or agent_session["process_id"] != agent_process_id:
+                    return ActionResult(False, "its agent ended before the message could be pasted")
+                displayed_state = self.displayed_state_by_session_id.get(session_id)
+                if (not agent_session["is_in_background"] and displayed_state is not None
+                        and displayed_state.state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
+                        and not self.claude_code_reports_the_session_busy(agent_session)):
+                    try:
+                        action_result = await iterm2_actions.paste_message_into_empty_input_box(
+                            self.app, session_id, message, agent_session["adapter"])
+                    except iterm2.RPCException:
+                        return ActionResult(False, "the tab closed meanwhile")
+                    if action_result is not None:
+                        return action_result
+            if time.time() >= deadline:
+                return ActionResult(False, "it didn't wait at its prompt with an empty input box within "
+                                           f"{SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT // 60} minutes, "
+                                           "so the message wasn't pasted")
+            await asyncio.sleep(SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT)
 
     def set_reserved_screen_area(self, reserved_area):
         """Receives the docked sidebar's area, {"frame": (x, y, width, height), "edge": "right" or
@@ -603,9 +842,8 @@ class DashboardCore:
             return ActionResult(False, "that tab no longer runs an agent session")
         process_id = agent_session["process_id"]
         claude_agent_record = self.claude_agents_by_process_id.get(process_id)
-        conversation_file = self.conversation_files_by_session_id.get(session_id) or {}
-        if conversation_file.get("cleared_path") and conversation_file["path"] is None:
-            conversation_id = None  # /clear ended the conversation and the next one has no file yet: start fresh
+        if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
+            conversation_id = None  # start fresh
         else:
             conversation_id = await agent_session["adapter"].find_conversation_id(process_id, claude_agent_record)
         launch_command_for_the_copy = agent_session["adapter"].build_launch_command_for_a_copy(
@@ -638,11 +876,12 @@ class DashboardCore:
 
     def set_core_settings(self, core_settings):
         """Receives the settings the core uses (settings_store.build_core_settings): the stuck
-        time limit, the agent tools the Harnesses section leaves out of the list, and whether
-        memory and CPU use are read."""
+        time limit, the agent tools the Harnesses section leaves out of the list, whether
+        memory and CPU use are read, and the codex program for `codex queue`."""
         self.stuck_threshold_seconds = core_settings["stuck_threshold_seconds"]
         self.left_out_agent_tool_names = frozenset(core_settings["left_out_agent_tool_names"])
         self.resource_usage_is_read = core_settings["resource_usage_is_read"]
+        self.codex_command_path = core_settings["codex_command_path"]
         self.snapshot_needed.set()
 
     def set_dashboard_is_active(self, dashboard_is_active):
@@ -664,6 +903,9 @@ class DashboardCore:
             (title, title_override_format), (job_pid, command_line, status, path) = await asyncio.gather(
                 tab_variables_reading, read_iterm2_variables(self.connection, ["jobPid", "commandLine", "status", "path"],
                                                              session_id=first_session.session_id))
+            if not status and command_line and not command_line_runs_a_shell(command_line):
+                # As after iTerm2 restarts: the status its tab bar shows (the variable then takes over).
+                status = await read_status_shown_in_iterm2s_tab_bar(first_session)
             job_process_id = parse_job_process_id(job_pid)
             job_process = read_process_info(job_process_id) if job_process_id else None
             gathered_session = {

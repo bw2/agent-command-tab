@@ -8,8 +8,9 @@ import time
 import unittest
 import unittest.mock
 
-from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered,
-                    NSBitmapImageFileTypePNG, NSColorSpace, NSDragOperationMove, NSDragOperationNone, NSMakeRect,
+from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
+                    NSBitmapImageFileTypePNG, NSColorSpace, NSDragOperationMove, NSDragOperationNone,
+                    NSEventModifierFlagCommand, NSMakeRect,
                     NSFloatingWindowLevel, NSMenu, NSNormalWindowLevel, NSParagraphStyleAttributeName, NSTextAlignmentRight,
                     NSTextField, NSWindow, NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
@@ -18,8 +19,11 @@ from agent_command_tab.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES,
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, PANEL_SIDE_MARGIN, POPOVER_WIDTH,
                                                                 TOP_BAR_HEIGHT, ListPanelController)
+from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
-                                                                         AgentSessionListController, RowButton)
+                                                                         AgentSessionListController, RowButton,
+                                                                         RowViewWithSelectionOutline, build_index_set)
+from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.screen_layout import frame_is_on_a_screen, grow_frame_to_smallest_size
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
@@ -43,6 +47,8 @@ class RecordingOwner:
         self.answer_to_confirmation = False
         self.peeks = []
         self.chosen_list_sort_orders = []
+        self.talk_to_each_other_requests = []  # (agent session entries, left-out entries)
+        self.note_to_send = None  # what the Talk to Each Other window returns: None for Cancel
 
     def submit_action(self, action_request):
         self.submitted_actions.append(action_request)
@@ -81,6 +87,10 @@ class RecordingOwner:
 
     def list_sort_order_chosen(self, list_sort_order):
         self.chosen_list_sort_orders.append(list_sort_order)
+
+    def ask_for_note_asking_agent_sessions_to_talk_to_each_other(self, agent_session_entries, left_out_agent_session_entries):
+        self.talk_to_each_other_requests.append((agent_session_entries, left_out_agent_session_entries))
+        return self.note_to_send
 
 
 def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False, slash_commands=("/compact", "/clear")):
@@ -400,6 +410,97 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
         self.assertIn("Aider", menu_items_by_title["/compact"].toolTip())
 
+    def select_rows(self, *rows):
+        self.list_controller.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(rows), False)
+
+    def test_only_window_and_tab_rows_can_be_selected_and_the_selection_is_an_outline(self):
+        self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))
+        outline_view = self.list_controller.outline_view
+        self.assertTrue(outline_view.allowsMultipleSelection())
+        every_row = build_index_set(range(outline_view.numberOfRows()))  # a Shift-click range over everything
+        allowed_rows = self.list_controller.outlineView_selectionIndexesForProposedSelection_(outline_view, every_row)
+        self.assertEqual([outline_view.itemAtRow_(row).kind for row in range(outline_view.numberOfRows()) if allowed_rows.containsIndex_(row)],
+                         ["window", "tab", "tab", "tab", "window", "tab", "tab"])  # no monitor rows, no "+" row
+        row_view = self.list_controller.outlineView_rowViewForItem_(outline_view, outline_view.itemAtRow_(1))
+        self.assertIsInstance(row_view, RowViewWithSelectionOutline)
+        self.assertEqual(row_view.interiorBackgroundStyle(), NSBackgroundStyleNormal)  # the text keeps its colors
+
+    def test_several_selected_rows_share_one_menu_that_acts_on_their_sessions(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.select_rows(3, 4)  # codex-review (done) and the second window (two idle tabs)
+        self.assertEqual(self.build_right_click_menu_titles(4),
+                         ["Talk to Each Other…", "---", "/compact 3 Sessions", "/clear 3 Sessions", "Kill 3 Sessions", "---",
+                          "Pause 3 Sessions"])
+        self.select_rows(0, 1)  # a window and one of its tabs: each session counts once
+        self.assertIn("Kill 3 Sessions", self.build_right_click_menu_titles(1))
+        self.select_rows(1, 5)  # planning (working) and analysis-0 (idle)
+        menu_items_by_title = self.build_right_click_menu_items_by_title(5)
+        self.assertEqual(menu_items_by_title["/compact 1 Session"].toolTip(), "Typed only into the 1 of 2 that wait at their prompt")
+        self.assertEqual(self.build_right_click_menu_titles(2)[0], "Show tab")  # an unselected row keeps its own menu
+        self.select_rows(5)
+        self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # so does a single selected row
+        self.select_rows(1, 2)  # working and asking: no slash command can be typed
+        menu_items_by_title = self.build_right_click_menu_items_by_title(1)
+        self.assertFalse(menu_items_by_title["/compact"].isEnabled())
+
+    def test_slash_commands_and_kill_for_several_sessions_ask_first_where_one_session_would(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.select_rows(1, 5)
+        menu_items_by_title = self.build_right_click_menu_items_by_title(5)
+        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/compact 1 Session"])
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target, self.submitted_actions[-1].arguments),
+                         ("send_slash_command_to_agent_sessions", {"session_ids": ["s10"]}, {"command": "/compact"}))
+        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/clear 1 Session"])  # the user says No
+        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill 2 Sessions"])  # No again
+        self.assertEqual(len(self.submitted_actions), 1)
+        self.assertIn('("analysis-0")', self.owner.confirmation_questions[0])
+        self.assertIn('("planning", "analysis-0")', self.owner.confirmation_questions[1])
+        self.owner.answer_to_confirmation = True
+        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill 2 Sessions"])
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                         ("end_agent_processes", {"session_ids": ["s1", "s10"]}))
+
+    def test_talk_to_each_other_sends_the_note_to_the_sessions_whose_tools_can_take_part(self):
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_two = window_two._replace(agent_sessions=(window_two.agent_sessions[0]._replace(agent_tool_name="Aider"),
+                                                         window_two.agent_sessions[1]))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
+        self.select_rows(3, 4)  # codex-review (Codex), and analysis-0 (Aider) and analysis-1 (Claude Code)
+        menu_items_by_title = self.build_right_click_menu_items_by_title(3)
+        self.list_controller.menuTalkToEachOther_(menu_items_by_title["Talk to Each Other…"])  # Cancel
+        self.assertEqual(self.submitted_actions, [])
+        talking_entries, left_out_entries = self.owner.talk_to_each_other_requests[-1]
+        self.assertEqual(([entry.tab_title for entry in talking_entries], [entry.tab_title for entry in left_out_entries]),
+                         (["codex-review", "analysis-1"], ["analysis-0"]))
+        self.owner.note_to_send = "Sync up, please."
+        self.list_controller.menuTalkToEachOther_(menu_items_by_title["Talk to Each Other…"])
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target, self.submitted_actions[-1].arguments),
+                         ("ask_agent_sessions_to_talk_to_each_other", {"session_ids": ["s3", "s11"]}, {"note": "Sync up, please."}))
+        self.select_rows(3, 5)  # one Codex session and the Aider one: nobody to talk to
+        self.assertFalse(self.build_right_click_menu_items_by_title(3)["Talk to Each Other…"].isEnabled())
+
+    def test_the_talk_to_each_other_window_holds_the_default_note_and_names_who_gets_it(self):
+        entries = [make_entry("1", "planning", "idle"), make_entry("2", "reviews", "working")]
+        alert, note_text_view = build_talk_to_each_other_alert(entries, [make_entry("3", "aider tab", "idle", tool="Aider")])
+        self.assertEqual(note_text_view.string(), DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER)
+        self.assertIn('2 agent sessions: "planning", "reviews".', alert.informativeText())
+        self.assertIn('Left out, since their tools can\'t take messages from other sessions: "aider tab".', alert.informativeText())
+        send_button, cancel_button = alert.buttons()
+        self.assertEqual((send_button.title(), cancel_button.title()), ("Send", "Cancel"))
+        self.assertEqual(send_button.keyEquivalentModifierMask(), NSEventModifierFlagCommand)  # Return alone starts a new line
+        self.assertIs(alert.window().initialFirstResponder(), note_text_view)
+        self.assertFalse(note_text_view.isAutomaticDashSubstitutionEnabled())
+
+    def test_dragging_one_of_several_selected_rows_drags_only_that_row(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        self.select_rows(1, 2)
+        self.list_controller.row_pressed(2)
+        self.addCleanup(self.list_controller.row_released)
+        self.assertIsNone(self.list_controller.outlineView_pasteboardWriterForItem_(outline_view, outline_view.itemAtRow_(1)))
+        self.assertIsNotNone(self.list_controller.outlineView_pasteboardWriterForItem_(outline_view, outline_view.itemAtRow_(2)))
+
     def test_double_click_on_a_window_shows_it_without_renaming_or_collapsing(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         window_item = self.list_controller.outline_view.itemAtRow_(0)
@@ -412,7 +513,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(self.list_controller.rename_in_progress)
         self.assertEqual(self.list_controller.collapsed_item_keys, set())
 
-    def test_single_click_on_a_tab_does_nothing_and_double_click_shows_it(self):
+    def test_single_click_on_a_tab_sends_nothing_and_double_click_shows_it(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         tab_item = self.list_controller.outline_view.itemAtRow_(1)
         self.list_controller.find_clicked_item = lambda: tab_item
@@ -969,6 +1070,14 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.controller.finish_width_drag()
         self.assertEqual(self.owner.saved_widths, [])
 
+    def test_the_shortcut_slides_it_out_at_once_even_while_it_was_to_stay_a_few_seconds(self):
+        self.controller.keep_shown_until = time.time() + 4
+        self.controller.check_whether_to_hide_in(4)
+        self.controller.hide_now()
+        self.assertFalse(self.controller.is_shown)
+        self.assertIsNone(self.controller.hide_timer)
+        self.assertEqual(self.controller.keep_shown_until, 0)
+
     def test_shown_from_the_menu_it_stays_for_the_whole_five_seconds(self):
         self.controller.keep_shown_until = time.time() + 4
         self.controller.hideTimerFired_(None)
@@ -1063,6 +1172,21 @@ class ListWindowSmokeTests(unittest.TestCase):
         controller.window.setFrame_display_(NSMakeRect(-4000, -4000, 500, 400), False)  # off every screen: not shown
         controller.report_frame()
         self.assertEqual(owner.reported_frames[-1], ("list_window_frame", [-4000, -4000, 500, 400]))
+
+    def test_the_window_is_in_front_for_the_shortcut_only_while_shown_with_the_keyboard_or_always_on_top(self):
+        controller = ListWindowController.alloc().initWithOwner_(RecordingOwner())
+        controller.list_controller.refresh_timer.invalidate()
+        self.assertFalse(controller.is_in_front())  # not shown
+        # A stand-in window: macOS would move a real titled window onto the user's screen to show it.
+        for is_visible, is_on_active_space, is_key_window, level, is_in_front in (
+                (True, True, False, NSNormalWindowLevel, False),
+                (True, True, True, NSNormalWindowLevel, True),
+                (True, True, False, NSFloatingWindowLevel, True),
+                (True, False, False, NSFloatingWindowLevel, False),  # always on top, but on another desktop
+                (False, True, True, NSFloatingWindowLevel, False)):
+            controller.window = unittest.mock.Mock(isVisible=lambda: is_visible, isOnActiveSpace=lambda: is_on_active_space,
+                                                   isKeyWindow=lambda: is_key_window, level=lambda: level)
+            self.assertEqual(controller.is_in_front(), is_in_front, (is_visible, is_on_active_space, is_key_window, level))
 
 
 class SettingsWindowSmokeTests(unittest.TestCase):

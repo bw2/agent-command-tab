@@ -75,6 +75,13 @@ class ListWindowController(WindowFrameSavingController):
         self.window.orderOut_(None)
 
     @objc.python_method
+    def is_in_front(self):
+        """Whether the window shows in front of other windows: it is on the desktop (Space) in
+        view, and it has the keyboard or is always on top (a minimized window isn't visible)."""
+        return (self.window.isVisible() and self.window.isOnActiveSpace()
+                and (self.window.isKeyWindow() or self.window.level() > NSNormalWindowLevel))
+
+    @objc.python_method
     def apply_settings(self, settings):
         """Keeps the window above other apps' windows while "Always on top" is checked."""
         self.window.setLevel_(NSFloatingWindowLevel if settings["list_window_is_always_on_top"] else NSNormalWindowLevel)

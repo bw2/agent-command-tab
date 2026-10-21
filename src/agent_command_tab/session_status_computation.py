@@ -12,6 +12,11 @@ STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done"})
 # During a turn, as iTerm2's status shows it: a permission prompt in between doesn't end the turn.
 STATES_OF_A_TURN_UNDER_WAY = frozenset({"working", "asking"})
 
+# A Claude Code session's own report in `claude agents --json`, for a tab for which iTerm2 has no
+# status at all, neither its `status` variable nor what its tab bar shows (for example without
+# iTerm2's Claude Code integration hooks; user request, 2026-10-21).
+CLAUDE_AGENTS_STATUSES_TO_STATES = {"idle": "idle", "busy": "working", "waiting": "asking"}
+
 ITERM2_STATUS_WORDS_TO_STATES = {
     "idle": "idle",
     "working": "working",

@@ -16,18 +16,20 @@ How snapshots are applied without breaking expansion, renames or drags:
 import time
 
 import objc
-from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSColor, NSDragOperationMove,
-                    NSDragOperationNone, NSEventModifierFlagControl, NSFont, NSFontAttributeName, NSFontWeightBold,
-                    NSFontWeightRegular, NSForegroundColorAttributeName, NSImageOnly, NSImageScaleNone, NSImageView, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
+from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundStyleNormal, NSBezierPath, NSColor,
+                    NSDragOperationMove, NSDragOperationNone, NSEventModifierFlagControl, NSFont, NSFontAttributeName,
+                    NSFontWeightBold, NSFontWeightRegular, NSForegroundColorAttributeName, NSImageOnly, NSImageScaleNone,
+                    NSImageView, NSInsetRect, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
                     NSMakeRect, NSMenu, NSMenuItem, NSMutableAttributedString, NSMutableParagraphStyle, NSOutlineView,
                     NSParagraphStyleAttributeName, NSPasteboardItem,
-                    NSTableCellView, NSTableColumn, NSTableColumnAutoresizingMask,
-                    NSTableViewLastColumnOnlyAutoresizingStyle, NSTableViewSelectionHighlightStyleNone,
+                    NSTableCellView, NSTableColumn, NSTableColumnAutoresizingMask, NSTableRowView,
+                    NSTableViewLastColumnOnlyAutoresizingStyle, NSTableViewSelectionHighlightStyleRegular,
                     NSTableViewStylePlain, NSTextAlignmentRight, NSTextField, NSWindowStyleMaskNonactivatingPanel,
                     NSZeroRect)
 from Foundation import NSMutableIndexSet, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
-from agent_command_tab.agent_adapters import list_slash_commands_of_the_built_in_agent_tools
+from agent_command_tab.agent_adapters import (list_agent_tool_names_whose_sessions_can_talk_to_each_other,
+                                              list_slash_commands_of_the_built_in_agent_tools)
 from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.list_sorting import sort_agent_session_entries, sort_window_entries
@@ -43,6 +45,7 @@ from agent_command_tab.user_interface.row_text_rendering import (RowTextParts, b
                                                                  build_dot_text, build_monitor_row_text_parts,
                                                                  build_tree_connector_text,
                                                                  build_window_row_text_parts)
+from agent_command_tab.user_interface.talk_to_each_other_alert import list_tab_titles_for_alert
 
 ROW_HEIGHT = 20
 PREVIEW_LINE_HEIGHT = 16  # the height of a 12-point line, so the tree's lines carry on beside the preview
@@ -91,6 +94,11 @@ LEFT_ALIGNED_COLUMN_NAMES = {"state"}
 COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usage", "cpu_usage", "context_tokens",
                               "agent_tool_icon", "state"]
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
+AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER = list_agent_tool_names_whose_sessions_can_talk_to_each_other()
+SELECTABLE_ROW_KINDS = ("window", "tab")  # not monitor rows or the "+" row (user request, 2026-10-21)
+SELECTION_OUTLINE_WIDTH = 1.5
+SELECTION_OUTLINE_INSET = 1
+SELECTION_OUTLINE_CORNER_RADIUS = 4
 TAB_DRAG_TYPE = "org.agent-command-tab.tab-id"
 WINDOW_DRAG_TYPE = "org.agent-command-tab.window-id"
 COLUMN_IDENTIFIER = "main"
@@ -132,6 +140,34 @@ class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
         finally:
             if is_plain_press:  # always, or the list would hold back every snapshot from then on
                 self.delegate().row_released()
+
+
+class RowViewWithSelectionOutline(NSTableRowView):
+    """A row that shows it is selected with an outline in the accent color rather than a filled
+    background, so its text keeps its colors (user request, 2026-10-21)."""
+
+    def drawSelectionInRect_(self, dirty_rect):
+        NSColor.controlAccentColor().setStroke()
+        outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSInsetRect(self.bounds(), SELECTION_OUTLINE_INSET, SELECTION_OUTLINE_INSET),
+            SELECTION_OUTLINE_CORNER_RADIUS, SELECTION_OUTLINE_CORNER_RADIUS)
+        outline.setLineWidth_(SELECTION_OUTLINE_WIDTH)
+        outline.stroke()
+
+    def interiorBackgroundStyle(self):
+        return NSBackgroundStyleNormal  # the row's labels keep the colors of an unselected row
+
+
+def describe_session_count(count):
+    """Returns "1 Session" or "3 Sessions", for menu item titles."""
+    return f"{count} Session{'' if count == 1 else 's'}"
+
+
+def list_agent_sessions_that_take_slash_command(agent_session_entries, command):
+    """Returns the agent sessions a slash command can be typed into now: their tool takes it, and
+    they wait at their prompt (R15.1)."""
+    return [entry for entry in agent_session_entries
+            if command in entry.slash_commands and entry.status in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT]
 
 
 def snapshot_shows_monitor_rows(snapshot):
@@ -335,6 +371,9 @@ class AgentSessionListController(NSObject):
             session right after it.
         find_launch_command(agent_tool_name): the tool's launch command from the settings, or "".
         start_peek(session_id), end_peek(): a tab row is held (shown for a moment), then released.
+        ask_for_note_asking_agent_sessions_to_talk_to_each_other(agent_session_entries,
+            left_out_agent_session_entries): shows the Talk to Each Other window; returns the
+            note the user may have edited, or None for Cancel.
     """
 
     def initWithOwner_(self, owner):
@@ -365,6 +404,9 @@ class AgentSessionListController(NSObject):
         self.peek_timer = None
         self.peek_in_progress = False
         self.item_under_first_click = None  # the row a single click hit, for a double-click's second click
+        self.item_under_press = None  # the row the button last went down on: a drag moves only that row
+        self.menu_target_item = None
+        self.menu_target_agent_session_entries = []  # the agent sessions of the selected rows, for their menu
         self.applying_expansion_state = False
         self.item_whose_expansion_is_changing = None
         self.item_being_renamed = None
@@ -408,7 +450,10 @@ class AgentSessionListController(NSObject):
         # their measured size and the dropdown can be fitted to them.
         outline_view.setStyle_(NSTableViewStylePlain)
         outline_view.setIntercellSpacing_((0, 0))
-        outline_view.setSelectionHighlightStyle_(NSTableViewSelectionHighlightStyleNone)
+        # A click selects a window or tab row, Command-click adds or removes one, Shift-click a
+        # range (user request, 2026-10-21); RowViewWithSelectionOutline draws the selection.
+        outline_view.setAllowsMultipleSelection_(True)
+        outline_view.setSelectionHighlightStyle_(NSTableViewSelectionHighlightStyleRegular)
         # The one column follows the outline view's width; its container calls sizeLastColumnToFit once it is embedded.
         outline_view.setColumnAutoresizingStyle_(NSTableViewLastColumnOnlyAutoresizingStyle)
         outline_view.setDataSource_(self)
@@ -523,9 +568,7 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def reload_and_restore_expansion(self):
         """Reloads the rows, then restores each item's expansion and the selection."""
-        selected_rows = self.outline_view.selectedRowIndexes()
-        selected_items = [self.outline_view.itemAtRow_(row) for row in range(self.outline_view.numberOfRows())
-                          if selected_rows.containsIndex_(row)]
+        selected_items = self.list_selected_items()
         self.outline_view.reloadData()
         self.apply_expansion_state(self.top_level_items)
         surviving_rows = [self.outline_view.rowForItem_(item) for item in selected_items
@@ -666,6 +709,34 @@ class AgentSessionListController(NSObject):
 
     def outlineView_heightOfRowByItem_(self, outline_view, item):
         return self.measure_row_height(item)
+
+    def outlineView_rowViewForItem_(self, outline_view, item):
+        return RowViewWithSelectionOutline.alloc().initWithFrame_(NSZeroRect)
+
+    # ----- selection (user request, 2026-10-21) -----
+
+    def outlineView_selectionIndexesForProposedSelection_(self, outline_view, proposed_selection_indexes):
+        """Keeps only window and tab rows of a proposed selection (a Shift-click range can span a monitor row)."""
+        return build_index_set(row for row in range(outline_view.numberOfRows())
+                               if proposed_selection_indexes.containsIndex_(row)
+                               and outline_view.itemAtRow_(row).kind in SELECTABLE_ROW_KINDS)
+
+    @objc.python_method
+    def list_selected_items(self):
+        """Returns the items of the selected rows, top to bottom."""
+        selected_rows = self.outline_view.selectedRowIndexes()
+        return [self.outline_view.itemAtRow_(row) for row in range(self.outline_view.numberOfRows())
+                if selected_rows.containsIndex_(row)]
+
+    @objc.python_method
+    def list_agent_session_entries_of_the_selected_rows(self):
+        """Returns the agent sessions of the selected tab rows and of every tab of the selected
+        window rows (also collapsed ones), once each, in list order."""
+        entry_by_session_id = {}
+        for item in self.list_selected_items():
+            for tab_item in (item.child_items if item.kind == "window" else [item]):
+                entry_by_session_id.setdefault(tab_item.entry.session_id, tab_item.entry)
+        return list(entry_by_session_id.values())
 
     @objc.python_method
     def row_can_open(self, item):
@@ -913,9 +984,10 @@ class AgentSessionListController(NSObject):
         current_event = NSApp.currentEvent()
         if current_event is not None and current_event.clickCount() > 1:
             return  # the second click of a double-click: rowDoubleClicked_ handles it
-        # A single click does nothing: a row opens and closes with its arrow (user request,
-        # 2026-10-19), and a double-click shows the window or tab (user request, milestone 2). The
-        # row is remembered for a double-click, should the rows move before its second click.
+        # A single click only selects the row, which the outline view does itself (user request,
+        # 2026-10-21): a row opens and closes with its arrow (user request, 2026-10-19), and a
+        # double-click shows the window or tab (user request, milestone 2). The row is remembered
+        # for a double-click, should the rows move before its second click.
         self.item_under_first_click = self.find_clicked_item()
 
     # Pressing and holding a tab row shows that tab until the button comes up (user request,
@@ -926,6 +998,7 @@ class AgentSessionListController(NSObject):
         self.cancel_peek_timer()
         self.row_press_in_progress = True
         item = self.outline_view.itemAtRow_(row) if row >= 0 else None
+        self.item_under_press = item
         if item is None or item.kind != "tab":
             return
         self.peek_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -1148,6 +1221,12 @@ class AgentSessionListController(NSObject):
         menu.setAutoenablesItems_(False)
         item = self.find_clicked_item()
         self.menu_target_item = item
+        selected_items = self.list_selected_items()
+        if item is not None and len(selected_items) >= 2 and any(selected_item is item for selected_item in selected_items):
+            # A right-click on one of several selected rows; a single row keeps its own menu, selected or not.
+            self.menu_target_agent_session_entries = self.list_agent_session_entries_of_the_selected_rows()
+            self.add_menu_items_for_the_selected_rows(menu, self.menu_target_agent_session_entries)
+            return
         if item is None or item.kind == "new_window":
             self.add_new_window_menu_items(menu)  # empty space, or the "+" row
             return
@@ -1239,9 +1318,74 @@ class AgentSessionListController(NSObject):
                                            ("Resume", sessions_to_resume, "menuResumeSessions:")):
             if not entries:
                 continue
-            title = (f"{verb} Session" if len(agent_session_entries) == 1
-                     else f"{verb} {len(entries)} Session{'' if len(entries) == 1 else 's'}")
+            title = f"{verb} Session" if len(agent_session_entries) == 1 else f"{verb} {describe_session_count(len(entries))}"
             self.add_menu_item(menu, title, action_name).setRepresentedObject_([entry.session_id for entry in entries])
+
+    @objc.python_method
+    def add_menu_items_for_the_selected_rows(self, menu, agent_session_entries):
+        """The menu of two or more selected rows, acting on their agent sessions (user request,
+        2026-10-21): Talk to Each Other…; /compact, /clear and Kill; Pause and Resume."""
+        talk_item = self.add_menu_item(menu, "Talk to Each Other…", "menuTalkToEachOther:")
+        if len(self.list_agent_sessions_that_can_talk_to_each_other(agent_session_entries)) < 2:
+            talk_item.setEnabled_(False)
+            talk_item.setToolTip_(f"Needs two or more {' or '.join(sorted(AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER))} sessions")
+        menu.addItem_(NSMenuItem.separatorItem())
+        for command in SLASH_COMMANDS_IN_THE_TAB_MENU:
+            agent_sessions_that_take_it = list_agent_sessions_that_take_slash_command(agent_session_entries, command)
+            command_item = self.add_menu_item(
+                menu, f"{command} {describe_session_count(len(agent_sessions_that_take_it))}" if agent_sessions_that_take_it else command,
+                "menuSendSlashCommandToSelectedSessions:")
+            command_item.setRepresentedObject_(command)
+            if not agent_sessions_that_take_it:
+                command_item.setEnabled_(False)
+                command_item.setToolTip_("Only while an agent waits at its prompt, and none of these does")
+            elif len(agent_sessions_that_take_it) < len(agent_session_entries):
+                command_item.setToolTip_(f"Typed only into the {len(agent_sessions_that_take_it)} of "
+                                         f"{len(agent_session_entries)} that wait at their prompt")
+        self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}", "menuKillSelectedSessions:")
+        menu.addItem_(NSMenuItem.separatorItem())
+        self.add_pause_and_resume_menu_items(menu, agent_session_entries)
+
+    @objc.python_method
+    def list_agent_sessions_that_can_talk_to_each_other(self, agent_session_entries):
+        """Returns the agent sessions of tools whose sessions other sessions can send messages to."""
+        return [entry for entry in agent_session_entries
+                if entry.agent_tool_name in AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER]
+
+    def menuTalkToEachOther_(self, sender):
+        agent_session_entries = self.list_agent_sessions_that_can_talk_to_each_other(self.menu_target_agent_session_entries)
+        left_out_agent_session_entries = [entry for entry in self.menu_target_agent_session_entries
+                                          if entry not in agent_session_entries]
+        note = self.owner.ask_for_note_asking_agent_sessions_to_talk_to_each_other(
+            agent_session_entries, left_out_agent_session_entries)
+        if note is None:
+            return
+        self.owner.submit_action_and_report_failure(
+            ActionRequest("ask_agent_sessions_to_talk_to_each_other",
+                          {"session_ids": [entry.session_id for entry in agent_session_entries]}, {"note": note}),
+            "Not every session got the message")
+
+    def menuSendSlashCommandToSelectedSessions_(self, sender):
+        command = sender.representedObject()
+        agent_session_entries = list_agent_sessions_that_take_slash_command(self.menu_target_agent_session_entries, command)
+        if command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION and not self.owner.ask_for_confirmation(
+                f"/clear starts a new conversation in {describe_session_count(len(agent_session_entries)).lower()} "
+                f"({list_tab_titles_for_alert(agent_session_entries)}); the current ones stay in their history."):
+            return
+        self.owner.submit_action_and_report_failure(
+            ActionRequest("send_slash_command_to_agent_sessions",
+                          {"session_ids": [entry.session_id for entry in agent_session_entries]}, {"command": command}),
+            f"{command} wasn't sent to every session")
+
+    def menuKillSelectedSessions_(self, sender):
+        agent_session_entries = self.menu_target_agent_session_entries
+        if self.owner.ask_for_confirmation(
+                f"Kill ends the agent processes of {describe_session_count(len(agent_session_entries)).lower()} "
+                f"({list_tab_titles_for_alert(agent_session_entries)}) at once, with whatever they were doing; "
+                "their tabs stay open with their shells."):
+            self.owner.submit_action_and_report_failure(
+                ActionRequest("end_agent_processes", {"session_ids": [entry.session_id for entry in agent_session_entries]}),
+                "Not every session was ended")
 
     def menuPauseSessions_(self, sender):
         self.pause_or_resume_agent_sessions(list(sender.representedObject()), pause=True)
@@ -1363,7 +1507,9 @@ class AgentSessionListController(NSObject):
     # ----- drag and drop (PLAN.md section 9) -----
 
     def outlineView_pasteboardWriterForItem_(self, outline_view, item):
-        if item.kind not in ("tab", "window"):
+        # Dragging one of several selected rows would drag them all; only the row under the
+        # pointer moves (None leaves a row out of the drag).
+        if item.kind not in ("tab", "window") or item is not self.item_under_press:
             return None
         pasteboard_item = NSPasteboardItem.alloc().init()
         pasteboard_item.setString_forType_(item.item_id, TAB_DRAG_TYPE if item.kind == "tab" else WINDOW_DRAG_TYPE)

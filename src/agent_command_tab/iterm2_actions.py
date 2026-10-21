@@ -1,4 +1,5 @@
-"""Actions that change iTerm2: focus, rename, tab moves, new agent sessions and typed slash commands (PLAN.md sections 8 and 9).
+"""Actions that change iTerm2: focus, rename, tab moves, new agent sessions, typed slash commands
+and pasted messages (PLAN.md sections 8 and 9).
 
 Each function takes the connection's iterm2.App and returns an ActionResult. After any action
 the core re-reads iTerm2 and publishes a new snapshot; the views never guess the result.
@@ -17,6 +18,11 @@ from agent_command_tab.tab_order_computation import compute_full_tab_order_after
 
 SECONDS_FOR_FULL_SCREEN_ANIMATION = 1.0
 SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED = 0.5  # the box empties within a redraw of the Enter
+# A bracketed paste: the agent takes the text between these as one paste, newlines included,
+# rather than as typed keys (where a newline would be Enter).
+BRACKETED_PASTE_START = "\x1b[200~"
+BRACKETED_PASTE_END = "\x1b[201~"
+SECONDS_BETWEEN_A_PASTE_AND_ITS_ENTER = 0.5  # the pause of the live check (2026-10-21)
 
 
 def escape_text_for_iterm2_interpolated_string(text):
@@ -259,4 +265,40 @@ async def type_slash_command(app, session_id, command, adapter):
     # A box that is off screen (the tool redrawing) can't be checked; the command was sent.
     if typed_text is not None and command in typed_text:
         return ActionResult(False, f"{command} may not have been submitted: it is still in the tab's input box")
+    return ActionResult(True)
+
+
+async def paste_message_into_empty_input_box(app, session_id, message, adapter):
+    """Pastes a message of one or more lines into the agent's empty input box as one bracketed
+    paste, then presses Enter ("Talk to Each Other"; checked live with Claude Code 2.1.306 on
+    2026-10-21: a three-line message was submitted as one prompt). Reports a failure, without
+    retrying, when the box isn't empty a moment after Enter.
+
+    Args:
+        app: The iterm2.App.
+        session_id: The tab's first session.
+        message: The text to submit.
+        adapter: The session's agent tool adapter (its input line marker and input area end).
+
+    Returns:
+        None when nothing was pasted because the box holds unsent text or can't be found on
+        screen (the caller may try again later), otherwise an ActionResult.
+    """
+    session = app.get_session_by_id(session_id)
+    if session is None:
+        return ActionResult(False, "that tab no longer exists")
+    if not input_area_is_empty(await read_screen_lines_with_faint_flags(session), adapter.input_line_marker,
+                               adapter.input_area_end_pattern):
+        return None
+    await session.async_send_text(BRACKETED_PASTE_START + message + BRACKETED_PASTE_END, suppress_broadcast=True)
+    await asyncio.sleep(SECONDS_BETWEEN_A_PASTE_AND_ITS_ENTER)
+    await session.async_send_text("\r", suppress_broadcast=True)
+    await asyncio.sleep(SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED)
+    try:
+        typed_text = read_typed_input_area_text(await read_screen_lines_with_faint_flags(session), adapter.input_line_marker,
+                                                adapter.input_area_end_pattern)
+    except iterm2.RPCException:
+        return ActionResult(True)  # the tab closed meanwhile
+    if typed_text:  # None: the box is off screen (the tool redrawing), so it can't be checked
+        return ActionResult(False, "the message may not have been submitted: the tab's input box isn't empty after Enter")
     return ActionResult(True)

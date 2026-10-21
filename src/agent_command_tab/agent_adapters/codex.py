@@ -6,8 +6,8 @@ import re
 import shlex
 import time
 
-from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, AgentToolAdapter,
-                                                   split_command_line_into_program_names)
+from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, MESSAGES_THROUGH_CODEX_QUEUE,
+                                                   AgentToolAdapter, split_command_line_into_program_names)
 from agent_command_tab.agent_process_tree import read_process_current_folder, read_process_info
 from agent_command_tab.context_window_usage import (find_codex_conversation_files,
                                                     read_context_tokens_from_codex_conversation_file,
@@ -35,6 +35,8 @@ class CodexAdapter(AgentToolAdapter):
     input_line_marker = "›"
     input_area_end_pattern = re.compile(r"^  \S[^·]* · [~/…]")
     seconds_before_enter = 0.3  # Codex takes keys within 8 ms of each other as a paste, and Enter for 120 ms after it as a newline
+    # `codex queue` reached a busy Codex 0.155.1 session in 0.2 s, which ran the message right after its turn (2026-10-21).
+    how_other_agent_sessions_send_it_messages = MESSAGES_THROUGH_CODEX_QUEUE
 
     def matches_command_line(self, command_line):
         """Returns whether the command line runs `codex`, directly or as `node <path>/codex`."""

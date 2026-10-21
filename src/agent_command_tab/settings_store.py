@@ -134,14 +134,28 @@ def replace_agent_tool_field(agent_tools, tool_index, field_name, value):
             for index, agent_tool in enumerate(agent_tools)]
 
 
-def build_core_settings(settings):
+def find_codex_command_path(settings, find_command_path=shutil.which):
+    """Returns the codex program that "Talk to Each Other" runs `codex queue` with: the first word
+    of the Codex tool's launch command (resolved to a full path at first run), looked up on PATH
+    when it is a bare name, or None when it isn't found. A launch command that starts with
+    another program (a wrapper) gives the codex found on PATH."""
+    launch_command = next((agent_tool["launch_command"] for agent_tool in settings["agent_tools"]
+                           if agent_tool["agent_tool_name"] == "Codex"), "")
+    first_word = (launch_command.split() or [""])[0]
+    if os.path.basename(first_word) != "codex":
+        first_word = "codex"
+    return first_word if os.path.isabs(first_word) else find_command_path(first_word)
+
+
+def build_core_settings(settings, find_command_path=shutil.which):
     """Returns the part of the settings that the core uses: the stuck time limit, the agent
-    tools left out of the list, and whether memory and CPU use are read (only while one of
-    their columns is shown)."""
+    tools left out of the list, whether memory and CPU use are read (only while one of
+    their columns is shown), and the codex program for `codex queue` (find_codex_command_path)."""
     return {
         "stuck_threshold_seconds": settings["stuck_minutes"] * 60,
         "left_out_agent_tool_names": list_left_out_agent_tool_names(settings),
         "resource_usage_is_read": bool({"memory_usage", "cpu_usage"} & set(settings["shown_columns"])),
+        "codex_command_path": find_codex_command_path(settings, find_command_path),
     }
 
 

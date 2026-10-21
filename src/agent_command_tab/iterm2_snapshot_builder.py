@@ -19,7 +19,9 @@ import os
 from agent_command_tab.agent_adapters import find_agent_tool_adapter_for_tab
 from agent_command_tab.monitor_assignment import assign_windows_to_monitors_by_largest_overlap
 from agent_command_tab.session_preview_computation import choose_preview_text
-from agent_command_tab.session_status_computation import compute_session_status_from_sources
+from agent_command_tab.session_status_computation import (CLAUDE_AGENTS_STATUSES_TO_STATES,
+                                                          compute_session_status_from_sources,
+                                                          map_iterm2_status_value_to_state)
 from agent_command_tab.snapshot_data_classes import (AgentSessionEntry, ComputerSnapshot, MonitorEntry,
                                                      WindowEntry)
 
@@ -163,6 +165,14 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
             (previous_displayed_state.state, previous_displayed_state.since)
             if previous_displayed_state and previous_displayed_state.state != "paused" else ("unknown", now))
         reason = "another program in front of the agent"
+    elif (map_iterm2_status_value_to_state(first_session.get("status")) is None
+          and claude_agent_record.get("status") in CLAUDE_AGENTS_STATUSES_TO_STATES):
+        # iTerm2 has no status for the tab, neither its variable nor its tab bar's (the core reads
+        # that when the variable is empty): Claude Code's own report, up to a minute old. It can't
+        # tell "done" from "idle", and the screen checks behind "stuck" and an answered "asking" don't run.
+        state = CLAUDE_AGENTS_STATUSES_TO_STATES[claude_agent_record["status"]]
+        reason = "from claude agents --json: iTerm2 reports no status for this tab"
+        status_since = compute_displayed_state_since(state, now, previous_displayed_state, now)
     else:
         # A finished turn stops waiting to be seen when the tab is seen, or when /clear cleared it.
         times_the_finished_turn_was_dealt_with = [time_ for time_ in (session_tracking.get("last_time_tab_was_seen"),
