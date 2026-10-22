@@ -287,6 +287,9 @@ class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
         self.assertEqual(self.typed, [("s3", "/compact")])
         with unittest.mock.patch.object(iterm2_actions, "read_screen_lines_with_faint_flags", read_screen_lines):
             self.assertTrue(asyncio.run(core.agent_whose_state_is_unknown_shows_no_turn_on_screen("s3", core.agent_sessions["s3"])))
+            screen_lines.insert(0, ("•\x00Working\x00(3s\x00•\x00esc\x00to\x00interrupt)", []))  # iTerm2's empty cells are NULs
+            self.assertFalse(asyncio.run(core.agent_whose_state_is_unknown_shows_no_turn_on_screen("s3", core.agent_sessions["s3"])))
+            screen_lines.pop(0)
             core.displayed_state_by_session_id["s3"] = DisplayedState("working", 0, 0)  # a state wins over the screen
             self.assertFalse(asyncio.run(core.agent_whose_state_is_unknown_shows_no_turn_on_screen("s3", core.agent_sessions["s3"])))
 
@@ -414,7 +417,8 @@ class TypeSlashCommandTests(unittest.TestCase):
     def test_a_command_codex_refused_during_a_turn_is_left_for_a_later_try(self):
         # Codex 0.155.1 hides its turn timer while answer text streams, so the turn looked over on screen.
         empty_codex_input_box = [("› ", [False, False]), ("  gpt-5 low · /p", [False] * 16)]
-        refused = [("■ '/compact' is disabled while a task is in progress.", [])] + empty_codex_input_box
+        # iTerm2's empty cells are NULs
+        refused = [("■\x00'/compact'\x00is\x00disabled\x00while\x00a\x00task\x00is\x00in\x00progress.", [])] + empty_codex_input_box
         self.assertEqual(self.type_compact([("menu covering the box", [])], agent_is_in_the_middle_of_a_turn=False,
                                            adapter=CodexAdapter(), empty_input_box=empty_codex_input_box,
                                            screen_after_enter=refused),

@@ -509,7 +509,8 @@ class DashboardCore:
         session = self.app.get_session_by_id(session_id)
         if working_screen_pattern is None or session is None or (displayed_state is not None and displayed_state.state != "unknown"):
             return False
-        return not any(working_screen_pattern.search(text) for text, _ in await iterm2_actions.read_screen_lines_with_faint_flags(session))
+        return count_lines_matching([text for text, _ in await iterm2_actions.read_screen_lines_with_faint_flags(session)],
+                                    working_screen_pattern) == 0
 
     def claude_code_reports_the_session_busy(self, agent_session):
         """Whether Claude Code itself reports the agent session as anything but idle right now

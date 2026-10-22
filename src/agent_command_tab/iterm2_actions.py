@@ -13,7 +13,7 @@ import iterm2
 from agent_command_tab.dashboard_core_api import ActionResult
 from agent_command_tab.monitor_assignment import (assign_windows_to_monitors_by_largest_overlap,
                                                   compute_window_frame_on_another_monitor)
-from agent_command_tab.screen_readings import input_area_is_empty, read_typed_input_area_text
+from agent_command_tab.screen_readings import count_lines_matching, input_area_is_empty, read_typed_input_area_text
 from agent_command_tab.tab_order_computation import compute_full_tab_order_after_move
 
 SECONDS_FOR_FULL_SCREEN_ANIMATION = 1.0
@@ -233,15 +233,6 @@ async def read_screen_lines_with_faint_flags(session):
     return screen_lines_with_faint_flags
 
 
-def count_slash_command_refusals(screen_lines_with_faint_flags, adapter):
-    """Returns how many visible lines say the tool refused a slash command typed during a turn
-    (its slash_command_refused_during_a_turn_pattern; 0 for a tool that prints no such line)."""
-    refusal_pattern = adapter.slash_command_refused_during_a_turn_pattern
-    if refusal_pattern is None:
-        return 0
-    return sum(1 for text, _ in screen_lines_with_faint_flags if refusal_pattern.search(text))
-
-
 async def type_slash_command(app, session_id, command, adapter, agent_is_in_the_middle_of_a_turn=False):
     """Types a slash command into the agent's empty input box, then Enter after the adapter's
     pause (R15.1; PLAN.md section 8, "Sending /compact and /clear"). Types nothing when the box
@@ -287,8 +278,9 @@ async def type_slash_command(app, session_id, command, adapter, agent_is_in_the_
         screen_lines_after_enter = await read_screen_lines_with_faint_flags(session)
     except iterm2.RPCException:
         return ActionResult(True)  # the tab closed meanwhile
-    if count_slash_command_refusals(screen_lines_after_enter, adapter) > count_slash_command_refusals(
-            screen_lines_before_typing, adapter):
+    refusal_pattern = adapter.slash_command_refused_during_a_turn_pattern
+    if count_lines_matching([text for text, _ in screen_lines_after_enter], refusal_pattern) > count_lines_matching(
+            [text for text, _ in screen_lines_before_typing], refusal_pattern):
         return None
     typed_text = read_typed_input_area_text(screen_lines_after_enter, adapter.input_line_marker, adapter.input_area_end_pattern)
     # A box that is off screen (the tool redrawing) can't be checked; the command was sent.
