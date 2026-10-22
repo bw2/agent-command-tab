@@ -64,6 +64,7 @@ DEFAULT_SETTINGS = {
     "stuck_minutes": 10,
     "list_sort_order": "manual",
     "shown_columns": ["context_tokens", "state", "state_duration"],
+    "idle_tabs_are_hidden": False,  # the Hide Idle / Show Idle button at the top of the list (user request, 2026-10-21)
 }
 
 
@@ -150,11 +151,12 @@ def find_codex_command_path(settings, find_command_path=shutil.which):
 def build_core_settings(settings, find_command_path=shutil.which):
     """Returns the part of the settings that the core uses: the stuck time limit, the agent
     tools left out of the list, whether memory and CPU use are read (only while one of
-    their columns is shown), and the codex program for `codex queue` (find_codex_command_path)."""
+    their columns is shown or the list is sorted by one of them), and the codex program for
+    `codex queue` (find_codex_command_path)."""
     return {
         "stuck_threshold_seconds": settings["stuck_minutes"] * 60,
         "left_out_agent_tool_names": list_left_out_agent_tool_names(settings),
-        "resource_usage_is_read": bool({"memory_usage", "cpu_usage"} & set(settings["shown_columns"])),
+        "resource_usage_is_read": bool({"memory_usage", "cpu_usage"} & {*settings["shown_columns"], settings["list_sort_order"]}),
         "codex_command_path": find_codex_command_path(settings, find_command_path),
     }
 

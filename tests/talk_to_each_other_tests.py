@@ -218,6 +218,86 @@ class TalkToEachOtherTests(unittest.TestCase):
             False, "\"reviews\": the agent is working; \"codex tests\": it failed: RuntimeError('tab gone')"))
 
 
+class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
+    """/compact and /clear from the menu of several selected rows reach sessions in the middle of a turn too."""
+
+    def setUp(self):
+        self.typed = []  # (session ID, command), in order
+        self.input_box_is_ready = True
+
+        async def type_command(app, session_id, command, adapter, agent_is_in_the_middle_of_a_turn=False):
+            if not self.input_box_is_ready:
+                return None
+            self.typed.append((session_id, command))
+            return ActionResult(True)
+        for patcher in (unittest.mock.patch.object(iterm2_actions, "type_slash_command", type_command),
+                        unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+                                                   lambda config_folder, process_id: None),
+                        unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.01)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def send(self, core, session_ids, command):
+        return core.handle_send_slash_command_to_agent_sessions(
+            ActionRequest("send_slash_command_to_agent_sessions", {"session_ids": session_ids}, {"command": command}))
+
+    def test_a_working_claude_code_session_gets_it_at_once_and_a_working_codex_session_once_it_is_idle(self):
+        core = make_core()
+        core.find_current_conversation_file = unittest.mock.AsyncMock(return_value="/old-conversation.jsonl")
+        core.forget_the_cleared_conversation = unittest.mock.Mock()
+
+        async def run():
+            # s1 is idle, s2 (Claude Code) and s3 (Codex) are working; s3 reaches its prompt a moment later.
+            asyncio.get_running_loop().call_later(
+                0.05, lambda: core.displayed_state_by_session_id.__setitem__("s3", DisplayedState("idle", 0, 0)))
+            return await self.send(core, ["s1", "s2", "s3"], "/clear")
+        self.assertEqual(asyncio.run(run()), ActionResult(True))
+        self.assertEqual(sorted(self.typed[:2]), [("s1", "/clear"), ("s2", "/clear")])
+        self.assertEqual(self.typed[2], ("s3", "/clear"))  # Codex refuses commands during a task
+        # Only a /clear typed at the prompt ends the conversation at once; s2's waits in Claude Code's queue.
+        self.assertEqual([call.args[0] for call in core.forget_the_cleared_conversation.call_args_list], ["s1", "s3"])
+
+    def test_it_waits_while_the_input_box_holds_unsent_text_and_gives_up_in_the_end(self):
+        core = make_core()
+        self.input_box_is_ready = False
+
+        async def run():
+            asyncio.get_running_loop().call_later(0.05, lambda: setattr(self, "input_box_is_ready", True))
+            return await self.send(core, ["s2"], "/compact")
+        self.assertEqual(asyncio.run(run()), ActionResult(True))
+        self.assertEqual(self.typed, [("s2", "/compact")])
+        self.input_box_is_ready = False
+        with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.05):
+            action_result = asyncio.run(self.send(core, ["s2"], "/compact"))
+        self.assertIn("\"reviews\": it didn't wait at its prompt with an empty input box", action_result.message)
+
+    def test_a_codex_row_without_a_state_gets_it_once_its_screen_shows_no_turn(self):
+        core = make_core()
+        core.displayed_state_by_session_id["s3"] = DisplayedState("unknown", 0, 0)  # Codex 0.155.1 reports no state
+        screen_lines = [("• Working (12s • esc to interrupt)", []), ("› ", [])]
+
+        async def read_screen_lines(session):
+            return screen_lines
+
+        async def run():
+            asyncio.get_running_loop().call_later(0.05, lambda: screen_lines.pop(0))  # the turn ends
+            return await self.send(core, ["s3"], "/compact")
+        with unittest.mock.patch.object(iterm2_actions, "read_screen_lines_with_faint_flags", read_screen_lines):
+            self.assertEqual(asyncio.run(run()), ActionResult(True))
+        self.assertEqual(self.typed, [("s3", "/compact")])
+        with unittest.mock.patch.object(iterm2_actions, "read_screen_lines_with_faint_flags", read_screen_lines):
+            self.assertTrue(asyncio.run(core.agent_whose_state_is_unknown_shows_no_turn_on_screen("s3", core.agent_sessions["s3"])))
+            core.displayed_state_by_session_id["s3"] = DisplayedState("working", 0, 0)  # a state wins over the screen
+            self.assertFalse(asyncio.run(core.agent_whose_state_is_unknown_shows_no_turn_on_screen("s3", core.agent_sessions["s3"])))
+
+    def test_a_suspended_agent_fails_at_once_and_the_others_still_get_the_command(self):
+        core = make_core()
+        core.agent_sessions["s1"]["is_in_background"] = True
+        action_result = asyncio.run(self.send(core, ["s1", "s2"], "/compact"))
+        self.assertEqual(action_result, ActionResult(False, "\"planning\": the agent is suspended or another program is in front of it"))
+        self.assertEqual(self.typed, [("s2", "/compact")])
+
+
 class ReadClaudeCodeSessionStatusTests(unittest.TestCase):
     def test_the_status_comes_from_the_session_file_of_its_config_folder(self):
         with tempfile.TemporaryDirectory() as config_folder:
@@ -290,6 +370,55 @@ class PasteMessageIntoEmptyInputBoxTests(unittest.TestCase):
         action_result, typed_texts = self.paste([EMPTY_CLAUDE_CODE_INPUT_BOX, still_there])
         self.assertFalse(action_result.succeeded)
         self.assertEqual(len(typed_texts), 2)
+
+
+class TypeSlashCommandTests(unittest.TestCase):
+    """iterm2_actions.type_slash_command presses Enter into an agent in the middle of a turn only
+    while the command is still in the input box (Claude Code may open a permission prompt
+    meanwhile), and leaves a command Codex refused during a turn for a later try."""
+
+    def type_compact(self, screen_after_typing, agent_is_in_the_middle_of_a_turn=True, adapter=None,
+                     empty_input_box=EMPTY_CLAUDE_CODE_INPUT_BOX, screen_after_enter=None):
+        """Types /compact into a stand-in tab whose empty box (empty_input_box) shows
+        screen_after_typing once the command is typed and screen_after_enter (by default the empty
+        box again) after Enter; returns (ActionResult or None, sent texts)."""
+        sent_texts = []
+
+        class StandInSession:
+            async def async_send_text(self, text, suppress_broadcast=False):
+                sent_texts.append(text)
+
+        async def read_screen_lines(session):
+            return [empty_input_box, screen_after_typing, screen_after_enter or empty_input_box][len(sent_texts)]
+        app = unittest.mock.Mock(get_session_by_id=lambda session_id: StandInSession())
+        with unittest.mock.patch.object(iterm2_actions, "read_screen_lines_with_faint_flags", read_screen_lines), \
+                unittest.mock.patch.object(iterm2_actions, "SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED", 0):
+            return asyncio.run(iterm2_actions.type_slash_command(
+                app, "s1", "/compact", adapter or ClaudeCodeAdapter(), agent_is_in_the_middle_of_a_turn)), sent_texts
+
+    def test_enter_follows_the_command_while_it_is_in_the_box(self):
+        self.assertEqual(self.type_compact([("❯ /compact", [False] * 10), ("─" * 20, [False] * 20)]),
+                         (ActionResult(True), ["/compact", "\r"]))
+
+    def test_no_enter_when_a_permission_prompt_opened_meanwhile(self):
+        permission_prompt = [(" Do you want to proceed?", []), (" ❯ 1. Yes", []), ("   2. No", [])]
+        self.assertEqual(self.type_compact(permission_prompt),
+                         (ActionResult(False, "/compact wasn't submitted: the tab's input box changed before Enter"),
+                          ["/compact"]))
+
+    def test_an_agent_at_its_prompt_gets_enter_without_the_check(self):
+        # Codex's input box couldn't be found with its slash-command menu open (live check, 2026-10-22).
+        self.assertEqual(self.type_compact([("menu covering the box", [])], agent_is_in_the_middle_of_a_turn=False),
+                         (ActionResult(True), ["/compact", "\r"]))
+
+    def test_a_command_codex_refused_during_a_turn_is_left_for_a_later_try(self):
+        # Codex 0.155.1 hides its turn timer while answer text streams, so the turn looked over on screen.
+        empty_codex_input_box = [("› ", [False, False]), ("  gpt-5 low · /p", [False] * 16)]
+        refused = [("■ '/compact' is disabled while a task is in progress.", [])] + empty_codex_input_box
+        self.assertEqual(self.type_compact([("menu covering the box", [])], agent_is_in_the_middle_of_a_turn=False,
+                                           adapter=CodexAdapter(), empty_input_box=empty_codex_input_box,
+                                           screen_after_enter=refused),
+                         (None, ["/compact", "\r"]))
 
 
 if __name__ == "__main__":

@@ -299,7 +299,7 @@ class DashboardCore:
         self.window_room_lock = asyncio.Lock()
         self.stuck_threshold_seconds = DEFAULT_STUCK_THRESHOLD_SECONDS
         self.left_out_agent_tool_names = frozenset()  # the settings' Harnesses section
-        self.resource_usage_is_read = False  # while the Memory or CPU column is shown
+        self.resource_usage_is_read = False  # while the Memory or CPU column is shown, or the list is sorted by one
         self.claude_agents_by_process_id = {}
         self.key_terminal_window_id = None  # None while no terminal window (for example iTerm2's Settings) has keyboard focus
         self.last_seen_session_id = None
@@ -398,19 +398,74 @@ class DashboardCore:
             return ActionResult(False, f"the agent is {state}; commands are typed only while it waits at its prompt")
         if self.claude_code_reports_the_session_busy(agent_session):
             return ActionResult(False, "Claude Code reports the session busy; commands are typed only while it waits at its prompt")
-        command = action_request.arguments["command"]
+        return await self.type_slash_command_into_agent_session(
+            session_id, agent_session, action_request.arguments["command"], waits_at_its_prompt=True) or ActionResult(
+            False, "the tab has unsent text in its input box, the input box isn't on screen, or the agent refused it during a turn")
+
+    async def type_slash_command_into_agent_session(self, session_id, agent_session, command, waits_at_its_prompt):
+        """Types the command (iterm2_actions.type_slash_command: None when nothing was typed, the
+        input box holding unsent text or being off screen). A /clear typed at the prompt forgets
+        the cleared conversation at once; one the agent queues during its turn runs only when the
+        turn ends, so its new conversation is found as after a /clear typed by hand (the
+        `claude agents` refresh)."""
+        clears_at_once = command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION and waits_at_its_prompt
         # Known before the conversation ends, since a lookup after /clear can't tell old from new.
         path_of_conversation_to_clear = await self.find_current_conversation_file(session_id, agent_session) \
-            if command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION else None
-        action_result = await iterm2_actions.type_slash_command(self.app, session_id, command, agent_session["adapter"])
-        if action_result.succeeded and command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION:
+            if clears_at_once else None
+        action_result = await iterm2_actions.type_slash_command(
+            self.app, session_id, command, agent_session["adapter"], agent_is_in_the_middle_of_a_turn=not waits_at_its_prompt)
+        if action_result is not None and action_result.succeeded and clears_at_once:
             self.forget_the_cleared_conversation(session_id, agent_session, path_of_conversation_to_clear)
         return action_result
 
     async def handle_send_slash_command_to_agent_sessions(self, action_request):
-        """send_slash_command for every session of target {"session_ids": [...]} (the menu of
-        several selected rows; user request, 2026-10-21)."""
-        return await self.run_for_each_agent_session(action_request, self.handle_send_slash_command)
+        """Types /compact or /clear (arguments {"command": ...}) into every session of target
+        {"session_ids": [...]}, those in the middle of a turn too (the menu of several selected
+        rows; user requests, 2026-10-21): type_slash_command_once_the_agent_can_take_it for each."""
+        return await self.run_for_each_agent_session(action_request, self.type_slash_command_once_the_agent_can_take_it)
+
+    async def type_slash_command_once_the_agent_can_take_it(self, action_request):
+        """Types /compact or /clear into one agent session (target {"session_id": ...}) at once when
+        it waits at its prompt (for a row without a state, when its screen shows no turn under
+        way), or when its tool queues commands typed during a turn (Claude Code runs them when the
+        turn ends). Otherwise (Codex refuses them during a task), and while the
+        input box holds unsent text or is off screen (a permission prompt), checks again every
+        SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT, as a held Talk to Each Other message
+        does. Gives up after SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT, or once the tab's
+        agent process changes; at once for an agent that is suspended or has another program in
+        front of it."""
+        session_id = action_request.target["session_id"]
+        command = action_request.arguments["command"]
+        agent_session = self.agent_sessions.get(session_id)
+        if agent_session is None or not agent_session["process_id"]:
+            return ActionResult(False, "that tab no longer runs an agent")
+        if agent_session["is_in_background"]:
+            return ActionResult(False, "the agent is suspended or another program is in front of it")
+        agent_process_id = agent_session["process_id"]
+        deadline = time.time() + SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT
+        typing_lock = self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock())
+        while True:
+            # Checked holding the lock: a held message or command may have just been typed, starting a turn.
+            async with typing_lock:
+                agent_session = self.agent_sessions.get(session_id)
+                if agent_session is None or agent_session["process_id"] != agent_process_id:
+                    return ActionResult(False, f"its agent ended before {command} could be typed")
+                try:
+                    waits_at_its_prompt = (self.agent_waits_at_its_prompt(session_id, agent_session)
+                                           or await self.agent_whose_state_is_unknown_shows_no_turn_on_screen(session_id, agent_session))
+                    if not agent_session["is_in_background"] and (
+                            waits_at_its_prompt or agent_session["adapter"].queues_slash_commands_typed_during_a_turn):
+                        action_result = await self.type_slash_command_into_agent_session(
+                            session_id, agent_session, command, waits_at_its_prompt)
+                        if action_result is not None:
+                            return action_result
+                except iterm2.RPCException:
+                    return ActionResult(False, "the tab closed meanwhile")
+            if time.time() >= deadline:
+                return ActionResult(False, "it didn't wait at its prompt with an empty input box within "
+                                           f"{SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT // 60} minutes, "
+                                           f"so {command} wasn't typed")
+            await asyncio.sleep(SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT)
 
     async def run_for_each_agent_session(self, action_request, handle_one):
         """Runs a one-session action (handle_one, taking target {"session_id": ...}) for every
@@ -436,6 +491,25 @@ class DashboardCore:
         return next((agent_session_entry.tab_title
                      for _, _, agent_session_entry in iterate_agent_session_entries(self.last_published_snapshot_without_time)
                      if agent_session_entry.session_id == session_id), "")
+
+    def agent_waits_at_its_prompt(self, session_id, agent_session):
+        """Whether the agent session waits at its prompt: its row shows idle or done, and Claude
+        Code doesn't report it busy."""
+        displayed_state = self.displayed_state_by_session_id.get(session_id)
+        return (displayed_state is not None and displayed_state.state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
+                and not self.claude_code_reports_the_session_busy(agent_session))
+
+    async def agent_whose_state_is_unknown_shows_no_turn_on_screen(self, session_id, agent_session):
+        """Whether an agent session whose row has no state (Codex 0.155.1 reports none to iTerm2)
+        shows no turn under way on screen (its adapter's working_screen_pattern, such as Codex's
+        "(5s • esc to interrupt)"), so it waits at its prompt. False when the row has a state, or
+        the adapter no such pattern."""
+        displayed_state = self.displayed_state_by_session_id.get(session_id)
+        working_screen_pattern = agent_session["adapter"].working_screen_pattern
+        session = self.app.get_session_by_id(session_id)
+        if working_screen_pattern is None or session is None or (displayed_state is not None and displayed_state.state != "unknown"):
+            return False
+        return not any(working_screen_pattern.search(text) for text, _ in await iterm2_actions.read_screen_lines_with_faint_flags(session))
 
     def claude_code_reports_the_session_busy(self, agent_session):
         """Whether Claude Code itself reports the agent session as anything but idle right now
@@ -665,10 +739,7 @@ class DashboardCore:
                 agent_session = self.agent_sessions.get(session_id)
                 if agent_session is None or agent_session["process_id"] != agent_process_id:
                     return ActionResult(False, "its agent ended before the message could be pasted")
-                displayed_state = self.displayed_state_by_session_id.get(session_id)
-                if (not agent_session["is_in_background"] and displayed_state is not None
-                        and displayed_state.state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
-                        and not self.claude_code_reports_the_session_busy(agent_session)):
+                if not agent_session["is_in_background"] and self.agent_waits_at_its_prompt(session_id, agent_session):
                     try:
                         action_result = await iterm2_actions.paste_message_into_empty_input_box(
                             self.app, session_id, message, agent_session["adapter"])

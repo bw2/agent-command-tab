@@ -52,13 +52,16 @@ class MergeSettingsTests(unittest.TestCase):
         self.assertEqual(list_included_agent_tool_names(settings), ["Claude Code"])
         self.assertEqual(list_left_out_agent_tool_names(settings), ["Codex"])
 
-    def test_core_settings_read_memory_and_cpu_only_while_their_columns_are_shown(self):
+    def test_core_settings_read_memory_and_cpu_only_while_their_columns_are_shown_or_sort_the_list(self):
         settings = merge_settings_with_defaults({"stuck_minutes": 4})
         self.assertEqual(build_core_settings(settings, {"codex": "/opt/homebrew/bin/codex"}.get),
                          {"stuck_threshold_seconds": 240, "left_out_agent_tool_names": [], "resource_usage_is_read": False,
                           "codex_command_path": "/opt/homebrew/bin/codex"})
         settings["shown_columns"] = ["state", "cpu_usage"]
         self.assertTrue(build_core_settings(settings)["resource_usage_is_read"])
+        for list_sort_order in ("memory_usage", "cpu_usage"):  # sorted by a column that isn't shown
+            settings = merge_settings_with_defaults({"list_sort_order": list_sort_order})
+            self.assertTrue(build_core_settings(settings)["resource_usage_is_read"], list_sort_order)
 
     def test_codex_queue_runs_the_codex_of_the_codex_launch_command(self):
         def codex_command_path_for(launch_command):

@@ -37,6 +37,16 @@ class SortAgentSessionEntriesTests(unittest.TestCase):
                    ENTRIES[3]._replace(started_at=2000.0)]
         self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "created_time")], ["3", "4", "1", "2"])
 
+    def test_memory_usage_puts_the_largest_first_and_unknown_usage_last(self):
+        entries = [ENTRIES[0]._replace(memory_bytes=200 * 1024 ** 2), ENTRIES[1], ENTRIES[2]._replace(memory_bytes=900 * 1024 ** 2),
+                   ENTRIES[3]._replace(memory_bytes=0)]
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "memory_usage")], ["3", "1", "4", "2"])
+
+    def test_cpu_usage_puts_the_busiest_first_and_unknown_usage_last(self):
+        entries = [ENTRIES[0]._replace(cpu_percent=0), ENTRIES[1]._replace(cpu_percent=150), ENTRIES[2],
+                   ENTRIES[3]._replace(cpu_percent=16)]
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "cpu_usage")], ["2", "4", "1", "3"])
+
     def test_sorting_leaves_the_manual_order_alone(self):
         sort_agent_session_entries(ENTRIES, "alphabet")
         self.assertEqual([entry.tab_id for entry in ENTRIES], ["1", "2", "3", "4"])
@@ -52,6 +62,21 @@ class SortWindowEntriesTests(unittest.TestCase):
 
     def test_activity_orders_windows_by_their_most_active_tab(self):
         self.assertEqual([window.window_id for window in sort_window_entries(self.windows, "activity")], ["w3", "w2", "w1", "w4"])
+
+    def test_memory_usage_orders_windows_by_their_largest_tab(self):
+        windows = [make_window("w1", "one", [ENTRIES[0]._replace(memory_bytes=300)]),
+                   make_window("w2", "two", [ENTRIES[1]._replace(memory_bytes=100), ENTRIES[2]._replace(memory_bytes=500)]),
+                   make_window("w3", "three", [ENTRIES[3]]), make_window("w4", "empty", [])]
+        self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")], ["w2", "w1", "w3", "w4"])
+
+    def test_a_window_ranks_by_the_agent_sessions_the_list_shows(self):
+        # With Hide Idle on, w1's idle tab (the largest) is hidden, so w2's 800M tab comes first.
+        windows = [make_window("w1", "one", [ENTRIES[0]._replace(memory_bytes=1200), ENTRIES[1]._replace(memory_bytes=300)]),
+                   make_window("w2", "two", [ENTRIES[2]._replace(memory_bytes=800)])]
+        self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")], ["w1", "w2"])
+        self.assertEqual([window.window_id for window in sort_window_entries(
+            windows, "memory_usage", lambda window_entry: [entry for entry in window_entry.agent_sessions if entry.status != "idle"])],
+            ["w2", "w1"])
 
     def test_alphabet_by_window_title(self):
         self.assertEqual([window.title for window in sort_window_entries(self.windows, "alphabet")],

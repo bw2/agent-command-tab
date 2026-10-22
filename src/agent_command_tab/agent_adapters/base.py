@@ -64,6 +64,15 @@ class AgentToolAdapter:
         input_area_end_pattern: Compiled pattern of the line just below the input area.
         seconds_before_enter: The pause between a typed command and its Enter, so the tool
             doesn't take the two as one paste (PLAN.md section 8, "Sending /compact and /clear").
+        working_screen_pattern: Compiled pattern of screen text the tool shows only while a turn
+            runs, which tells whether a session whose row has no state (a tool that reports
+            none) waits at its prompt; None when unknown.
+        queues_slash_commands_typed_during_a_turn: Whether a slash command typed into the tool's
+            input box during a turn waits in the tool's own queue and runs when the turn ends,
+            rather than being refused (Codex 0.155.1: "'/compact' is disabled while a task is in progress").
+        slash_command_refused_during_a_turn_pattern: Compiled pattern of the line the tool prints
+            when it refuses a slash command typed during a turn, so the command can be typed again
+            later; None when the tool prints none.
         how_other_agent_sessions_send_it_messages: MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL,
             MESSAGES_THROUGH_CODEX_QUEUE, or None when other sessions have no way to.
     """
@@ -77,6 +86,9 @@ class AgentToolAdapter:
     input_line_marker = None
     input_area_end_pattern = None
     seconds_before_enter = 0.15
+    working_screen_pattern = None
+    queues_slash_commands_typed_during_a_turn = False
+    slash_command_refused_during_a_turn_pattern = None
     how_other_agent_sessions_send_it_messages = None
 
     async def find_conversation_id(self, agent_process_id, claude_agent_record):

@@ -27,12 +27,28 @@ def rank_agent_session_by_title(agent_session_entry):
     return agent_session_entry.tab_title.casefold()
 
 
+def rank_agent_session_by_memory_usage(agent_session_entry):
+    """Sort key: the agent session using the most memory first (with the processes below it); one
+    whose usage is unknown last (user request, 2026-10-21)."""
+    memory_bytes = agent_session_entry.memory_bytes
+    return (memory_bytes is None, -(memory_bytes or 0))
+
+
+def rank_agent_session_by_cpu_usage(agent_session_entry):
+    """Sort key: the agent session using the most CPU first (with the processes below it); one
+    whose usage is unknown last (user request, 2026-10-21)."""
+    cpu_percent = agent_session_entry.cpu_percent
+    return (cpu_percent is None, -(cpu_percent or 0))
+
+
 # How each sort order but "manual" (iTerm2's tab order, and the window order set by dragging)
 # ranks agent sessions; settings_store takes its choices from here.
 AGENT_SESSION_RANK_BY_LIST_SORT_ORDER = {
     "activity": rank_agent_session_by_activity,
     "alphabet": rank_agent_session_by_title,
     "created_time": rank_agent_session_by_created_time,
+    "memory_usage": rank_agent_session_by_memory_usage,
+    "cpu_usage": rank_agent_session_by_cpu_usage,
 }
 LIST_SORT_ORDERS = ["manual"] + list(AGENT_SESSION_RANK_BY_LIST_SORT_ORDER)
 
@@ -44,9 +60,11 @@ def sort_agent_session_entries(agent_session_entries, list_sort_order):
     return sorted(agent_session_entries, key=AGENT_SESSION_RANK_BY_LIST_SORT_ORDER[list_sort_order])
 
 
-def sort_window_entries(window_entries, list_sort_order):
+def sort_window_entries(window_entries, list_sort_order, list_ranked_agent_sessions=lambda window_entry: window_entry.agent_sessions):
     """Returns one monitor's windows in the list's order (one of LIST_SORT_ORDERS): alphabetically
-    by their own titles, otherwise by each window's first agent session in that order."""
+    by their own titles, otherwise by each window's first agent session in that order, among those
+    list_ranked_agent_sessions(window_entry) returns (all of them, or the ones whose rows Hide
+    Idle doesn't hide, so a hidden tab doesn't decide where its window goes)."""
     if list_sort_order == "manual":
         return list(window_entries)
     if list_sort_order == "alphabet":
@@ -54,4 +72,4 @@ def sort_window_entries(window_entries, list_sort_order):
     rank_agent_session = AGENT_SESSION_RANK_BY_LIST_SORT_ORDER[list_sort_order]
     no_agent_session_rank = (float("inf"), 0)
     return sorted(window_entries, key=lambda window_entry: min(
-        (rank_agent_session(entry) for entry in window_entry.agent_sessions), default=no_agent_session_rank))
+        (rank_agent_session(entry) for entry in list_ranked_agent_sessions(window_entry)), default=no_agent_session_rank))

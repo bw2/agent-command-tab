@@ -17,6 +17,9 @@ from agent_command_tab.session_preview_computation import read_preview_fields_fr
 # <sessions folder>/2026/10/18/rollout-2026-10-18T15-04-05-<conversation ID>.jsonl
 CONVERSATION_FILE_PATTERN = re.compile(
     r"rollout-[^/]*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
+# The timer Codex shows above its input box only while a turn runs: "Working (5s • esc to
+# interrupt)", "Waiting for background terminal (16s • esc to interrupt)" (0.155.1 and 0.163).
+TURN_TIMER_PATTERN = re.compile(r"\((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)")
 
 
 class CodexAdapter(AgentToolAdapter):
@@ -27,7 +30,8 @@ class CodexAdapter(AgentToolAdapter):
     """
 
     agent_tool_name = "Codex"
-    progress_noise_patterns = (re.compile(r"\((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)"),)
+    progress_noise_patterns = (TURN_TIMER_PATTERN,)
+    working_screen_pattern = TURN_TIMER_PATTERN
     helper_process_names = frozenset({"codex-code-mode-host"})  # stays running for the whole session
     slash_commands = COMPACT_AND_CLEAR_SLASH_COMMANDS
     # The input box: "›", then the input, above the line with the model and the folder
@@ -35,6 +39,9 @@ class CodexAdapter(AgentToolAdapter):
     input_line_marker = "›"
     input_area_end_pattern = re.compile(r"^  \S[^·]* · [~/…]")
     seconds_before_enter = 0.3  # Codex takes keys within 8 ms of each other as a paste, and Enter for 120 ms after it as a newline
+    # Codex 0.155.1 hides its turn timer while answer text streams, so a turn can look over on
+    # screen; a /compact typed then is refused with this line and dropped from the box.
+    slash_command_refused_during_a_turn_pattern = re.compile(r"'/\w+' is disabled while a task is in progress")
     # `codex queue` reached a busy Codex 0.155.1 session in 0.2 s, which ran the message right after its turn (2026-10-21).
     how_other_agent_sessions_send_it_messages = MESSAGES_THROUGH_CODEX_QUEUE
 

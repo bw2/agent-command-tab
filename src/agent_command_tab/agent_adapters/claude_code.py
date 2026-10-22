@@ -36,6 +36,9 @@ class ClaudeCodeAdapter(AgentToolAdapter):
     # The input box: "❯" and a no-break space, then the input, between two rules of "─" (Phase 0).
     input_line_marker = "❯"
     input_area_end_pattern = re.compile(r"^─{10,}\s*$")
+    # Checked live with Claude Code 2.1.307 on 2026-10-21: /compact and /clear typed during a turn
+    # showed under "Press up to edit queued messages" and ran when the turn ended.
+    queues_slash_commands_typed_during_a_turn = True
     how_other_agent_sessions_send_it_messages = MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
 
     def matches_command_line(self, command_line):

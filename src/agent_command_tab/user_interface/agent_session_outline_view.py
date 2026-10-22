@@ -18,7 +18,8 @@ import time
 import objc
 from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundStyleNormal, NSBezierPath, NSColor,
                     NSDragOperationMove, NSDragOperationNone, NSEventModifierFlagControl, NSFont, NSFontAttributeName,
-                    NSFontWeightBold, NSFontWeightRegular, NSForegroundColorAttributeName, NSImageOnly, NSImageScaleNone,
+                    NSFontWeightBold, NSFontWeightRegular, NSForegroundColorAttributeName, NSGraphicsContext,
+                    NSImageOnly, NSImageScaleNone,
                     NSImageView, NSInsetRect, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
                     NSMakeRect, NSMenu, NSMenuItem, NSMutableAttributedString, NSMutableParagraphStyle, NSOutlineView,
                     NSParagraphStyleAttributeName, NSPasteboardItem,
@@ -142,17 +143,45 @@ class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
                 self.delegate().row_released()
 
 
+def compute_selection_outline_rect(row_bounds, is_flipped, joins_the_row_above, joins_the_row_below):
+    """Returns the NSRect of the rounded rectangle a selected row strokes: its bounds
+    inset by SELECTION_OUTLINE_INSET, run on past each edge it shares with a selected row above or
+    below, so that the row's clip cuts off that edge and its corners and adjacent selected rows
+    show one outline around them all (user request, 2026-10-21).
+
+    Args:
+        row_bounds: The row view's bounds.
+        is_flipped: Whether the row view's y axis points down (the row above is then at the smaller y).
+        joins_the_row_above: Whether the row above is selected too.
+        joins_the_row_below: Whether the row below is selected too.
+    """
+    (x, y), (width, height) = NSInsetRect(row_bounds, SELECTION_OUTLINE_INSET, SELECTION_OUTLINE_INSET)
+    run_on = SELECTION_OUTLINE_INSET + SELECTION_OUTLINE_CORNER_RADIUS + SELECTION_OUTLINE_WIDTH
+    joins_at_smaller_y, joins_at_larger_y = ((joins_the_row_above, joins_the_row_below) if is_flipped
+                                             else (joins_the_row_below, joins_the_row_above))
+    if joins_at_smaller_y:
+        y, height = y - run_on, height + run_on
+    if joins_at_larger_y:
+        height += run_on
+    return NSMakeRect(x, y, width, height)
+
+
 class RowViewWithSelectionOutline(NSTableRowView):
     """A row that shows it is selected with an outline in the accent color rather than a filled
-    background, so its text keeps its colors (user request, 2026-10-21)."""
+    background, so its text keeps its colors; adjacent selected rows share one outline (user
+    requests, 2026-10-21)."""
 
     def drawSelectionInRect_(self, dirty_rect):
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath.clipRect_(self.bounds())
         NSColor.controlAccentColor().setStroke()
         outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSInsetRect(self.bounds(), SELECTION_OUTLINE_INSET, SELECTION_OUTLINE_INSET),
+            compute_selection_outline_rect(self.bounds(), self.isFlipped(), self.isPreviousRowSelected(),
+                                           self.isNextRowSelected()),
             SELECTION_OUTLINE_CORNER_RADIUS, SELECTION_OUTLINE_CORNER_RADIUS)
         outline.setLineWidth_(SELECTION_OUTLINE_WIDTH)
         outline.stroke()
+        NSGraphicsContext.restoreGraphicsState()
 
     def interiorBackgroundStyle(self):
         return NSBackgroundStyleNormal  # the row's labels keep the colors of an unselected row
@@ -164,10 +193,32 @@ def describe_session_count(count):
 
 
 def list_agent_sessions_that_take_slash_command(agent_session_entries, command):
-    """Returns the agent sessions a slash command can be typed into now: their tool takes it, and
-    they wait at their prompt (R15.1)."""
-    return [entry for entry in agent_session_entries
-            if command in entry.slash_commands and entry.status in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT]
+    """Returns the agent sessions whose tool takes a slash command, whatever they are doing but
+    paused (the menu of several selected rows; user request, 2026-10-21): one in the middle of a
+    turn gets it when the turn ends (handle_send_slash_command_to_agent_sessions), while the core
+    can't type into a suspended agent."""
+    return [entry for entry in agent_session_entries if command in entry.slash_commands and entry.status != "paused"]
+
+
+def tab_row_is_hidden(agent_session_entry, idle_tabs_are_hidden):
+    """Whether "Hide Idle" hides the agent session's tab row (user request, 2026-10-21). It only
+    hides rows: a window row still stands for its whole iTerm2 window, so the window's menu and
+    the top bar's buttons act on its hidden agent sessions too."""
+    return idle_tabs_are_hidden and agent_session_entry.status == "idle"
+
+
+def window_row_is_hidden(window_entry, idle_tabs_are_hidden):
+    """Whether "Hide Idle" hides a window row: every one of its agent sessions' rows is hidden."""
+    return bool(window_entry.agent_sessions) and all(tab_row_is_hidden(entry, idle_tabs_are_hidden)
+                                                     for entry in window_entry.agent_sessions)
+
+
+def list_window_and_tab_item_keys(snapshot):
+    """Returns the item keys of every window and agent session tab in the snapshot, also those
+    whose rows Hide Idle hides, so a hidden window keeps its collapsed state and a hidden tab its
+    open preview for when its row shows again."""
+    return ({("window", window_entry.window_id) for monitor_entry in snapshot.monitors for window_entry in monitor_entry.windows}
+            | {("tab", entry.tab_id) for _, _, entry in iterate_agent_session_entries(snapshot)})
 
 
 def snapshot_shows_monitor_rows(snapshot):
@@ -428,6 +479,7 @@ class AgentSessionListController(NSObject):
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}
         self.width_is_set_by_the_user = False  # True for the sidebar's and the list window's lists; the dropdown fits its width to the rows
         self.list_sort_order = "manual"  # set by the Sort pop-up (list_sorting.py)
+        self.idle_tabs_are_hidden = False  # set by the Hide Idle / Show Idle button
         self.shown_columns = list(DEFAULT_SETTINGS["shown_columns"])  # set from the settings (settings_store.LIST_COLUMNS)
         self.outline_view = self.build_outline_view()
         self.refresh_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -484,7 +536,12 @@ class AgentSessionListController(NSObject):
         live_keys = set()
         for monitor_entry in snapshot.monitors:
             window_items = [self.update_window_item(window_entry, live_keys)
-                            for window_entry in sort_window_entries(monitor_entry.windows, self.list_sort_order)]
+                            for window_entry in sort_window_entries(
+                                monitor_entry.windows, self.list_sort_order,
+                                list_ranked_agent_sessions=lambda window_entry: [
+                                    entry for entry in window_entry.agent_sessions
+                                    if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden)])
+                            if not window_row_is_hidden(window_entry, self.idle_tabs_are_hidden)]
             if show_monitor_rows:
                 monitor_item = self.find_or_make_item("monitor", monitor_entry.monitor_id, monitor_entry, live_keys)
                 self.set_child_items(monitor_item, window_items)
@@ -497,8 +554,9 @@ class AgentSessionListController(NSObject):
             removed_item = self.items_by_key.pop(key)
             removed_item.parent_item = None  # break the parent-child cycle so the item can be freed
             removed_item.child_items = []
-        self.collapsed_item_keys &= live_keys
-        self.open_preview_item_keys &= live_keys
+        keys_with_saved_row_state = live_keys | list_window_and_tab_item_keys(snapshot)
+        self.collapsed_item_keys &= keys_with_saved_row_state
+        self.open_preview_item_keys &= keys_with_saved_row_state
         self.top_level_items = new_top_level_items
         new_row_structure = self.list_row_structure()
         if new_row_structure == self.row_structure:
@@ -513,17 +571,28 @@ class AgentSessionListController(NSObject):
         window_item = self.find_or_make_item("window", window_entry.window_id, window_entry, live_keys)
         self.set_child_items(window_item, [self.find_or_make_item("tab", agent_session_entry.tab_id, agent_session_entry, live_keys)
                                            for agent_session_entry in sort_agent_session_entries(
-                                               window_entry.agent_sessions, self.list_sort_order)])
+                                               window_entry.agent_sessions, self.list_sort_order)
+                                           if not tab_row_is_hidden(agent_session_entry, self.idle_tabs_are_hidden)])
         return window_item
 
     @objc.python_method
     def set_list_sort_order(self, list_sort_order):
-        """Shows the rows in this order from now on ("manual", "activity", "alphabet" or "created_time")."""
+        """Shows the rows in this order from now on (one of list_sorting.LIST_SORT_ORDERS)."""
         if list_sort_order == self.list_sort_order:
             return
         self.list_sort_order = list_sort_order
         if self.held_snapshot is None and self.snapshot is not None:
             self.apply_snapshot(self.snapshot)  # (a held snapshot is sorted when it is applied)
+
+    @objc.python_method
+    def set_idle_tabs_are_hidden(self, idle_tabs_are_hidden):
+        """Hides or shows the idle tabs' rows from now on (the Hide Idle / Show Idle button; user request, 2026-10-21)."""
+        if idle_tabs_are_hidden == self.idle_tabs_are_hidden:
+            return
+        self.idle_tabs_are_hidden = idle_tabs_are_hidden
+        if self.held_snapshot is None and self.snapshot is not None:
+            self.apply_snapshot(self.snapshot)  # (a held snapshot is filtered when it is applied)
+            self.on_row_count_changed()  # the dropdown fits its size to the rows again
 
     @objc.python_method
     def set_shown_columns(self, shown_columns):
@@ -731,11 +800,13 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def list_agent_session_entries_of_the_selected_rows(self):
         """Returns the agent sessions of the selected tab rows and of every tab of the selected
-        window rows (also collapsed ones), once each, in list order."""
+        window rows (also collapsed ones, and tabs whose rows Hide Idle hides), once each, in list order."""
         entry_by_session_id = {}
         for item in self.list_selected_items():
-            for tab_item in (item.child_items if item.kind == "window" else [item]):
-                entry_by_session_id.setdefault(tab_item.entry.session_id, tab_item.entry)
+            agent_session_entries = (sort_agent_session_entries(item.entry.agent_sessions, self.list_sort_order)
+                                     if item.kind == "window" else [item.entry])
+            for entry in agent_session_entries:
+                entry_by_session_id.setdefault(entry.session_id, entry)
         return list(entry_by_session_id.values())
 
     @objc.python_method
@@ -897,7 +968,8 @@ class AgentSessionListController(NSObject):
         hide it or no row has text for it (no context size known yet); the icon column's fits the
         widest tool icon, or is 0 when all agent sessions use the same tool. A narrow sidebar or
         window then drops columns in COLUMN_NAMES_IN_DROP_ORDER to keep room for names."""
-        agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)] if self.snapshot else []
+        agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)
+                                 if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden)] if self.snapshot else []
         now = time.time()
         all_parts = [build_agent_session_row_text_parts(entry, [], now) for entry in agent_session_entries]
         for column_name, parts_field_name in TAB_ROW_COLUMNS:
@@ -1052,12 +1124,13 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def set_all_expanded(self, expanded):
         """Expands or collapses every monitor and window row (R8.1), leaving the tabs' previews
-        as they are (user request, 2026-10-19)."""
+        as they are (user request, 2026-10-19). Collapsing keeps the windows collapsed before,
+        also those whose rows Hide Idle hides."""
         self.finish_rename()
         if expanded:
             self.collapsed_item_keys.clear()
         else:
-            self.collapsed_item_keys = {key for key, item in self.items_by_key.items() if item.child_items}
+            self.collapsed_item_keys |= {key for key, item in self.items_by_key.items() if item.child_items}
         # Row by row rather than through reloadData, which would rebuild every row view.
         run_without_animation(lambda: self.apply_expansion_state(self.top_level_items))
         self.redraw_visible_rows()
@@ -1225,7 +1298,8 @@ class AgentSessionListController(NSObject):
         if item is not None and len(selected_items) >= 2 and any(selected_item is item for selected_item in selected_items):
             # A right-click on one of several selected rows; a single row keeps its own menu, selected or not.
             self.menu_target_agent_session_entries = self.list_agent_session_entries_of_the_selected_rows()
-            self.add_menu_items_for_the_selected_rows(menu, self.menu_target_agent_session_entries)
+            self.add_menu_items_for_the_selected_rows(menu, self.menu_target_agent_session_entries,
+                                                      any(selected_item.kind == "window" for selected_item in selected_items))
             return
         if item is None or item.kind == "new_window":
             self.add_new_window_menu_items(menu)  # empty space, or the "+" row
@@ -1233,11 +1307,10 @@ class AgentSessionListController(NSObject):
         if item.child_items:  # monitor and window rows (tab rows have nothing to expand)
             self.add_menu_item(menu, "Collapse" if self.outline_view.isItemExpanded_(item) else "Expand",
                                "menuToggleExpansion:")
-            if item.kind == "monitor":
-                menu.addItem_(NSMenuItem.separatorItem())
-                self.add_pause_and_resume_menu_items(menu, self.list_agent_session_entries_below(item))
-                return
             menu.addItem_(NSMenuItem.separatorItem())
+        if item.kind == "monitor":  # also when Hide Idle hides all of its window rows
+            self.add_pause_and_resume_menu_items(menu, self.list_agent_session_entries_below(item))
+            return
         if item.kind == "window":
             self.add_menu_item(menu, "Show window", "menuFocus:")
             self.add_menu_item(menu, "Rename", "menuRename:")
@@ -1298,14 +1371,15 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def list_agent_session_entries_below(self, item):
-        """Returns the agent sessions in a window row, or in all window rows of a monitor row."""
+        """Returns the agent sessions in a window row, or in all windows of a monitor row (also
+        those whose rows Hide Idle hides)."""
         if item.kind == "window":
             return list(item.entry.agent_sessions)
-        return [entry for window_item in item.child_items for entry in window_item.entry.agent_sessions]
+        return [entry for window_entry in item.entry.windows for entry in window_entry.agent_sessions]
 
     @objc.python_method
     def list_agent_session_entries(self):
-        """Returns every agent session the list shows (the top bar's pause or resume button acts on all of them)."""
+        """Returns every agent session in the list, those whose rows Hide Idle hides too (the bottom bar's pause or resume button acts on all of them)."""
         return [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)] if self.snapshot else []
 
     @objc.python_method
@@ -1322,9 +1396,13 @@ class AgentSessionListController(NSObject):
             self.add_menu_item(menu, title, action_name).setRepresentedObject_([entry.session_id for entry in entries])
 
     @objc.python_method
-    def add_menu_items_for_the_selected_rows(self, menu, agent_session_entries):
+    def add_menu_items_for_the_selected_rows(self, menu, agent_session_entries, a_window_row_is_selected):
         """The menu of two or more selected rows, acting on their agent sessions (user request,
-        2026-10-21): Talk to Each Other…; /compact, /clear and Kill; Pause and Resume."""
+        2026-10-21): Talk to Each Other…; /compact, /clear and Kill; Pause and Resume.
+
+        Kill says how many sessions only when a window row is selected, since that row stands for
+        all of its window's tabs, hidden idle ones too; for tab rows alone the selection shows it
+        (user requests, 2026-10-21)."""
         talk_item = self.add_menu_item(menu, "Talk to Each Other…", "menuTalkToEachOther:")
         if len(self.list_agent_sessions_that_can_talk_to_each_other(agent_session_entries)) < 2:
             talk_item.setEnabled_(False)
@@ -1337,12 +1415,21 @@ class AgentSessionListController(NSObject):
                 "menuSendSlashCommandToSelectedSessions:")
             command_item.setRepresentedObject_(command)
             if not agent_sessions_that_take_it:
+                agent_tool_names = sorted({entry.agent_tool_name or "these agents" for entry in agent_session_entries})
                 command_item.setEnabled_(False)
-                command_item.setToolTip_("Only while an agent waits at its prompt, and none of these does")
-            elif len(agent_sessions_that_take_it) < len(agent_session_entries):
-                command_item.setToolTip_(f"Typed only into the {len(agent_sessions_that_take_it)} of "
-                                         f"{len(agent_session_entries)} that wait at their prompt")
-        self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}", "menuKillSelectedSessions:")
+                command_item.setToolTip_("Only after the paused sessions are resumed"
+                                         if any(command in entry.slash_commands for entry in agent_session_entries)
+                                         else f"The dashboard can't type commands into {' or '.join(agent_tool_names)}")
+                continue
+            tool_tip_lines = []
+            if len(agent_sessions_that_take_it) < len(agent_session_entries):
+                tool_tip_lines.append(f"Typed only into the {len(agent_sessions_that_take_it)} of "
+                                      f"{len(agent_session_entries)} whose agent takes it and isn't paused")
+            if any(entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT for entry in agent_sessions_that_take_it):
+                tool_tip_lines.append("A session in the middle of a turn gets it when the turn ends")
+            command_item.setToolTip_("\n".join(tool_tip_lines) or None)
+        self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}" if a_window_row_is_selected
+                           else "Kill Sessions", "menuKillSelectedSessions:")
         menu.addItem_(NSMenuItem.separatorItem())
         self.add_pause_and_resume_menu_items(menu, agent_session_entries)
 

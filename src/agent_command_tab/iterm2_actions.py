@@ -233,35 +233,64 @@ async def read_screen_lines_with_faint_flags(session):
     return screen_lines_with_faint_flags
 
 
-async def type_slash_command(app, session_id, command, adapter):
+def count_slash_command_refusals(screen_lines_with_faint_flags, adapter):
+    """Returns how many visible lines say the tool refused a slash command typed during a turn
+    (its slash_command_refused_during_a_turn_pattern; 0 for a tool that prints no such line)."""
+    refusal_pattern = adapter.slash_command_refused_during_a_turn_pattern
+    if refusal_pattern is None:
+        return 0
+    return sum(1 for text, _ in screen_lines_with_faint_flags if refusal_pattern.search(text))
+
+
+async def type_slash_command(app, session_id, command, adapter, agent_is_in_the_middle_of_a_turn=False):
     """Types a slash command into the agent's empty input box, then Enter after the adapter's
-    pause (R15.1; PLAN.md section 8, "Sending /compact and /clear"). Refuses when the box holds
-    unsent text or can't be found on screen, since the command would join the draft. Reports
-    a failure, without retrying, when the command is still in the box a moment after Enter.
+    pause (R15.1; PLAN.md section 8, "Sending /compact and /clear"). Types nothing when the box
+    holds unsent text or can't be found on screen, since the command would join the draft.
+    Reports a failure, without retrying, when the command is still in the box a moment after Enter.
 
     Args:
         app: The iterm2.App.
         session_id: The tab's first session.
         command: One of the adapter's slash_commands, for example "/compact".
         adapter: The session's agent tool adapter (its input line marker, input area end and pause).
+        agent_is_in_the_middle_of_a_turn: Whether the agent is busy (Claude Code queues a command
+            typed then). Enter then goes only while the command is still in the box, since the
+            agent may open a permission prompt meanwhile, which would take the Enter as its answer;
+            otherwise a failure is reported. Not checked for an agent at its prompt, which opens
+            no prompt on its own: in a live check on 2026-10-22, Codex's input box couldn't be found
+            on screen right after the command was typed (its slash-command menu was open).
+
+    Returns:
+        None when nothing was typed because the box holds unsent text or can't be found on screen,
+        or when the agent refused the command because a turn is under way (Codex, whose turn can
+        look over on screen while answer text streams); the caller may try again later. Otherwise
+        an ActionResult.
     """
     session = app.get_session_by_id(session_id)
     if session is None:
         return ActionResult(False, "that tab no longer exists")
     if command not in adapter.slash_commands:
         return ActionResult(False, f"{command} can't be sent to {adapter.agent_tool_name or 'this agent'}")
-    if not input_area_is_empty(await read_screen_lines_with_faint_flags(session), adapter.input_line_marker,
-                               adapter.input_area_end_pattern):
-        return ActionResult(False, "the tab has unsent text in its input box, or the input box isn't on screen")
+    screen_lines_before_typing = await read_screen_lines_with_faint_flags(session)
+    if not input_area_is_empty(screen_lines_before_typing, adapter.input_line_marker, adapter.input_area_end_pattern):
+        return None
     await session.async_send_text(command, suppress_broadcast=True)
     await asyncio.sleep(adapter.seconds_before_enter)
+    if agent_is_in_the_middle_of_a_turn:
+        typed_text = read_typed_input_area_text(await read_screen_lines_with_faint_flags(session), adapter.input_line_marker,
+                                                adapter.input_area_end_pattern)
+        if typed_text is None or command not in typed_text:
+            return ActionResult(False, f"{command} wasn't submitted: the tab's input box changed before Enter")
     await session.async_send_text("\r", suppress_broadcast=True)
     await asyncio.sleep(SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED)
     try:
-        typed_text = read_typed_input_area_text(await read_screen_lines_with_faint_flags(session), adapter.input_line_marker,
-                                                adapter.input_area_end_pattern)
+        screen_lines_after_enter = await read_screen_lines_with_faint_flags(session)
     except iterm2.RPCException:
         return ActionResult(True)  # the tab closed meanwhile
+    if count_slash_command_refusals(screen_lines_after_enter, adapter) > count_slash_command_refusals(
+            screen_lines_before_typing, adapter):
+        return None
+    typed_text = read_typed_input_area_text(screen_lines_after_enter, adapter.input_line_marker, adapter.input_area_end_pattern)
     # A box that is off screen (the tool redrawing) can't be checked; the command was sent.
     if typed_text is not None and command in typed_text:
         return ActionResult(False, f"{command} may not have been submitted: it is still in the tab's input box")

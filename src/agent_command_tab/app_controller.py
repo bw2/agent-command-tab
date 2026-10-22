@@ -604,10 +604,17 @@ class AppController(NSObject):
             self.settings_changed(dict(self.settings, list_sort_order=list_sort_order))
 
     @objc.python_method
+    def idle_tabs_are_hidden_chosen(self, idle_tabs_are_hidden):
+        """The Hide Idle / Show Idle button at the top of the dropdown, the sidebar or the list window: one choice for all, saved with the settings."""
+        if idle_tabs_are_hidden != self.settings["idle_tabs_are_hidden"]:
+            self.settings_changed(dict(self.settings, idle_tabs_are_hidden=idle_tabs_are_hidden))
+
+    @objc.python_method
     def apply_list_settings(self, settings):
-        """Gives the dropdown's, the sidebar's and the list window's lists the same sort order and shown columns."""
+        """Gives the dropdown's, the sidebar's and the list window's lists the same sort order, idle tabs shown or hidden, and shown columns."""
         for list_panel_controller in self.list_all_list_panel_controllers():
             list_panel_controller.show_list_sort_order(settings["list_sort_order"])
+            list_panel_controller.show_idle_tabs_are_hidden(settings["idle_tabs_are_hidden"])
             list_panel_controller.list_controller.set_shown_columns(settings["shown_columns"])
 
     @objc.python_method

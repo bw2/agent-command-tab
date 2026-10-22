@@ -17,12 +17,14 @@ from Foundation import NSIndexSet
 
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES, SMALLEST_WINDOW_SIZES
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
-from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, PANEL_SIDE_MARGIN, POPOVER_WIDTH,
-                                                                TOP_BAR_HEIGHT, ListPanelController)
+from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
+                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH, TOP_BAR_HEIGHT,
+                                                                ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
                                                                          AgentSessionListController, RowButton,
-                                                                         RowViewWithSelectionOutline, build_index_set)
+                                                                         RowViewWithSelectionOutline, build_index_set,
+                                                                         compute_selection_outline_rect)
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.screen_layout import frame_is_on_a_screen, grow_frame_to_smallest_size
@@ -47,6 +49,7 @@ class RecordingOwner:
         self.answer_to_confirmation = False
         self.peeks = []
         self.chosen_list_sort_orders = []
+        self.idle_tabs_are_hidden_choices = []
         self.talk_to_each_other_requests = []  # (agent session entries, left-out entries)
         self.note_to_send = None  # what the Talk to Each Other window returns: None for Cancel
 
@@ -87,6 +90,9 @@ class RecordingOwner:
 
     def list_sort_order_chosen(self, list_sort_order):
         self.chosen_list_sort_orders.append(list_sort_order)
+
+    def idle_tabs_are_hidden_chosen(self, idle_tabs_are_hidden):
+        self.idle_tabs_are_hidden_choices.append(idle_tabs_are_hidden)
 
     def ask_for_note_asking_agent_sessions_to_talk_to_each_other(self, agent_session_entries, left_out_agent_session_entries):
         self.talk_to_each_other_requests.append((agent_session_entries, left_out_agent_session_entries))
@@ -281,32 +287,98 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertLess(memory_view.frame().origin.x, cpu_view.frame().origin.x)  # left to right as in the settings
         self.assertLess(cpu_view.frame().origin.x, state_view.frame().origin.x)
 
-    def test_top_bar_drops_the_sort_label_then_the_sort_popup_when_narrow(self):
+    def test_top_bar_drops_the_sort_label_then_narrows_the_sort_popup_when_narrow(self):
         panel = self.dropdown_panel_controller
         # Two windows with running agents: the expand or collapse and the pause or resume buttons show.
         self.list_controller.apply_snapshot(make_sample_snapshot())
         # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's
-        # smallest width and 200 the sidebar's (185 and 150 can't happen, but check the later steps).
-        for width, label_shown, popup_shown in ((460, True, True), (320, True, True), (216, False, True), (185, False, True),
-                                                (184, False, False), (150, False, False), (460, True, True)):
+        # smallest width and 200 the sidebar's (150 can't happen, but check the later steps).
+        for width, label_shown, popup_shown, popup_width in (
+                (460, True, True, 124), (320, True, True, 124), (265, True, True, 124), (264, False, True, 124),
+                (233, False, True, 124), (232, False, True, 123), (200, False, True, 91), (169, False, True, 60),
+                (168, False, False, 59), (150, False, False, 41), (460, True, True, 124)):
             self.window.setContentSize_((width, 260))
-            self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden()),
-                             (label_shown, popup_shown), width)
-            right_buttons_x = panel.pause_or_resume_all_button.frame().origin.x  # left of the expand or collapse button
-            self.assertLess(right_buttons_x, panel.expand_or_collapse_all_button.frame().origin.x)
+            self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden(),
+                              panel.list_sort_order_popup.frame().size.width), (label_shown, popup_shown, popup_width), width)
+            idle_tabs_button_frame = panel.idle_tabs_button.frame()  # just left of the expand or collapse button
+            self.assertFalse(panel.idle_tabs_button.isHidden())
+            self.assertEqual(idle_tabs_button_frame.origin.x + idle_tabs_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                             panel.expand_or_collapse_all_button.frame().origin.x)
             if popup_shown:
                 popup_frame = panel.list_sort_order_popup.frame()
-                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, right_buttons_x)
+                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, idle_tabs_button_frame.origin.x)
             message_frame = panel.message_text_field.frame()
-            self.assertTrue(message_frame.size.width == 0 or message_frame.origin.x + message_frame.size.width <= right_buttons_x,
+            self.assertTrue(message_frame.size.width == 0
+                            or message_frame.origin.x + message_frame.size.width <= idle_tabs_button_frame.origin.x,
                             width)  # never covers the buttons
+            pause_button_frame = panel.pause_or_resume_all_button.frame()  # at the bottom bar's right end
+            self.assertEqual(pause_button_frame.origin.x + pause_button_frame.size.width, width - PANEL_SIDE_MARGIN)
+            self.assertLessEqual(pause_button_frame.origin.y + pause_button_frame.size.height, BOTTOM_BAR_HEIGHT)
         self.assertGreater(panel.message_text_field.frame().size.width, 100)  # room again for a connection message
         self.window.setContentSize_((320, 260))
-        panel.show_message("iTerm2 can't be reached; retrying")  # the sort control steps aside for it
+        panel.show_message("iTerm2 can't be reached; retrying")  # the sort control and Hide Idle step aside for it
         self.assertTrue(panel.list_sort_order_popup.isHidden())
+        self.assertTrue(panel.idle_tabs_button.isHidden())
         self.assertGreater(panel.message_text_field.frame().size.width, 100)
         panel.show_message("")
         self.assertFalse(panel.list_sort_order_popup.isHidden())
+        self.assertFalse(panel.idle_tabs_button.isHidden())
+
+    def test_hide_idle_hides_idle_tabs_and_windows_left_without_tabs_until_show_idle(self):
+        panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # the second window's two tabs are idle
+        panel.idleTabsButtonClicked_(panel.idle_tabs_button)
+        self.assertEqual(self.owner.idle_tabs_are_hidden_choices, [True])  # the owner saves it and shows it in every list
+        panel.show_idle_tabs_are_hidden(True)
+        outline_view = self.list_controller.outline_view
+        self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                         ["w1", "1", "2", "3", "new_window"])
+        self.assertEqual((panel.idle_tabs_button.title(), panel.idle_tabs_button.toolTip()),
+                         ("Show Idle", "Show the tabs whose agent is idle again"))
+        snapshot = make_sample_snapshot()  # a new snapshot is filtered too: planning becomes idle
+        window_one, window_two = snapshot.monitors[0].windows
+        window_one = window_one._replace(agent_sessions=(window_one.agent_sessions[0]._replace(status="idle"),)
+                                         + window_one.agent_sessions[1:])
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
+        self.assertEqual(outline_view.numberOfRows(), 4)  # w1, phase0-tests (asking), codex-review (done), "+"
+        # Only rows are hidden: the window row still stands for its whole window (New tab starts in
+        # the selected tab's folder, Close window counts every agent), and the bottom bar's pause
+        # button still acts on every agent session.
+        self.assertEqual(len(outline_view.itemAtRow_(0).entry.agent_sessions), 3)
+        self.assertEqual(len(self.list_controller.list_agent_session_entries()), 5)
+        self.select_rows(0, 1)  # the window and phase0-tests: Kill counts and ends the hidden idle planning too
+        menu_items_by_title = self.build_right_click_menu_items_by_title(1)
+        self.owner.answer_to_confirmation = True
+        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill 3 Sessions"])
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                         ("end_agent_processes", {"session_ids": ["s1", "s2", "s3"]}))
+        panel.show_idle_tabs_are_hidden(False)
+        self.assertEqual(outline_view.numberOfRows(), 8)
+        self.assertEqual(panel.idle_tabs_button.title(), "Hide Idle")
+
+    def test_hide_idle_keeps_hidden_rows_collapsed_or_with_their_previews_open(self):
+        outline_view = self.apply_snapshot_with_previews()
+        self.click_row_arrow(5)  # opens analysis-0's preview (idle)
+        self.click_row_arrow(4)  # collapses tandem-repeats (both tabs idle)
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)
+        self.assertEqual(outline_view.numberOfRows(), 5)  # w1, its three tabs, "+"
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
+        self.assertEqual(outline_view.numberOfRows(), 6)  # tandem-repeats comes back collapsed
+        self.click_row_arrow(4)
+        self.assertEqual(outline_view.rectOfRow_(5).size.height, TAB_ROW_HEIGHT_WITH_PREVIEW)  # and the preview open
+        self.click_row_arrow(4)  # collapsed again
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)
+        self.list_controller.set_all_expanded(False)  # Collapse All: agent-command-tab, and tandem-repeats stays collapsed
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
+        self.assertEqual(outline_view.numberOfRows(), 3)  # the two collapsed windows and "+"
+
+    def test_hide_idle_leaves_a_monitor_row_its_pause_item_when_all_of_its_windows_are_hidden(self):
+        self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # Studio Display: two idle tabs
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)
+        outline_view = self.list_controller.outline_view
+        studio_display_row = next(row for row in range(outline_view.numberOfRows())
+                                  if outline_view.itemAtRow_(row).key == ("monitor", "2"))
+        self.assertEqual(self.build_right_click_menu_titles(studio_display_row), ["Pause 2 Sessions"])
 
     def test_sort_popup_reports_the_choice_to_the_owner(self):
         self.dropdown_panel_controller.list_sort_order_popup.selectItemWithTitle_("Activity")
@@ -425,38 +497,86 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertIsInstance(row_view, RowViewWithSelectionOutline)
         self.assertEqual(row_view.interiorBackgroundStyle(), NSBackgroundStyleNormal)  # the text keeps its colors
 
+    def test_adjacent_selected_rows_draw_one_outline_around_them_all(self):
+        bounds = NSMakeRect(0, 0, 300, 22)
+        # Inset by 1 point; a side shared with a selected neighbor runs on 6.5 points past the row, where its clip cuts it off.
+        self.assertEqual(tuple(compute_selection_outline_rect(bounds, True, False, False)), ((1, 1), (298, 20)))
+        self.assertEqual(tuple(compute_selection_outline_rect(bounds, True, True, False)), ((1, -5.5), (298, 26.5)))
+        self.assertEqual(tuple(compute_selection_outline_rect(bounds, True, False, True)), ((1, 1), (298, 26.5)))
+        self.assertEqual(tuple(compute_selection_outline_rect(bounds, False, False, True)), ((1, -5.5), (298, 26.5)))
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.select_rows(1, 2, 3, 5)
+        content_view = self.window.contentView()  # draws the selected rows, which raises if the outline can't be built
+        content_view.cacheDisplayInRect_toBitmapImageRep_(
+            content_view.bounds(), content_view.bitmapImageRepForCachingDisplayInRect_(content_view.bounds()))
+        row_views = [self.list_controller.outline_view.rowViewAtRow_makeIfNecessary_(row, False) for row in (1, 2, 3, 5)]
+        self.assertEqual([(row_view.isPreviousRowSelected(), row_view.isNextRowSelected()) for row_view in row_views],
+                         [(False, True), (True, True), (True, False), (False, False)])
+
     def test_several_selected_rows_share_one_menu_that_acts_on_their_sessions(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(3, 4)  # codex-review (done) and the second window (two idle tabs)
         self.assertEqual(self.build_right_click_menu_titles(4),
                          ["Talk to Each Other…", "---", "/compact 3 Sessions", "/clear 3 Sessions", "Kill 3 Sessions", "---",
                           "Pause 3 Sessions"])
+        self.assertIsNone(self.build_right_click_menu_items_by_title(4)["/compact 3 Sessions"].toolTip())  # all at their prompt
         self.select_rows(0, 1)  # a window and one of its tabs: each session counts once
-        self.assertIn("Kill 3 Sessions", self.build_right_click_menu_titles(1))
-        self.select_rows(1, 5)  # planning (working) and analysis-0 (idle)
-        menu_items_by_title = self.build_right_click_menu_items_by_title(5)
-        self.assertEqual(menu_items_by_title["/compact 1 Session"].toolTip(), "Typed only into the 1 of 2 that wait at their prompt")
-        self.assertEqual(self.build_right_click_menu_titles(2)[0], "Show tab")  # an unselected row keeps its own menu
+        self.assertIn("/compact 3 Sessions", self.build_right_click_menu_titles(1))
+        self.assertIn("Kill 3 Sessions", self.build_right_click_menu_titles(1))  # a window row is selected
+        self.select_rows(1, 2)  # working and asking: each gets the command when its turn ends (user request, 2026-10-21)
+        menu_items_by_title = self.build_right_click_menu_items_by_title(1)
+        self.assertIn("Kill Sessions", menu_items_by_title)  # tab rows alone: the selection shows how many
+        self.assertTrue(menu_items_by_title["/compact 2 Sessions"].isEnabled())
+        self.assertEqual(menu_items_by_title["/compact 2 Sessions"].toolTip(), "A session in the middle of a turn gets it when the turn ends")
+        self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # an unselected row keeps its own menu
         self.select_rows(5)
         self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # so does a single selected row
-        self.select_rows(1, 2)  # working and asking: no slash command can be typed
-        menu_items_by_title = self.build_right_click_menu_items_by_title(1)
+
+    def test_the_menu_of_several_rows_types_commands_only_into_agents_that_take_them(self):
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_two = window_two._replace(agent_sessions=tuple(entry._replace(agent_tool_name="Aider", slash_commands=())
+                                                              for entry in window_two.agent_sessions))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two)),)))
+        self.select_rows(3, 5)  # codex-review (Codex) and analysis-0 (Aider)
+        self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 Session"].toolTip(),
+                         "Typed only into the 1 of 2 whose agent takes it and isn't paused")
+        self.select_rows(5, 6)  # two Aider tabs
+        menu_items_by_title = self.build_right_click_menu_items_by_title(5)
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
+        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "The dashboard can't type commands into Aider")
+
+    def test_the_menu_of_several_rows_leaves_out_paused_sessions(self):
+        # The core can't type into a suspended agent, so a paused session isn't counted.
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_two = window_two._replace(agent_sessions=tuple(entry._replace(status="paused") for entry in window_two.agent_sessions))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two)),)))
+        self.select_rows(3, 5)  # codex-review (done) and analysis-0 (paused)
+        self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 Session"].toolTip(),
+                         "Typed only into the 1 of 2 whose agent takes it and isn't paused")
+        self.select_rows(5, 6)  # both paused
+        menu_items_by_title = self.build_right_click_menu_items_by_title(5)
+        self.assertFalse(menu_items_by_title["/compact"].isEnabled())
+        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "Only after the paused sessions are resumed")
+        self.assertIn("Resume 2 Sessions", menu_items_by_title)
 
     def test_slash_commands_and_kill_for_several_sessions_ask_first_where_one_session_would(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
-        self.select_rows(1, 5)
+        self.select_rows(1, 5)  # planning (working) and analysis-0 (idle)
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)
-        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/compact 1 Session"])
+        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/compact 2 Sessions"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target, self.submitted_actions[-1].arguments),
-                         ("send_slash_command_to_agent_sessions", {"session_ids": ["s10"]}, {"command": "/compact"}))
-        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/clear 1 Session"])  # the user says No
-        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill 2 Sessions"])  # No again
+                         ("send_slash_command_to_agent_sessions", {"session_ids": ["s1", "s10"]}, {"command": "/compact"}))
+        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/clear 2 Sessions"])  # the user says No
+        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill Sessions"])  # No again
         self.assertEqual(len(self.submitted_actions), 1)
-        self.assertIn('("analysis-0")', self.owner.confirmation_questions[0])
+        self.assertIn('("planning", "analysis-0")', self.owner.confirmation_questions[0])
         self.assertIn('("planning", "analysis-0")', self.owner.confirmation_questions[1])
         self.owner.answer_to_confirmation = True
-        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill 2 Sessions"])
+        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill Sessions"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("end_agent_processes", {"session_ids": ["s1", "s10"]}))
 
@@ -898,16 +1018,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(one_window_snapshot)
         self.assertTrue(button.isHidden())
         self.window.setContentSize_((320, 260))
-        pause_button = panel.pause_or_resume_all_button  # at the right edge instead
-        self.assertEqual(pause_button.frame().origin.x + pause_button.frame().size.width,
+        idle_tabs_button = panel.idle_tabs_button  # at the right edge instead
+        self.assertEqual(idle_tabs_button.frame().origin.x + idle_tabs_button.frame().size.width,
                          panel.view().bounds().size.width - PANEL_SIDE_MARGIN)
         message_frame = panel.message_text_field.frame()
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, pause_button.frame().origin.x - 8)
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, idle_tabs_button.frame().origin.x - 8)
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertFalse(button.isHidden())
         self.assertEqual(button.frame().origin.x + button.frame().size.width, panel.view().bounds().size.width - PANEL_SIDE_MARGIN)
         message_frame = panel.message_text_field.frame()
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, pause_button.frame().origin.x - 8)
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, idle_tabs_button.frame().origin.x - 8)
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # one window per monitor
         self.assertFalse(button.isHidden())
 
