@@ -1,6 +1,7 @@
 """Adapter for Anthropic's Claude Code."""
 
 import asyncio
+import glob
 import os
 import re
 import shlex
@@ -18,6 +19,20 @@ ELAPSED_TIME = r"(?:\d+h )?(?:\d+m )?\d+s"
 # One "NAME=value " word in front of a launch command's program, the value maybe quoted
 # ("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude").
 LEADING_ENVIRONMENT_SETTING_PATTERN = re.compile(r"""([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])*\s+""")
+
+
+def list_claude_config_folders():
+    """Returns the Claude Code config folders in use: the default folder (None: a command run
+    without CLAUDE_CONFIG_DIR uses it), the dashboard's own CLAUDE_CONFIG_DIR, and every other
+    ~/.claude* folder with a sessions folder, since a Claude Code started with its own
+    CLAUDE_CONFIG_DIR (for example ~/.claude_work) keeps its sessions and settings there. Asked
+    by `claude agents --json`, which lists a session only from its own folder, and by the hooks
+    installer, since such a session reads only its own folder's settings.json.
+    """
+    default_folder = os.path.expanduser("~/.claude")
+    other_folders = ([os.environ["CLAUDE_CONFIG_DIR"]] if os.environ.get("CLAUDE_CONFIG_DIR") else []) + sorted(
+        folder for folder in glob.glob(os.path.expanduser("~/.claude*")) if os.path.isdir(os.path.join(folder, "sessions")))
+    return [None] + [folder for folder in dict.fromkeys(other_folders) if os.path.realpath(folder) != os.path.realpath(default_folder)]
 
 
 def remove_config_folder_settings_from_launch_command(launch_command):

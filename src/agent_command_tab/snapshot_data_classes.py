@@ -6,22 +6,20 @@ classes, which would need type annotations), so equal contents compare equal, wh
 use to redraw only the rows that changed. Frames are (x, y, width, height) tuples in points,
 with the origin at the bottom-left of the main monitor.
 
-Some fields are reserved for planned features (PLAN.md section 4, "Snapshot shape") and nothing
-fills or reads them yet: an agent session's details, importance_level, background_task_count,
-last_user_interaction_time and ended_abnormally_at; peer_messaging_address, which is filled but
-not read; a window's last_prompt_time (always None); and a computer's codex_usage and
-hooks_status_per_agent_tool.
+The fields once kept for importance levels, hover panels, automatic introductions, the startup
+window order and Codex usage bars were removed when those features were dropped (user decision,
+2026-10-27).
 """
 
 import collections
 
 # Each optional field beside its default, so a field added or moved can't take another's default.
 AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD = {
-    "status_reason": "", "status_since": 0.0, "preview_line": "", "details": "", "context_fill_percent": None,
-    "importance_level": 0, "background_task_count": 0, "last_user_interaction_time": None, "ended_abnormally_at": None,
-    "is_in_front": False, "peer_messaging_address": "", "last_time_tab_was_seen": None, "running_command_name": "",
-    "running_command_started_at": None, "context_tokens": None, "started_at": None, "memory_bytes": None,
-    "cpu_percent": None, "slash_commands": (), "is_paused_with_the_processes_below_it": False,
+    "status_reason": "", "status_since": 0.0, "preview_line": "", "context_fill_percent": None,
+    "background_task_count": 0, "ended_abnormally_at": None, "is_in_front": False, "last_time_tab_was_seen": None,
+    "running_command_name": "", "running_command_started_at": None, "context_tokens": None, "started_at": None,
+    "memory_bytes": None, "cpu_percent": None, "slash_commands": (), "is_paused_with_the_processes_below_it": False,
+    "child_processes": (),
 }
 AgentSessionEntry = collections.namedtuple(
     "AgentSessionEntry",
@@ -43,12 +41,22 @@ AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent sess
                              "None until they are read. slash_commands are the commands the tab's menu can type "
                              "into its agent tool (its adapter's), in menu order. is_paused_with_the_processes_below_it "
                              "is True for a paused row whose pause also stopped the processes below the agent (Pause "
-                             "from the list), False for an agent suspended with Ctrl+Z by hand.")
+                             "from the list), False for an agent suspended with Ctrl+Z by hand. A row whose agent "
+                             "ended without a normal session end (a crash, or killed; R14.1) has the status "
+                             "\"exited\" and ended_abnormally_at, when that was noticed. background_task_count is "
+                             "how many background shells and background agents it runs (R26.2), and "
+                             "child_processes the ChildProcessEntry of each process it started, oldest first.")
+
+ChildProcessEntry = collections.namedtuple(
+    "ChildProcessEntry", ["process_id", "command_text", "started_at", "is_background_shell", "memory_bytes", "cpu_percent"])
+ChildProcessEntry.__doc__ = ("One process an agent started, a sub row of its open tab row (user request, 2026-10-27): "
+                             "the command it runs (agent_process_tree.list_child_processes_of_the_agent), when that "
+                             "command started, whether it is a command left running in the background, and what it and the "
+                             "processes below it use (None while memory and CPU use aren't read).")
 
 WindowEntry = collections.namedtuple(
     "WindowEntry",
-    ["window_id", "title", "window_title_set_by_user", "frame", "last_prompt_time", "total_tab_count", "agent_sessions",
-     "selected_tab_id"],
+    ["window_id", "title", "window_title_set_by_user", "frame", "total_tab_count", "agent_sessions", "selected_tab_id"],
     defaults=[None],
 )
 WindowEntry.__doc__ = ("One iTerm2 window with at least one agent session tab. total_tab_count includes the tabs "
@@ -59,11 +67,12 @@ MonitorEntry = collections.namedtuple("MonitorEntry", ["monitor_id", "name", "fr
 MonitorEntry.__doc__ = "One monitor and the windows assigned to it, in the core's window list order."
 
 ComputerSnapshot = collections.namedtuple(
-    "ComputerSnapshot",
-    ["computer_id", "computer_name", "taken_at", "monitors", "codex_usage", "hooks_status_per_agent_tool"],
-    defaults=[None, None],
+    "ComputerSnapshot", ["computer_id", "computer_name", "taken_at", "monitors", "hooks_status_per_agent_tool"],
+    defaults=[()],
 )
-ComputerSnapshot.__doc__ = "Everything one computer's core knows, at one moment."
+ComputerSnapshot.__doc__ = ("Everything one computer's core knows, at one moment. hooks_status_per_agent_tool holds "
+                            "(agent tool name, hooks_installer.check_hooks's status) pairs, one for each tool the "
+                            "app has hooks for (user request, 2026-10-27).")
 
 
 def convert_snapshot_to_json_ready_dict(snapshot):

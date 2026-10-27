@@ -39,9 +39,12 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 ```bash
 agent-command-tab                # the menu bar app; restarts itself if iTerm2's connection drops
 agent-command-tab dump-snapshot  # prints the current list as JSON
+agent-command-tab install-hooks  # adds the app's hooks to Claude Code's and Codex's settings (remove-hooks takes them out)
 ```
 
 Click the "C" in the menu bar to see the list, right-click it for Settings. The first time, iTerm2 asks whether to allow the app to use its Python API.
+
+The app's hooks tell a crashed agent from one that ended normally (its row stays, gray and "exited", for 5 minutes), and count Claude Code's background shells and agents. The list offers to install them (Install Hooks, at its bottom left) while an agent tool in it lacks them. Each settings file is copied to `<file>.agent-command-tab-backup` first. Sessions started afterwards use them, and Codex asks you to approve them first: type `/hooks` in Codex.
 
 The shortcut needs the Accessibility permission (System Settings > Privacy & Security > Accessibility), because it has to see the keys before macOS's app switcher does. macOS gives it to the app that starts AgentCommandTab, so started from iTerm2, turn it on for iTerm2. Until it is on, Settings show a button that opens that page.
 

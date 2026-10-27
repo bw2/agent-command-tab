@@ -4,20 +4,13 @@ edit before sending it (user request, 2026-10-21)."""
 from AppKit import (NSAlert, NSBezelBorder, NSColor, NSEventModifierFlagCommand, NSFont, NSMakeRect, NSScrollView,
                     NSTextField, NSTextView, NSView, NSViewWidthSizable)
 
-from agent_command_tab.messages_between_agent_sessions import (DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER,
-                                                               SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT)
+from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 
 ACCESSORY_WIDTH = 460
 NOTE_BOX_HEIGHT = 110
 GAP = 6
 LARGEST_TEXT_VIEW_SIZE = 1e7
-EXPLANATION = (
-    "Each session's copy ends with its own name and, for each of the others, its name, process ID, folder and "
-    "tab, and how to message it: a Claude Code session with Claude Code's SendMessage tool, a Codex session "
-    "with codex queue. A Codex session can't message a Claude Code session. A Claude Code session gets its copy "
-    "once it waits at its prompt with an empty input box (for up to "
-    f"{SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT // 60} minutes); a Codex session gets it after any "
-    "turn under way. Command-Return sends.")
+EXPLANATION = "The message will also include the name, process ID, and folder of each agent."
 
 
 def list_tab_titles_for_alert(agent_session_entries):
@@ -47,7 +40,7 @@ def build_note_text_view(frame_size):
 
 def build_talk_to_each_other_alert(agent_session_entries, left_out_agent_session_entries):
     """Returns (alert, note_text_view): an alert with Send (also Command-Return) and Cancel (also
-    Esc), a "Message to send:" box holding the default note, and what each session's copy adds.
+    Esc), a "Message draft:" box holding the default note, and what each session's copy adds.
 
     Args:
         agent_session_entries: The selected agent sessions that get the message.
@@ -55,10 +48,10 @@ def build_talk_to_each_other_alert(agent_session_entries, left_out_agent_session
     """
     alert = NSAlert.alloc().init()
     alert.setMessageText_("Talk to Each Other")
-    informative_text = (f"Sends a message to these {len(agent_session_entries)} agent sessions: "
-                        f"{list_tab_titles_for_alert(agent_session_entries)}.")
+    informative_text = (f"Send a message introducing these {len(agent_session_entries)} agents to each other:\n"
+                        + "\n".join(f"• {entry.tab_title}" for entry in agent_session_entries))
     if left_out_agent_session_entries:
-        informative_text += (" Left out, since their tools can't take messages from other sessions: "
+        informative_text += ("\n\nLeft out, since their tools can't take messages from other sessions: "
                              f"{list_tab_titles_for_alert(left_out_agent_session_entries)}.")
     alert.setInformativeText_(informative_text)
     alert.addButtonWithTitle_("Send")
@@ -68,7 +61,7 @@ def build_talk_to_each_other_alert(agent_session_entries, left_out_agent_session
     explanation_field.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
     explanation_field.setTextColor_(NSColor.secondaryLabelColor())
     explanation_height = explanation_field.cell().cellSizeForBounds_(NSMakeRect(0, 0, ACCESSORY_WIDTH, LARGEST_TEXT_VIEW_SIZE)).height
-    message_label = NSTextField.labelWithString_("Message to send:")
+    message_label = NSTextField.labelWithString_("Message draft:")
     message_label_height = message_label.fittingSize().height
     accessory_view = NSView.alloc().initWithFrame_(NSMakeRect(
         0, 0, ACCESSORY_WIDTH, explanation_height + GAP + NOTE_BOX_HEIGHT + GAP + message_label_height))

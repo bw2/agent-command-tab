@@ -26,6 +26,8 @@ from agent_command_tab.command_line import RECONNECT_EXIT_STATUS, SECONDS_TO_WAI
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
 from agent_command_tab.global_shortcut_key_filter import GlobalShortcutKeyFilter
+from agent_command_tab.hook_event_forwarder import HOOK_EVENTS_SOCKET_PATH
+from agent_command_tab.hooks_installer import BACKUP_FILE_SUFFIX, install_hooks, list_settings_file_paths
 from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
 from agent_command_tab.monitor_assignment import compute_frame_clear_of_area
 from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
@@ -130,7 +132,8 @@ class AppController(NSObject):
         self.global_shortcut_key_filter = GlobalShortcutKeyFilter(lambda: AppHelper.callAfter(self.global_shortcut_pressed))
         self.connection_thread = Iterm2ConnectionThread(self.receive_snapshot_on_background_thread,
                                                         self.receive_connection_lost_on_background_thread, verbose,
-                                                        DOCKED_WINDOW_FRAMES_FILE_PATH, PAUSE_RECORDS_FILE_PATH)
+                                                        DOCKED_WINDOW_FRAMES_FILE_PATH, PAUSE_RECORDS_FILE_PATH,
+                                                        hook_events_socket_path=HOOK_EVENTS_SOCKET_PATH)
         notification_center = NSNotificationCenter.defaultCenter()
         for notification_name, selector_name in (
                 (NSApplicationDidChangeScreenParametersNotification, "screenParametersChanged:"),
@@ -500,6 +503,34 @@ class AppController(NSObject):
         alert.addButtonWithTitle_("No")  # the first button is the default and sits rightmost
         alert.addButtonWithTitle_("Yes")
         return self.run_alert_in_front(alert) == NSAlertSecondButtonReturn
+
+    @objc.python_method
+    def install_hooks(self, agent_tool_names):
+        """Adds the app's hooks to these agent tools' settings files (the list's Install Hooks
+        button; user request, 2026-10-27), once the user agrees, then has the core check them again."""
+        home_folder = os.path.expanduser("~")
+        file_paths = [file_path.replace(home_folder, "~", 1) for agent_tool_name in agent_tool_names
+                      for file_path in list_settings_file_paths(agent_tool_name)]
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Install the hooks for {' and '.join(agent_tool_names)}?")
+        alert.setInformativeText_(
+            "They tell a crashed agent from one that ended normally, and count Claude Code's background "
+            "shells and agents. They are added to:\n\n" + "\n".join(file_paths)
+            + f"\n\nEach file is first copied to its name plus {BACKUP_FILE_SUFFIX}. Sessions started from now on use them."
+            + (" Codex then asks you to approve them: type /hooks in Codex." if "Codex" in agent_tool_names else ""))
+        alert.addButtonWithTitle_("Install")
+        alert.addButtonWithTitle_("Cancel")
+        if self.run_alert_in_front(alert) != NSAlertFirstButtonReturn:
+            return
+        try:
+            for agent_tool_name in agent_tool_names:
+                install_hooks(agent_tool_name)
+        except (OSError, ValueError) as error:
+            failure_alert = NSAlert.alloc().init()
+            failure_alert.setMessageText_("The hooks couldn't be installed")
+            failure_alert.setInformativeText_(str(error))
+            self.run_alert_in_front(failure_alert)
+        self.connection_thread.send_hooks_changed()
 
     @objc.python_method
     def ask_for_note_asking_agent_sessions_to_talk_to_each_other(self, agent_session_entries, left_out_agent_session_entries):

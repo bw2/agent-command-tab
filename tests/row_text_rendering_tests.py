@@ -1,10 +1,12 @@
 import time
 import unittest
 
-from agent_command_tab.snapshot_data_classes import AgentSessionEntry, MonitorEntry, WindowEntry
+from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry, MonitorEntry, WindowEntry
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
                                                                  LONGEST_TEXT_BY_COLUMN_FIELD_NAME,
                                                                  build_agent_session_row_text_parts,
+                                                                 build_background_task_lights_text,
+                                                                 build_child_process_row_text_parts,
                                                                  build_monitor_row_text_parts,
                                                                  build_tree_connector_text,
                                                                  build_tree_continuation_text,
@@ -21,7 +23,7 @@ def make_entry(status, tab_title="reviews", status_since=0.0):
 
 def make_window(statuses):
     return WindowEntry(window_id="w", title="project", window_title_set_by_user=False, frame=(0, 0, 1, 1),
-                       last_prompt_time=None, total_tab_count=len(statuses),
+                       total_tab_count=len(statuses),
                        agent_sessions=tuple(make_entry(status) for status in statuses))
 
 
@@ -123,6 +125,28 @@ class RowTextPartsTests(unittest.TestCase):
     def test_monitor_row(self):
         monitor = MonitorEntry("m", "Built-in", (0, 0, 1, 1), (0, 0, 1, 1), (make_window(["idle"]),))
         self.assertEqual(build_monitor_row_text_parts(monitor).details_text, "1 window")
+
+    def test_background_tasks_light_up_after_the_name(self):
+        self.assertEqual([build_background_task_lights_text(count) for count in (0, 1, 4, 6)], ["", "•", "••••", "•×6"])
+        parts = build_agent_session_row_text_parts(make_entry("idle")._replace(background_task_count=2), [True], 1.0)
+        self.assertEqual((parts.details_text, parts.details_color_name), ("••", "yellow"))
+
+    def test_an_exited_row_is_gray(self):
+        parts = build_agent_session_row_text_parts(make_entry("exited", status_since=100.0), [True], 160.0)
+        self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.state_text, parts.elapsed_time_text),
+                         ("⊘", "gray", "exited", "1m"))
+
+    def test_child_process_row(self):
+        now = time.mktime((2026, 10, 27, 9, 30, 0, 0, 0, -1))
+        child_process = ChildProcessEntry(77, "python3 -m unittest", now - 125, True, 300 * 1024 ** 2, 12)
+        parts = build_child_process_row_text_parts(child_process, [False, True], now)
+        self.assertEqual((parts.connector_text, parts.dot_glyph, parts.dot_color_name, parts.name_text),
+                         ("│  └─ ", "•", "yellow", "python3 -m unittest"))  # a command left in the background
+        self.assertEqual((parts.created_time_text, parts.existence_duration_text, parts.memory_text, parts.cpu_text, parts.state_text),
+                         ("9:27 AM", "2m", "300M", "12%", ""))
+        parts = build_child_process_row_text_parts(child_process._replace(is_background_shell=False, memory_bytes=None,
+                                                                          cpu_percent=None), [True], now)
+        self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.memory_text, parts.cpu_text), ("·", "gray", "", ""))
 
 
 if __name__ == "__main__":

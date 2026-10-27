@@ -1,4 +1,4 @@
-"""Command line entry point: `agent-command-tab run | app | dump-snapshot`."""
+"""Command line entry point: `agent-command-tab run | app | dump-snapshot | install-hooks | remove-hooks`."""
 
 import argparse
 import json
@@ -60,6 +60,28 @@ def dump_snapshot(verbose):
     return 0
 
 
+def install_or_remove_hooks(install):
+    """Adds the app's hooks to Claude Code's and Codex's settings, or takes them out, and prints
+    which files changed (hooks_installer); returns the exit status."""
+    from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, install_hooks, remove_hooks
+    exit_status = 0
+    for agent_tool_name in HOOK_EVENTS_BY_AGENT_TOOL_NAME:
+        try:
+            changed_file_paths = (install_hooks if install else remove_hooks)(agent_tool_name)
+        except (OSError, ValueError) as error:
+            print(f"{agent_tool_name}: {error}", file=sys.stderr)
+            exit_status = 1
+            continue
+        for file_path in changed_file_paths:
+            print(f"{agent_tool_name}: {'added to' if install else 'removed from'} {file_path}")
+        if not changed_file_paths:
+            print(f"{agent_tool_name}: nothing to change")
+        elif install:
+            print(f"{agent_tool_name}: sessions started from now on use them"
+                  + ("; Codex asks you to approve them first (type /hooks in Codex)" if agent_tool_name == "Codex" else ""))
+    return exit_status
+
+
 def run_app_process(verbose):
     """Runs the menu bar app in this process; returns its exit status."""
     from agent_command_tab.app_controller import run_menu_bar_app
@@ -109,13 +131,18 @@ def run_with_restarts(verbose):
 def main(arguments=None):
     """Parses the command line and runs the chosen command."""
     parser = argparse.ArgumentParser(prog="agent-command-tab", description=__doc__)
-    parser.add_argument("command", choices=["run", "app", "dump-snapshot"], nargs="?", default="run",
+    parser.add_argument("command", choices=["run", "app", "dump-snapshot", "install-hooks", "remove-hooks"], nargs="?",
+                        default="run",
                         help="run: the menu bar app, restarted when iTerm2's connection drops (default); "
-                             "app: the menu bar app without restarts; dump-snapshot: print the current list as JSON")
+                             "app: the menu bar app without restarts; dump-snapshot: print the current list as JSON; "
+                             "install-hooks, remove-hooks: add the app's hooks to Claude Code's and Codex's settings, "
+                             "or take them out")
     parser.add_argument("--verbose", action="store_true", help="print diagnostics")
     parsed_arguments = parser.parse_args(arguments)
     if parsed_arguments.command == "dump-snapshot":
         return dump_snapshot(parsed_arguments.verbose)
+    if parsed_arguments.command in ("install-hooks", "remove-hooks"):
+        return install_or_remove_hooks(parsed_arguments.command == "install-hooks")
     if parsed_arguments.command == "app":
         return run_app_process(parsed_arguments.verbose)
     return run_with_restarts(parsed_arguments.verbose)

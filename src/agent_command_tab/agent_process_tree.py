@@ -312,6 +312,98 @@ def list_descendant_processes_and_other_users_process_ids(process_id, maximum_de
     return descendants, other_users_process_ids
 
 
+def list_child_processes_of_the_agent(agent_process_id, descendant_processes, now):
+    """Returns [(child, shown process)] for each process the agent started, oldest first (the sub
+    rows of an open tab row; user request, 2026-10-27). Codex's own program below its node
+    launcher is part of the agent, so the processes it started count instead. The shown process
+    is the child itself, or for a shell or wrapper the first process started below it (the agent's
+    shell tool runs `python3 ...` inside a `bash -c`), if one runs. As for the command the agent
+    waits on, a child counts only once it has run SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS, so the
+    hooks and status line commands that end within a second (iTerm2's cc-status) never show.
+
+    Args:
+        agent_process_id: The agent process (the tab's job).
+        descendant_processes: ProcessInfo of every process below it (list_descendant_processes).
+        now: The current time.
+    """
+    own_program_process_ids = {agent_process_id} | {
+        process.process_id for process in descendant_processes
+        if process.parent_process_id == agent_process_id and process.name in NAMES_OF_AGENT_PROGRAMS}
+    process_ids_by_parent_process_id = collections.defaultdict(list)
+    for process in descendant_processes:
+        process_ids_by_parent_process_id[process.parent_process_id].append(process.process_id)
+    process_by_id = {process.process_id: process for process in descendant_processes}
+
+    def find_first_process_run_below(shell):
+        below = []
+        parent_process_ids = [shell.process_id]
+        while parent_process_ids:  # every level, so a shell inside a shell is looked through too
+            children = [process_by_id[process_id] for parent_process_id in parent_process_ids
+                        for process_id in process_ids_by_parent_process_id[parent_process_id]]
+            below.extend(child for child in children if child.name not in SHELL_AND_WRAPPER_PROCESS_NAMES)
+            parent_process_ids = [child.process_id for child in children]
+        return min(below, key=lambda process: process.started_at, default=None)
+    children = sorted((process for process in descendant_processes if process.parent_process_id in own_program_process_ids
+                       and process.process_id not in own_program_process_ids
+                       and now - process.started_at >= SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS),
+                      key=lambda process: process.started_at)
+    return [(child, (find_first_process_run_below(child) if child.name in SHELL_AND_WRAPPER_PROCESS_NAMES else None) or child)
+            for child in children]
+
+
+def child_process_is_a_background_shell(child, shown_process, turn_is_under_way, turn_started_at):
+    """Whether one of list_child_processes_of_the_agent's children is a command the agent's shell
+    tool left running in the background: a shell or wrapper with a process running in it (not
+    Codex's terminal kept open between commands, nor a helper such as an MCP server, which the
+    agent starts itself), between turns, or during a turn when the command in it started before
+    the turn did (the command's start, not the shell's: Codex runs a later turn's commands in a
+    shell kept from an earlier turn). A command started in the turn under way may be the one the
+    agent waits on (the order the agent started them in doesn't tell), so it counts only once the
+    turn ends (code review, 2026-10-27).
+
+    Args:
+        child, shown_process: One of list_child_processes_of_the_agent's pairs.
+        turn_is_under_way: Whether the agent is in a turn (working or asking).
+        turn_started_at: When that turn began, or None while not known (then no command counts).
+    """
+    if child.name not in SHELL_AND_WRAPPER_PROCESS_NAMES or shown_process is child:
+        return False
+    if not turn_is_under_way:
+        return True
+    return turn_started_at is not None and shown_process.started_at < turn_started_at - SECONDS_OF_SLACK_AT_TURN_START
+
+
+def build_command_text(arguments, executable_name):
+    """Returns how a sub row names a process: its program's base name and its arguments, on one
+    line ("python3 -m unittest"), or its executable's name when its arguments can't be read."""
+    if not arguments:
+        return executable_name
+    return " ".join([os.path.basename(arguments[0])] + arguments[1:]).replace("\n", " ")
+
+
+def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, now):
+    """Returns [{"child": ProcessInfo, "command_text", "command_started_at", "is_background_shell",
+    "resource_usage": (memory in bytes, CPU seconds) of the child and the processes below it, or
+    None}] for each process the agent started (list_child_processes_of_the_agent), named by the
+    command shown and dated by its start (a shell Codex keeps between turns is older).
+
+    Args:
+        agent_process_id: The agent process.
+        turn_is_under_way, turn_started_at: See child_process_is_a_background_shell.
+        reads_resource_usage: Whether to read each child's memory and CPU time (else None).
+        now: The current time.
+    """
+    descendant_processes = list_descendant_processes(agent_process_id)
+    return [{"child": child,
+             "command_text": build_command_text(read_process_arguments_and_environment(shown_process.process_id)[0],
+                                                shown_process.name),
+             "command_started_at": shown_process.started_at,
+             "is_background_shell": child_process_is_a_background_shell(child, shown_process, turn_is_under_way,
+                                                                        turn_started_at),
+             "resource_usage": read_process_tree_resource_usage(child.process_id) if reads_resource_usage else None}
+            for child, shown_process in list_child_processes_of_the_agent(agent_process_id, descendant_processes, now)]
+
+
 def choose_helper_process_ids(descendant_processes):
     """Returns the IDs of the processes running below an agent between its turns (MCP servers, for
     example), which choose_command_the_agent_is_waiting_on never takes for a command, nor anything

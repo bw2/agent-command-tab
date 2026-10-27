@@ -11,9 +11,11 @@ from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_adapters.codex import CONVERSATION_FILE_PATTERN, CodexAdapter
 from agent_command_tab.agent_adapters.generic import GenericAdapter
 from agent_command_tab.agent_process_tree import (ProcessInfo, an_agent_program_runs_through_a_shell_below,
+                                                  build_command_text, child_process_is_a_background_shell,
                                                   choose_command_the_agent_is_waiting_on, choose_helper_process_ids,
-                                                  compute_cpu_percent,
-                                                  list_descendant_processes, read_name_the_process_was_started_as,
+                                                  compute_cpu_percent, list_child_processes_of_the_agent,
+                                                  list_descendant_processes, read_child_processes,
+                                                  read_name_the_process_was_started_as,
                                                   read_process_info, read_process_resource_usage,
                                                   read_process_tree_resource_usage)
 
@@ -60,6 +62,73 @@ class CommandTheAgentIsWaitingOnTests(unittest.TestCase):
         self.assertEqual(choose_command_the_agent_is_waiting_on(
             descendants + [make_process(6, 1, "zsh", 1040.0), pytest_process],
             TURN_STARTED_AT, {"codex-code-mode-host"}, NOW, helper_process_ids={4, 5}), (pytest_process, 1040.0))
+
+
+class ChildProcessTests(unittest.TestCase):
+    """The sub rows of an open tab row and the background shells (user request, 2026-10-27)."""
+
+    def test_claude_codes_children_are_named_by_the_command_run_in_each_shell(self):
+        # As seen below this Mac's Claude Code on 2026-10-27: its caffeinate, a `bash -c` running a
+        # background python3, and one running the command it waits on.
+        caffeinate = make_process(2, 1, "caffeinate", 900.0)
+        background_shell, background_python = make_process(3, 1, "bash", 1001.0), make_process(4, 3, "python3", 1001.1)
+        foreground_shell, foreground_python = make_process(5, 1, "bash", 1050.0), make_process(6, 5, "python3", 1050.1)
+        hook_shell, hook = make_process(7, 1, "sh", 1099.5), make_process(8, 7, "cc-status", 1099.6)  # a hook, just started
+        descendants = [foreground_python, foreground_shell, background_python, background_shell, caffeinate, hook_shell, hook]
+        children = list_child_processes_of_the_agent(1, descendants, NOW)
+        self.assertEqual(children, [(caffeinate, caffeinate), (background_shell, background_python),
+                                    (foreground_shell, foreground_python)])  # oldest first, without the hook
+        # Between turns, every command left running is in the background (caffeinate is a helper, not a shell).
+        self.assertEqual([child_process_is_a_background_shell(child, shown, False, None) for child, shown in children],
+                         [False, True, True])
+        # In a turn begun at 1040, only the command from before it is known to be: one started in
+        # the turn may be the command the agent waits on, whichever came first.
+        self.assertEqual([child_process_is_a_background_shell(child, shown, True, 1040.0) for child, shown in children],
+                         [False, True, False])
+        self.assertEqual([child_process_is_a_background_shell(child, shown, True, 1000.0) for child, shown in children],
+                         [False, False, False])  # both started in the turn: neither counts until it ends
+        self.assertEqual([child_process_is_a_background_shell(child, shown, True, None) for child, shown in children],
+                         [False, False, False])  # when the turn began isn't known yet
+
+    def test_codexs_own_program_below_its_node_launcher_counts_as_the_agent(self):
+        codex = make_process(2, 1, "codex", 100.0)
+        kept_terminal = make_process(3, 2, "zsh", 200.0)  # open between commands, with nothing running
+        wrapper, build = make_process(4, 2, "zsh", 300.0), make_process(6, 5, "cargo", 300.2)
+        inner_shell = make_process(5, 4, "bash", 300.1)
+        descendants = [codex, kept_terminal, wrapper, inner_shell, build]
+        children = list_child_processes_of_the_agent(1, descendants, NOW)
+        self.assertEqual(children, [(kept_terminal, kept_terminal), (wrapper, build)])  # shells inside shells are looked through
+        self.assertEqual([child_process_is_a_background_shell(child, shown, False, None) for child, shown in children],
+                         [False, True])
+
+    def test_a_command_in_a_shell_kept_from_an_earlier_turn_goes_by_its_own_start(self):
+        # Codex runs a later turn's command in a shell started in an earlier one.
+        codex, kept_shell, python = make_process(2, 1, "codex", 10.0), make_process(7, 2, "bash", 20.0), make_process(8, 7, "python3", 1030.0)
+        ((child, shown),) = list_child_processes_of_the_agent(1, [codex, kept_shell, python], NOW)
+        self.assertIs(shown, python)
+        self.assertFalse(child_process_is_a_background_shell(child, shown, True, TURN_STARTED_AT))  # started in this turn
+        self.assertTrue(child_process_is_a_background_shell(child, shown, True, 1100.0))  # from before the turn
+
+    def test_a_command_is_named_by_its_program_and_arguments(self):
+        self.assertEqual(build_command_text(["/opt/homebrew/bin/python3", "-m", "unittest"], "Python"), "python3 -m unittest")
+        self.assertEqual(build_command_text(["bash", "-c", "echo a\necho b"], "bash"), "bash -c echo a echo b")
+        self.assertEqual(build_command_text([], "caffeinate"), "caffeinate")
+
+    def test_a_real_child_of_this_process(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            until = time.time() + 10
+            child_processes = []
+            while time.time() < until and not any(entry["child"].process_id == child.pid for entry in child_processes):
+                child_processes = read_child_processes(os.getpid(), False, None, True, time.time() + 60)  # (it counts once it has run 2 s)
+            entry = next(entry for entry in child_processes if entry["child"].process_id == child.pid)
+            self.assertIn("import time; time.sleep(30)", entry["command_text"])
+            self.assertEqual(entry["command_started_at"], entry["child"].started_at)  # not a shell: the command itself
+            self.assertFalse(entry["is_background_shell"])  # not a shell
+            self.assertGreater(entry["resource_usage"][0], 0)  # its memory
+        finally:
+            child.kill()
+            child.wait()
 
 
 class HelperProcessTests(unittest.TestCase):

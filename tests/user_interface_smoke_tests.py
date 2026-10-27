@@ -18,7 +18,7 @@ from Foundation import NSIndexSet
 
 from agent_command_tab.app_controller import AppController
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
-from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
+from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
                                                                 PANEL_SIDE_MARGIN, POPOVER_WIDTH, TOP_BAR_HEIGHT,
                                                                 ListPanelController)
@@ -56,6 +56,7 @@ class RecordingOwner:
         self.idle_tabs_are_hidden_choices = []
         self.talk_to_each_other_requests = []  # (agent session entries, left-out entries)
         self.note_to_send = None  # what the Talk to Each Other window returns: None for Cancel
+        self.hooks_install_requests = []
 
     def submit_action(self, action_request):
         self.submitted_actions.append(action_request)
@@ -102,6 +103,9 @@ class RecordingOwner:
         self.talk_to_each_other_requests.append((agent_session_entries, left_out_agent_session_entries))
         return self.note_to_send
 
+    def install_hooks(self, agent_tool_names):
+        self.hooks_install_requests.append(list(agent_tool_names))
+
 
 def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False, slash_commands=("/compact", "/clear")):
     return AgentSessionEntry(tab_id=tab_id, session_id=f"s{tab_id}", tab_title=title, tab_title_set_by_user=False,
@@ -110,12 +114,12 @@ def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False, sla
 
 
 def make_sample_snapshot(second_window_tabs=2):
-    window_one = WindowEntry("w1", "agent-command-tab", False, (0, 0, 800, 600), None, 4, (
+    window_one = WindowEntry("w1", "agent-command-tab", False, (0, 0, 800, 600), 4, (
         make_entry("1", "planning", "working", is_in_front=True),
         make_entry("2", "phase0-tests", "asking"),
         make_entry("3", "codex-review", "done", tool="Codex"),
     ))
-    window_two = WindowEntry("w2", "tandem-repeats", False, (0, 0, 800, 600), None, 2, tuple(
+    window_two = WindowEntry("w2", "tandem-repeats", False, (0, 0, 800, 600), 2, tuple(
         make_entry(str(10 + index), f"analysis-{index}", "idle") for index in range(second_window_tabs)))
     monitor = MonitorEntry("1", "Built-in", (0, 0, 2000, 1300), (0, 0, 2000, 1260), (window_one, window_two))
     return ComputerSnapshot("c", "Test Mac", 1.0, (monitor,))
@@ -643,8 +647,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(3, 4)  # codex-review (done) and the second window (two idle tabs)
         self.assertEqual(self.build_right_click_menu_titles(4),
-                         ["Talk to Each Other…", "---", "/compact 3 Sessions", "/clear 3 Sessions", "Kill 3 Sessions", "---",
-                          "Pause 3 Sessions"])
+                         ["/compact 3 Sessions", "/clear 3 Sessions", "Kill 3 Sessions", "---", "Pause 3 Sessions", "---",
+                          "Talk to Each Other…"])
         self.assertIsNone(self.build_right_click_menu_items_by_title(4)["/compact 3 Sessions"].toolTip())  # all at their prompt
         self.select_rows(0, 1)  # a window and one of its tabs: each session counts once
         self.assertIn("/compact 3 Sessions", self.build_right_click_menu_titles(1))
@@ -730,7 +734,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         entries = [make_entry("1", "planning", "idle"), make_entry("2", "reviews", "working")]
         alert, note_text_view = build_talk_to_each_other_alert(entries, [make_entry("3", "aider tab", "idle", tool="Aider")])
         self.assertEqual(note_text_view.string(), DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER)
-        self.assertIn('2 agent sessions: "planning", "reviews".', alert.informativeText())
+        self.assertIn("these 2 agents to each other:\n• planning\n• reviews", alert.informativeText())
         self.assertIn('Left out, since their tools can\'t take messages from other sessions: "aider tab".', alert.informativeText())
         send_button, cancel_button = alert.buttons()
         self.assertEqual((send_button.title(), cancel_button.title()), ("Send", "Cancel"))
@@ -965,7 +969,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_new_agent_session_uses_the_folder_of_the_windows_selected_tab(self):
         # A background window (nothing in front) whose selected tab is its second agent session.
-        window = WindowEntry("w3", "two projects", False, (0, 0, 800, 600), None, 2, (
+        window = WindowEntry("w3", "two projects", False, (0, 0, 800, 600), 2, (
             make_entry("31", "photos", "idle")._replace(working_folder="/code/photos"),
             make_entry("32", "other", "idle")._replace(working_folder="/tmp/other-project"),
         ), selected_tab_id="32")
@@ -1322,10 +1326,136 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             content_view.cacheDisplayInRect_toBitmapImageRep_(content_view.bounds(), bitmap)
             bitmap.representationUsingType_properties_(NSBitmapImageFileTypePNG, {}).writeToFile_atomically_(image_path, True)
 
+    # ----- process rows, background lights, exited rows and the hooks note (user requests, 2026-10-27) -----
+
+    def apply_snapshot_with_child_processes(self, child_processes=None, preview_line=""):
+        """Applies the sample snapshot with child processes (and a preview, if given) on the first tab."""
+        snapshot = make_sample_snapshot()
+        child_processes = child_processes if child_processes is not None else (
+            ChildProcessEntry(201, "caffeinate -i -t 300", 900.0, False, None, None),
+            ChildProcessEntry(202, "python3 -c import time; time.sleep(600) " + "x" * 300, 950.0, True, 300 * 1024 ** 2, 12))
+        window_one, window_two = snapshot.monitors[0].windows
+        window_one = window_one._replace(agent_sessions=(
+            window_one.agent_sessions[0]._replace(child_processes=child_processes, preview_line=preview_line),)
+            + window_one.agent_sessions[1:])
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
+        return self.list_controller.outline_view
+
+    def test_an_open_tab_row_has_a_sub_row_for_each_process_its_agent_started(self):
+        outline_view = self.apply_snapshot_with_child_processes()
+        self.dropdown_panel_controller.fit_size_to_rows()
+        closed_width = self.list_controller.measure_widest_row_width()
+        self.assertEqual(outline_view.numberOfRows(), 8)  # closed at first
+        self.window.contentView().layoutSubtreeIfNeeded()
+        self.assertFalse(self.lay_out_row_view(1).disclosure_button.isHidden())  # it has processes to show
+        self.click_row_arrow(1)
+        self.assertEqual(outline_view.numberOfRows(), 10)
+        process_rows = [self.lay_out_row_view(row) for row in (2, 3)]
+        self.assertEqual([outline_view.itemAtRow_(row).kind for row in (2, 3)], ["process", "process"])
+        self.assertEqual([row_view.prefix_text_field.stringValue() for row_view in process_rows], ["│  ├─ ", "│  └─ "])
+        self.assertEqual([row_view.dot_text_field.stringValue() for row_view in process_rows], ["· ", "• "])  # • in the background
+        self.assertEqual(process_rows[0].name_text_field.stringValue(), "caffeinate -i -t 300")
+        self.assertTrue(process_rows[1].disclosure_button.isHidden())
+        self.assertFalse(process_rows[1].column_views["state_duration"].isHidden())  # the columns line up with the tabs'
+        self.assertEqual(process_rows[1].column_views["state"].stringValue(), "")
+        self.assertEqual(self.list_controller.measure_widest_row_width(), closed_width)  # a long command doesn't widen the dropdown
+        # The command runs on over the columns a process row leaves empty (the default ones), up to the first with text.
+        name_frame = process_rows[1].name_text_field.frame()
+        self.assertGreater(name_frame.origin.x + name_frame.size.width, process_rows[1].column_views["state"].frame().origin.x)
+        self.assertLessEqual(name_frame.origin.x + name_frame.size.width, process_rows[1].frame().size.width)
+        self.list_controller.set_shown_columns(["context_tokens", "memory_usage", "state", "state_duration"])
+        name_frame = self.lay_out_row_view(3).name_text_field.frame()
+        self.assertLessEqual(name_frame.origin.x + name_frame.size.width, self.lay_out_row_view(3).column_views["memory_usage"].frame().origin.x)
+        # Not selectable; a double-click shows its tab.
+        self.assertEqual(self.list_controller.outlineView_selectionIndexesForProposedSelection_(
+            outline_view, build_index_set([2, 3])).count(), 0)
+        process_item = outline_view.itemAtRow_(2)
+        self.list_controller.find_clicked_item = lambda: process_item
+        self.list_controller.rowDoubleClicked_(None)
+        self.assertEqual([(request.action, request.target) for request in self.submitted_actions],
+                         [("focus_agent_session", {"session_id": "s1"})])
+        # A process ends while the row is open; then the row closes.
+        self.apply_snapshot_with_child_processes(child_processes=(ChildProcessEntry(201, "caffeinate", 900.0, False, None, None),))
+        self.assertEqual(outline_view.numberOfRows(), 9)
+        self.click_row_arrow(1)
+        self.assertEqual(outline_view.numberOfRows(), 8)
+
+    def test_process_rows_come_once_the_arrows_button_is_up(self):
+        outline_view = self.apply_snapshot_with_child_processes()
+        self.list_controller.row_press_in_progress = True  # as RowButton.mouseDown_ sets it around the click's action
+        self.click_row_arrow(1)
+        self.assertEqual(outline_view.numberOfRows(), 8)  # held while the button is down
+        self.list_controller.row_released()
+        self.assertEqual(outline_view.numberOfRows(), 10)
+
+    def test_the_line_down_to_the_process_rows_runs_beside_the_preview(self):
+        outline_view = self.apply_snapshot_with_child_processes(preview_line="Bash: sleep 600")
+        self.click_row_arrow(1)
+        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 2, 3)],
+                         [TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT, ROW_HEIGHT])
+        self.assertEqual(self.lay_out_row_view(1).preview_connector_text_field.stringValue(), "│  │\n│  │")
+        self.list_controller.set_all_expanded(False)  # collapsing all leaves the tab row open
+        self.list_controller.set_all_expanded(True)
+        self.assertEqual(outline_view.numberOfRows(), 10)
+
+    def test_background_tasks_light_up_after_the_tab_name(self):
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_one = window_one._replace(agent_sessions=(window_one.agent_sessions[0]._replace(background_task_count=3),)
+                                         + window_one.agent_sessions[1:])
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        row_view = self.lay_out_row_view(1)
+        self.assertEqual(row_view.details_text_field.stringValue(), "•••")
+        self.assertGreater(row_view.details_text_field.frame().origin.x, row_view.name_text_field.frame().origin.x)
+        self.assertEqual(self.lay_out_row_view(2).name_text_field.frame().origin.x, row_view.name_text_field.frame().origin.x)
+
+    def test_an_exited_row_is_gray_and_its_menu_has_nothing_to_send_or_kill(self):
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        exited_entry = window_one.agent_sessions[0]._replace(status="exited", slash_commands=(), ended_abnormally_at=1.0)
+        window_one = window_one._replace(agent_sessions=(exited_entry,) + window_one.agent_sessions[1:])
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        row_view = self.lay_out_row_view(1)
+        self.assertEqual((row_view.dot_text_field.stringValue(), row_view.column_views["state"].stringValue()), ("⊘ ", "exited"))
+        tab_item = self.list_controller.outline_view.itemAtRow_(1)
+        self.list_controller.find_clicked_item = lambda: tab_item
+        menu = NSMenu.alloc().initWithTitle_("")
+        self.list_controller.menuNeedsUpdate_(menu)
+        disabled_titles = [menu_item.title() for menu_item in menu.itemArray() if not menu_item.isEnabled() and menu_item.title()]
+        self.assertTrue({"/compact", "/clear", "Kill Session", "Duplicate this tab"} <= set(disabled_titles))
+        self.assertEqual(menu.itemWithTitle_("Kill Session").toolTip(), "The agent has ended")
+        self.assertEqual(menu.itemWithTitle_("Duplicate this tab").toolTip(), "The agent has ended")
+        self.assertTrue(menu.itemWithTitle_("Rename").isEnabled())
+
+    def test_the_bottom_bar_notes_missing_hooks_for_the_agent_tools_listed(self):
+        panel = self.dropdown_panel_controller
+        snapshot = make_sample_snapshot()  # Claude Code and Codex sessions
+        for hooks_status_per_agent_tool, expected_note, shows_button in (
+                ((("Claude Code", "missing"), ("Codex", "missing")), "No hooks for Claude Code and Codex", True),
+                ((("Claude Code", "installed"), ("Codex", "needs approval")), "Approve the Codex hooks: /hooks in Codex", False),
+                ((("Claude Code", "installed"), ("Codex", "installed")), "", False)):
+            self.list_controller.apply_snapshot(snapshot._replace(hooks_status_per_agent_tool=hooks_status_per_agent_tool))
+            self.assertEqual((panel.hooks_note_text_field.stringValue(), panel.hooks_note_text_field.isHidden(),
+                              panel.install_hooks_button.isHidden()), (expected_note, not expected_note, not shows_button))
+        self.list_controller.apply_snapshot(snapshot._replace(hooks_status_per_agent_tool=(("Claude Code", "missing"),)))
+        note_frame, button_frame = panel.hooks_note_text_field.frame(), panel.install_hooks_button.frame()
+        self.assertEqual(note_frame.origin.x, PANEL_SIDE_MARGIN)  # at the bottom left, then the button
+        self.assertLess(note_frame.origin.x + note_frame.size.width, button_frame.origin.x)
+        self.assertLessEqual(button_frame.origin.x + button_frame.size.width, panel.pause_or_resume_all_button.frame().origin.x)
+        self.assertLess(button_frame.origin.y + button_frame.size.height, BOTTOM_BAR_HEIGHT)
+        panel.installHooksClicked_(panel.install_hooks_button)
+        self.assertEqual(self.owner.hooks_install_requests, [["Claude Code"]])
+        only_claude_code = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(snapshot.monitors[0].windows[1],)),),
+                                             hooks_status_per_agent_tool=(("Codex", "missing"),))
+        self.list_controller.apply_snapshot(only_claude_code)  # no Codex session listed: nothing to say about its hooks
+        self.assertTrue(panel.hooks_note_text_field.isHidden())
+
 
 class AutomaticIconColorTests(unittest.TestCase):
     def snapshot_with_states(self, states):
-        window = WindowEntry("w1", "work", False, (0, 0, 800, 600), None, len(states), tuple(
+        window = WindowEntry("w1", "work", False, (0, 0, 800, 600), len(states), tuple(
             make_entry(str(index), f"tab-{index}", state) for index, state in enumerate(states)))
         return ComputerSnapshot("c", "Test Mac", 1.0, (MonitorEntry("1", "Built-in", (0, 0, 2000, 1300),
                                                                     (0, 0, 2000, 1260), (window,)),))

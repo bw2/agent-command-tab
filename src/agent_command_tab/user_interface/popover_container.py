@@ -1,4 +1,4 @@
-"""The panel around the list: the sort order, Settings, Hide Idle and expand or collapse all at the top, then the column titles; pause or resume all at the bottom right.
+"""The panel around the list: the sort order, Settings, Hide Idle and expand or collapse all at the top, then the column titles; pause or resume all at the bottom right, and a note while the app's hooks are missing at the bottom left.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
 sidebar and in the list window, each with its own list controller.
@@ -8,10 +8,11 @@ import math
 
 import objc
 from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont,
-                    NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
+                    NSLineBreakByTruncatingTail, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
                     NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
+from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
 from agent_command_tab.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_NAMES, add_popup_choices,
                                                               read_popup_choice, select_popup_choice,
@@ -51,6 +52,29 @@ IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide the tabs whose agent is idl
                           True: ("Show Idle", "Show the tabs whose agent is idle again")}
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
+HOOKS_NOTE_TOOL_TIP = ("With these hooks, the list can tell when an agent crashes: its row stays for 5 minutes, grayed "
+                       "out and marked \"exited\", instead of disappearing. They also show Claude Code's background "
+                       "shells and agents as yellow dots after the tab's name. Only sessions you start after "
+                       "installing them are covered.")
+
+
+def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
+    """Returns (the bottom bar's note about the app's hooks, or "" for none, the agent tools its
+    Install Hooks button installs them for) (user request, 2026-10-27). Only tools with a session
+    in the list count, so someone who never runs Codex isn't asked to install its hooks.
+
+    Args:
+        hooks_status_per_agent_tool: ComputerSnapshot.hooks_status_per_agent_tool.
+        listed_agent_tool_names: The agent tools of the list's sessions.
+    """
+    missing_agent_tool_names = [agent_tool_name for agent_tool_name, status in hooks_status_per_agent_tool
+                                if status == HOOKS_ARE_MISSING and agent_tool_name in listed_agent_tool_names]
+    if missing_agent_tool_names:
+        return f"No hooks for {' and '.join(missing_agent_tool_names)}", missing_agent_tool_names
+    if any(status == HOOKS_AWAIT_APPROVAL and agent_tool_name in listed_agent_tool_names
+           for agent_tool_name, status in hooks_status_per_agent_tool):
+        return "Approve the Codex hooks: /hooks in Codex", []
+    return "", []
 
 
 class ListPanelView(NSView):
@@ -67,6 +91,7 @@ class ListPanelView(NSView):
         controller = getattr(self, "controller", None)
         if controller is not None:
             controller.fit_top_bar_to_width()
+            controller.fit_bottom_bar_to_width()
 
     def mouseDown_(self, event):
         point = self.convertPoint_fromView_(event.locationInWindow(), None)
@@ -90,8 +115,9 @@ class ListPanelController(NSViewController):
     The owner is the list controller's owner (see AgentSessionListController); the panel also
     calls its open_settings(), list_sort_order_chosen(list_sort_order, list_sort_order_is_reversed)
     (as the list controller does when a column's title is clicked),
-    idle_tabs_are_hidden_chosen(idle_tabs_are_hidden) and
-    top_bar_dragged(list_panel_controller, start_point_on_screen).
+    idle_tabs_are_hidden_chosen(idle_tabs_are_hidden),
+    top_bar_dragged(list_panel_controller, start_point_on_screen) and
+    install_hooks(agent_tool_names) (the bottom bar's Install Hooks button).
     """
 
     def initWithListController_(self, list_controller):
@@ -204,6 +230,26 @@ class ListPanelController(NSViewController):
         self.pause_or_resume_all_button.setAction_("pauseOrResumeAllClicked:")
         self.pause_or_resume_all_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)  # stays at the bottom right
         root_view.addSubview_(self.pause_or_resume_all_button)
+        # At the bottom left, while the app's hooks are missing for an agent tool with a session
+        # in the list, a note and a button that installs them (user request, 2026-10-27).
+        self.hooks_note_text_field = NSTextField.labelWithString_("")
+        self.hooks_note_text_field.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.hooks_note_text_field.setTextColor_(NSColor.secondaryLabelColor())
+        self.hooks_note_text_field.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
+        self.hooks_note_text_field.setToolTip_(HOOKS_NOTE_TOOL_TIP)
+        root_view.addSubview_(self.hooks_note_text_field)
+        self.install_hooks_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
+        self.install_hooks_button.setTitle_("Install Hooks")
+        self.install_hooks_button.setBezelStyle_(NSBezelStyleRecessed)  # a gray pill like the top bar's buttons
+        self.install_hooks_button.setShowsBorderOnlyWhileMouseInside_(False)
+        self.install_hooks_button.setControlSize_(NSControlSizeSmall)
+        self.install_hooks_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.install_hooks_button.sizeToFit()
+        self.install_hooks_button.setTarget_(self)
+        self.install_hooks_button.setAction_("installHooksClicked:")
+        self.install_hooks_button.setToolTip_(HOOKS_NOTE_TOOL_TIP)
+        root_view.addSubview_(self.install_hooks_button)
+        self.agent_tool_names_to_install_hooks_for = []
         self.setView_(root_view)
         root_view.controller = self
         self.update_top_and_bottom_bar_buttons()
@@ -305,6 +351,37 @@ class ListPanelController(NSViewController):
         self.pause_or_resume_all_button.setHidden_(not (sessions_to_pause or sessions_to_resume))
         if self.expand_or_collapse_all_button.isHidden() != expand_or_collapse_all_button_was_hidden:
             self.fit_top_bar_to_width()
+        snapshot = self.list_controller.snapshot
+        note, self.agent_tool_names_to_install_hooks_for = choose_hooks_note(
+            snapshot.hooks_status_per_agent_tool if snapshot is not None else (),
+            {entry.agent_tool_name for entry in self.list_controller.list_agent_session_entries()})
+        self.hooks_note_text_field.setStringValue_(note)
+        self.fit_bottom_bar_to_width()
+
+    @objc.python_method
+    def fit_bottom_bar_to_width(self):
+        """Puts the hooks note at the bottom left, then its Install Hooks button (when there is
+        something to install), the note cut short before the button and the pause or resume button."""
+        note = self.hooks_note_text_field.stringValue()
+        shows_install_button = bool(note and self.agent_tool_names_to_install_hooks_for)
+        self.hooks_note_text_field.setHidden_(not note)
+        self.install_hooks_button.setHidden_(not shows_install_button)
+        if not note:
+            return
+        right_end_x = (self.pause_or_resume_all_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
+                       if not self.pause_or_resume_all_button.isHidden() else self.view().bounds().size.width - PANEL_SIDE_MARGIN)
+        button_width, button_height = self.install_hooks_button.frame().size
+        if shows_install_button:
+            right_end_x -= button_width + GAP_BETWEEN_TOP_BAR_BUTTONS
+        note_size = self.hooks_note_text_field.fittingSize()
+        note_width = max(min(note_size.width, right_end_x - PANEL_SIDE_MARGIN), 0)
+        self.hooks_note_text_field.setFrame_(NSMakeRect(PANEL_SIDE_MARGIN, (BOTTOM_BAR_HEIGHT - note_size.height) / 2,
+                                                        note_width, note_size.height))
+        self.install_hooks_button.setFrameOrigin_((PANEL_SIDE_MARGIN + note_width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                                                   (BOTTOM_BAR_HEIGHT - button_height) / 2))
+
+    def installHooksClicked_(self, sender):
+        self.list_controller.owner.install_hooks(self.agent_tool_names_to_install_hooks_for)
 
     def listSortOrderChosen_(self, sender):
         self.list_controller.owner.list_sort_order_chosen(read_popup_choice(sender), False)  # in its first direction

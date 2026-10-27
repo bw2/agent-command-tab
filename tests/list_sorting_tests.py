@@ -12,7 +12,7 @@ def make_entry(tab_id, tab_title, status, status_since):
 
 def make_window(window_id, title, agent_sessions):
     return WindowEntry(window_id=window_id, title=title, window_title_set_by_user=False, frame=(0, 0, 1, 1),
-                       last_prompt_time=None, total_tab_count=len(agent_sessions), agent_sessions=tuple(agent_sessions))
+                       total_tab_count=len(agent_sessions), agent_sessions=tuple(agent_sessions))
 
 
 # In iTerm2's tab order.

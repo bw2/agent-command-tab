@@ -14,8 +14,8 @@ RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
                      "agent_tool_name", "state_text", "elapsed_time_text", "context_text",
                      "created_time_text", "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text",
-                     "preview_text"],
-    defaults=["", "", "", "", "", "", "", "", "", ""])
+                     "preview_text", "details_color_name"],
+    defaults=["", "", "", "", "", "", "", "", "", "", "gray"])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
                         "context_text (the context's size and its share of the context window, "
@@ -24,7 +24,17 @@ RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working sessi
                         "agent and the processes it started use), the icon for agent_tool_name, state_text and "
                         "elapsed_time_text (the state's duration). Under it, a tab row has a gray preview line "
                         "(R23): preview_connector_text continues the tree's lines, and preview_text starts under "
-                        "the name.")
+                        "the name. A tab row's details are its background task lights, in details_color_name.")
+
+# A light per background shell or background agent after a tab's name (R26.2); more than
+# MOST_BACKGROUND_TASK_LIGHTS show as one light and their number. After the name rather than the
+# dot (as R26.2 first had it), so the names stay lined up from row to row.
+BACKGROUND_TASK_LIGHT = "•"
+BACKGROUND_TASK_LIGHTS_COLOR_NAME = "yellow"
+MOST_BACKGROUND_TASK_LIGHTS = 4
+# A child process's sub row has the light too when the agent left it running in the background,
+# and a gray middle dot otherwise, the same width, so the commands line up.
+CHILD_PROCESS_DOT_GLYPHS_AND_COLORS = {True: (BACKGROUND_TASK_LIGHT, BACKGROUND_TASK_LIGHTS_COLOR_NAME), False: ("·", "gray")}
 
 # Each state's dot and its color, also the menu bar icon's color for the most urgent state.
 DOT_GLYPH_AND_COLOR_BY_STATE = {
@@ -120,6 +130,19 @@ def build_tree_continuation_text(is_last_child_at_each_level):
     return "".join("   " if is_last else "│  " for is_last in is_last_child_at_each_level)
 
 
+def build_background_task_lights_text(background_task_count):
+    """Returns "••" for two background tasks, "•×6" beyond MOST_BACKGROUND_TASK_LIGHTS, "" for none."""
+    if background_task_count > MOST_BACKGROUND_TASK_LIGHTS:
+        return f"{BACKGROUND_TASK_LIGHT}×{background_task_count}"
+    return BACKGROUND_TASK_LIGHT * background_task_count
+
+
+def build_resource_usage_texts(memory_bytes, cpu_percent):
+    """Returns (memory_text, cpu_text) for the Memory and CPU columns, "" while not read."""
+    return (format_memory_size(memory_bytes) if memory_bytes is not None else "",
+            f"{cpu_percent}%" if cpu_percent is not None else "")
+
+
 def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_each_level, now):
     """Returns the RowTextParts for a tab row.
 
@@ -130,13 +153,15 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
     """
     dot_glyph, dot_color_name = DOT_GLYPH_AND_COLOR_BY_STATE.get(agent_session_entry.status, DOT_GLYPH_AND_COLOR_BY_STATE["unknown"])
     started_at = agent_session_entry.started_at
+    memory_text, cpu_text = build_resource_usage_texts(agent_session_entry.memory_bytes, agent_session_entry.cpu_percent)
     return RowTextParts(
         connector_text=build_tree_connector_text(is_last_child_at_each_level),
         dot_glyph=dot_glyph,
         dot_color_name=dot_color_name,
         dot_blinks=agent_session_entry.status == "working",
         name_text=agent_session_entry.tab_title,
-        details_text="",  # the preview has its own line under the row
+        details_text=build_background_task_lights_text(agent_session_entry.background_task_count),  # the preview has its own line
+        details_color_name=BACKGROUND_TASK_LIGHTS_COLOR_NAME,
         agent_tool_name=agent_session_entry.agent_tool_name,
         # While it waits on a command it started, a working agent shows "running" and the command's time.
         state_text="running" if agent_session_entry.running_command_name else agent_session_entry.status,
@@ -146,10 +171,36 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         context_text=format_context_text(agent_session_entry.context_tokens, agent_session_entry.context_fill_percent),
         created_time_text=format_clock_time(started_at, now) if started_at is not None else "",
         existence_duration_text=format_elapsed_time(now - started_at) if started_at is not None else "",
-        memory_text=format_memory_size(agent_session_entry.memory_bytes) if agent_session_entry.memory_bytes is not None else "",
-        cpu_text=f"{agent_session_entry.cpu_percent}%" if agent_session_entry.cpu_percent is not None else "",
+        memory_text=memory_text,
+        cpu_text=cpu_text,
         preview_connector_text=build_tree_continuation_text(is_last_child_at_each_level),
         preview_text=agent_session_entry.preview_line,
+    )
+
+
+def build_child_process_row_text_parts(child_process_entry, is_last_child_at_each_level, now):
+    """Returns the RowTextParts for a sub row of an open tab row (user request, 2026-10-27): the
+    command the agent started, in gray, and when it started, how long ago, and its memory and CPU
+    use in the tab row's columns.
+
+    Args:
+        child_process_entry: A ChildProcessEntry.
+        is_last_child_at_each_level: See build_tree_connector_text.
+        now: The current time.
+    """
+    dot_glyph, dot_color_name = CHILD_PROCESS_DOT_GLYPHS_AND_COLORS[child_process_entry.is_background_shell]
+    memory_text, cpu_text = build_resource_usage_texts(child_process_entry.memory_bytes, child_process_entry.cpu_percent)
+    return RowTextParts(
+        connector_text=build_tree_connector_text(is_last_child_at_each_level),
+        dot_glyph=dot_glyph,
+        dot_color_name=dot_color_name,
+        dot_blinks=False,
+        name_text=child_process_entry.command_text,
+        details_text="",
+        created_time_text=format_clock_time(child_process_entry.started_at, now),
+        existence_duration_text=format_elapsed_time(now - child_process_entry.started_at),
+        memory_text=memory_text,
+        cpu_text=cpu_text,
     )
 
 

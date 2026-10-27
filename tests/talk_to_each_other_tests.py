@@ -57,7 +57,7 @@ def make_core():
                                       status_since=0.0)
                     for session_id, tab_title in TAB_TITLE_BY_SESSION_ID.items())
     core.last_published_snapshot_without_time = ComputerSnapshot("c", "Test Mac", 0, (MonitorEntry(
-        "1", "Built-in", (0, 0, 100, 100), (0, 0, 100, 100), (WindowEntry("w1", "w", False, (0, 0, 10, 10), None, 5, entries),)),))
+        "1", "Built-in", (0, 0, 100, 100), (0, 0, 100, 100), (WindowEntry("w1", "w", False, (0, 0, 10, 10), 5, entries),)),))
     return core
 
 

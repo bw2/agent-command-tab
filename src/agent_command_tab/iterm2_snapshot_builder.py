@@ -213,7 +213,6 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         status_since=status_since,
         is_paused_with_the_processes_below_it=state == "paused" and is_paused_with_the_processes_below_it,
         is_in_front=session_id == highlighted_session_id,
-        peer_messaging_address=agent_session_name,
         last_time_tab_was_seen=session_tracking.get("last_time_tab_was_seen"),
         running_command_name=running_command[0] if running_command else "",
         running_command_started_at=running_command[1] if running_command else None,
@@ -225,7 +224,33 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         cpu_percent=(screen_reading or {}).get("cpu_percent"),
         started_at=agent_session.get("started_at"),
         slash_commands=agent_session["adapter"].slash_commands,
+        background_task_count=(screen_reading or {}).get("background_task_count", 0),
+        child_processes=(screen_reading or {}).get("child_processes", ()),
     )
+
+
+def build_exited_agent_session_entry(last_agent_session_entry, ended_at, highlighted_session_id, gathered_tab):
+    """Returns the row of an agent that ended without a normal session end (a crash, or killed;
+    R14.1), kept for EXITED_ROW_SECONDS: what its row last showed (name, tool, folder, preview),
+    gray and "exited" since it ended, without the readings of a running agent. A title the user
+    gives the tab meanwhile (Rename stays in its menu) is its name.
+
+    Args:
+        last_agent_session_entry: The AgentSessionEntry from the last snapshot before it ended.
+        ended_at: When the dashboard noticed its process was gone.
+        highlighted_session_id: See build_agent_session_entry.
+        gathered_tab: The tab's gathered dict now (module docstring).
+    """
+    if gathered_tab.get("title_override_format"):
+        last_agent_session_entry = last_agent_session_entry._replace(
+            tab_title=gathered_tab.get("title") or gathered_tab["title_override_format"], tab_title_set_by_user=True)
+    return last_agent_session_entry._replace(
+        status="exited", status_reason="the agent ended without a normal session end (a crash, or killed)",
+        status_since=ended_at, ended_abnormally_at=ended_at,
+        is_in_front=last_agent_session_entry.session_id == highlighted_session_id, running_command_name="",
+        running_command_started_at=None, context_tokens=None, context_fill_percent=None, memory_bytes=None,
+        cpu_percent=None, slash_commands=(), is_paused_with_the_processes_below_it=False, background_task_count=0,
+        child_processes=())
 
 
 def build_window_entry(gathered_window, agent_session_entries):
@@ -243,7 +268,6 @@ def build_window_entry(gathered_window, agent_session_entries):
         title=title,
         window_title_set_by_user=window_title_set_by_user,
         frame=tuple(gathered_window.get("frame") or (0, 0, 0, 0)),
-        last_prompt_time=None,
         total_tab_count=len(gathered_window["tabs"]),
         agent_sessions=tuple(agent_session_entries),
         selected_tab_id=gathered_window.get("selected_tab_id"),
@@ -253,7 +277,7 @@ def build_window_entry(gathered_window, agent_session_entries):
 def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_order, session_tracking_by_session_id,
                             displayed_state_by_session_id, screen_readings_by_session_id, stuck_threshold_seconds,
                             claude_agents_by_process_id, seen_session_id, highlighted_session_id, computer_id,
-                            computer_name, now):
+                            computer_name, now, exited_agent_sessions_by_session_id=None, hooks_status_per_agent_tool=()):
     """Returns the ComputerSnapshot for the gathered iTerm2 state.
 
     Args:
@@ -273,10 +297,15 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
         computer_id: A stable ID for this computer.
         computer_name: The computer's name.
         now: The current time.
+        exited_agent_sessions_by_session_id: {session ID: (the AgentSessionEntry its row last
+            showed, when its agent ended)} for the tabs whose agent ended without a normal
+            session end, still shown as "exited" (build_exited_agent_session_entry).
+        hooks_status_per_agent_tool: ComputerSnapshot.hooks_status_per_agent_tool.
 
     Returns:
         A ComputerSnapshot. Windows without agent sessions are left out.
     """
+    exited_agent_sessions_by_session_id = exited_agent_sessions_by_session_id or {}
     window_entries_by_window_id = {}
     for gathered_window in gathered_windows:
         agent_session_entries = []
@@ -284,6 +313,9 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
             first_session = gathered_tab.get("first_session")
             agent_session = agent_sessions.get(first_session["session_id"]) if first_session else None
             if agent_session is None:
+                if first_session and first_session["session_id"] in exited_agent_sessions_by_session_id:
+                    agent_session_entries.append(build_exited_agent_session_entry(
+                        *exited_agent_sessions_by_session_id[first_session["session_id"]], highlighted_session_id, gathered_tab))
                 continue
             agent_session_entries.append(build_agent_session_entry(
                 gathered_tab, agent_session, claude_agents_by_process_id.get(agent_session["process_id"]),
@@ -311,4 +343,4 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
                           if monitor_index_by_window_id.get(window_id, 0) == monitor_index),
         ))
     return ComputerSnapshot(computer_id=computer_id, computer_name=computer_name, taken_at=now,
-                            monitors=tuple(monitor_entries))
+                            monitors=tuple(monitor_entries), hooks_status_per_agent_tool=tuple(hooks_status_per_agent_tool))

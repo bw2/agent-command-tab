@@ -5,7 +5,8 @@ from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
 from agent_command_tab.iterm2_snapshot_builder import (DisplayedState, build_computer_snapshot,
                                                        build_folder_display_name, compute_context_fill_percent,
                                                        compute_displayed_state_since, resolve_agent_sessions)
-from agent_command_tab.snapshot_data_classes import convert_snapshot_to_json_ready_dict, iterate_agent_session_entries
+from agent_command_tab.snapshot_data_classes import (ChildProcessEntry, convert_snapshot_to_json_ready_dict,
+                                                     iterate_agent_session_entries)
 
 MONITOR = {"monitor_id": "display-1", "name": "Built-in", "frame": (0, 0, 2000, 1300), "visible_frame": (0, 0, 2000, 1260)}
 
@@ -31,11 +32,12 @@ def resolve(gathered_windows, previous_agent_sessions=None, alive_process_ids=()
 
 def build_snapshot(gathered_windows, window_order=(), claude_agents_by_process_id=None, tracking=None,
                    seen_session_id=None, monitors=(MONITOR,), agent_sessions=None, displayed_states=None,
-                   screen_readings=None, now=1000.0):
+                   screen_readings=None, now=1000.0, exited_agent_sessions_by_session_id=None, hooks_status_per_agent_tool=()):
     return build_computer_snapshot(gathered_windows, agent_sessions if agent_sessions is not None else resolve(gathered_windows),
                                    list(monitors), list(window_order), tracking or {}, displayed_states or {},
                                    screen_readings or {}, 600, claude_agents_by_process_id or {}, seen_session_id,
-                                   seen_session_id, "computer-1", "Test Mac", now)
+                                   seen_session_id, "computer-1", "Test Mac", now, exited_agent_sessions_by_session_id,
+                                   hooks_status_per_agent_tool)
 
 
 class ContextFillPercentTests(unittest.TestCase):
@@ -198,6 +200,46 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         entry = build_snapshot(at_the_shell, agent_sessions=agent_sessions, displayed_states=displayed_states,
                                now=1010.0).monitors[0].windows[0].agent_sessions[0]
         self.assertEqual(entry.status, "unknown")
+
+    def test_background_tasks_and_child_processes_come_from_the_readings(self):
+        child_process = ChildProcessEntry(77, "python3 -m unittest", 990.0, True, None, None)
+        snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="working")])], screen_readings={
+            "session-1": {"background_task_count": 2, "child_processes": (child_process,)}})
+        entry = snapshot.monitors[0].windows[0].agent_sessions[0]
+        self.assertEqual((entry.background_task_count, entry.child_processes), (2, (child_process,)))
+
+    def test_an_agent_that_ended_without_a_session_end_keeps_an_exited_row_in_its_tab(self):
+        running = [make_window("w", [make_tab("1", "claude", status="working", job_pid=42),
+                                     make_tab("2", "claude", status="idle", job_pid=43)])]
+        last_entry = build_snapshot(running, screen_readings={"session-1": {
+            "memory_bytes": 1024 ** 2, "conversation_preview": {"open_tool_call": "Bash: pytest"}}}).monitors[0].windows[0].agent_sessions[0]
+        # The first tab's agent is gone: its shell is in front again.
+        after_the_crash = [make_window("w", [make_tab("1", "-zsh", job_pid=80), make_tab("2", "claude", status="idle", job_pid=43)])]
+        snapshot = build_snapshot(after_the_crash, exited_agent_sessions_by_session_id={"session-1": (last_entry, 1500.0)},
+                                  now=1600.0)
+        exited_entry, other_entry = snapshot.monitors[0].windows[0].agent_sessions
+        self.assertEqual((exited_entry.tab_id, exited_entry.status, exited_entry.status_since, exited_entry.ended_abnormally_at),
+                         ("1", "exited", 1500.0, 1500.0))
+        self.assertEqual((exited_entry.preview_line, exited_entry.memory_bytes, exited_entry.slash_commands),
+                         ("Bash: pytest", None, ()))  # what it was doing; nothing of a running agent
+        self.assertEqual(other_entry.tab_id, "2")
+        # A window whose only agent crashed stays for its row.
+        alone = build_snapshot([make_window("w", [make_tab("1", "-zsh", job_pid=80)])],
+                               exited_agent_sessions_by_session_id={"session-1": (last_entry, 1500.0)})
+        self.assertEqual([entry.status for entry in alone.monitors[0].windows[0].agent_sessions], ["exited"])
+        self.assertEqual(alone.monitors[0].windows[0].agent_sessions[0].tab_title, last_entry.tab_title)
+        # Renamed after the crash: the row takes the tab's new title.
+        renamed = build_snapshot([make_window("w", [make_tab("1", "-zsh", job_pid=80, title="crashed run",
+                                                             title_override_format="crashed run")])],
+                                 exited_agent_sessions_by_session_id={"session-1": (last_entry, 1500.0)})
+        exited_entry = renamed.monitors[0].windows[0].agent_sessions[0]
+        self.assertEqual((exited_entry.tab_title, exited_entry.tab_title_set_by_user), ("crashed run", True))
+
+    def test_the_hooks_status_is_in_the_snapshot(self):
+        snapshot = build_snapshot([make_window("w", [make_tab("1", "claude")])],
+                                  hooks_status_per_agent_tool=(("Claude Code", "installed"), ("Codex", "missing")))
+        self.assertEqual(convert_snapshot_to_json_ready_dict(snapshot)["hooks_status_per_agent_tool"],
+                         [["Claude Code", "installed"], ["Codex", "missing"]])
 
 
 class DisplayedStateSinceTests(unittest.TestCase):

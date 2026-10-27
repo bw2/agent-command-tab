@@ -14,6 +14,7 @@ def make_srgb_color_maker(red, green, blue):
 COLOR_MAKERS_BY_NAME = {
     "purple": make_srgb_color_maker(150, 95, 255), "red": NSColor.systemRedColor, "orange": NSColor.systemOrangeColor,
     "green": NSColor.systemGreenColor, "light_blue": NSColor.systemCyanColor, "gray": NSColor.secondaryLabelColor,
+    "yellow": NSColor.systemYellowColor,  # the background task lights (R26.2)
 }
 
 
