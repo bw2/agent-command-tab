@@ -741,6 +741,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(send_button.keyEquivalentModifierMask(), NSEventModifierFlagCommand)  # Return alone starts a new line
         self.assertIs(alert.window().initialFirstResponder(), note_text_view)
         self.assertFalse(note_text_view.isAutomaticDashSubstitutionEnabled())
+        self.assertEqual(tuple(alert.icon().size()), (1, 1))  # blank, not the app's icon
 
     def test_dragging_one_of_several_selected_rows_drags_only_that_row(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())

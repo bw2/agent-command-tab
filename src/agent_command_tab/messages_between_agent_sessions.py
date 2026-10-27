@@ -16,8 +16,8 @@ from agent_command_tab.agent_adapters.base import MESSAGES_THROUGH_CODEX_QUEUE, 
 # A Claude Code session's message is held until it waits at its prompt, for up to this long.
 SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT = 30 * 60
 DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER = (
-    "You may be working on things related to what the other agents listed below are doing. Please message them "
-    "with a summary of what you're working on and figure out how you all can work together effectively.")
+    "You and these other agents might be working on similar things right now. Please message them with a summary "
+    "of what you're doing and figure out how you can all work together effectively.")
 
 AgentSessionForMessages = collections.namedtuple(
     "AgentSessionForMessages",
