@@ -223,8 +223,8 @@ class RowViewWithSelectionOutline(NSTableRowView):
 
 
 def describe_session_count(count):
-    """Returns "1 Session" or "3 Sessions", for menu item titles."""
-    return f"{count} Session{'' if count == 1 else 's'}"
+    """Returns "1 session" or "3 sessions", for menu item titles, which are in sentence case (user request, 2026-10-27)."""
+    return f"{count} session{'' if count == 1 else 's'}"
 
 
 def list_agent_sessions_that_take_slash_command(agent_session_entries, command):
@@ -364,7 +364,9 @@ class ColumnTitlesRowView(NSView):
             NSZeroRect, NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingCursorUpdate
             | NSTrackingActiveAlways | NSTrackingInVisibleRect, self, None))
         self.outline_view = outline_view
-        self.name_title_text_field = make_label_text_field()
+        # A wrapping label too, of one line: a single-line field's text sits 2 points lower in the
+        # same fixed line height, so "Name" would stand below the other titles (user request, 2026-10-27).
+        self.name_title_text_field = make_multiline_label_text_field(1)
         self.column_title_text_fields = {column_name: make_multiline_label_text_field(2) for column_name, _ in TAB_ROW_COLUMNS}
         for subview in (self.name_title_text_field, *self.column_title_text_fields.values()):
             self.addSubview_(subview)
@@ -490,6 +492,7 @@ class AgentListRowView(NSTableCellView):
         self.has_preview_line = False  # a tab row whose preview is open
         self.shows_columns = False  # tab and process rows
         self.name_runs_over_empty_columns = False  # process rows
+        self.details_are_right_aligned = False  # window rows
         self.shows_disclosure_button = False  # a row that can open or close
         self.shows_preview_toggle_button = False  # an expanded window row with a preview to show
         self.tree_line_x = None  # set on the "+" row: its button is centered on the tree's vertical line
@@ -553,7 +556,10 @@ class AgentListRowView(NSTableCellView):
                                                      available_width * 0.6))
         self.name_text_field.setFrame_(NSMakeRect(name_x, y, name_width, text_height))
         details_x = name_x + name_width + GAP_BEFORE_DETAILS
-        self.details_text_field.setFrame_(NSMakeRect(details_x, y, max(text_right_limit - details_x, 0), text_height))
+        details_width = max(text_right_limit - details_x, 0)
+        if not self.details_are_right_aligned:  # only as wide as its text, so the lights' hover text shows only over them
+            details_width = min(details_fitting_width, details_width)
+        self.details_text_field.setFrame_(NSMakeRect(details_x, y, details_width, text_height))
         self.preview_connector_text_field.setHidden_(not self.has_preview_line)
         self.preview_text_field.setHidden_(not self.has_preview_line)
         if self.has_preview_line:  # under the columns too, up to the right margin; a label's text starts at its top
@@ -1151,6 +1157,9 @@ class AgentSessionListController(NSObject):
             dot_color = dot_color.colorWithAlphaComponent_(0.25)
         row_view.dot_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             build_dot_text(parts.dot_glyph), {NSFontAttributeName: self.regular_font, NSForegroundColorAttributeName: dot_color}))
+        # Only the dot and the lights say what they mean; the row as a whole has no hover text (user requests, 2026-10-19 and 2026-10-27).
+        row_view.dot_text_field.setToolTip_(parts.dot_tool_tip or None)
+        row_view.details_text_field.setToolTip_(parts.details_tool_tip or None)
         # The tab in front is marked by its bold name only, in the same color as the others (blue
         # until 2026-10-26, user request). A process row's command is gray, as a preview is.
         row_view.name_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
@@ -1165,6 +1174,7 @@ class AgentSessionListController(NSObject):
         row_view.details_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             parts.details_text,
             right_aligned_secondary_text_attributes if item.kind == "window" else secondary_text_attributes))
+        row_view.details_are_right_aligned = item.kind == "window"
         # The columns' texts in the names' color rather than gray (user request, 2026-10-26).
         column_text_attributes = {NSFontAttributeName: self.regular_font, NSForegroundColorAttributeName: NSColor.labelColor()}
         right_aligned_column_text_attributes = dict(
@@ -1174,9 +1184,16 @@ class AgentSessionListController(NSObject):
             if parts_field_name is None:
                 column_view.setImage_(self.find_agent_tool_icon(parts.agent_tool_name) if parts.agent_tool_name else None)
             else:
-                column_view.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
+                column_text = NSMutableAttributedString.alloc().initWithString_attributes_(
                     getattr(parts, parts_field_name), column_text_attributes if column_name in LEFT_ALIGNED_COLUMN_NAMES
-                    else right_aligned_column_text_attributes))
+                    else right_aligned_column_text_attributes)
+                if parts_field_name == "context_text" and parts.context_fill_percent_color_name:
+                    # Only the share in parentheses is colored, amber from 50% and red from 75% (user request, 2026-10-27).
+                    share_start = parts.context_text.index("(")
+                    column_text.addAttribute_value_range_(NSForegroundColorAttributeName,
+                                                          build_color_from_name(parts.context_fill_percent_color_name),
+                                                          (share_start, len(parts.context_text) - share_start))
+                column_view.setAttributedStringValue_(column_text)
         row_view.column_widths = dict(self.column_widths)
         row_view.room_for_the_previews_button = self.room_for_the_previews_button
         row_view.has_preview_line = self.preview_is_open(item)
@@ -1686,7 +1703,7 @@ class AgentSessionListController(NSObject):
                 elif item.entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
                     command_item.setEnabled_(False)
                     command_item.setToolTip_(f"Only while the agent waits at its prompt (it is {item.entry.status})")
-            kill_item = self.add_menu_item(menu, "Kill Session", "menuKillSession:")
+            kill_item = self.add_menu_item(menu, "Kill session", "menuKillSession:")
             if item.entry.status == "exited":
                 kill_item.setEnabled_(False)
                 kill_item.setToolTip_("The agent has ended")
@@ -1708,15 +1725,15 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def add_pause_and_resume_menu_items(self, menu, agent_session_entries):
-        """Adds "Pause Session" for those of the agent sessions that run and "Resume Session" for
-        those that are paused, with the count when the row holds several ("Pause 3 Sessions";
+        """Adds "Pause session" for those of the agent sessions that run and "Resume session" for
+        those that are paused, with the count when the row holds several ("Pause 3 sessions";
         user request, 2026-10-20)."""
         sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(agent_session_entries)
         for verb, entries, action_name in (("Pause", sessions_to_pause, "menuPauseSessions:"),
                                            ("Resume", sessions_to_resume, "menuResumeSessions:")):
             if not entries:
                 continue
-            title = f"{verb} Session" if len(agent_session_entries) == 1 else f"{verb} {describe_session_count(len(entries))}"
+            title = f"{verb} session" if len(agent_session_entries) == 1 else f"{verb} {describe_session_count(len(entries))}"
             self.add_menu_item(menu, title, action_name).setRepresentedObject_([entry.session_id for entry in entries])
 
     @objc.python_method
@@ -1749,11 +1766,11 @@ class AgentSessionListController(NSObject):
                 tool_tip_lines.append("A session in the middle of a turn gets it when the turn ends")
             command_item.setToolTip_("\n".join(tool_tip_lines) or None)
         self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}" if a_window_row_is_selected
-                           else "Kill Sessions", "menuKillSelectedSessions:")
+                           else "Kill sessions", "menuKillSelectedSessions:")
         menu.addItem_(NSMenuItem.separatorItem())
         self.add_pause_and_resume_menu_items(menu, agent_session_entries)
         menu.addItem_(NSMenuItem.separatorItem())
-        talk_item = self.add_menu_item(menu, "Talk to Each Other…", "menuTalkToEachOther:")
+        talk_item = self.add_menu_item(menu, "Talk to each other…", "menuTalkToEachOther:")
         if len(self.list_agent_sessions_that_can_talk_to_each_other(agent_session_entries)) < 2:
             talk_item.setEnabled_(False)
             talk_item.setToolTip_(f"Needs two or more {' or '.join(sorted(AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER))} sessions")
@@ -1781,7 +1798,7 @@ class AgentSessionListController(NSObject):
         command = sender.representedObject()
         agent_session_entries = list_agent_sessions_that_take_slash_command(self.menu_target_agent_session_entries, command)
         if command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION and not self.owner.ask_for_confirmation(
-                f"/clear starts a new conversation in {describe_session_count(len(agent_session_entries)).lower()} "
+                f"/clear starts a new conversation in {describe_session_count(len(agent_session_entries))} "
                 f"({list_tab_titles_for_alert(agent_session_entries)}); the current ones stay in their history."):
             return
         self.owner.submit_action_and_report_failure(
@@ -1792,7 +1809,7 @@ class AgentSessionListController(NSObject):
     def menuKillSelectedSessions_(self, sender):
         agent_session_entries = self.menu_target_agent_session_entries
         if self.owner.ask_for_confirmation(
-                f"Kill ends the agent processes of {describe_session_count(len(agent_session_entries)).lower()} "
+                f"Kill ends the agent processes of {describe_session_count(len(agent_session_entries))} "
                 f"({list_tab_titles_for_alert(agent_session_entries)}) at once, with whatever they were doing; "
                 "their tabs stay open with their shells."):
             self.owner.submit_action_and_report_failure(
@@ -1817,10 +1834,10 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def add_new_window_menu_items(self, menu):
-        """Adds "New Claude Code Window" and the like, one per agent tool the settings include:
+        """Adds "New Claude Code window" and the like, one per agent tool the settings include:
         each starts that tool in a new iTerm2 window (R13.1)."""
         for agent_tool_name in self.owner.list_agent_tool_names():
-            self.add_menu_item(menu, f"New {agent_tool_name} Window", "menuNewWindowWithAgentSession:"
+            self.add_menu_item(menu, f"New {agent_tool_name} window", "menuNewWindowWithAgentSession:"
                                ).setRepresentedObject_(agent_tool_name)
 
     def newWindowButtonClicked_(self, sender):

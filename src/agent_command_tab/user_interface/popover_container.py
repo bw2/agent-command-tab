@@ -27,7 +27,9 @@ POPOVER_WIDTH = 460  # before the first fit
 SMALLEST_POPOVER_WIDTH = 320
 LARGEST_SHARE_OF_SCREEN_WIDTH = 0.9
 SPACE_FOR_SCROLLER_AND_MARGINS = 24
-TOP_BAR_HEIGHT = 26
+# Its controls sit 3 points above its bottom; the 3 points more than the 26 it had put about as
+# much room above them as below them, down to the column titles (user request, 2026-10-27).
+TOP_BAR_HEIGHT = 29
 BOTTOM_BAR_HEIGHT = 28
 SMALLEST_LIST_HEIGHT = 60
 LIST_BOTTOM_PADDING = 6

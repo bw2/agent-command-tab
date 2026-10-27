@@ -14,17 +14,21 @@ RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
                      "agent_tool_name", "state_text", "elapsed_time_text", "context_text",
                      "created_time_text", "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text",
-                     "preview_text", "details_color_name"],
-    defaults=["", "", "", "", "", "", "", "", "", "", "gray"])
+                     "preview_text", "details_color_name", "dot_tool_tip", "details_tool_tip",
+                     "context_fill_percent_color_name"],
+    defaults=["", "", "", "", "", "", "", "", "", "", "gray", "", "", ""])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
                         "context_text (the context's size and its share of the context window, "
-                        "\"425k (42%)\"), created_time_text (when the agent session "
+                        "\"425k (42%)\", the share in parentheses in context_fill_percent_color_name, or in the "
+                        "column's color for \"\"), created_time_text (when the agent session "
                         "started) and existence_duration_text (how long ago), memory_text and cpu_text (what the "
                         "agent and the processes it started use), the icon for agent_tool_name, state_text and "
                         "elapsed_time_text (the state's duration). Under it, a tab row has a gray preview line "
                         "(R23): preview_connector_text continues the tree's lines, and preview_text starts under "
-                        "the name. A tab row's details are its background task lights, in details_color_name.")
+                        "the name. A tab row's details are its background task lights, in details_color_name. "
+                        "dot_tool_tip and details_tool_tip are what the dot and the details mean, shown when the "
+                        "pointer rests on them, or \"\" for none (user request, 2026-10-27).")
 
 # A light per background shell or background agent after a tab's name (R26.2); more than
 # MOST_BACKGROUND_TASK_LIGHTS show as one light and their number. After the name rather than the
@@ -35,6 +39,12 @@ MOST_BACKGROUND_TASK_LIGHTS = 4
 # A child process's sub row has the light too when the agent left it running in the background,
 # and a gray middle dot otherwise, the same width, so the commands line up.
 CHILD_PROCESS_DOT_GLYPHS_AND_COLORS = {True: (BACKGROUND_TASK_LIGHT, BACKGROUND_TASK_LIGHTS_COLOR_NAME), False: ("·", "gray")}
+CHILD_PROCESS_DOT_TOOL_TIPS = {
+    True: "Running in the background: the agent left this command running and went on (one of the yellow lights "
+          "after the tab's name)",
+    False: "Not a background task: a command from the agent's current turn, or a helper the agent runs for "
+           "itself, such as a language server",
+}
 
 # Each state's dot and its color, also the menu bar icon's color for the most urgent state.
 DOT_GLYPH_AND_COLOR_BY_STATE = {
@@ -47,6 +57,20 @@ DOT_GLYPH_AND_COLOR_BY_STATE = {
     "paused": ("‖", "purple"),
     "unknown": ("◌", "gray"),
     "exited": ("⊘", "gray"),
+}
+
+# What each state means, the dot's hover text (user request, 2026-10-27). The 10 and 5 minutes are
+# iterm2_connection_thread's STUCK_THRESHOLD_SECONDS and EXITED_ROW_SECONDS.
+MEANING_BY_STATE = {
+    "asking": "the agent is waiting for your answer: a question, or permission to use a tool",
+    "error": "the agent reported an error",
+    "stuck": "the agent has been thinking for 10 minutes with nothing new on screen and no command running",
+    "working": "the agent is thinking or running a command",
+    "done": "the agent finished its turn after you last looked at the tab",
+    "idle": "the agent is waiting at its prompt, with nothing new since you last looked at the tab",
+    "paused": "the agent is stopped until it is resumed",
+    "unknown": "the app can't tell what the agent is doing",
+    "exited": "the agent ended without a normal session end (a crash, or killed); the row goes away 5 minutes later",
 }
 
 # The longest text each column at a tab row's right edge can get, by RowTextParts field (the font
@@ -102,6 +126,15 @@ def format_context_text(context_tokens, context_fill_percent):
     return f"{format_token_count(context_tokens)} ({context_fill_percent}%)"
 
 
+def choose_context_fill_percent_color_name(context_fill_percent):
+    """Returns the color of the Tokens column's share of the context window: "amber" from 50%,
+    "red" from 75%, or "" below 50% or while the share isn't known, for the column's own color
+    (user request, 2026-10-27)."""
+    if context_fill_percent is None or context_fill_percent < 50:
+        return ""
+    return "amber" if context_fill_percent < 75 else "red"
+
+
 def format_clock_time(timestamp, now):
     """Returns a short local time: "6:08 AM" for a time today, otherwise the day, such as "Oct 17"."""
     moment = time.localtime(timestamp)
@@ -137,6 +170,20 @@ def build_background_task_lights_text(background_task_count):
     return BACKGROUND_TASK_LIGHT * background_task_count
 
 
+def describe_background_task_lights(background_task_count):
+    """Returns the background task lights' hover text, such as "2 background tasks: ...", or "" for none."""
+    if not background_task_count:
+        return ""
+    if background_task_count == 1:
+        return "1 background task: a command or subagent the agent left running"
+    return f"{background_task_count} background tasks: commands or subagents the agent left running"
+
+
+def describe_state(state):
+    """Returns a state dot's hover text, such as "Done: the agent finished its turn after you last looked at the tab"."""
+    return f"{state.capitalize()}: {MEANING_BY_STATE[state]}"
+
+
 def build_resource_usage_texts(memory_bytes, cpu_percent):
     """Returns (memory_text, cpu_text) for the Memory and CPU columns, "" while not read."""
     return (format_memory_size(memory_bytes) if memory_bytes is not None else "",
@@ -151,7 +198,8 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         is_last_child_at_each_level: See build_tree_connector_text.
         now: The current time, for the elapsed time since the status changed and since the agent session started.
     """
-    dot_glyph, dot_color_name = DOT_GLYPH_AND_COLOR_BY_STATE.get(agent_session_entry.status, DOT_GLYPH_AND_COLOR_BY_STATE["unknown"])
+    state = agent_session_entry.status if agent_session_entry.status in DOT_GLYPH_AND_COLOR_BY_STATE else "unknown"
+    dot_glyph, dot_color_name = DOT_GLYPH_AND_COLOR_BY_STATE[state]
     started_at = agent_session_entry.started_at
     memory_text, cpu_text = build_resource_usage_texts(agent_session_entry.memory_bytes, agent_session_entry.cpu_percent)
     return RowTextParts(
@@ -162,6 +210,8 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         name_text=agent_session_entry.tab_title,
         details_text=build_background_task_lights_text(agent_session_entry.background_task_count),  # the preview has its own line
         details_color_name=BACKGROUND_TASK_LIGHTS_COLOR_NAME,
+        dot_tool_tip=describe_state(state),
+        details_tool_tip=describe_background_task_lights(agent_session_entry.background_task_count),
         agent_tool_name=agent_session_entry.agent_tool_name,
         # While it waits on a command it started, a working agent shows "running" and the command's time.
         state_text="running" if agent_session_entry.running_command_name else agent_session_entry.status,
@@ -169,6 +219,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
                                                      if agent_session_entry.running_command_name
                                                      else agent_session_entry.status_since)),
         context_text=format_context_text(agent_session_entry.context_tokens, agent_session_entry.context_fill_percent),
+        context_fill_percent_color_name=choose_context_fill_percent_color_name(agent_session_entry.context_fill_percent),
         created_time_text=format_clock_time(started_at, now) if started_at is not None else "",
         existence_duration_text=format_elapsed_time(now - started_at) if started_at is not None else "",
         memory_text=memory_text,
@@ -195,6 +246,7 @@ def build_child_process_row_text_parts(child_process_entry, is_last_child_at_eac
         dot_glyph=dot_glyph,
         dot_color_name=dot_color_name,
         dot_blinks=False,
+        dot_tool_tip=CHILD_PROCESS_DOT_TOOL_TIPS[child_process_entry.is_background_shell],
         name_text=child_process_entry.command_text,
         details_text="",
         created_time_text=format_clock_time(child_process_entry.started_at, now),
@@ -221,6 +273,7 @@ def build_window_row_text_parts(window_entry, is_last_child_at_each_level, is_ex
         dot_glyph=dot_glyph,
         dot_color_name=dot_color_name,
         dot_blinks=most_urgent_state == "working",  # blinks like its working tab's dot
+        dot_tool_tip=f"The most urgent status among this window's tabs:\n{describe_state(most_urgent_state)}",
         name_text=window_entry.title,
         details_text=details_text,
     )

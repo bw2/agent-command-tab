@@ -5,17 +5,19 @@ and the settings name the agent tools as the adapters do."""
 import unittest
 
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
-from agent_command_tab.settings_store import (DEFAULT_SETTINGS, GLOBAL_SHORTCUT_CHOICES, LIST_COLUMNS, LIST_SORT_ORDERS,
-                                              SHOW_AS_CHOICES, SIDEBAR_EDGES, SIDEBAR_MODES)
+from agent_command_tab.app_controller import APPEARANCE_NAMES_BY_CHOICE
+from agent_command_tab.settings_store import (APPEARANCE_CHOICES, DEFAULT_SETTINGS, GLOBAL_SHORTCUT_CHOICES, LIST_COLUMNS,
+                                              LIST_SORT_ORDERS, SHOW_AS_CHOICES, SIDEBAR_EDGES, SIDEBAR_MODES)
 from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_NAMES_IN_DROP_ORDER, TAB_ROW_COLUMNS
 from agent_command_tab.user_interface.popover_container import LIST_SORT_ORDER_TITLES
-from agent_command_tab.user_interface.settings_window import (GLOBAL_SHORTCUT_TITLES, LIST_COLUMN_TITLES, SHOW_AS_TITLES,
-                                                              SIDEBAR_EDGE_TITLES, SIDEBAR_MODE_TITLES)
+from agent_command_tab.user_interface.settings_window import (APPEARANCE_TITLES, GLOBAL_SHORTCUT_TITLES, LIST_COLUMN_TITLES,
+                                                              SHOW_AS_TITLES, SIDEBAR_EDGE_TITLES, SIDEBAR_MODE_TITLES)
 
 
 class SettingChoiceTitlesTests(unittest.TestCase):
     def test_every_choice_has_a_title_in_the_settings_order(self):
         for titles_by_value, choices in ((SHOW_AS_TITLES, SHOW_AS_CHOICES), (GLOBAL_SHORTCUT_TITLES, GLOBAL_SHORTCUT_CHOICES),
+                                         (APPEARANCE_TITLES, APPEARANCE_CHOICES), (APPEARANCE_NAMES_BY_CHOICE, APPEARANCE_CHOICES),
                                          (SIDEBAR_MODE_TITLES, SIDEBAR_MODES),
                                          (SIDEBAR_EDGE_TITLES, SIDEBAR_EDGES), (LIST_SORT_ORDER_TITLES, LIST_SORT_ORDERS)):
             self.assertEqual(list(titles_by_value), choices)

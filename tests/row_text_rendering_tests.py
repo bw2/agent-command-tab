@@ -2,8 +2,9 @@ import time
 import unittest
 
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry, MonitorEntry, WindowEntry
+from agent_command_tab.session_status_computation import STATES_IN_URGENCY_ORDER
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
-                                                                 LONGEST_TEXT_BY_COLUMN_FIELD_NAME,
+                                                                 LONGEST_TEXT_BY_COLUMN_FIELD_NAME, MEANING_BY_STATE,
                                                                  build_agent_session_row_text_parts,
                                                                  build_background_task_lights_text,
                                                                  build_child_process_row_text_parts,
@@ -11,6 +12,7 @@ from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_C
                                                                  build_tree_connector_text,
                                                                  build_tree_continuation_text,
                                                                  build_window_row_text_parts,
+                                                                 choose_context_fill_percent_color_name,
                                                                  format_clock_time, format_context_text,
                                                                  format_elapsed_time, format_memory_size)
 
@@ -88,6 +90,14 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_text, "84k")  # nor the window's
         filled_entry = filled_entry._replace(context_fill_percent=42)
         self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_text, "84k (42%)")
+        self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_fill_percent_color_name, "")
+        filled_entry = filled_entry._replace(context_tokens=170_000, context_fill_percent=85)
+        self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_fill_percent_color_name, "red")
+
+    def test_the_context_window_share_turns_amber_from_50_percent_and_red_from_75_percent(self):
+        self.assertEqual([choose_context_fill_percent_color_name(context_fill_percent)
+                          for context_fill_percent in (None, 0, 49, 50, 74, 75, 100, 130)],
+                         ["", "", "", "amber", "amber", "red", "red", "red"])
 
     def test_a_session_waiting_on_its_command_shows_running_and_the_commands_time(self):
         entry = make_entry("working", status_since=100.0)._replace(running_command_name="python3",
@@ -110,6 +120,17 @@ class RowTextPartsTests(unittest.TestCase):
         parts = build_agent_session_row_text_parts(make_entry("asking"), [False], 1.0)
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "light_blue", False))
 
+    def test_every_state_dot_says_what_it_means(self):  # user request, 2026-10-27
+        self.assertEqual(set(MEANING_BY_STATE), set(STATES_IN_URGENCY_ORDER))
+        self.assertEqual(build_agent_session_row_text_parts(make_entry("done"), [False], 1.0).dot_tool_tip,
+                         "Done: the agent finished its turn after you last looked at the tab")
+        self.assertTrue(build_agent_session_row_text_parts(make_entry("no such state"), [False], 1.0).dot_tool_tip
+                        .startswith("Unknown: "))  # the gray "unknown" dot
+        self.assertEqual(build_window_row_text_parts(make_window(["idle", "asking"]), [], True).dot_tool_tip,
+                         "The most urgent status among this window's tabs:\nAsking: the agent is waiting for your "
+                         "answer: a question, or permission to use a tool")
+        self.assertEqual(build_monitor_row_text_parts(MonitorEntry("m", "Built-in", (0, 0, 1, 1), (0, 0, 1, 1), ())).dot_tool_tip, "")
+
     def test_window_row_expanded_and_collapsed(self):
         window = make_window(["idle", "asking", "idle"])
         expanded_parts = build_window_row_text_parts(window, [], True)
@@ -130,6 +151,8 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual([build_background_task_lights_text(count) for count in (0, 1, 4, 6)], ["", "•", "••••", "•×6"])
         parts = build_agent_session_row_text_parts(make_entry("idle")._replace(background_task_count=2), [True], 1.0)
         self.assertEqual((parts.details_text, parts.details_color_name), ("••", "yellow"))
+        self.assertEqual(parts.details_tool_tip, "2 background tasks: commands or subagents the agent left running")
+        self.assertEqual(build_agent_session_row_text_parts(make_entry("idle"), [True], 1.0).details_tool_tip, "")
 
     def test_an_exited_row_is_gray(self):
         parts = build_agent_session_row_text_parts(make_entry("exited", status_since=100.0), [True], 160.0)
@@ -147,6 +170,7 @@ class RowTextPartsTests(unittest.TestCase):
         parts = build_child_process_row_text_parts(child_process._replace(is_background_shell=False, memory_bytes=None,
                                                                           cpu_percent=None), [True], now)
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.memory_text, parts.cpu_text), ("·", "gray", "", ""))
+        self.assertTrue(parts.dot_tool_tip.startswith("Not a background task: "))
 
 
 if __name__ == "__main__":

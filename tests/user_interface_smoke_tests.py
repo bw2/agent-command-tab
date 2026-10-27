@@ -8,12 +8,13 @@ import time
 import unittest
 import unittest.mock
 
-from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
-                    NSBitmapImageFileTypePNG, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
+from AppKit import (NSApp, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+                    NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
+                    NSBitmapImageFileTypePNG, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSEventModifierFlagCommand, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSMakePoint, NSMakeRect,
-                    NSFloatingWindowLevel, NSMenu, NSNormalWindowLevel, NSParagraphStyleAttributeName, NSTextAlignmentRight,
-                    NSTextField, NSWindow, NSWindowOcclusionStateVisible, NSWindowStyleMaskBorderless,
-                    NSWindowStyleMaskResizable)
+                    NSFloatingWindowLevel, NSForegroundColorAttributeName, NSMenu, NSNormalWindowLevel, NSPopover,
+                    NSParagraphStyleAttributeName, NSTextAlignmentRight, NSTextField, NSWindow, NSWindowOcclusionStateVisible,
+                    NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
 
 from agent_command_tab.app_controller import AppController
@@ -279,6 +280,61 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # Only the tool icon column is left: it shows by itself, since Claude Code and Codex both run.
         self.assertEqual(self.list_controller.measure_right_columns_width(), self.list_controller.column_widths["agent_tool_icon"])
 
+    def test_the_name_title_stands_on_the_same_line_as_the_column_titles(self):
+        snapshot = make_sample_snapshot()
+        window_one = snapshot.monitors[0].windows[0]
+        window_one = window_one._replace(agent_sessions=tuple(entry._replace(context_tokens=91_000, context_fill_percent=46)
+                                                              for entry in window_one.agent_sessions))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, snapshot.monitors[0].windows[1])),)))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        row_view = self.list_controller.column_titles_row_view
+        image = row_view.bitmapImageRepForCachingDisplayInRect_(row_view.bounds())
+        row_view.cacheDisplayInRect_toBitmapImageRep_(row_view.bounds(), image)
+        scale = image.pixelsWide() / row_view.bounds().size.width
+
+        def find_lowest_drawn_pixel_row(text_field):
+            """Returns the lowest pixel row (counted from the top) that the field's text draws on: for a
+            title without descenders, such as "Name" and "Tokens", its baseline."""
+            frame = text_field.frame()
+            return max(y for y in range(image.pixelsHigh())
+                       for x in range(int(frame.origin.x * scale), int((frame.origin.x + frame.size.width) * scale))
+                       if image.colorAtX_y_(x, y).alphaComponent() > 0.3)
+        self.assertEqual(find_lowest_drawn_pixel_row(row_view.name_title_text_field),
+                         find_lowest_drawn_pixel_row(row_view.column_title_text_fields["context_tokens"]))
+
+    def test_the_context_window_share_in_parentheses_is_amber_from_50_percent_and_red_from_75_percent(self):
+        snapshot = make_sample_snapshot()
+        window_one = snapshot.monitors[0].windows[0]
+        window_one = window_one._replace(agent_sessions=(
+            window_one.agent_sessions[0]._replace(context_tokens=610_000, context_fill_percent=61),
+            window_one.agent_sessions[1]._replace(context_tokens=91_000, context_fill_percent=46),
+            window_one.agent_sessions[2]._replace(context_tokens=170_000, context_fill_percent=85)))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, snapshot.monitors[0].windows[1])),)))
+        self.window.contentView().layoutSubtreeIfNeeded()
+
+        def resolve(color, appearance_name):
+            """Returns the color's red, green and blue (0 to 255) as drawn in this appearance."""
+            resolved_colors = []
+            NSAppearance.appearanceNamed_(appearance_name).performAsCurrentDrawingAppearance_(
+                lambda: resolved_colors.append(color.colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())))
+            return tuple(round(component * 255) for component in (
+                resolved_colors[0].redComponent(), resolved_colors[0].greenComponent(), resolved_colors[0].blueComponent()))
+        # The rows of planning, phase0-tests and codex-review: light mode has a darker amber than the system yellow.
+        for row, expected_share_colors in ((1, ((168, 118, 0), resolve(NSColor.systemYellowColor(), NSAppearanceNameDarkAqua))),
+                                           (2, (resolve(NSColor.labelColor(), NSAppearanceNameAqua),
+                                                resolve(NSColor.labelColor(), NSAppearanceNameDarkAqua))),
+                                           (3, (resolve(NSColor.systemRedColor(), NSAppearanceNameAqua),
+                                                resolve(NSColor.systemRedColor(), NSAppearanceNameDarkAqua)))):
+            column_text = self.lay_out_row_view(row).column_views["context_tokens"].attributedStringValue()
+            share_start = column_text.string().index("(")
+            size_color, share_color = (column_text.attribute_atIndex_effectiveRange_(NSForegroundColorAttributeName, index, None)[0]
+                                       for index in (0, share_start))
+            self.assertEqual(size_color, NSColor.labelColor())
+            self.assertEqual((resolve(share_color, NSAppearanceNameAqua), resolve(share_color, NSAppearanceNameDarkAqua)),
+                             expected_share_colors)
+
     def test_column_titles_sit_over_their_columns_between_the_top_bar_and_the_list(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())  # no context sizes known: no token columns
         self.window.contentView().layoutSubtreeIfNeeded()
@@ -479,7 +535,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.select_rows(0, 1)  # the window and phase0-tests: Kill counts and ends the hidden idle planning too
         menu_items_by_title = self.build_right_click_menu_items_by_title(1)
         self.owner.answer_to_confirmation = True
-        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill 3 Sessions"])
+        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill 3 sessions"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("end_agent_processes", {"session_ids": ["s1", "s2", "s3"]}))
         panel.show_idle_tabs_are_hidden(False)
@@ -508,7 +564,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         outline_view = self.list_controller.outline_view
         studio_display_row = next(row for row in range(outline_view.numberOfRows())
                                   if outline_view.itemAtRow_(row).key == ("monitor", "2"))
-        self.assertEqual(self.build_right_click_menu_titles(studio_display_row), ["Pause 2 Sessions"])
+        self.assertEqual(self.build_right_click_menu_titles(studio_display_row), ["Pause 2 sessions"])
 
     def test_sort_popup_reports_the_choice_to_the_owner(self):
         self.dropdown_panel_controller.list_sort_order_popup.selectItemWithTitle_("Activity")
@@ -545,10 +601,10 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertEqual(self.build_right_click_menu_titles(0),
                          ["Collapse", "---", "Show window", "Rename", "---", "New tab with Claude Code session…",
-                          "New tab with Codex session…", "---", "Pause 3 Sessions", "---", "Close window"])
+                          "New tab with Codex session…", "---", "Pause 3 sessions", "---", "Close window"])
         self.assertEqual(self.build_right_click_menu_titles(1),
                          ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Extract to new window", "---",
-                          "/compact", "/clear", "Kill Session", "---", "Pause Session"])
+                          "/compact", "/clear", "Kill session", "---", "Pause session"])
 
     def test_pause_and_resume_in_the_row_menus_and_the_top_bar(self):
         snapshot = make_sample_snapshot()
@@ -559,11 +615,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             window_two)),))
         self.list_controller.apply_snapshot(with_one_paused)
         window_menu_titles = self.build_right_click_menu_titles(0)
-        self.assertIn("Pause 2 Sessions", window_menu_titles)
-        self.assertIn("Resume 1 Session", window_menu_titles)
+        self.assertIn("Pause 2 sessions", window_menu_titles)
+        self.assertIn("Resume 1 session", window_menu_titles)
         tab_menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # "planning", paused
-        self.assertNotIn("Pause Session", tab_menu_items_by_title)
-        self.list_controller.menuResumeSessions_(tab_menu_items_by_title["Resume Session"])
+        self.assertNotIn("Pause session", tab_menu_items_by_title)
+        self.list_controller.menuResumeSessions_(tab_menu_items_by_title["Resume session"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("resume_agent_sessions", {"session_ids": ["s1"]}))
         panel = self.dropdown_panel_controller
@@ -582,24 +638,24 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("resume_agent_sessions", {"session_ids": ["s1", "s2", "s3", "s10", "s11"]}))
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(snapshot))
-        self.assertEqual(self.build_right_click_menu_titles(0)[-1], "Pause 3 Sessions")  # a monitor row's menu
+        self.assertEqual(self.build_right_click_menu_titles(0)[-1], "Pause 3 sessions")  # a monitor row's menu
 
     def test_slash_commands_only_at_the_prompt_and_clear_and_kill_ask_first(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # "planning" is working
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
-        self.assertTrue(menu_items_by_title["Kill Session"].isEnabled())
+        self.assertTrue(menu_items_by_title["Kill session"].isEnabled())
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)  # analysis-0 is idle
         self.assertTrue(menu_items_by_title["/compact"].isEnabled())
         self.list_controller.menuSendSlashCommand_(menu_items_by_title["/compact"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].arguments),
                          ("send_slash_command", {"command": "/compact"}))
         self.list_controller.menuSendSlashCommand_(menu_items_by_title["/clear"])  # the user says No
-        self.list_controller.menuKillSession_(menu_items_by_title["Kill Session"])
+        self.list_controller.menuKillSession_(menu_items_by_title["Kill session"])
         self.assertEqual(len(self.owner.confirmation_questions), 2)
         self.assertEqual(len(self.submitted_actions), 1)
         self.owner.answer_to_confirmation = True
-        self.list_controller.menuKillSession_(menu_items_by_title["Kill Session"])
+        self.list_controller.menuKillSession_(menu_items_by_title["Kill session"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("end_agent_process", {"session_id": "s10"}))
         snapshot = make_sample_snapshot()
@@ -647,17 +703,17 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(3, 4)  # codex-review (done) and the second window (two idle tabs)
         self.assertEqual(self.build_right_click_menu_titles(4),
-                         ["/compact 3 Sessions", "/clear 3 Sessions", "Kill 3 Sessions", "---", "Pause 3 Sessions", "---",
-                          "Talk to Each Other…"])
-        self.assertIsNone(self.build_right_click_menu_items_by_title(4)["/compact 3 Sessions"].toolTip())  # all at their prompt
+                         ["/compact 3 sessions", "/clear 3 sessions", "Kill 3 sessions", "---", "Pause 3 sessions", "---",
+                          "Talk to each other…"])
+        self.assertIsNone(self.build_right_click_menu_items_by_title(4)["/compact 3 sessions"].toolTip())  # all at their prompt
         self.select_rows(0, 1)  # a window and one of its tabs: each session counts once
-        self.assertIn("/compact 3 Sessions", self.build_right_click_menu_titles(1))
-        self.assertIn("Kill 3 Sessions", self.build_right_click_menu_titles(1))  # a window row is selected
+        self.assertIn("/compact 3 sessions", self.build_right_click_menu_titles(1))
+        self.assertIn("Kill 3 sessions", self.build_right_click_menu_titles(1))  # a window row is selected
         self.select_rows(1, 2)  # working and asking: each gets the command when its turn ends (user request, 2026-10-21)
         menu_items_by_title = self.build_right_click_menu_items_by_title(1)
-        self.assertIn("Kill Sessions", menu_items_by_title)  # tab rows alone: the selection shows how many
-        self.assertTrue(menu_items_by_title["/compact 2 Sessions"].isEnabled())
-        self.assertEqual(menu_items_by_title["/compact 2 Sessions"].toolTip(), "A session in the middle of a turn gets it when the turn ends")
+        self.assertIn("Kill sessions", menu_items_by_title)  # tab rows alone: the selection shows how many
+        self.assertTrue(menu_items_by_title["/compact 2 sessions"].isEnabled())
+        self.assertEqual(menu_items_by_title["/compact 2 sessions"].toolTip(), "A session in the middle of a turn gets it when the turn ends")
         self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # an unselected row keeps its own menu
         self.select_rows(5)
         self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # so does a single selected row
@@ -670,7 +726,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
             windows=(window_one, window_two)),)))
         self.select_rows(3, 5)  # codex-review (Codex) and analysis-0 (Aider)
-        self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 Session"].toolTip(),
+        self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 session"].toolTip(),
                          "Typed only into the 1 of 2 whose agent takes it and isn't paused")
         self.select_rows(5, 6)  # two Aider tabs
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)
@@ -685,28 +741,28 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
             windows=(window_one, window_two)),)))
         self.select_rows(3, 5)  # codex-review (done) and analysis-0 (paused)
-        self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 Session"].toolTip(),
+        self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 session"].toolTip(),
                          "Typed only into the 1 of 2 whose agent takes it and isn't paused")
         self.select_rows(5, 6)  # both paused
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
         self.assertEqual(menu_items_by_title["/compact"].toolTip(), "Only after the paused sessions are resumed")
-        self.assertIn("Resume 2 Sessions", menu_items_by_title)
+        self.assertIn("Resume 2 sessions", menu_items_by_title)
 
     def test_slash_commands_and_kill_for_several_sessions_ask_first_where_one_session_would(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(1, 5)  # planning (working) and analysis-0 (idle)
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)
-        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/compact 2 Sessions"])
+        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/compact 2 sessions"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target, self.submitted_actions[-1].arguments),
                          ("send_slash_command_to_agent_sessions", {"session_ids": ["s1", "s10"]}, {"command": "/compact"}))
-        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/clear 2 Sessions"])  # the user says No
-        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill Sessions"])  # No again
+        self.list_controller.menuSendSlashCommandToSelectedSessions_(menu_items_by_title["/clear 2 sessions"])  # the user says No
+        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill sessions"])  # No again
         self.assertEqual(len(self.submitted_actions), 1)
         self.assertIn('("planning", "analysis-0")', self.owner.confirmation_questions[0])
         self.assertIn('("planning", "analysis-0")', self.owner.confirmation_questions[1])
         self.owner.answer_to_confirmation = True
-        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill Sessions"])
+        self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill sessions"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("end_agent_processes", {"session_ids": ["s1", "s10"]}))
 
@@ -718,17 +774,17 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
         self.select_rows(3, 4)  # codex-review (Codex), and analysis-0 (Aider) and analysis-1 (Claude Code)
         menu_items_by_title = self.build_right_click_menu_items_by_title(3)
-        self.list_controller.menuTalkToEachOther_(menu_items_by_title["Talk to Each Other…"])  # Cancel
+        self.list_controller.menuTalkToEachOther_(menu_items_by_title["Talk to each other…"])  # Cancel
         self.assertEqual(self.submitted_actions, [])
         talking_entries, left_out_entries = self.owner.talk_to_each_other_requests[-1]
         self.assertEqual(([entry.tab_title for entry in talking_entries], [entry.tab_title for entry in left_out_entries]),
                          (["codex-review", "analysis-1"], ["analysis-0"]))
         self.owner.note_to_send = "Sync up, please."
-        self.list_controller.menuTalkToEachOther_(menu_items_by_title["Talk to Each Other…"])
+        self.list_controller.menuTalkToEachOther_(menu_items_by_title["Talk to each other…"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target, self.submitted_actions[-1].arguments),
                          ("ask_agent_sessions_to_talk_to_each_other", {"session_ids": ["s3", "s11"]}, {"note": "Sync up, please."}))
         self.select_rows(3, 5)  # one Codex session and the Aider one: nobody to talk to
-        self.assertFalse(self.build_right_click_menu_items_by_title(3)["Talk to Each Other…"].isEnabled())
+        self.assertFalse(self.build_right_click_menu_items_by_title(3)["Talk to each other…"].isEnabled())
 
     def test_the_talk_to_each_other_window_holds_the_default_note_and_names_who_gets_it(self):
         entries = [make_entry("1", "planning", "idle"), make_entry("2", "reviews", "working")]
@@ -1181,7 +1237,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertLess(abs(plus_center_x - self.list_controller.measure_tree_line_x()), 0.5)
         self.assertLess(connector_frame.origin.x, plus_center_x)
         self.assertLess(plus_center_x, connector_frame.origin.x + connector_frame.size.width / 3)  # under the "└"
-        self.assertEqual(self.build_right_click_menu_titles(plus_row), ["New Claude Code Window", "New Codex Window"])
+        self.assertEqual(self.build_right_click_menu_titles(plus_row), ["New Claude Code window", "New Codex window"])
         # Every clickable icon shows the pointing hand.
         for button in (plus_button, tab_row_view.disclosure_button, self.dropdown_panel_controller.settings_button,
                        self.dropdown_panel_controller.expand_or_collapse_all_button):
@@ -1320,6 +1376,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(row_view.name_text_field.stringValue(), "planning")
         self.assertEqual(row_view.column_views["state"].stringValue(), "working")
         self.assertIsNone(row_view.toolTip())  # no hover popups on rows (user request, 2026-10-19)
+        self.assertEqual(row_view.dot_text_field.toolTip(), "Working: the agent is thinking or running a command")  # only on the dot (2026-10-27)
+        self.assertIsNone(row_view.details_text_field.toolTip())  # no background tasks
         self.assertTrue(row_view.prefix_text_field.stringValue().startswith("├─ "))
         image_path = os.environ.get("AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE")
         if image_path:
@@ -1355,6 +1413,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual([outline_view.itemAtRow_(row).kind for row in (2, 3)], ["process", "process"])
         self.assertEqual([row_view.prefix_text_field.stringValue() for row_view in process_rows], ["│  ├─ ", "│  └─ "])
         self.assertEqual([row_view.dot_text_field.stringValue() for row_view in process_rows], ["· ", "• "])  # • in the background
+        self.assertEqual([row_view.dot_text_field.toolTip().split(":")[0] for row_view in process_rows],
+                         ["Not a background task", "Running in the background"])
         self.assertEqual(process_rows[0].name_text_field.stringValue(), "caffeinate -i -t 300")
         self.assertTrue(process_rows[1].disclosure_button.isHidden())
         self.assertFalse(process_rows[1].column_views["state_duration"].isHidden())  # the columns line up with the tabs'
@@ -1410,6 +1470,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(row_view.details_text_field.stringValue(), "•••")
         self.assertGreater(row_view.details_text_field.frame().origin.x, row_view.name_text_field.frame().origin.x)
         self.assertEqual(self.lay_out_row_view(2).name_text_field.frame().origin.x, row_view.name_text_field.frame().origin.x)
+        # Their hover text shows over the lights only, not over the empty room up to the columns.
+        self.assertEqual(row_view.details_text_field.toolTip(), "3 background tasks: commands or subagents the agent left running")
+        self.assertEqual(row_view.details_text_field.frame().size.width, row_view.details_text_field.fittingSize().width)
 
     def test_an_exited_row_is_gray_and_its_menu_has_nothing_to_send_or_kill(self):
         snapshot = make_sample_snapshot()
@@ -1425,8 +1488,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         menu = NSMenu.alloc().initWithTitle_("")
         self.list_controller.menuNeedsUpdate_(menu)
         disabled_titles = [menu_item.title() for menu_item in menu.itemArray() if not menu_item.isEnabled() and menu_item.title()]
-        self.assertTrue({"/compact", "/clear", "Kill Session", "Duplicate this tab"} <= set(disabled_titles))
-        self.assertEqual(menu.itemWithTitle_("Kill Session").toolTip(), "The agent has ended")
+        self.assertTrue({"/compact", "/clear", "Kill session", "Duplicate this tab"} <= set(disabled_titles))
+        self.assertEqual(menu.itemWithTitle_("Kill session").toolTip(), "The agent has ended")
         self.assertEqual(menu.itemWithTitle_("Duplicate this tab").toolTip(), "The agent has ended")
         self.assertTrue(menu.itemWithTitle_("Rename").isEnabled())
 
@@ -1886,8 +1949,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             (subview for subview in rows_view.subviews() if isinstance(subview, NSTextField)),
             key=lambda subview: subview.frame().origin.y)]
         self.assertEqual(texts_top_to_bottom[0], "General")
-        for earlier, later in (("General", "Show as:"), ("Show as:", "Keyboard shortcut:"),
-                               ("Keyboard shortcut:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Display Columns"),
+        for earlier, later in (("General", "Show as:"), ("Show as:", "Keyboard shortcut:"), ("Keyboard shortcut:", "Appearance:"),
+                               ("Appearance:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Display Columns"),
                                ("Display Columns", "Harnesses"), ("Harnesses", "Use:")):
             self.assertLess(texts_top_to_bottom.index(earlier), texts_top_to_bottom.index(later), (earlier, later))
         self.assertTrue(self.controller.window.styleMask() & NSWindowStyleMaskResizable)
@@ -1939,6 +2002,31 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.global_shortcut_popup.selectItemWithTitle_("Command-Fn-Tab")
         self.controller.controlChanged_(self.controller.global_shortcut_popup)
         self.assertEqual(self.owner.settings["global_shortcut"], "command_fn_tab")
+
+    def test_the_appearance_popup_offers_auto_dark_and_light_below_the_shortcut_and_saves_the_choice(self):
+        popup = self.controller.appearance_popup
+        self.assertEqual(popup.itemTitles(), ["Auto", "Dark", "Light"])
+        self.assertEqual(popup.titleOfSelectedItem(), "Auto")  # the default
+        # Below the accessibility button's row, which stays right under the shortcut.
+        self.assertEqual(popup.frame().origin.y - self.controller.global_shortcut_popup.frame().origin.y, 2 * ROW_SPACING)
+        popup.selectItemWithTitle_("Dark")
+        self.controller.controlChanged_(popup)
+        self.assertEqual(self.owner.settings["appearance"], "dark")
+
+    def test_the_chosen_appearance_draws_the_app_and_the_dropdown_and_auto_follows_macos(self):
+        # The dropdown is set by itself: a popover takes the look of the menu bar it opens from.
+        stand_in_app_controller = unittest.mock.Mock(popover=NSPopover.alloc().init())
+        try:
+            AppController.apply_appearance(stand_in_app_controller, "dark")
+            self.assertEqual((NSApp.appearance().name(), stand_in_app_controller.popover.appearance().name()),
+                             (NSAppearanceNameDarkAqua, NSAppearanceNameDarkAqua))
+            AppController.apply_appearance(stand_in_app_controller, "light")
+            self.assertEqual((NSApp.appearance().name(), stand_in_app_controller.popover.appearance().name()),
+                             (NSAppearanceNameAqua, NSAppearanceNameAqua))
+            AppController.apply_appearance(stand_in_app_controller, "auto")
+            self.assertEqual((NSApp.appearance(), stand_in_app_controller.popover.appearance()), (None, None))
+        finally:
+            NSApp.setAppearance_(None)  # the other tests' windows follow macOS's setting
 
     def test_the_accessibility_button_shows_under_the_shortcut_only_while_it_lacks_the_permission(self):
         button = self.controller.accessibility_settings_button

@@ -11,8 +11,8 @@ import sys
 import threading
 import time
 
-from AppKit import (NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyleWarning, NSApp, NSApplication,
-                    NSApplicationActivationPolicyAccessory, NSApplicationDidBecomeActiveNotification,
+from AppKit import (NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyleWarning, NSApp, NSAppearance,
+                    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicyAccessory, NSApplicationDidBecomeActiveNotification,
                     NSApplicationDidChangeScreenParametersNotification, NSApplicationDidResignActiveNotification,
                     NSApplicationWillTerminateNotification, NSEvent, NSEventModifierFlagCommand, NSEventModifierFlagShift,
                     NSMakeRect, NSMenu, NSMenuItem, NSModalPanelWindowLevel, NSMouseInRect, NSPopoverBehaviorApplicationDefined,
@@ -49,6 +49,9 @@ from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk
 ITERM2_BUNDLE_IDENTIFIER = "com.googlecode.iterm2"
 SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING = 10
 SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
+# The settings' Appearance (settings_store.APPEARANCE_CHOICES; user request, 2026-10-27): the
+# NSAppearance name the app is drawn in, or None to follow macOS's Light or Dark setting.
+APPEARANCE_NAMES_BY_CHOICE = {"auto": None, "dark": NSAppearanceNameDarkAqua, "light": NSAppearanceNameAqua}
 
 
 def build_main_menu_with_the_edit_shortcuts():
@@ -150,6 +153,7 @@ class AppController(NSObject):
         self.connection_thread.start()
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.apply_settings_to_the_core_and_every_list(self.settings)
+        self.apply_appearance(self.settings["appearance"])
         self.global_shortcut_key_filter.use_global_shortcut(self.settings["global_shortcut"])
         if self.global_shortcut_key_filter.lacks_permission():
             print("agent-command-tab: the global shortcut needs the Accessibility permission (see Settings)", flush=True)
@@ -645,12 +649,15 @@ class AppController(NSObject):
 
     @objc.python_method
     def settings_changed(self, new_settings):
-        """Saves new settings and applies them to the global shortcut, the sidebar, the list window
-        (shown when "Show as" turns to Window, hidden when it turns away) and an open settings window."""
+        """Saves new settings and applies them to the global shortcut, the appearance, the sidebar,
+        the list window (shown when "Show as" turns to Window, hidden when it turns away) and an
+        open settings window."""
         show_as_before = self.settings["show_as"]
         list_window_was_always_on_top = self.settings["list_window_is_always_on_top"]
         if new_settings["global_shortcut"] != self.settings["global_shortcut"]:
             self.global_shortcut_key_filter.use_global_shortcut(new_settings["global_shortcut"])
+        if new_settings["appearance"] != self.settings["appearance"]:
+            self.apply_appearance(new_settings["appearance"])
         self.settings = new_settings
         save_settings(new_settings)
         self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
@@ -669,6 +676,17 @@ class AppController(NSObject):
             self.place_the_settings_window_above_the_lists(self.popover.isShown())
             if list_window_is_shown_now or new_settings["list_window_is_always_on_top"] != list_window_was_always_on_top:
                 self.settings_window_controller.window.orderFront_(None)  # the list window just shown or put on top stays behind it
+
+    @objc.python_method
+    def apply_appearance(self, appearance_choice):
+        """Draws the app's windows, the sidebar and the dropdown always dark, always light, or, for
+        "auto", in macOS's Light or Dark setting. The dropdown is set by itself: a popover takes the
+        look of the menu bar it opens from rather than the app's, and on "auto" it keeps doing so,
+        as before. The menu bar icon keeps the menu bar's look either way."""
+        appearance_name = APPEARANCE_NAMES_BY_CHOICE[appearance_choice]
+        appearance = NSAppearance.appearanceNamed_(appearance_name) if appearance_name else None
+        NSApp.setAppearance_(appearance)
+        self.popover.setAppearance_(appearance)
 
     @objc.python_method
     def apply_settings_to_the_core_and_every_list(self, settings):

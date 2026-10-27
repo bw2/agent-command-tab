@@ -37,10 +37,11 @@ ROW_SPACING = 30
 INDENT_UNDER_A_CHECKBOX = 20  # where a checkbox's title starts
 LAUNCH_COMMAND_FIELD_WIDTH = 200  # a longer command scrolls inside the field (user request, 2026-10-25)
 # The titles of the choices in settings_store (SHOW_AS_CHOICES, GLOBAL_SHORTCUT_CHOICES,
-# SIDEBAR_MODES, SIDEBAR_EDGES, LIST_COLUMNS); setting_choice_titles_tests checks that each table
-# names every choice.
+# APPEARANCE_CHOICES, SIDEBAR_MODES, SIDEBAR_EDGES, LIST_COLUMNS); setting_choice_titles_tests
+# checks that each table names every choice.
 SHOW_AS_TITLES = {"window": "Window", "sidebar": "Sidebar", "popup": "Popup"}
 GLOBAL_SHORTCUT_TITLES = {"shift_command_tab": "Shift-Command-Tab", "command_fn_tab": "Command-Fn-Tab", "off": "Off"}
+APPEARANCE_TITLES = {"auto": "Auto", "dark": "Dark", "light": "Light"}  # in the user's order (user request, 2026-10-27)
 # System Settings > Privacy & Security > Accessibility, which the global shortcut's key filter needs.
 ACCESSIBILITY_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 SIDEBAR_MODE_TITLES = {
@@ -157,6 +158,9 @@ class SettingsWindowController(WindowFrameSavingController):
             "Turn it on for the app that starts AgentCommandTab (iTerm2, when you start it from iTerm2), then click "
             "the menu bar icon")
         self.update_accessibility_settings_button()
+        self.appearance_popup = self.make_popup(APPEARANCE_TITLES, self.settings["appearance"])
+        self.appearance_popup.setToolTip_("Auto follows the Light or Dark setting in System Settings > Appearance. "
+                                          "The menu bar icon keeps the menu bar's own look")
         self.sidebar_mode_popup = self.make_popup(SIDEBAR_MODE_TITLES, self.settings["sidebar_mode"])
         self.edge_popup = self.make_popup(SIDEBAR_EDGE_TITLES, self.settings["sidebar_edge"])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
@@ -165,11 +169,12 @@ class SettingsWindowController(WindowFrameSavingController):
         self.edge_note = NSTextField.wrappingLabelWithString_("")
         self.edge_note.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
-        # A General section first: "Show as", then the keyboard shortcut (user requests, 2026-10-25
-        # and 2026-10-26). The accessibility button's row, empty while the shortcut has its
-        # permission, is the gap before the next section, as the sidebar's note row is.
+        # A General section first: "Show as", the keyboard shortcut with its accessibility button
+        # under it (a row left empty while the shortcut has its permission), then Appearance (user
+        # requests, 2026-10-25 to 2026-10-27; Appearance last, the user's choice over after "Show as").
         rows += [SettingsSection("General"), ("Show as", self.show_as_popup, None),
-                 ("Keyboard shortcut", self.global_shortcut_popup, None), (None, self.accessibility_settings_button, None)]
+                 ("Keyboard shortcut", self.global_shortcut_popup, None), (None, self.accessibility_settings_button, None),
+                 ("Appearance", self.appearance_popup, None), (None, None, None)]
         self.list_window_always_on_top_checkbox = self.make_checkbox("Always on top", self.settings["list_window_is_always_on_top"])
         rows += [SettingsSection("Window"), (None, self.list_window_always_on_top_checkbox, None), (None, None, None)]
         rows += [SettingsSection("Sidebar"), ("Show", self.sidebar_mode_popup, None), ("Window Edge", self.edge_popup, None),
@@ -344,6 +349,8 @@ class SettingsWindowController(WindowFrameSavingController):
             new_settings["show_as"] = read_popup_choice(sender)
         elif sender is self.global_shortcut_popup:
             new_settings["global_shortcut"] = read_popup_choice(sender)
+        elif sender is self.appearance_popup:
+            new_settings["appearance"] = read_popup_choice(sender)
         elif sender is self.sidebar_mode_popup:
             new_settings["sidebar_mode"] = read_popup_choice(sender)
         elif sender is self.edge_popup:

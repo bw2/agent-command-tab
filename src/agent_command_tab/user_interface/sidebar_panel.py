@@ -166,6 +166,7 @@ class SidebarController(NSObject):
         window.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary
                                       | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle)
         window.setHidesOnDeactivate_(False)
+        window.setAllowsToolTipsWhenApplicationIsInactive_(True)  # the sidebar never makes the app active
         window.setBecomesKeyOnlyIfNeeded_(True)  # clicks on rows don't take keyboard focus (R6)
         window.setDelegate_(self)  # windowDidResignKey_
         window.setHasShadow_(True)

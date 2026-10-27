@@ -48,6 +48,7 @@ class ListWindowController(WindowFrameSavingController):
         self.window.setTitle_("AgentCommandTab")
         self.window.setReleasedWhenClosed_(False)  # closing only hides it; the menu bar icon brings it back
         self.window.setMinSize_(SMALLEST_WINDOW_SIZES["list_window_frame"])
+        self.window.setAllowsToolTipsWhenApplicationIsInactive_(True)  # hover texts while another app is in front
         self.window.setContentView_(self.list_panel_controller.view())
         self.window.setDelegate_(self)
         return self
