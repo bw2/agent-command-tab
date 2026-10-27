@@ -122,9 +122,11 @@ SORT_ARROWS_BY_IS_ASCENDING = {True: " ▴", False: " ▾"}  # a space before th
 COLUMN_TITLE_FONT_SIZE = 11
 COLUMN_TITLE_LINE_HEIGHT = 14
 COLUMN_TITLES_ROW_PADDING = 2  # above and below the titles
-# A narrow sidebar or window drops columns in this order to keep room for names (the dot's color still shows the state).
+# A narrow sidebar or window drops columns in this order to keep room for names (the dot's color
+# still shows the state). The time since the last status change goes last, since its two-line title
+# makes its column about 107 points wide, which would leave a 200-point sidebar's names unreadable.
 COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usage", "cpu_usage", "context_tokens",
-                              "agent_tool_icon", "state"]
+                              "agent_tool_icon", "state", "state_duration"]
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
 AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER = list_agent_tool_names_whose_sessions_can_talk_to_each_other()
 SELECTABLE_ROW_KINDS = ("window", "tab")  # not monitor rows or the "+" row (user request, 2026-10-21)

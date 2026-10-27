@@ -8,7 +8,8 @@ Usage: live_agent_sessions_check.py CLAUDE_TEST_FOLDER CODEX_TRUSTED_FOLDER
    other window with the same session, and the command finishes (the turn ends and the screen
    shows its last line), so the move didn't interrupt the agent.
 2. Codex starts in a folder its config already trusts (no trust question, no config change),
-   is asked to reply "OK", and the check confirms it is listed as Codex and that its turn timer
+   is asked to reply "OK" once its input box shows (nothing is typed under a start-up menu),
+   and the check confirms it is listed as Codex and that its turn timer
    shows on screen and then goes away (Codex 0.155 reports no state to iTerm2, so its row
    shows "unknown").
 Closes its windows at the end. Touches nothing else.
@@ -34,6 +35,8 @@ CODEX_TRUSTED_FOLDER = os.path.realpath(sys.argv[2])
 # Three lines over 21 seconds: Claude Code shows a finished command's output in full only up to three lines.
 COUNTING_COMMAND = 'python3 -c "import time; [print(f\'count {i} of 3\', flush=True) or time.sleep(7) for i in range(1, 4)]"'
 LAST_COUNT_LINE_PATTERN = re.compile(r"^\W*count 3 of 3\s*$", re.MULTILINE)  # not in the prompt, which holds the code
+# The empty input box's placeholder: shown only once Codex waits at its prompt, not under a start-up menu.
+CODEX_INPUT_BOX_PATTERN = re.compile(r"Ask Codex to do anything")
 
 
 def main():
@@ -128,7 +131,9 @@ def main():
             "codex -c check_for_update_on_startup=false", CODEX_TRUSTED_FOLDER))
         results["codex listed as Codex"] = wait_until(
             lambda: find_entry(codex_session_id)[1] is not None and find_entry(codex_session_id)[1].agent_tool_name == "Codex", 60)
-        time.sleep(3)  # its prompt box draws
+        results["codex shows its input box"] = wait_until_screen_matches(codex_session_id, CODEX_INPUT_BOX_PATTERN, True, 30)
+        if not results["codex shows its input box"]:
+            return 1  # a start-up menu (a new model's notice, its folder trust question) would take the Enter
         run_on_core_loop(type_prompt(codex_session_id, "Reply with just the word OK."))
         # Codex 0.155 reports no state to iTerm2 (its row shows "unknown"), so its turn is looked for on
         # screen: the turn timer, "(5s • esc to interrupt)", shows only while a turn runs.

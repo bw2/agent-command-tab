@@ -27,10 +27,10 @@ class SettingChoiceTitlesTests(unittest.TestCase):
         self.assertEqual([agent_tool["agent_tool_name"] for agent_tool in DEFAULT_SETTINGS["agent_tools"]],
                          [adapter.agent_tool_name for adapter in specific_adapters])
 
-    def test_tab_rows_show_every_column_and_a_narrow_list_can_drop_all_but_the_state_duration(self):
+    def test_tab_rows_show_every_column_and_a_narrow_list_can_drop_them_all_the_state_duration_last(self):
         self.assertEqual([column_name for column_name, parts_field_name in TAB_ROW_COLUMNS if parts_field_name], LIST_COLUMNS)
-        self.assertEqual(sorted(COLUMN_NAMES_IN_DROP_ORDER),
-                         sorted(column_name for column_name, _ in TAB_ROW_COLUMNS if column_name != "state_duration"))
+        self.assertEqual(sorted(COLUMN_NAMES_IN_DROP_ORDER), sorted(column_name for column_name, _ in TAB_ROW_COLUMNS))
+        self.assertEqual(COLUMN_NAMES_IN_DROP_ORDER[-1], "state_duration")
 
 
 if __name__ == "__main__":

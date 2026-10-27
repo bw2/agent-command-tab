@@ -723,13 +723,24 @@ class AppController(NSObject):
 
     @objc.python_method
     def quit(self):
-        """Quits, first giving iTerm2 windows back the room a docked sidebar took."""
+        """Quits, first saving what waits to be saved and giving iTerm2 windows back the room a
+        docked sidebar took."""
+        self.save_settings_before_exiting()
         self.give_room_back_before_exiting()
         os._exit(0)
 
     def applicationWillTerminate_(self, notification):
+        # For example after Ctrl+C in the terminal that started the app, or at logout.
+        self.save_settings_before_exiting()
+        self.give_room_back_before_exiting()
+
+    @objc.python_method
+    def save_settings_before_exiting(self):
+        """Saves a launch command or width being typed in the settings window (its field saves it
+        as its editing ends) and a moved window's frame waiting to be saved."""
+        if self.settings_window_controller.window is not None:
+            self.settings_window_controller.window.makeFirstResponder_(None)
         self.save_settings_if_scheduled()
-        self.give_room_back_before_exiting()  # for example after Ctrl+C in the terminal that started the app
 
     @objc.python_method
     def give_room_back_before_exiting(self):
@@ -752,5 +763,7 @@ def run_menu_bar_app(verbose):
     # which calls applicationWillTerminate_.
     AppHelper.installMachInterrupt()
     AppHelper.runEventLoop()
-    app_controller.give_room_back_before_exiting()  # Ctrl+C can stop the event loop without terminating the app
+    # Ctrl+C can stop the event loop without terminating the app.
+    app_controller.save_settings_before_exiting()
+    app_controller.give_room_back_before_exiting()
     return 0

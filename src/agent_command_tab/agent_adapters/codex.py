@@ -8,7 +8,8 @@ import time
 
 from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, MESSAGES_THROUGH_CODEX_QUEUE,
                                                    AgentToolAdapter, split_command_line_into_program_names)
-from agent_command_tab.agent_process_tree import read_process_current_folder, read_process_info
+from agent_command_tab.agent_process_tree import (read_process_arguments_and_environment, read_process_current_folder,
+                                                  read_process_info)
 from agent_command_tab.context_window_usage import (find_codex_conversation_files,
                                                     read_context_tokens_from_codex_conversation_file,
                                                     read_context_window_tokens_from_codex_conversation_file,
@@ -72,13 +73,15 @@ class CodexAdapter(AgentToolAdapter):
     def find_conversation_files(self, agent_process_id):
         """Returns the files that may be the Codex process's conversation, matched by its folder and
         start time in Codex's sessions folder, newest first (context_window_usage.find_codex_conversation_files;
-        Codex 0.163 doesn't keep the file open, so lsof can't find it)."""
+        Codex 0.163 doesn't keep the file open, so lsof can't find it). A process started with
+        `codex resume` (or `node .../codex resume`) may be writing an earlier conversation's file."""
         agent_process = read_process_info(agent_process_id) if agent_process_id else None
         if agent_process is None:
             return []
         codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
-        return find_codex_conversation_files(os.path.join(codex_home, "sessions"), agent_process.started_at,
-                                             read_process_current_folder(agent_process_id), time.time())
+        return find_codex_conversation_files(
+            os.path.join(codex_home, "sessions"), agent_process.started_at, read_process_current_folder(agent_process_id),
+            time.time(), agent_resumed_a_conversation="resume" in read_process_arguments_and_environment(agent_process_id)[0][1:])
 
     def read_context_tokens(self, conversation_file_path):
         return read_context_tokens_from_codex_conversation_file(conversation_file_path)

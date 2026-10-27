@@ -29,7 +29,9 @@ from agent_command_tab.snapshot_data_classes import iterate_agent_session_entrie
 CLAUDE_CODE_FOLDER = os.path.realpath(sys.argv[1])
 CODEX_FOLDER = os.path.realpath(sys.argv[2])
 CLAUDE_IDLE_LAUNCH_COMMAND = "claude --model haiku"
-CLAUDE_BUSY_LAUNCH_COMMAND = 'claude --model haiku "Use the Bash tool to run exactly this command: sleep 25"'
+# Not `sleep 25`: Claude Code 2.1.310 and later refuse a lone sleep of 25 seconds or more (PHASE0_RESULTS.md).
+CLAUDE_BUSY_LAUNCH_COMMAND = ("claude --model haiku 'Use the Bash tool to run exactly this command: "
+                              "python3 -c \"import time; time.sleep(25)\"'")
 CODEX_LAUNCH_COMMAND = 'codex -s read-only -a never -c check_for_update_on_startup=false "Reply with only the word READY."'
 # The answer starts with "received" in lower case, which the note itself never shows, so the
 # note on screen is never taken for the answer.

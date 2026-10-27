@@ -3,7 +3,7 @@
 Usage: settings_and_docked_mode_live_check.py
 
 Runs the real AppController (its own menu bar icon shows during the run) with a temporary copy of
-your settings (showing the list as a sidebar, with Always on top off) and temporary docked-window
+your settings (showing the list as an auto-hiding sidebar, with Always on top off) and temporary docked-window
 and pause-records files, so your own files are not touched. Each step changes a
 Settings control the way a click does (choose the item, then send the control's action):
 1. "Show:" set to "Always: Above other windows": saved, and the sidebar stays visible.
@@ -30,13 +30,20 @@ from agent_command_tab import settings_store
 
 TEMPORARY_FOLDER = tempfile.mkdtemp(prefix="settings_and_docked_mode_live_check_")
 TEMPORARY_SETTINGS_PATH = os.path.join(TEMPORARY_FOLDER, "settings.json")
-if os.path.exists(settings_store.SETTINGS_FILE_PATH):
-    shutil.copy(settings_store.SETTINGS_FILE_PATH, TEMPORARY_SETTINGS_PATH)
+# Your settings, from the folder of the app's old name if it hasn't run since it was renamed.
+for settings_file_path in (settings_store.SETTINGS_FILE_PATH,
+                           os.path.join(settings_store.SETTINGS_FOLDER_OF_THE_OLD_NAME, "settings.json")):
+    if os.path.exists(settings_file_path):
+        shutil.copy(settings_file_path, TEMPORARY_SETTINGS_PATH)
+        break
 # The sidebar steps need the list shown as a sidebar, and step 2 needs Always on top off, so its
-# check sees the click save a change.
+# check sees the click save a change. Auto-hide at start, so no window is docked before the
+# frames are first read (they would come back wider in step 4).
 settings_store.save_settings(dict(settings_store.load_settings(TEMPORARY_SETTINGS_PATH), show_as="sidebar",
-                                  list_window_is_always_on_top=False), TEMPORARY_SETTINGS_PATH)
-# The app module looks these names up when it runs, so the copy is used instead of your files.
+                                  list_window_is_always_on_top=False, sidebar_mode="auto_hide"), TEMPORARY_SETTINGS_PATH)
+# The app module looks these names up when it runs, so the copy is used instead of your files,
+# and your settings folder isn't moved from the app's old name.
+app_controller_module.move_the_settings_folder_of_the_old_name = lambda: None
 app_controller_module.load_settings_resolving_paths_at_first_run = lambda: settings_store.load_settings(TEMPORARY_SETTINGS_PATH)
 app_controller_module.save_settings = lambda settings: settings_store.save_settings(settings, TEMPORARY_SETTINGS_PATH)
 app_controller_module.DOCKED_WINDOW_FRAMES_FILE_PATH = os.path.join(TEMPORARY_FOLDER, "docked_window_frames.json")
@@ -78,8 +85,11 @@ def run_checks(app_controller):
             time.sleep(0.1)
 
         async def read_window_frames():
+            """Returns the frames of the iTerm2 windows docking may move: not full-screen ones, which the core leaves alone."""
             frames = {}
             for window in core.app.terminal_windows:
+                if await window.async_get_fullscreen():
+                    continue
                 frame = await window.async_get_frame()
                 frames[window.window_id] = (round(frame.origin.x), round(frame.origin.y), round(frame.size.width), round(frame.size.height))
             return frames

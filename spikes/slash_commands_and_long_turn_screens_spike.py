@@ -11,7 +11,10 @@ logging hooks (shared with codex_agent_experiments_spike.py), and records:
 3. what happens when `/compact` and then `/clear` are typed, followed after a pause by a
    separate Enter: the screen with the slash-command menu open, the screen afterwards, and
    the hook events.
-Nothing is typed while a menu other than the slash-command menu is showing.
+The prompts (the long command's and /exit) are typed through
+codex_agent_experiments_spike.type_prompt_and_submit, which types nothing while Codex shows a
+menu; it doesn't recognize Claude Code's menus (marked "❯"), and the draft, the Backspaces and
+the slash commands are typed without that check.
 """
 
 import asyncio

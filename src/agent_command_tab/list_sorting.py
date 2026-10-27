@@ -13,13 +13,21 @@ sessions go last in either direction.
 from agent_command_tab.session_status_computation import STATES_IN_URGENCY_ORDER
 
 
+def find_when_the_shown_state_started(agent_session_entry):
+    """Returns when the state an agent session's row shows started, which its time counts from:
+    while it runs a command ("running"), when the command started; otherwise its last state change."""
+    if agent_session_entry.running_command_name:
+        return agent_session_entry.running_command_started_at
+    return agent_session_entry.status_since
+
+
 def rank_agent_session_by_activity(agent_session_entry):
     """Sort key: the most urgent state first (asking, error, stuck, working, done, idle), then the
-    most recent state change."""
+    most recent state change, as the row shows it (find_when_the_shown_state_started)."""
     state = agent_session_entry.status
     if state not in STATES_IN_URGENCY_ORDER:
         return None
-    return STATES_IN_URGENCY_ORDER.index(state), -agent_session_entry.status_since
+    return STATES_IN_URGENCY_ORDER.index(state), -find_when_the_shown_state_started(agent_session_entry)
 
 
 def rank_agent_session_by_created_time(agent_session_entry):
@@ -55,8 +63,9 @@ def rank_agent_session_by_context_percent(agent_session_entry):
 
 
 def rank_agent_session_by_last_state_change(agent_session_entry):
-    """Sort key: the agent session whose state changed last first (user request, 2026-10-26)."""
-    return -agent_session_entry.status_since
+    """Sort key: the agent session whose state changed last first (user request, 2026-10-26), by
+    the time its row shows (find_when_the_shown_state_started)."""
+    return -find_when_the_shown_state_started(agent_session_entry)
 
 
 # How each sort order but "manual" (iTerm2's tab order, and the window order set by dragging)

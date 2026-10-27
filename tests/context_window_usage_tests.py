@@ -117,6 +117,26 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now), [own_file])
         self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/nothing-here", now), [])
 
+    def test_a_resumed_codex_conversation_is_found_in_its_own_older_day_folder(self):
+        now = time.time()
+
+        def write_conversation(name, started_at, modified_at):
+            started_day = datetime.date.fromtimestamp(started_at)
+            started_at_text = datetime.datetime.fromtimestamp(started_at, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            path = self.write_lines(f"sessions/{started_day.year:04d}/{started_day.month:02d}/{started_day.day:02d}/{name}",
+                                    [{"type": "session_meta", "payload": {"cwd": "/Users/me/code", "timestamp": started_at_text,
+                                                                          "source": "cli"}}])
+            os.utime(path, (modified_at, modified_at))
+            return path
+
+        # `codex resume`, started a minute ago, has written to a conversation started 3 days ago.
+        resumed_file = write_conversation("rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl", now - 3 * 86400, now - 10)
+        write_conversation("rollout-b-01a151f0-8f89-7711-a0cc-cfcae10915f9.jsonl", now - 2 * 86400, now - 86400)  # not since
+        sessions_folder = os.path.join(self.folder.name, "sessions")
+        self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now), [])
+        self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now,
+                                                       agent_resumed_a_conversation=True), [resumed_file])
+
     def test_unicode_line_separators_inside_a_record_do_not_split_it(self):
         # Written raw: json.dumps would escape them, Claude Code's own writer doesn't.
         path = self.write_lines("separators.jsonl", ['{"type": "assistant", "message": {"content": "a b\u0085c", '

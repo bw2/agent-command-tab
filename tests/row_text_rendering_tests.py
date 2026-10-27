@@ -1,7 +1,6 @@
 import time
 import unittest
 
-from agent_command_tab.context_window_usage import format_token_count
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, MonitorEntry, WindowEntry
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
                                                                  LONGEST_TEXT_BY_COLUMN_FIELD_NAME,
@@ -10,8 +9,8 @@ from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_C
                                                                  build_tree_connector_text,
                                                                  build_tree_continuation_text,
                                                                  build_window_row_text_parts,
-                                                                 format_clock_time, format_elapsed_time,
-                                                                 format_memory_size)
+                                                                 format_clock_time, format_context_text,
+                                                                 format_elapsed_time, format_memory_size)
 
 
 def make_entry(status, tab_title="reviews", status_since=0.0):
@@ -45,7 +44,9 @@ class LongestColumnTextTests(unittest.TestCase):
         elapsed_seconds_samples = list(range(0, 2 * 86400, 7)) + [999 * 86400 + 5]
         self.assertLessEqual(max(len(format_elapsed_time(seconds)) for seconds in elapsed_seconds_samples),
                              min(longest_length["elapsed_time_text"], longest_length["existence_duration_text"]))
-        self.assertLessEqual(max(len(format_token_count(count)) for count in range(0, 2_000_000, 37)),  # context windows hold up to 1M
+        self.assertLessEqual(max(len(format_context_text(context_tokens, context_fill_percent))
+                                 for context_tokens in range(0, 2_000_000, 37)  # context windows hold up to 1M
+                                 for context_fill_percent in (None, 9, 100)),
                              longest_length["context_text"])
         memory_bytes_samples = [megabytes * 1024 ** 2 for megabytes in range(0, 100 * 1024 - 52)] + [1024 ** 3 - 1]
         self.assertLessEqual(max(len(format_memory_size(memory_bytes)) for memory_bytes in memory_bytes_samples),

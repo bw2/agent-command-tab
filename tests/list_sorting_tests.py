@@ -57,6 +57,13 @@ class SortAgentSessionEntriesTests(unittest.TestCase):
     def test_status_change_puts_the_latest_change_first(self):
         self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(ENTRIES, "state_duration")], ["1", "4", "2", "3"])
 
+    def test_status_change_goes_by_a_running_commands_start_as_the_row_shows(self):
+        # Reviews has worked since 50 and runs pytest since 120, so its row shows the shortest time.
+        entries = [ENTRIES[0], ENTRIES[1]._replace(running_command_name="pytest", running_command_started_at=120.0), *ENTRIES[2:]]
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "state_duration")], ["2", "1", "4", "3"])
+        # Activity too: among the two working, Reviews's shown change (120) is now later than docs's (80).
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "activity")], ["3", "2", "4", "1"])
+
     def test_reversed_orders_keep_unknown_values_last_and_equal_ones_in_tab_order(self):
         entries = [ENTRIES[0]._replace(memory_bytes=200), ENTRIES[1], ENTRIES[2]._replace(memory_bytes=900),
                    ENTRIES[3]._replace(memory_bytes=200)]
@@ -90,13 +97,15 @@ class SortWindowEntriesTests(unittest.TestCase):
         self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")], ["w2", "w1", "w3", "w4"])
 
     def test_reversed_orders_rank_windows_by_their_first_tab_in_that_direction(self):
-        windows = [make_window("w1", "one", [ENTRIES[0]._replace(memory_bytes=50)]),
+        # w1's 300 bytes lie between w2's tabs, so w2 goes first both ways only if it is ranked by
+        # its largest tab, then by its smallest.
+        windows = [make_window("w1", "one", [ENTRIES[0]._replace(memory_bytes=300)]),
                    make_window("w2", "two", [ENTRIES[1]._replace(memory_bytes=100), ENTRIES[2]._replace(memory_bytes=500)]),
                    make_window("w3", "three", [ENTRIES[3]]), make_window("w4", "empty", [])]
         self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")], ["w2", "w1", "w3", "w4"])
-        # The smallest first: w1's 50 bytes, then w2's smallest tab; unknown usage and no tabs still last.
+        # The smallest first: w2's smallest tab (100), then w1; unknown usage and no tabs still last.
         self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage", is_reversed=True)],
-                         ["w1", "w2", "w3", "w4"])
+                         ["w2", "w1", "w3", "w4"])
         self.assertEqual([window.title for window in sort_window_entries(windows, "alphabet", is_reversed=True)],
                          ["two", "three", "one", "empty"])
 

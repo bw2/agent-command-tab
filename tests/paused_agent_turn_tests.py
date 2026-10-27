@@ -20,7 +20,8 @@ class PausedAgentTurnTests(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
         for now, status_set_in_iterm2, is_stopped, job_pid in ((1.0, "idle", False, 101), (2.0, "working", False, 101),  # a turn starts
-                                                               (3.0, None, True, 77),  # paused: the shell is in front
+                                                               # paused: iTerm2's jobPid still names the agent for a while
+                                                               (3.0, None, True, 101),
                                                                (3.5, None, False, 77),  # resumed, iTerm2 still sees the shell
                                                                (4.0, "working", False, 101)):  # back in front
             agent_is_stopped[:] = [True] if is_stopped else []

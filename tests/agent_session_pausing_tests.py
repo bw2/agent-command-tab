@@ -291,7 +291,8 @@ class ResumeTests(unittest.TestCase):
             action_result = run_with_patches(processes, agent_session_pausing.resume_agent_session(
                 tab, AGENT_PROCESS_ID, make_pause_record()))
         self.assertFalse(action_result.succeeded)
-        self.assertIn("fg %N", action_result.message)
+        self.assertEqual(tab.typed_texts, ["\x15fg\r"])  # typed, unlike a refusal, whose message also says "fg %N"
+        self.assertIn("fg didn't bring the agent back", action_result.message)
 
     def test_a_process_this_user_may_not_signal_is_left_out_of_the_record_and_reported(self):
         processes = FakeProcesses(process_ids_below=(101, 102, 103))

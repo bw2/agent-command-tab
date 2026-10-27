@@ -26,7 +26,8 @@ SECONDS_TO_WAIT_FOR_CLAUDE_CODE_TO_START = 30
 
 async def read_screen_lines(session):
     contents = await session.async_get_screen_contents()
-    return [contents.line(index).string for index in range(contents.number_of_lines)]
+    # iTerm2's empty cells (NULs) as spaces, so rows of them count as blank.
+    return [contents.line(index).string.replace("\x00", " ") for index in range(contents.number_of_lines)]
 
 
 async def open_test_windows(connection, claude_test_folder, state_file_path):

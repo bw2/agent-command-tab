@@ -413,11 +413,18 @@ class SettingsWindowController(WindowFrameSavingController):
     def reflect_settings(self, settings):
         """Shows settings changed elsewhere (a width dragged at the sidebar's edge) in an open
         window; does nothing before the window was first opened."""
-        self.settings = dict(settings)
         if self.window is None:
+            self.settings = dict(settings)
             return
+        # A width typed but not saved yet is kept (a click on a checkbox doesn't end its editing);
+        # the field saves it once its editing ends. A field that only has the focus, as the first
+        # text field does when the window opens, shows the new width.
+        width_editor = self.sidebar_width_field.currentEditor()
+        width_is_being_typed = width_editor is not None and width_editor.string() != str(int(self.settings["sidebar_width"]))
+        self.settings = dict(settings)
         select_popup_choice(self.show_as_popup, settings["show_as"])
         self.update_accessibility_settings_button()  # after a shortcut change, or once the permission was given
         self.list_window_always_on_top_checkbox.setState_(1 if settings["list_window_is_always_on_top"] else 0)
-        self.sidebar_width_field.setStringValue_(str(int(settings["sidebar_width"])))
+        if not width_is_being_typed:
+            self.sidebar_width_field.setStringValue_(str(int(settings["sidebar_width"])))
         self.show_placement_fallback_note(settings)

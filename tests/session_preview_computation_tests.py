@@ -81,6 +81,15 @@ class ReadClaudeCodePreviewTests(unittest.TestCase):
         ])
         self.assertEqual((fields["message_since_prompt"], fields["open_tool_call"]), ("All tests pass.", ""))
 
+    def test_an_answered_tool_call_is_not_open_with_nothing_said_after_it(self):
+        # No text after the answer, so only its tool_result keeps the call from showing as open.
+        fields = self.read([
+            claude_user_record("Fix it"),
+            claude_assistant_record({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pytest"}}),
+            claude_user_record([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]),
+        ])
+        self.assertEqual((fields["message_since_prompt"], fields["open_tool_call"]), ("", ""))
+
     def test_a_message_from_an_earlier_turn_is_not_shown_after_a_new_prompt(self):
         fields = self.read([
             claude_user_record("First request"),

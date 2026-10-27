@@ -155,7 +155,8 @@ def find_claude_code_transcript(claude_config_folders, claude_session_id):
     return None
 
 
-def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent_working_folder, now):
+def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent_working_folder, now,
+                                  agent_resumed_a_conversation=False):
     """Returns the files that may be a Codex session's conversation, most recently written first;
     empty before the first prompt (Codex writes the file then, and doesn't keep it open, so lsof
     can't find it).
@@ -167,29 +168,39 @@ def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent
     conversation (Codex's /new starts another). Two Codex sessions in one folder can't be
     told apart (a known limit), so callers that must be sure check that there is only one.
 
+    `codex resume` goes on writing the earlier conversation's file, which stays in its own day
+    folder with its own header: for such a process, every day folder is searched, and a file
+    written since the process started fits whatever start its header names.
+
     Args:
         codex_sessions_folder: Codex's sessions folder ($CODEX_HOME/sessions).
         agent_started_at: When the agent process started.
         agent_working_folder: The agent process's current folder.
         now: The current time.
+        agent_resumed_a_conversation: Whether the agent process was started with `codex resume`.
     """
+    if agent_resumed_a_conversation:
+        paths = glob.glob(os.path.join(glob.escape(codex_sessions_folder), "*", "*", "*", "rollout-*.jsonl"))
+    else:
+        paths = []
+        day = datetime.date.fromtimestamp(agent_started_at)
+        while day <= datetime.date.fromtimestamp(now):
+            day_folder = os.path.join(codex_sessions_folder, f"{day.year:04d}", f"{day.month:02d}", f"{day.day:02d}")
+            paths += glob.glob(os.path.join(glob.escape(day_folder), "rollout-*.jsonl"))
+            day += datetime.timedelta(days=1)
     candidates = []
-    day = datetime.date.fromtimestamp(agent_started_at)
-    while day <= datetime.date.fromtimestamp(now):
-        day_folder = os.path.join(codex_sessions_folder, f"{day.year:04d}", f"{day.month:02d}", f"{day.day:02d}")
-        for path in glob.glob(os.path.join(glob.escape(day_folder), "rollout-*.jsonl")):
-            try:
-                modified_at = os.path.getmtime(path)
-            except OSError:
-                continue
-            if modified_at >= agent_started_at:
-                candidates.append((modified_at, path))
-        day += datetime.timedelta(days=1)
+    for path in paths:
+        try:
+            modified_at = os.path.getmtime(path)
+        except OSError:
+            continue
+        if modified_at >= agent_started_at:
+            candidates.append((modified_at, path))
     conversation_files = []
     for _, path in sorted(candidates, reverse=True):
         header = read_codex_session_header(path)
         if (header.get("source") == "cli" and header.get("cwd") == agent_working_folder
-                and parse_iso_time(header.get("timestamp")) >= agent_started_at - 5):
+                and (agent_resumed_a_conversation or parse_iso_time(header.get("timestamp")) >= agent_started_at - 5)):
             conversation_files.append(path)
     return conversation_files
 

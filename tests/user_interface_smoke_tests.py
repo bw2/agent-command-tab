@@ -24,8 +24,9 @@ from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGH
                                                                 ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
-                                                                         GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
-                                                                         TEXT_FIELD_INSETS, AgentSessionListController, RowButton,
+                                                                         GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT, SMALLEST_TAB_NAME_WIDTH,
+                                                                         TAB_ROW_HEIGHT_WITH_PREVIEW, TEXT_FIELD_INSETS,
+                                                                         AgentSessionListController, RowButton,
                                                                          RowViewWithSelectionOutline, build_index_set,
                                                                          compute_selection_outline_rect)
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
@@ -873,6 +874,13 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.measure_right_columns()
         self.assertEqual((self.list_controller.column_widths["context_tokens"], self.list_controller.column_widths["agent_tool_icon"]),
                          (0, 0))
+        # The rest go too, the time since the last status change last, so the names stay readable.
+        self.assertEqual(sum(self.list_controller.column_widths.values()), 0)
+        self.assertGreaterEqual(self.list_controller.measure_room_left_for_tab_names(), SMALLEST_TAB_NAME_WIDTH)
+        self.window.setContentSize_((300, 260))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        self.list_controller.measure_right_columns()
+        self.assertGreater(self.list_controller.column_widths["state_duration"], 0)  # kept while there is room for it
 
     def test_duplicate_is_greyed_out_for_a_tool_without_a_launch_command(self):
         snapshot = make_sample_snapshot()
@@ -1685,6 +1693,41 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.controlChanged_(self.controller.list_window_always_on_top_checkbox)
         self.assertEqual((self.owner.settings["show_as"], self.owner.settings["sidebar_width"]), ("sidebar", 650))
         self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
+
+    def test_a_width_being_typed_survives_a_click_on_another_control(self):
+        width_field = self.controller.sidebar_width_field
+        self.assertTrue(self.controller.window.makeFirstResponder_(width_field))
+        width_field.currentEditor().setString_("500")  # typed, without Return or Tab
+        self.controller.list_window_always_on_top_checkbox.setState_(1)
+        self.controller.controlChanged_(self.controller.list_window_always_on_top_checkbox)
+        self.controller.reflect_settings(self.owner.settings)  # as the app controller does after every change
+        self.assertEqual(width_field.currentEditor().string(), "500")
+        self.controller.window.makeFirstResponder_(None)  # editing ends, as a click elsewhere does
+        self.assertEqual(self.owner.settings["sidebar_width"], 500)
+
+    def test_a_width_field_that_only_has_the_focus_follows_a_width_dragged_at_the_sidebar(self):
+        width_field = self.controller.sidebar_width_field
+        self.assertTrue(self.controller.window.makeFirstResponder_(width_field))  # as the first text field when the window opens
+        self.owner.settings = dict(self.owner.settings, sidebar_width=555)  # dragged at the sidebar's edge
+        self.controller.reflect_settings(self.owner.settings)
+        self.assertEqual(width_field.currentEditor().string(), "555")
+        self.controller.window.makeFirstResponder_(None)  # the window closes
+        self.assertEqual(self.owner.settings["sidebar_width"], 555)  # not the 400 it showed before the drag
+
+    def test_quit_saves_a_width_being_typed_first(self):
+        width_field = self.controller.sidebar_width_field
+        self.assertTrue(self.controller.window.makeFirstResponder_(width_field))
+        width_field.currentEditor().setString_("500")  # typed, without Return or Tab
+        steps = []
+        stand_in_app_controller = unittest.mock.Mock(settings_window_controller=self.controller,
+                                                     save_settings_if_scheduled=lambda: steps.append("save a moved window's frame"),
+                                                     give_room_back_before_exiting=lambda: steps.append("give room back"))
+        # The real one, which Ctrl+C and logout (applicationWillTerminate_) also go through.
+        stand_in_app_controller.save_settings_before_exiting = lambda: AppController.save_settings_before_exiting(stand_in_app_controller)
+        with unittest.mock.patch("os._exit", lambda status: steps.append(f"exit {status}")):
+            AppController.quit(stand_in_app_controller)
+        self.assertEqual(self.owner.settings["sidebar_width"], 500)
+        self.assertEqual(steps, ["save a moved window's frame", "give room back", "exit 0"])
 
     def test_the_show_as_popup_offers_the_three_ways_and_saves_the_choice(self):
         self.assertEqual(self.controller.show_as_popup.itemTitles(), ["Window", "Sidebar", "Popup"])

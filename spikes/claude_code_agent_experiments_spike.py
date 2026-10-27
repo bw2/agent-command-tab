@@ -200,6 +200,8 @@ async def run_experiments(connection):
                 break
             if await session.async_get_variable("status") in ("idle", "done"):
                 break
+        if await wait_for_status(session, ("idle", "done"), 30) is None:
+            raise RuntimeError("Claude Code did not reach its prompt; stopping so nothing is typed into a menu or the shell")
         await asyncio.sleep(3)
         await recorder.mark("ready")
 

@@ -5,6 +5,12 @@ computer can receive exactly what the menu bar list receives. They are named tup
 classes, which would need type annotations), so equal contents compare equal, which the views
 use to redraw only the rows that changed. Frames are (x, y, width, height) tuples in points,
 with the origin at the bottom-left of the main monitor.
+
+Some fields are reserved for planned features (PLAN.md section 4, "Snapshot shape") and nothing
+fills or reads them yet: an agent session's details, importance_level, background_task_count,
+last_user_interaction_time and ended_abnormally_at; peer_messaging_address, which is filled but
+not read; a window's last_prompt_time (always None); and a computer's codex_usage and
+hooks_status_per_agent_tool.
 """
 
 import collections
