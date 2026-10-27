@@ -1,7 +1,7 @@
 """The Talk to Each Other window: the note sent to the selected agent sessions, which the user can
 edit before sending it (user request, 2026-10-21)."""
 
-from AppKit import (NSAlert, NSBezelBorder, NSColor, NSEventModifierFlagCommand, NSFont, NSImage, NSMakeRect,
+from AppKit import (NSAlert, NSBezelBorder, NSColor, NSEventModifierFlagCommand, NSFont, NSMakeRect,
                     NSScrollView, NSTextField, NSTextView, NSView, NSViewWidthSizable)
 
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
@@ -47,10 +47,7 @@ def build_talk_to_each_other_alert(agent_session_entries, left_out_agent_session
         left_out_agent_session_entries: The selected ones whose tools can't take part.
     """
     alert = NSAlert.alloc().init()
-    alert.setMessageText_("Talk to Each Other")
-    # A blank image in place of the app's icon (Python's rocket, run from the venv; user request, 2026-10-27).
-    # NSAlert keeps the icon's space either way: hiding its icon view leaves the gap, and removing it raises.
-    alert.setIcon_(NSImage.alloc().initWithSize_((1, 1)))
+    alert.setMessageText_("Talk to Each Other")  # with the app's icon (blanked, then restored: user requests, 2026-10-27)
     informative_text = (f"Send a message introducing these {len(agent_session_entries)} agents to each other:\n"
                         + "\n".join(f"• {entry.tab_title}" for entry in agent_session_entries))
     if left_out_agent_session_entries:
