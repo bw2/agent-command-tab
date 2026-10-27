@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -60,6 +61,16 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(list_positions_of_the_apps_hooks(USERS_SETTINGS, COMMAND, EVENTS))
         self.assertIsNone(list_positions_of_the_apps_hooks(settings, "/other/python -I -S x 'Claude Code'", EVENTS))
 
+    def test_another_link_to_the_same_python_is_the_same_command(self):
+        # The app's entry point runs as .venv/bin/python3.11, `python -m ...` as .venv/bin/python, a link to it.
+        folder = tempfile.mkdtemp()
+        python_path, link_path = os.path.join(folder, "python3.11"), os.path.join(folder, "python")
+        open(python_path, "w").close()
+        os.symlink("python3.11", link_path)
+        settings = add_the_apps_hooks(USERS_SETTINGS, build_forwarder_command("Claude Code", python_path, "/f.py"), EVENTS)
+        self.assertIsNotNone(list_positions_of_the_apps_hooks(settings, build_forwarder_command("Claude Code", link_path, "/f.py"), EVENTS))
+        self.assertIsNone(list_positions_of_the_apps_hooks(settings, build_forwarder_command("Codex", link_path, "/f.py"), EVENTS))
+
     def test_codex_approvals_are_found_by_position(self):
         self.assertEqual(convert_event_name_to_codex_hook_state_name("SessionEnd"), "session_end")
         positions = [("SessionEnd", 0, 0), ("Stop", 1, 0)]
@@ -109,6 +120,10 @@ class FilesTests(unittest.TestCase):
             for event_name, group_index, hook_index in positions:
                 config_file.write(f'[hooks.state."{self.codex_hooks_path}:{convert_event_name_to_codex_hook_state_name(event_name)}:'
                                   f'{group_index}:{hook_index}"]\ntrusted_hash = "sha256:0"\n\n')
+        self.assertEqual(check_hooks("Codex"), HOOKS_ARE_INSTALLED)
+        # Installing again, from another link to the same Python, leaves the approved file alone.
+        with unittest.mock.patch.object(hooks_installer.sys, "executable", os.path.realpath(sys.executable)):
+            self.assertEqual(install_hooks("Codex"), [])
         self.assertEqual(check_hooks("Codex"), HOOKS_ARE_INSTALLED)
 
     def test_a_symlinked_settings_file_stays_a_link_to_the_file_that_gets_the_hooks(self):

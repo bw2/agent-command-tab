@@ -45,9 +45,10 @@ HOOKS_ARE_MISSING = "missing"
 HOOKS_AWAIT_APPROVAL = "needs approval"  # Codex: in hooks.json, not yet approved in its /hooks screen
 
 
-def build_forwarder_command(agent_tool_name, python_path=sys.executable, forwarder_path=FORWARDER_FILE_PATH):
-    """Returns the hook command: this Python, isolated (-I) and without site packages (-S), running the forwarder."""
-    return " ".join(shlex.quote(part) for part in (python_path, "-I", "-S", forwarder_path, agent_tool_name))
+def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FORWARDER_FILE_PATH):
+    """Returns the hook command: this Python (python_path, or the one running), isolated (-I) and
+    without site packages (-S), running the forwarder."""
+    return " ".join(shlex.quote(part) for part in (python_path or sys.executable, "-I", "-S", forwarder_path, agent_tool_name))
 
 
 def hook_group_is_the_apps(hook_group):
@@ -96,15 +97,40 @@ def add_the_apps_hooks(settings, command, events):
     return dict(settings, hooks=hooks)
 
 
+def normalize_forwarder_command(command):
+    """Returns a hook command's words with its program as the file it leads to, so the venv's
+    python, python3 and python3.11 (links to one program) give the same command; None for a
+    command that can't be split. The forwarder runs without site packages (-S), so which of
+    those links started it makes no difference."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    return [os.path.realpath(words[0])] + words[1:] if words else None
+
+
+def hook_group_is_the_same_as(hook_group, expected_hook_group):
+    """Whether a hooks entry is the one add_the_apps_hooks adds (expected_hook_group), its command
+    perhaps naming the same Python by another link (normalize_forwarder_command): the app's entry
+    point runs as python3.11, `python -m agent_command_tab.command_line` as python."""
+    if not (isinstance(hook_group, dict) and isinstance(hook_group.get("hooks"), list) and len(hook_group["hooks"]) == 1
+            and isinstance(hook_group["hooks"][0], dict)):
+        return False
+    hook, expected_hook = hook_group["hooks"][0], expected_hook_group["hooks"][0]
+    return (dict(hook_group, hooks=None) == dict(expected_hook_group, hooks=None)
+            and dict(hook, command=None) == dict(expected_hook, command=None)
+            and normalize_forwarder_command(str(hook.get("command", ""))) == normalize_forwarder_command(expected_hook["command"]))
+
+
 def list_positions_of_the_apps_hooks(settings, command, events):
     """Returns [(event name, entry index, hook index)] of the app's hook for each event, or None
-    unless every event has exactly the entry add_the_apps_hooks adds."""
+    unless every event has the entry add_the_apps_hooks adds (hook_group_is_the_same_as)."""
     hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
     positions = []
     for event_name, matcher in events:
         hook_groups = hooks.get(event_name) if isinstance(hooks.get(event_name), list) else []
         group_indexes = [index for index, hook_group in enumerate(hook_groups)
-                         if hook_group == build_the_apps_hook_group(command, matcher)]
+                         if hook_group_is_the_same_as(hook_group, build_the_apps_hook_group(command, matcher))]
         if not group_indexes:
             return None
         positions.append((event_name, group_indexes[0], 0))
@@ -170,7 +196,9 @@ def write_settings_file(settings, file_path):
 
 
 def install_hooks(agent_tool_name):
-    """Adds the app's hooks to the agent tool's settings files; returns the files changed.
+    """Adds the app's hooks to the agent tool's settings files; returns the files changed. A file
+    that has them already (perhaps naming the same Python by another link) is left as it is, so
+    Codex's approval of them stays.
 
     Raises:
         OSError, ValueError: A file couldn't be read or written; files changed before it stay changed.
@@ -180,6 +208,8 @@ def install_hooks(agent_tool_name):
     changed_file_paths = []
     for file_path in list_settings_file_paths(agent_tool_name):
         settings = read_settings_file(file_path)
+        if list_positions_of_the_apps_hooks(settings, command, events) is not None:
+            continue
         new_settings = add_the_apps_hooks(settings, command, events)
         if new_settings != settings:
             write_settings_file(new_settings, file_path)
