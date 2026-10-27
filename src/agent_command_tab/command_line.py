@@ -25,6 +25,7 @@ def dump_snapshot(verbose):
     """
     from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
     from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH, load_pause_records
+    from agent_command_tab.settings_store import build_core_settings, load_settings
     from agent_command_tab.snapshot_data_classes import convert_snapshot_to_json_ready_dict
     from agent_command_tab.user_interface.screen_layout import read_monitors_from_screens
 
@@ -45,6 +46,8 @@ def dump_snapshot(verbose):
         publish_snapshot, report_connection_lost, verbose,
         pause_record_by_tab_and_agent_to_start_with=load_pause_records(PAUSE_RECORDS_FILE_PATH))
     connection_thread.start()
+    # The app's settings, so the agent tools left out in Settings are left out here too.
+    connection_thread.send_core_settings(build_core_settings(load_settings()))
     connection_thread.send_monitors(read_monitors_from_screens())  # the same monitor groups as the dropdown
     if not first_snapshot_arrived.wait(timeout=30):
         print("no snapshot within 30 seconds", file=sys.stderr)

@@ -48,6 +48,13 @@ async def open_test_windows(connection):
     await window_a.tabs[0].async_set_title("TEST working agent")
     await window_a.tabs[1].async_set_title("TEST asking agent")
     await window_b.tabs[0].async_set_title("TEST idle agent")
+    # Report statuses only once the stand-ins run: iTerm2 clears `status` when the foreground job changes.
+    stand_in_sessions = [window_a.tabs[0].sessions[0], window_a.tabs[1].sessions[0], window_b.tabs[0].sessions[0]]
+    for _ in range(40):
+        command_lines = [await session.async_get_variable("commandLine") for session in stand_in_sessions]
+        if all((command_line or "").startswith("claude") for command_line in command_lines):
+            break
+        await asyncio.sleep(0.25)
     await window_a.tabs[0].sessions[0].async_inject(b"\x1b]7501;state=working\x1b\\")
     await window_a.tabs[1].sessions[0].async_inject(b"\x1b]7501;state=blocked:kind=permission\x1b\\")
     await window_b.tabs[0].sessions[0].async_inject(b"\x1b]7501;state=idle\x1b\\")

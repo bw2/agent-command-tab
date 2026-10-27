@@ -3,7 +3,8 @@
 A non-activating panel that floats above windows on every desktop, including full-screen
 ones, and takes keyboard focus only for typing (a rename). Three modes (settings_store.SIDEBAR_MODES):
 - auto_hide: slides in when the pointer touches the chosen edge and slides out half a second
-  after the pointer leaves, unless a rename, drag or menu is open;
+  after the pointer leaves, unless a rename, drag or menu is open, or at once on a click in
+  another app;
 - floating: always visible, over the windows beneath it;
 - docked: always visible, and the core keeps iTerm2 windows on that monitor out of its area
   (macOS lets no app reserve screen space for other apps, so other apps' windows can still
@@ -19,8 +20,8 @@ import ctypes
 import time
 
 import objc
-from AppKit import (NSAnimationContext, NSBackingStoreBuffered, NSCursor, NSEvent, NSEventMaskMouseMoved,
-                    NSMakeRect, NSPanel, NSStatusWindowLevel, NSTrackingActiveAlways, NSTrackingArea,
+from AppKit import (NSAnimationContext, NSBackingStoreBuffered, NSCursor, NSEvent, NSEventMaskLeftMouseDown,
+                    NSEventMaskMouseMoved, NSEventMaskOtherMouseDown, NSEventMaskRightMouseDown, NSMakeRect, NSPanel, NSStatusWindowLevel, NSTrackingActiveAlways, NSTrackingArea,
                     NSTrackingCursorUpdate, NSTrackingInVisibleRect, NSTrackingMouseEnteredAndExited,
                     NSTrackingMouseMoved, NSView, NSViewHeightSizable, NSViewMaxXMargin, NSViewMinXMargin,
                     NSViewWidthSizable, NSVisualEffectBlendingModeBehindWindow, NSVisualEffectMaterialSidebar,
@@ -146,6 +147,7 @@ class SidebarController(NSObject):
         self.keep_shown_until = 0  # set by "Show the sidebar" in the menu bar item's menu
         self.shown_from_the_menu = False  # out because of that menu item (until it next hides)
         self.mouse_monitors = []
+        self.click_monitor = None  # while a sidebar that hides by itself is in (watch_for_clicks_in_other_apps)
         self.width_drag_start = None  # (pointer x, width) while the inner edge is dragged
         self.list_controller = AgentSessionListController.alloc().initWithOwner_(owner)
         self.list_controller.width_is_set_by_the_user = True
@@ -220,6 +222,7 @@ class SidebarController(NSObject):
         self.placement = choose_sidebar_edge(self.settings["sidebar_edge"], self.screens)
         if self.placement is None:
             self.stop_tracking_the_pointer()
+            self.watch_for_clicks_in_other_apps(False)
             self.cancel_hide_timer()
             self.window.orderOut_(None)
             self.is_shown = False
@@ -269,6 +272,7 @@ class SidebarController(NSObject):
         self.is_shown = is_shown
         if not is_shown:
             self.shown_from_the_menu = False
+        self.watch_for_clicks_in_other_apps(is_shown and self.hides_by_itself())
         if is_shown:
             self.window.orderFrontRegardless()
             if not was_on_screen:
@@ -293,9 +297,7 @@ class SidebarController(NSObject):
         menu bar icon while the list shows as a sidebar: shows the sidebar, also while the list
         shows as a popup or a window, for SECONDS_SHOWN_FROM_THE_MENU, then hides it once the
         pointer isn't on it. A sidebar that is always shown stays as it is."""
-        if self.settings is None or self.placement is None:
-            return
-        if self.settings["show_as"] == "sidebar" and self.settings["sidebar_mode"] != "auto_hide":
+        if self.settings is None or self.placement is None or not self.hides_by_itself():
             return
         self.keep_shown_until = time.time() + SECONDS_SHOWN_FROM_THE_MENU
         self.set_shown(True)
@@ -303,13 +305,35 @@ class SidebarController(NSObject):
         self.check_whether_to_hide_in(SECONDS_SHOWN_FROM_THE_MENU)
 
     @objc.python_method
-    def hide_now(self):
-        """The global shortcut pressed again while an auto-hiding sidebar is in: it slides out at
-        once, even with the pointer on it (user request, 2026-10-21)."""
+    def hides_by_itself(self):
+        """Whether the sidebar slides out again after it slid in: it auto-hides, or the list shows
+        as a popup or a window (it slid in from "Show the sidebar"), rather than always shown."""
+        return self.settings["show_as"] != "sidebar" or self.settings["sidebar_mode"] == "auto_hide"
+
+    @objc.python_method
+    def hide_now(self, animate=True):
+        """Slides the sidebar out at once, even with the pointer on it or while it was to stay a
+        few seconds: the global shortcut pressed again (user request, 2026-10-21) or a click in
+        another app (watch_for_clicks_in_other_apps). Without animate it vanishes at once (its top
+        bar dragged away into the list window)."""
         self.cancel_hide_timer()
         self.keep_shown_until = 0
         self.list_controller.cancel_rename()  # an open rename would keep the list from updating
-        self.set_shown(False)
+        self.set_shown(False, animate)
+
+    @objc.python_method
+    def watch_for_clicks_in_other_apps(self, is_watching):
+        """Adds or removes a global monitor (it only watches, needing no Accessibility permission)
+        of mouse button presses in other apps' windows, which slide out a sidebar that hides by
+        itself at once (user request, 2026-10-22), rather than after SECONDS_SHOWN_FROM_THE_MENU or
+        once the pointer leaves. Clicks on the sidebar and the menu bar icon go to the dashboard,
+        so the monitor never sees them."""
+        if is_watching and self.click_monitor is None:
+            self.click_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown, lambda event: self.hide_now())
+        elif not is_watching and self.click_monitor is not None:
+            NSEvent.removeMonitor_(self.click_monitor)
+            self.click_monitor = None
 
     @objc.python_method
     def something_belonging_to_the_sidebar_is_open(self):

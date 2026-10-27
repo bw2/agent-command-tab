@@ -14,7 +14,6 @@ D. Type /exit; record when commandLine changes and when SessionEnd arrives.
 """
 
 import asyncio
-import json
 import os
 import re
 import sys
@@ -29,20 +28,11 @@ import claude_code_agent_experiments_spike as shared  # noqa: E402  (reuses its 
 iterm2.auth.gAppKitAvailable = False
 
 
-def read_hook_events_since(start_time):
-    """Returns hook log records received at or after start_time."""
-    if not os.path.exists(shared.HOOK_LOG_PATH):
-        return []
-    with open(shared.HOOK_LOG_PATH) as log_file:
-        records = [json.loads(line) for line in log_file if line.strip()]
-    return [record for record in records if record["received_at"] >= start_time]
-
-
 async def wait_for_hook_event(event_name, start_time, timeout_seconds, session_id=None):
     """Waits for a hook event of the given name after start_time; returns it or None."""
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
-        for record in read_hook_events_since(start_time):
+        for record in shared.read_hook_events_since(start_time):
             if record["hook_event_name"] == event_name and (session_id is None or record["session_id"] == session_id):
                 return record
         await asyncio.sleep(0.2)
@@ -50,10 +40,11 @@ async def wait_for_hook_event(event_name, start_time, timeout_seconds, session_i
 
 
 async def read_screen_lines(session):
-    """Returns the non-blank lines of the session's visible screen."""
+    """Returns the non-blank lines of the session's visible screen, iTerm2's empty cells (NULs) as
+    spaces, so rows of them count as blank."""
     contents = await session.async_get_screen_contents()
-    return [contents.line(index).string for index in range(contents.number_of_lines)
-            if contents.line(index).string.strip()]
+    lines = [contents.line(index).string.replace("\x00", " ") for index in range(contents.number_of_lines)]
+    return [line for line in lines if line.strip()]
 
 
 async def run_experiments(connection):
@@ -64,6 +55,7 @@ async def run_experiments(connection):
     original_session = original_window.current_tab.current_session if original_window else None
     launch_command = (f"cd {shared.TEST_PROJECT_FOLDER} && claude --permission-mode default --model haiku "
                       "--name phase0-test-claude-permissions")
+    launched_at = time.time()  # the hook log keeps earlier runs' records
     test_window = await iterm2.Window.async_create(
         connection, profile_customizations=iterm2.LocalWriteOnlyProfile({"Initial Text": launch_command}))
     second_window = await iterm2.Window.async_create(connection)
@@ -73,8 +65,12 @@ async def run_experiments(connection):
     recorder = shared.TimelineRecorder(session)
     polling_task = asyncio.ensure_future(recorder.poll_forever())
     try:
-        session_start = await wait_for_hook_event("SessionStart", 0, 60)
-        main_session_id = session_start["session_id"] if session_start else None
+        session_start = await wait_for_hook_event("SessionStart", launched_at, 60)
+        if session_start is None:
+            # Claude Code runs no project hooks while its folder trust question is up.
+            raise RuntimeError("no SessionStart from Claude Code within 60 s (a folder trust question?); "
+                               "stopping so nothing is typed into a menu")
+        main_session_id = session_start["session_id"]
         await asyncio.sleep(2)
         await recorder.mark("ready")
 
@@ -93,10 +89,11 @@ async def run_experiments(connection):
             recorder.write({"kind": "status right after approval", "status": await session.async_get_variable("status")})
         await second_window.async_set_tabs([second_window.tabs[0], test_tab])
         await recorder.mark("A tab moved while the tool runs")
-        await wait_for_hook_event("Stop", step_start, 60, main_session_id)
+        turn_ended = await wait_for_hook_event("Stop", step_start, 60, main_session_id)
         await asyncio.sleep(1)
-        recorder.write({"kind": "A output seen after move",
-                        "seen": any("phase0-A-done" in line for line in await read_screen_lines(session))})
+        # A line holding just the marker: the prompt and the command on screen hold it too.
+        recorder.write({"kind": "A output seen after move", "seen": bool(turn_ended) and any(
+            re.fullmatch(r"\W*phase0-A-done\s*", line.replace("\x00", " ")) for line in await read_screen_lines(session))})
         await recorder.mark("A finished")
 
         # B: approve a long tool call, then press Esc.
@@ -113,7 +110,7 @@ async def run_experiments(connection):
         await session.async_send_text("\x1b", suppress_broadcast=True)
         await asyncio.sleep(8)
         recorder.write({"kind": "B hooks after Esc",
-                        "events": [record["hook_event_name"] for record in read_hook_events_since(escape_time)]})
+                        "events": [record["hook_event_name"] for record in shared.read_hook_events_since(escape_time)]})
         await recorder.mark("B 8 s after Esc")
 
         # C: deny with a comment.
@@ -123,23 +120,20 @@ async def run_experiments(connection):
         if not await wait_for_hook_event("PermissionRequest", step_start, 60, main_session_id):
             raise RuntimeError("no permission prompt in step C; stopping so no stray keys are typed")
         await asyncio.sleep(0.8)
-        menu_lines = await read_screen_lines(session)
-        recorder.write({"kind": "C permission menu", "lines": menu_lines[-12:]})
-        no_option_number = None
-        for line in menu_lines:
-            match = re.search(r"(\d)\.\s*No\b", line)
-            if match:
-                no_option_number = match.group(1)
+        recorder.write({"kind": "C permission menu", "lines": (await read_screen_lines(session))[-12:]})
+        no_option_number = await shared.find_number_of_the_no_option(session)
         recorder.write({"kind": "C chosen No option", "number": no_option_number})
+        if no_option_number is None:
+            # Step D's /exit and Enter would otherwise go to the open menu, where Enter picks its highlighted option.
+            raise RuntimeError("no \"No\" option in step C's permission menu; stopping so no stray keys are typed")
         denial_time = time.time()
-        if no_option_number:
-            await session.async_send_text(no_option_number, suppress_broadcast=True)
-            await asyncio.sleep(1.5)
-            await recorder.mark("C after choosing No")
-            await shared.type_prompt_and_submit(session, "do not run it; just reply with the word skipped")
-            await asyncio.sleep(10)
+        await session.async_send_text(no_option_number, suppress_broadcast=True)
+        await asyncio.sleep(1.5)
+        await recorder.mark("C after choosing No")
+        await shared.type_prompt_and_submit(session, "do not run it; just reply with the word skipped")
+        await asyncio.sleep(10)
         recorder.write({"kind": "C hooks after denial",
-                        "events": [(record["hook_event_name"], record.get("tool_input_command")) for record in read_hook_events_since(denial_time)]})
+                        "events": [(record["hook_event_name"], record.get("tool_input_command")) for record in shared.read_hook_events_since(denial_time)]})
         await recorder.mark("C finished")
 
         # D: exit.

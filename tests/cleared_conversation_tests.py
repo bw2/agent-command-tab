@@ -7,6 +7,7 @@ import unittest
 import unittest.mock
 
 from agent_command_tab import iterm2_actions
+from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.iterm2_connection_thread import DashboardCore
 from agent_command_tab.iterm2_snapshot_builder import DisplayedState
@@ -29,6 +30,9 @@ class StandInAdapter:
         if self.while_reading is not None:
             self.while_reading()
         return 1000
+
+    def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
+        return 200_000
 
     def read_preview_fields(self, conversation_file_path):
         self.read_paths.append(conversation_file_path)
@@ -112,9 +116,33 @@ class ClearedConversationTests(unittest.TestCase):
         self.clear()
         self.assertEqual(self.duplicate(), "codex")  # Codex's lookup still finds the old file: it forked that before
         self.adapter.path = self.write_file("new.jsonl")  # the new chat's first prompt
-        self.adapter.paths_that_fit = [self.adapter.path, self.old_path]
         self.update_readings_with_a_lookup_due()
+        self.assertFalse(self.core.conversation_was_cleared_and_the_next_has_no_file_yet("s1"))  # the new file ends it
+        self.adapter.paths_that_fit = [self.adapter.path]
+        self.assertEqual(self.duplicate(), "codex fork new.jsonl")
+        self.adapter.paths_that_fit = [self.adapter.path, self.old_path]
         self.assertEqual(self.duplicate(), "codex")  # both files fit the process, so which one is its isn't known
+
+    def test_a_codex_session_sharing_its_folder_neither_shows_nor_forks_a_conversation_that_may_be_the_others(self):
+        later_sessions_file = "/codex/rollout-2026-10-25T10-00-00-0199aaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+
+        class StandInCodexAdapter(CodexAdapter):
+            # The one file that fits, as for a session with no file yet while a later one in its folder has one.
+            def find_conversation_files(self, agent_process_id):
+                return [later_sessions_file]
+        self.agent_session.update(adapter=StandInCodexAdapter(), working_folder="/p")
+        self.assertEqual(asyncio.run(self.core.look_up_conversation_file("s1", self.agent_session)), later_sessions_file)
+        self.assertEqual(self.duplicate(), "codex fork 0199aaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        self.core.agent_sessions["s2"] = {"adapter": StandInCodexAdapter(), "process_id": 4343, "is_in_background": False,
+                                          "working_folder": "/p"}
+        self.assertIsNone(asyncio.run(self.core.look_up_conversation_file("s1", self.agent_session)))
+        self.assertEqual(self.duplicate(), "codex")
+        # The other session's tab closes, but its file stays and still fits this session.
+        self.core.remember_codex_sessions_that_share_a_folder()  # as each snapshot does
+        del self.core.agent_sessions["s2"]
+        self.core.remember_codex_sessions_that_share_a_folder()
+        self.assertIsNone(asyncio.run(self.core.look_up_conversation_file("s1", self.agent_session)))
+        self.assertEqual(self.duplicate(), "codex")
 
     def test_commands_are_not_typed_into_a_suspended_agent(self):
         self.agent_session["is_in_background"] = True

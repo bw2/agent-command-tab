@@ -237,23 +237,29 @@ class ResumeTests(unittest.TestCase):
     def test_fg_is_typed_at_the_unchanged_prompt_then_the_stopped_processes_continue(self):
         for text_before_cursor in (PROMPT, PROMPT + "22;3;1R"):  # a terminal reply that reached the shell at the pause
             processes = FakeProcesses(stopped_process_ids={AGENT_PROCESS_ID, 101, 102})
-            tab = FakeTab([text_before_cursor + RIGHT_PROMPT], cursor_x=len(text_before_cursor),
-                          on_text=lambda text: processes.stopped_process_ids.discard(AGENT_PROCESS_ID))  # fg
+            signal_counts_when_fg_was_typed = []
+
+            def type_fg(text):
+                signal_counts_when_fg_was_typed.append(len(processes.signals))
+                processes.stopped_process_ids.discard(AGENT_PROCESS_ID)
+            tab = FakeTab([text_before_cursor + RIGHT_PROMPT], cursor_x=len(text_before_cursor), on_text=type_fg)
             action_result = run_with_patches(processes, agent_session_pausing.resume_agent_session(
                 tab, AGENT_PROCESS_ID, make_pause_record(text_before_cursor, RIGHT_PROMPT)))
             self.assertTrue(action_result.succeeded)
             self.assertEqual(tab.typed_texts, ["\x15fg\r"])  # Ctrl+U first clears what the line held at the pause
-            self.assertEqual(processes.signals, [(101, signal.SIGCONT), (102, signal.SIGCONT)])  # after fg, not before
+            self.assertEqual(signal_counts_when_fg_was_typed, [0])  # the stopped processes continue after fg, not before
+            self.assertEqual(processes.signals, [(101, signal.SIGCONT), (102, signal.SIGCONT)])
 
     def test_nothing_is_typed_and_nothing_continues_unless_typing_fg_is_safe(self):
-        for screen_row, pause_record, other_stopped_jobs, words in (
-                (PROMPT + "git push", make_pause_record(), [], "shell line has changed"),
-                (PROMPT + "    main 12:25", make_pause_record(PROMPT, RIGHT_PROMPT), [], "shell line has changed"),
-                (PROMPT + "echo review # ", None, [], "type fg in the tab"),  # suspended by hand: no prompt seen
-                (PROMPT, PauseRecord((AGENT_PROCESS_ID, STARTED_AT), TOOL, None, []), [], "type fg in the tab"),  # no prompt showed
-                (PROMPT, make_pause_record(), [555], "another job is suspended")):
+        for screen_row, cursor_x, pause_record, other_stopped_jobs, words in (
+                (PROMPT + "git push", None, make_pause_record(), [], "shell line has changed"),
+                # Only the right-side prompt was redrawn: the text before the cursor still matches.
+                (PROMPT + "    main 12:25", len(PROMPT), make_pause_record(PROMPT, RIGHT_PROMPT), [], "shell line has changed"),
+                (PROMPT + "echo review # ", None, None, [], "type fg in the tab"),  # suspended by hand: no prompt seen
+                (PROMPT, None, PauseRecord((AGENT_PROCESS_ID, STARTED_AT), TOOL, None, []), [], "type fg in the tab"),  # no prompt showed
+                (PROMPT, None, make_pause_record(), [555], "another job is suspended")):
             processes = FakeProcesses(stopped_process_ids={AGENT_PROCESS_ID, 101, 102}, other_stopped_jobs=other_stopped_jobs)
-            tab = FakeTab([screen_row])
+            tab = FakeTab([screen_row], cursor_x=cursor_x)
             action_result = run_with_patches(processes, agent_session_pausing.resume_agent_session(
                 tab, AGENT_PROCESS_ID, pause_record))
             self.assertFalse(action_result.succeeded, screen_row)

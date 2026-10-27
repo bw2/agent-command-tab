@@ -134,10 +134,11 @@ class TimelineRecorder:
 
 
 async def read_screen_lines(session):
-    """Returns the non-blank lines of the session's visible screen."""
+    """Returns the non-blank lines of the session's visible screen, iTerm2's empty cells (NULs) as
+    spaces, so rows of them count as blank."""
     contents = await session.async_get_screen_contents()
-    return [contents.line(index).string for index in range(contents.number_of_lines)
-            if contents.line(index).string.strip()]
+    lines = [contents.line(index).string.replace("\x00", " ") for index in range(contents.number_of_lines)]
+    return [line for line in lines if line.strip()]
 
 
 async def wait_for_hook_event(event_name, start_time, timeout_seconds):
@@ -152,16 +153,19 @@ async def wait_for_hook_event(event_name, start_time, timeout_seconds):
 
 
 async def wait_for_approval_prompt(session, start_time, timeout_seconds):
-    """Waits until a PermissionRequest hook arrives or the screen shows an approval prompt.
+    """Waits until the screen shows Codex's approval menu.
 
-    Returns a short description of what was seen first, or None on timeout.
+    A PermissionRequest hook alone isn't enough: with approvals_reviewer "auto_review" it fires,
+    but a reviewer model decides and no menu appears, so an approval key typed then would land in
+    the input box. Returns a short description of what was seen, or None on timeout.
     """
     deadline = time.time() + timeout_seconds
+    hook_was_seen = False
     while time.time() < deadline:
-        if any(hook_event_name(record) == "PermissionRequest" for record in read_hook_events_since(start_time)):
-            return "PermissionRequest hook"
+        hook_was_seen = hook_was_seen or any(hook_event_name(record) == "PermissionRequest"
+                                             for record in read_hook_events_since(start_time))
         if any(APPROVAL_SCREEN_PATTERN.search(line) for line in (await read_screen_lines(session))[-20:]):
-            return "approval text on screen"
+            return "approval text on screen" + (" after a PermissionRequest hook" if hook_was_seen else "")
         await asyncio.sleep(0.3)
     return None
 
@@ -225,6 +229,7 @@ async def run_experiments(connection):
     launch_command = (f"cd {TEST_PROJECT_FOLDER} && codex --dangerously-bypass-hook-trust "
                       "-c 'model_reasoning_effort=\"low\"' -c check_for_update_on_startup=false "
                       f"-c 'approvals_reviewer=\"{APPROVALS_REVIEWER}\"' -a on-request -s read-only")
+    launched_at = time.time()  # the hook log keeps earlier runs' records
     test_window = await iterm2.Window.async_create(
         connection, profile_customizations=iterm2.LocalWriteOnlyProfile({"Initial Text": launch_command}))
     second_window = await iterm2.Window.async_create(connection)
@@ -245,7 +250,7 @@ async def run_experiments(connection):
                 await recorder.mark("trust question shown")
                 await session.async_send_text("\r", suppress_broadcast=True)
                 break
-        session_start = await wait_for_hook_event("SessionStart", 0, 25)
+        session_start = await wait_for_hook_event("SessionStart", launched_at, 25)
         await asyncio.sleep(2)
         await recorder.mark(f"ready (SessionStart hook seen: {bool(session_start)})")
         if "codex" not in (await session.async_get_variable("commandLine") or ""):
@@ -262,7 +267,8 @@ async def run_experiments(connection):
         menu_lines = await read_screen_lines(session)
         await recorder.mark(f"A approval prompt ({seen})")
         if not seen:
-            raise RuntimeError("no approval prompt in step A; stopping so no stray keys are typed")
+            raise RuntimeError("no approval menu in step A (with auto_review, Codex's reviewer decides and shows none); "
+                               "stopping so no stray keys are typed")
         approve_key = find_option_key(menu_lines[-12:], r"Yes, proceed|^\W*1\.\s*Yes") or "y"
         recorder.write({"kind": "A approve key", "key": approve_key, "status before approval": await session.async_get_variable("status")})
         await session.async_send_text(approve_key, suppress_broadcast=True)
@@ -271,10 +277,11 @@ async def run_experiments(connection):
             recorder.write({"kind": "status right after approval", "status": await session.async_get_variable("status")})
         await second_window.async_set_tabs([second_window.tabs[0], test_tab])
         await recorder.mark("A tab moved while the command runs")
-        await wait_for_hook_event("Stop", step_start, 90)
+        turn_ended = await wait_for_hook_event("Stop", step_start, 90)
         await asyncio.sleep(1)
-        recorder.write({"kind": "A output seen after move",
-                        "seen": any("phase0-codex-A-done" in line for line in await read_screen_lines(session))})
+        # A line holding just the marker: the prompt and the command on screen hold it too.
+        recorder.write({"kind": "A output seen after move", "seen": bool(turn_ended) and any(
+            re.fullmatch(r"\W*phase0-codex-A-done\s*", line.replace("\x00", " ")) for line in await read_screen_lines(session))})
         await recorder.mark("A finished")
 
         # B: approve a long command, then press Esc.
@@ -315,7 +322,7 @@ async def run_experiments(connection):
         # D: queue a message from outside while the session is idle.
         queue_time = time.time()
         codex_session_id = codex_session_id or next(
-            (record["payload"]["session_id"] for record in read_hook_events_since(0) if record["payload"].get("session_id")), None)
+            (record["payload"]["session_id"] for record in read_hook_events_since(launched_at) if record["payload"].get("session_id")), None)
         recorder.write({"kind": "D codex session id", "session_id": codex_session_id})
         if codex_session_id:
             queue_result = subprocess.run(["codex", "queue", "--thread", codex_session_id,

@@ -3,8 +3,8 @@ import unittest
 
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
 from agent_command_tab.iterm2_snapshot_builder import (DisplayedState, build_computer_snapshot,
-                                                       build_folder_display_name, compute_displayed_state_since,
-                                                       resolve_agent_sessions)
+                                                       build_folder_display_name, compute_context_fill_percent,
+                                                       compute_displayed_state_since, resolve_agent_sessions)
 from agent_command_tab.snapshot_data_classes import convert_snapshot_to_json_ready_dict, iterate_agent_session_entries
 
 MONITOR = {"monitor_id": "display-1", "name": "Built-in", "frame": (0, 0, 2000, 1300), "visible_frame": (0, 0, 2000, 1260)}
@@ -36,6 +36,14 @@ def build_snapshot(gathered_windows, window_order=(), claude_agents_by_process_i
                                    list(monitors), list(window_order), tracking or {}, displayed_states or {},
                                    screen_readings or {}, 600, claude_agents_by_process_id or {}, seen_session_id,
                                    seen_session_id, "computer-1", "Test Mac", now)
+
+
+class ContextFillPercentTests(unittest.TestCase):
+    def test_the_share_of_the_window_in_use_once_both_numbers_are_known(self):
+        self.assertEqual(compute_context_fill_percent(84_000, 200_000), 42)
+        self.assertEqual(compute_context_fill_percent(84_000, 1_000_000), 8)
+        self.assertIsNone(compute_context_fill_percent(84_000, None))
+        self.assertIsNone(compute_context_fill_percent(None, 200_000))
 
 
 class BuildComputerSnapshotTests(unittest.TestCase):

@@ -3,12 +3,14 @@
 Usage:
   drag_test_windows.py open CLAUDE_TEST_FOLDER STATE_FILE
       Opens windows "drag-test-A" and "drag-test-B", each with a Claude Code (Haiku) tab
-      ("drag-test-a1", "drag-test-b1"), and has the agent in drag-test-a1 run a 90-second command
-      that prints a number each second, so a drag can happen while it runs. Saves the IDs.
+      ("drag-test-a1", "drag-test-b1"), and, once it is at its prompt, has the agent in drag-test-a1
+      run a 90-second command that prints a number each second, so a drag can happen while it
+      runs. Saves the IDs.
   drag_test_windows.py check STATE_FILE
       Prints which window holds each test tab now, in what tab order, and the end of drag-test-a1's screen.
   drag_test_windows.py close STATE_FILE
-      Closes the test windows that still exist. Touches nothing else.
+      Closes the test tabs wherever they are now (a test window closes once it has no tabs left).
+      Touches nothing else: a tab of yours dropped into a test window stays.
 """
 
 import asyncio
@@ -44,11 +46,13 @@ async def open_test_windows(connection, claude_test_folder, state_file_path):
     session = app.get_session_by_id(test_ids["A"]["session_id"])
     for _ in range(SECONDS_TO_WAIT_FOR_CLAUDE_CODE_TO_START):
         if any("for shortcuts" in line for line in await read_screen_lines(session)):
+            await session.async_send_text(f"Use the Bash tool to run exactly this command: {COUNTING_COMMAND}", suppress_broadcast=True)
+            await asyncio.sleep(0.3)
+            await session.async_send_text("\r", suppress_broadcast=True)
             break
         await asyncio.sleep(1)
-    await session.async_send_text(f"Use the Bash tool to run exactly this command: {COUNTING_COMMAND}", suppress_broadcast=True)
-    await asyncio.sleep(0.3)
-    await session.async_send_text("\r", suppress_broadcast=True)
+    else:
+        print("drag-test-a1: Claude Code didn't reach its prompt (its folder trust question, say), so nothing was typed")
     print(json.dumps(test_ids))
 
 
@@ -71,14 +75,16 @@ async def check_test_windows(connection, state_file_path):
 
 
 async def close_test_windows(connection, state_file_path):
+    """Closes the test tabs wherever drags put them, and so the test windows once they are empty;
+    a tab of yours dropped into a test window stays."""
     app = await iterm2.async_get_app(connection)
     with open(state_file_path) as state_file:
-        test_ids = json.load(state_file)
-    for ids in test_ids.values():
-        window = app.get_window_by_id(ids["window_id"])
-        if window is not None:
-            await window.async_close(force=True)
-            print("closed", ids["window_id"])
+        test_session_ids = {ids["session_id"] for ids in json.load(state_file).values()}
+    for window in app.terminal_windows:
+        for tab in window.tabs:
+            if tab.sessions and tab.sessions[0].session_id in test_session_ids:
+                await tab.async_close(force=True)
+                print("closed test tab", tab.tab_id)
 
 
 def main():

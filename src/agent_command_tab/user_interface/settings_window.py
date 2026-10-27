@@ -7,16 +7,16 @@ import collections
 import threading
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxSeparator, NSButton, NSButtonTypeRadio,
+from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxSeparator, NSButton,
                     NSButtonTypeSwitch, NSColor, NSControlSizeSmall, NSFont, NSMakeRect, NSNormalWindowLevel, NSPopUpButton,
-                    NSScrollView, NSTextField, NSView, NSViewWidthSizable, NSWindow, NSWindowStyleMaskClosable,
+                    NSScrollView, NSTextField, NSView, NSViewWidthSizable, NSWindow, NSWindowOcclusionStateVisible,
+                    NSWindowStyleMaskClosable,
                     NSWindowStyleMaskResizable, NSWindowStyleMaskTitled, NSWorkspace)
 from Foundation import NSURL
 from PyObjCTools import AppHelper
 
-from agent_command_tab.settings_store import (ICON_COLOR_NAMES, LIST_COLUMNS, SMALLEST_WINDOW_SIZES,
-                                              find_launch_command_problem, is_valid_setting_value,
-                                              replace_agent_tool_field)
+from agent_command_tab.settings_store import (LIST_COLUMNS, SMALLEST_WINDOW_SIZES, find_launch_command_problem,
+                                              is_valid_setting_value, replace_agent_tool_field)
 from agent_command_tab.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
 from agent_command_tab.user_interface.screen_layout import (WindowFrameSavingController,
                                                             place_window_at_saved_frame_or_center,
@@ -26,13 +26,16 @@ from agent_command_tab.user_interface.sidebar_placement import (describe_sidebar
 
 WINDOW_WIDTH = SMALLEST_WINDOW_SIZES["settings_window_frame"][0]  # the rows' layout width; the window only gets wider
 SIDE_MARGIN = 12
-LABEL_WIDTH = 180  # the label column; a longer label starts at the left edge, with its control after it
+# The label column. "Window Edge:" starts 47 points from the left edge, half of the 93 it started at
+# when the column was 180 points wide (user request, 2026-10-25). The longest label, "Keyboard
+# shortcut:" (120 points), leaves 6 points of the 126-point label field, so a narrower column clips it.
+LABEL_WIDTH = 134
 GAP_BEFORE_CONTROL = 8  # between a right-aligned label and its control
 CONTROL_COLUMN_X = SIDE_MARGIN + LABEL_WIDTH  # where the rows' controls start
 CONTROL_COLUMN_WIDTH = WINDOW_WIDTH - CONTROL_COLUMN_X - SIDE_MARGIN  # to the right margin
 ROW_SPACING = 30
-GAP_BETWEEN_RADIO_BUTTONS = 16
 INDENT_UNDER_A_CHECKBOX = 20  # where a checkbox's title starts
+LAUNCH_COMMAND_FIELD_WIDTH = 200  # a longer command scrolls inside the field (user request, 2026-10-25)
 # The titles of the choices in settings_store (SHOW_AS_CHOICES, GLOBAL_SHORTCUT_CHOICES,
 # SIDEBAR_MODES, SIDEBAR_EDGES, LIST_COLUMNS); setting_choice_titles_tests checks that each table
 # names every choice.
@@ -48,9 +51,10 @@ SIDEBAR_MODE_TITLES = {
 SIDEBAR_EDGE_TITLES = {"right": "Right", "left": "Left"}
 # The tab rows' information columns, in the order the user listed them (user request, 2026-10-19).
 LIST_COLUMN_TITLES = {
-    "state": "State",
-    "state_duration": "State Duration",
-    "context_tokens": "Used Token Count",
+    "state": "Status",  # "State" until 2026-10-26 (user request)
+    "state_duration": "Time Since Last Status Change",  # "State Duration" until 2026-10-26 (user request)
+    # The size and the share of the context window, in one column since 2026-10-26 (user request).
+    "context_tokens": "Tokens Used",
     "created_time": "Created Time",
     "existence_duration": "Time Since Created",
     "memory_usage": "Memory Usage",
@@ -58,9 +62,10 @@ LIST_COLUMN_TITLES = {
 }
 # A titled section of the window, drawn as a bold title and a line to the right edge (user request, 2026-10-19).
 SettingsSection = collections.namedtuple("SettingsSection", ["title"])
-# A control in the control column that takes row_count rows' height and widens with the window
-# (the sidebar's placement note, which may take two lines).
-TallControlRow = collections.namedtuple("TallControlRow", ["control", "row_count"])
+# The sidebar's placement note: small text across the control column, widening with the window,
+# with two lines fitting in its one row. Empty, it is the gap before the next section, as the blank
+# row that ends every other section is (user request, 2026-10-26: even gaps between sections).
+NoteRow = collections.namedtuple("NoteRow", ["note_field"])
 
 
 class FlippedView(NSView):
@@ -110,29 +115,33 @@ class SettingsWindowController(WindowFrameSavingController):
 
     def windowDidResize_(self, notification):
         # A scroll view doesn't widen what it holds, so the rows follow the window's width here
-        # (their fields and lines then widen through their autoresizing).
+        # (the section lines and the sidebar's placement note then widen through their autoresizing).
         self.rows_view.setFrameSize_((self.window.contentView().contentSize().width, self.rows_view.frame().size.height))
 
     def windowWillClose_(self, notification):
         if notification.object() is self.window:
+            # However it closes: a launch command or width being typed is saved as its field stops editing.
+            self.window.makeFirstResponder_(None)
             AppHelper.callAfter(self.owner.settings_window_closed)  # once it is no longer visible
+
+    def windowDidChangeOcclusionState_(self, notification):
+        """Closes the window once no part of it shows: other windows cover it, or it is on another
+        desktop, or the screen is locked (user request, 2026-10-25). Each setting is saved as it
+        changes, and a field being typed in as the window closes (windowWillClose_)."""
+        window = notification.object()
+        if window is self.window and window.isVisible() and not window.occlusionState() & NSWindowOcclusionStateVisible:
+            window.close()
 
     # ----- building -----
 
     @objc.python_method
     def build_window(self):
-        # From top to bottom: (label or None, control or None, units after the control or None), or a SettingsSection.
+        # From top to bottom: (label or None, control or None, units after the control or None), a SettingsSection,
+        # or a NoteRow. Every section but the last ends in a blank row (or the note), so the gaps between them match.
         rows = []
         # Shown as a popup or a window, the sidebar still appears for a few seconds from the menu bar icon's "Show the sidebar".
-        self.show_as_radio_buttons = [self.make_radio_button(title, show_as == self.settings["show_as"])
-                                      for show_as, title in SHOW_AS_TITLES.items()]
-        show_as_radio_group = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 22))  # one group: same view, same action
-        x = 0
-        for radio_button in self.show_as_radio_buttons:
-            radio_button.setFrameOrigin_((x, 0))
-            show_as_radio_group.addSubview_(radio_button)
-            x += radio_button.frame().size.width + GAP_BETWEEN_RADIO_BUTTONS
-        show_as_radio_group.setFrameSize_((x, 22))
+        # A pop-up, as the keyboard shortcut's is (radio buttons until 2026-10-26, user request).
+        self.show_as_popup = self.make_popup(SHOW_AS_TITLES, self.settings["show_as"])
         self.global_shortcut_popup = self.make_popup(GLOBAL_SHORTCUT_TITLES, self.settings["global_shortcut"])
         self.global_shortcut_popup.setToolTip_("Shows the list from any app, and hides it when pressed again (a sidebar set to "
                                                "stay visible stays). While the app switcher is open (Command still held "
@@ -151,48 +160,47 @@ class SettingsWindowController(WindowFrameSavingController):
         self.sidebar_mode_popup = self.make_popup(SIDEBAR_MODE_TITLES, self.settings["sidebar_mode"])
         self.edge_popup = self.make_popup(SIDEBAR_EDGE_TITLES, self.settings["sidebar_edge"])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
-        self.icon_color_popup = self.make_popup({color_name: color_name.capitalize() for color_name in ICON_COLOR_NAMES},
-                                                self.settings["icon_color"])
-        self.icon_color_popup.setToolTip_("Auto: light blue while an agent session is asking, red if one has an error, "
-                                          "orange if one is stuck, otherwise green")
-        self.asking_count_checkbox = self.make_checkbox(
-            "Show number of agents waiting for my answer", self.settings["icon_shows_asking_count"])
-        self.stuck_minutes_field = self.make_text_field(str(self.settings["stuck_minutes"]), 80)
         self.column_checkboxes = {column_name: self.make_checkbox(title, column_name in self.settings["shown_columns"])
                                   for column_name, title in LIST_COLUMN_TITLES.items()}
         self.edge_note = NSTextField.wrappingLabelWithString_("")
         self.edge_note.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
-        rows += [("Show as", show_as_radio_group, None), ("Shortcut", self.global_shortcut_popup, None),
-                 (None, self.accessibility_settings_button, None), ("Menu icon", self.icon_color_popup, None), (None, self.asking_count_checkbox, None), (None, None, None)]
-        rows += [("Columns" if index == 0 else None, checkbox, None) for index, checkbox in enumerate(self.column_checkboxes.values())]
-        rows.append((None, None, None))
+        # A General section first: "Show as", then the keyboard shortcut (user requests, 2026-10-25
+        # and 2026-10-26). The accessibility button's row, empty while the shortcut has its
+        # permission, is the gap before the next section, as the sidebar's note row is.
+        rows += [SettingsSection("General"), ("Show as", self.show_as_popup, None),
+                 ("Keyboard shortcut", self.global_shortcut_popup, None), (None, self.accessibility_settings_button, None)]
         self.list_window_always_on_top_checkbox = self.make_checkbox("Always on top", self.settings["list_window_is_always_on_top"])
         rows += [SettingsSection("Window"), (None, self.list_window_always_on_top_checkbox, None), (None, None, None)]
         rows += [SettingsSection("Sidebar"), ("Show", self.sidebar_mode_popup, None), ("Window Edge", self.edge_popup, None),
-                 ("Width", self.sidebar_width_field, "points"), TallControlRow(self.edge_note, 2)]
+                 ("Width", self.sidebar_width_field, "points"), NoteRow(self.edge_note)]
+        # The columns in a section of their own, above Harnesses (user request, 2026-10-25).
+        rows.append(SettingsSection("Display Columns"))
+        rows += [(None, checkbox, None) for checkbox in self.column_checkboxes.values()]
+        rows.append((None, None, None))
         # Each agent tool: whether it is included, and below that, indented, its launch command (user request, 2026-10-19).
         rows.append(SettingsSection("Harnesses"))
         self.include_checkboxes = []
         self.launch_command_fields = []
-        for index, agent_tool in enumerate(self.settings["agent_tools"]):
+        command_labels = [f"{agent_tool['agent_tool_name']} command:" for agent_tool in self.settings["agent_tools"]]
+        # The command fields start together, after the longest label (user request, 2026-10-25).
+        command_field_x = (INDENT_UNDER_A_CHECKBOX + 6
+                           + max(NSTextField.labelWithString_(command_label).fittingSize().width for command_label in command_labels))
+        for index, (agent_tool, command_label) in enumerate(zip(self.settings["agent_tools"], command_labels)):
             include_checkbox = self.make_checkbox(agent_tool["agent_tool_name"], agent_tool["is_included"])
             self.include_checkboxes.append(include_checkbox)
-            launch_command_field = self.make_text_field(agent_tool["launch_command"], 10)
+            launch_command_field = self.make_text_field(agent_tool["launch_command"], LAUNCH_COMMAND_FIELD_WIDTH)
             self.launch_command_fields.append(launch_command_field)
-            rows += [("Include" if index == 0 else None, include_checkbox, None),
-                     (None, self.make_labeled_field_row(f"{agent_tool['agent_tool_name']} command:", launch_command_field), None)]
-        rows += [(None, None, None), ("Agent is stuck if it thinks for more than", self.stuck_minutes_field, "minutes"),
-                 (None, None, None)]
+            rows += [("Use" if index == 0 else None, include_checkbox, None),  # "Include" until 2026-10-25 (user request)
+                     (None, self.make_labeled_field_row(command_label, launch_command_field, command_field_x), None)]
 
         # Resizable, with the rows in a scroll view, so a window made shorter than its rows scrolls
         # (user request, 2026-10-19). The rows' view is flipped: rows go from the top down.
-        row_counts = [row.row_count if isinstance(row, TallControlRow) else 1 for row in rows]
-        rows_height = 12 + ROW_SPACING * sum(row_counts) + 12
+        rows_height = 12 + ROW_SPACING * len(rows) + 12
         rows_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, WINDOW_WIDTH, rows_height))
         self.rows_view = rows_view
         for index, row in enumerate(rows):
-            self.add_row(rows_view, row, 20 + ROW_SPACING * sum(row_counts[:index]))  # each control's top
+            self.add_row(rows_view, row, 20 + ROW_SPACING * index)  # each control's top
         scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, WINDOW_WIDTH, rows_height))
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setAutohidesScrollers_(True)
@@ -214,37 +222,29 @@ class SettingsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def add_row(self, rows_view, row, top):
-        """Adds one row at top (rows_view is flipped): a label in the label column (or, when too
-        long for it, from the left edge with the control after it), the control and its units;
-        a section's title; or a tall control. Text sits 1 point below a control's top, which
+        """Adds one row at top (rows_view is flipped): a label in the label column, the control and
+        its units; a section's title; or a note. Text sits 1 point below a control's top, which
         centers it."""
         if isinstance(row, SettingsSection):
             self.add_section_title(rows_view, row.title, top)
             return
-        if isinstance(row, TallControlRow):
-            row.control.setFrame_(NSMakeRect(CONTROL_COLUMN_X, top + 2, CONTROL_COLUMN_WIDTH,
-                                             ROW_SPACING * (row.row_count - 1) + 16))
-            row.control.setAutoresizingMask_(NSViewWidthSizable)
-            rows_view.addSubview_(row.control)
+        if isinstance(row, NoteRow):
+            row.note_field.setFrame_(NSMakeRect(CONTROL_COLUMN_X, top + 2, CONTROL_COLUMN_WIDTH, ROW_SPACING - 2))
+            row.note_field.setAutoresizingMask_(NSViewWidthSizable)
+            rows_view.addSubview_(row.note_field)
             return
         label, control, units = row
-        control_x = CONTROL_COLUMN_X
         if label is not None:
             label_field = NSTextField.labelWithString_(label + ":")
-            label_width = label_field.fittingSize().width
-            if label_width <= LABEL_WIDTH - GAP_BEFORE_CONTROL:
-                label_field.setAlignment_(2)  # right, in the label column
-                label_field.setFrame_(NSMakeRect(SIDE_MARGIN, top + 1, LABEL_WIDTH - GAP_BEFORE_CONTROL, 18))
-            else:  # too long for the column: the row reads as one sentence from the left edge
-                label_field.setFrame_(NSMakeRect(SIDE_MARGIN, top + 1, label_width, 18))
-                control_x = SIDE_MARGIN + label_width + 6
+            label_field.setAlignment_(2)  # right, in the label column
+            label_field.setFrame_(NSMakeRect(SIDE_MARGIN, top + 1, LABEL_WIDTH - GAP_BEFORE_CONTROL, 18))
             rows_view.addSubview_(label_field)
         if control is not None:
-            control.setFrameOrigin_((control_x, top))
+            control.setFrameOrigin_((CONTROL_COLUMN_X, top))
             rows_view.addSubview_(control)
         if units is not None:
             units_field = NSTextField.labelWithString_(units)
-            units_field.setFrame_(NSMakeRect(control_x + control.frame().size.width + 6, top + 1, 80, 18))
+            units_field.setFrame_(NSMakeRect(CONTROL_COLUMN_X + control.frame().size.width + 6, top + 1, 80, 18))
             rows_view.addSubview_(units_field)
 
     @objc.python_method
@@ -262,32 +262,16 @@ class SettingsWindowController(WindowFrameSavingController):
         rows_view.addSubview_(line)
 
     @objc.python_method
-    def make_labeled_field_row(self, label_text, text_field):
-        """Returns a row control for the control column: a label, then text_field reaching to the
-        window's right margin, indented under the checkbox above it."""
-        row_width = CONTROL_COLUMN_WIDTH
-        row_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, row_width, 22))
-        row_view.setAutoresizingMask_(NSViewWidthSizable)  # the field widens with the window
+    def make_labeled_field_row(self, label_text, text_field, field_x):
+        """Returns a row control for the control column: a label, indented under the checkbox above
+        it, then text_field at field_x from the row's left end."""
+        row_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_COLUMN_WIDTH, 22))
         label_field = NSTextField.labelWithString_(label_text)
-        label_width = label_field.fittingSize().width
-        label_field.setFrame_(NSMakeRect(INDENT_UNDER_A_CHECKBOX, 3, label_width, 18))
+        label_field.setFrame_(NSMakeRect(INDENT_UNDER_A_CHECKBOX, 3, label_field.fittingSize().width, 18))
         row_view.addSubview_(label_field)
-        field_x = INDENT_UNDER_A_CHECKBOX + label_width + 6
-        text_field.setFrame_(NSMakeRect(field_x, 0, row_width - field_x, 22))
-        text_field.setAutoresizingMask_(NSViewWidthSizable)
+        text_field.setFrameOrigin_((field_x, 0))
         row_view.addSubview_(text_field)
         return row_view
-
-    @objc.python_method
-    def make_radio_button(self, title, is_on):
-        radio_button = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 22))
-        radio_button.setButtonType_(NSButtonTypeRadio)
-        radio_button.setTitle_(title)
-        radio_button.setState_(1 if is_on else 0)
-        radio_button.setTarget_(self)
-        radio_button.setAction_("controlChanged:")
-        radio_button.sizeToFit()
-        return radio_button
 
     @objc.python_method
     def make_checkbox(self, title, is_checked):
@@ -317,6 +301,7 @@ class SettingsWindowController(WindowFrameSavingController):
         text_field.setTarget_(self)
         text_field.setAction_("controlChanged:")
         text_field.cell().setSendsActionOnEndEditing_(True)  # also when the field loses focus, not only on Return
+        text_field.cell().setScrollable_(True)  # a text longer than the field scrolls on one line rather than wrapping
         return text_field
 
     # ----- reading the controls -----
@@ -332,8 +317,18 @@ class SettingsWindowController(WindowFrameSavingController):
         self.edge_popup.setAutoenablesItems_(False)
         for menu_item in self.edge_popup.itemArray():
             menu_item.setEnabled_(menu_item.representedObject() in outer_edges)
+        select_popup_choice(self.edge_popup, self.settings["sidebar_edge"])  # back to the saved edge once it is outer again
         if read_popup_choice(self.edge_popup) not in outer_edges:
             select_popup_choice(self.edge_popup, sorted(outer_edges)[-1])  # "right" if it is outer
+
+    @objc.python_method
+    def screen_layout_changed(self):
+        """Brings an open window's edge choices and placement note up to date after a monitor was
+        connected, disconnected or rearranged; does nothing before the window was first opened."""
+        if self.window is None:
+            return
+        self.update_edge_choices()
+        self.show_placement_fallback_note(self.settings)
 
     @objc.python_method
     def show_placement_fallback_note(self, settings):
@@ -345,8 +340,8 @@ class SettingsWindowController(WindowFrameSavingController):
         a saved edge that can't be used right now (it borders another monitor) and changes made
         elsewhere (a width dragged at the sidebar's edge) are kept."""
         new_settings = dict(self.owner.settings)
-        if sender in self.show_as_radio_buttons:
-            new_settings["show_as"] = list(SHOW_AS_TITLES)[self.show_as_radio_buttons.index(sender)]
+        if sender is self.show_as_popup:
+            new_settings["show_as"] = read_popup_choice(sender)
         elif sender is self.global_shortcut_popup:
             new_settings["global_shortcut"] = read_popup_choice(sender)
         elif sender is self.sidebar_mode_popup:
@@ -355,14 +350,8 @@ class SettingsWindowController(WindowFrameSavingController):
             new_settings["sidebar_edge"] = read_popup_choice(sender)
         elif sender is self.sidebar_width_field:
             self.read_number_field_into_settings(sender, "sidebar_width", new_settings)
-        elif sender is self.stuck_minutes_field:
-            self.read_number_field_into_settings(sender, "stuck_minutes", new_settings)
-        elif sender is self.icon_color_popup:
-            new_settings["icon_color"] = read_popup_choice(sender)
         elif sender is self.list_window_always_on_top_checkbox:
             new_settings["list_window_is_always_on_top"] = bool(sender.state())
-        elif sender is self.asking_count_checkbox:
-            new_settings["icon_shows_asking_count"] = bool(sender.state())
         elif sender in self.column_checkboxes.values():
             new_settings["shown_columns"] = [column_name for column_name in LIST_COLUMNS
                                              if self.column_checkboxes[column_name].state()]
@@ -427,8 +416,7 @@ class SettingsWindowController(WindowFrameSavingController):
         self.settings = dict(settings)
         if self.window is None:
             return
-        for show_as, radio_button in zip(SHOW_AS_TITLES, self.show_as_radio_buttons):
-            radio_button.setState_(1 if show_as == settings["show_as"] else 0)
+        select_popup_choice(self.show_as_popup, settings["show_as"])
         self.update_accessibility_settings_button()  # after a shortcut change, or once the permission was given
         self.list_window_always_on_top_checkbox.setState_(1 if settings["list_window_is_always_on_top"] else 0)
         self.sidebar_width_field.setStringValue_(str(int(settings["sidebar_width"])))

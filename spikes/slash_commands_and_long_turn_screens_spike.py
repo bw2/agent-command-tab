@@ -115,6 +115,7 @@ async def run_experiments(connection):
     app = await iterm2.async_get_app(connection)
     original_window = app.current_terminal_window
     original_session = original_window.current_tab.current_session if original_window else None
+    launched_at = time.time()  # the hook log keeps earlier runs' records
     test_window = await iterm2.Window.async_create(
         connection, profile_customizations=iterm2.LocalWriteOnlyProfile({"Initial Text": build_launch_command()}))
     test_session_ids = {test_window.tabs[0].sessions[0].session_id}
@@ -124,8 +125,10 @@ async def run_experiments(connection):
     try:
         if AGENT_TOOL == "codex":
             await answer_codex_trust_question_if_shown(session, recorder)
-        else:
-            await shared.wait_for_hook_event("SessionStart", 0, 30)
+        elif not await shared.wait_for_hook_event("SessionStart", launched_at, 30):
+            # Claude Code runs no project hooks while its folder trust question is up.
+            raise RuntimeError("no SessionStart from Claude Code within 30 s (a folder trust question?); "
+                               "stopping so nothing is typed into a menu")
         await asyncio.sleep(3)
         if AGENT_TOOL not in (await session.async_get_variable("commandLine") or ""):
             raise RuntimeError("the agent is not running in the test tab; stopping")

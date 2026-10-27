@@ -31,6 +31,22 @@ def grow_frame_to_smallest_size(frame, smallest_size):
     return [x, y - (new_height - height), new_width, new_height]
 
 
+def compute_list_window_content_rect_for_a_dragged_sidebar(sidebar_frame, pointer, content_size):
+    """Returns the content rect [x, y, width, height] of the list window that the sidebar turns
+    into when its top bar is dragged: content_size, with its top level with the sidebar's top and
+    the pointer as far across it, in proportion, as across the sidebar, so the pointer stays on
+    the top bar, as far below the top as before.
+
+    Args:
+        sidebar_frame: The sidebar's frame [x, y, width, height] on the screen (y grows upward).
+        pointer: Where the drag started (x, y), on the sidebar's top bar.
+        content_size: The list window's content size (width, height).
+    """
+    sidebar_x, sidebar_y, sidebar_width, sidebar_height = sidebar_frame
+    width, height = content_size
+    return [pointer[0] - (pointer[0] - sidebar_x) / sidebar_width * width, sidebar_y + sidebar_height - height, width, height]
+
+
 class WindowFrameSavingController(NSObject):
     """The base of the controllers of windows whose frame the settings keep (the list window and
     the settings window). As the window's delegate it reports the frame to the owner's

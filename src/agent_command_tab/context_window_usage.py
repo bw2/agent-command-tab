@@ -6,6 +6,9 @@ conversation file (user request, milestone 2: a tokens column, for example "425k
   same number its status line shows as total_input_tokens.
 - Codex writes ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<ID>.jsonl with "token_count"
   events whose last_token_usage.total_tokens is the context in use (find_codex_conversation_files).
+- The context window's size, for the share in use (user request, 2026-10-26: "134k (13%)" in the
+  Tokens column): Codex reports it with its usage; for Claude Code it follows from the model the session
+  was started with, from its arguments, environment or settings (read_claude_code_model_setting).
 
 Only the last BYTES_TO_READ_FROM_THE_END bytes are read, since transcripts reach tens of megabytes.
 """
@@ -19,6 +22,8 @@ from agent_command_tab.claude_code_transcript_records import (RECORD_KINDS_THAT_
                                                               list_message_blocks)
 
 BYTES_TO_READ_FROM_THE_END = 512 * 1024
+CLAUDE_CODE_CONTEXT_WINDOW_TOKENS = 200_000
+CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS = 1_000_000
 
 
 def read_last_lines(file_path, byte_count=BYTES_TO_READ_FROM_THE_END):
@@ -78,6 +83,47 @@ def read_context_tokens_from_codex_conversation_file(file_path):
             if "total_tokens" in last_token_usage:
                 return last_token_usage["total_tokens"]
     return None
+
+
+def read_context_window_tokens_from_codex_conversation_file(file_path):
+    """Returns the size of the context window Codex reports with its latest turn's usage
+    (model_context_window, for example 258400), or None."""
+    for record in read_last_records(file_path):
+        payload = record.get("payload")
+        if isinstance(payload, dict) and payload.get("type") == "token_count":
+            model_context_window = (payload.get("info") or {}).get("model_context_window")
+            if isinstance(model_context_window, int) and model_context_window > 0:
+                return model_context_window
+    return None
+
+
+def read_claude_code_model_setting(process_arguments, process_environment, config_folder):
+    """Returns the model a Claude Code session was started with, in the order Claude Code goes by:
+    its `--model` argument, else its ANTHROPIC_MODEL environment variable, else the "model" in its
+    config folder's settings.json (for example "opus[1m]"), else None. Its transcript names the
+    model without saying whether its context window is the 1M one."""
+    for index, argument in enumerate(process_arguments):
+        if argument == "--model" and index + 1 < len(process_arguments):
+            return process_arguments[index + 1]
+        if argument.startswith("--model="):
+            return argument.partition("=")[2]
+    if process_environment.get("ANTHROPIC_MODEL"):
+        return process_environment["ANTHROPIC_MODEL"]
+    try:
+        with open(os.path.join(config_folder or os.path.expanduser("~/.claude"), "settings.json")) as settings_file:
+            model = json.load(settings_file).get("model")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return model if isinstance(model, str) else None
+
+
+def choose_claude_code_context_window_tokens(model_setting, context_tokens):
+    """Returns the size of a Claude Code session's context window: 1M for a model chosen with the
+    "[1m]" suffix, or once the context holds more than 200k tokens (a 1M model chosen some other
+    way), else 200k."""
+    if (model_setting or "").lower().endswith("[1m]") or (context_tokens or 0) > CLAUDE_CODE_CONTEXT_WINDOW_TOKENS:
+        return CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS
+    return CLAUDE_CODE_CONTEXT_WINDOW_TOKENS
 
 
 def read_turn_started_at_from_claude_code_transcript(file_path):
@@ -167,7 +213,7 @@ def parse_iso_time(text):
 
 
 def format_token_count(token_count):
-    """Returns a short token count: "425k", or "1.2M" from a million up."""
-    if token_count >= 1_000_000:
+    """Returns a short token count: "425k", or "1.2M" from 999,500 up (which "k" would round to "1000k")."""
+    if token_count >= 999_500:
         return f"{token_count / 1_000_000:.1f}M"
     return f"{round(token_count / 1000)}k"

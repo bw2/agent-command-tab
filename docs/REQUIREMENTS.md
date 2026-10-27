@@ -27,8 +27,8 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
 ### Menu bar
 
-- R1. A menu bar icon on the right side of the menu bar, next to other apps' icons. The icon is a "C", drawn in color (a setting) rather than the usual monochrome, so it is easy to tell apart from other "C" icons such as Cynthia's.
-- R2. The icon shows the number of agent sessions that are asking (a setting can hide it).
+- R1. A menu bar icon on the right side of the menu bar, next to other apps' icons. The icon is a "C", drawn in color (the most urgent agent session's color, R2) rather than the usual monochrome, so it is easy to tell apart from other "C" icons such as Cynthia's.
+- R2. The icon shows the number of agent sessions that are asking, in the color of the most urgent agent session (the setting that hid the number, and the icon color setting, were removed on 2026-10-25, user request).
 - R3. Clicking the icon opens a dropdown panel with the window list and everything in R7 to R41.
 - R3.1. Codex usage bars at the bottom: one bar per limit Codex reports (for example the weekly limit), with the percent used and the reset time. The app re-reads Codex's own session files every minute (a setting) and shows the latest numbers Codex recorded; they only change when a Codex session talks to OpenAI. Claude Code usage is left out of version 1: it is only available locally through Claude Code's status line command, and the user prefers not to wrap their existing status line.
 - R3.2. A global shortcut shows the list from any app the way "Show as" asks: it opens the dropdown, slides in the sidebar, or brings the window to the front. Pressed again, it hides the list (user request, 2026-10-21): it closes the dropdown, slides an auto-hiding sidebar out, or hides the window while the window is in front, and gives the keyboard back to the app that had it; a sidebar set to stay visible stays. Settings offer Shift-Command-Tab (the default), Command-Fn-Tab and Off. While macOS's app switcher is open (Command still held after Command-Tab), the keys go to the app switcher instead. It needs the Accessibility permission; without it, Settings say so and open that page of System Settings (user request, 2026-10-19).
@@ -36,7 +36,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 ### Sidebar
 
 - R4. Optional sidebar showing the same list and controls as the dropdown.
-- R5. The sidebar auto-hides: it slides in when the pointer touches the chosen screen edge and slides out when the pointer leaves. It is always on the menu bar's monitor; the edge (right or left, default right) is a setting. Only outer edges are offered, meaning edges that don't border another monitor, because the pointer slides past a shared edge.
+- R5. The sidebar auto-hides: it slides in when the pointer touches the chosen screen edge and slides out when the pointer leaves, or at once on a click in another app's window (user request, 2026-10-22). It is always on the menu bar's monitor; the edge (right or left, default right) is a setting. Only outer edges are offered, meaning edges that don't border another monitor, because the pointer slides past a shared edge.
 - R6. The sidebar never takes keyboard focus from iTerm2 unless the user clicks into a text field, and appears on every macOS desktop (Space).
 
 ### Window list
@@ -79,7 +79,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 - R20. Each agent session has one of these states, listed in urgency order (most urgent first):
   1. asking (permission prompt or question);
   2. error;
-  3. stuck (working, but no visible progress for longer than a set time, default 10 minutes);
+  3. stuck (working, but no visible progress for longer than 10 minutes, a fixed time since 2026-10-26, user request);
   4. working;
   5. done (finished a turn, and its tab hasn't been in front since);
   6. idle;
@@ -129,17 +129,15 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
 ### Settings
 
-- R34. A settings button at the bottom of the dropdown and the sidebar.
+- R34. A settings button in the top bar of the dropdown, the sidebar and the list window (at the bottom until 2026-10-26, user request).
 - R35. Settings include:
   - how the list is shown, "Show as: Window, Sidebar, Popup" (a regular window, the sidebar at the screen's edge, or the dropdown under the menu bar icon; user request, 2026-10-19), and for the window "Always on top";
   - the sidebar's mode, edge and width (width also adjustable by dragging the edge of the sidebar);
-  - icon color, and whether the icon shows the asking count;
-  - which information columns tab rows show: State, State Duration, Used Token Count, Created Time, Time Since Created, Memory Usage, CPU Usage (the agent and every process below it);
+  - which information columns tab rows show: Status, Time Since Last Status Change ("State" and "State Duration" until 2026-10-26, user request), Tokens Used (the context's size and its share of the context window, "134k (13%)"; user requests, 2026-10-26), Created Time, Time Since Created, Memory Usage, CPU Usage (the agent and every process below it);
   - which harnesses are included (Claude Code, Codex): a tool left out isn't listed or offered for new sessions;
-  - the list's sort order (Manual, Activity, Alphabetically, Created Time, Memory Usage, CPU Usage), also chosen with the Sort pop-up above the list;
-  - whether idle tabs are hidden, chosen with the Hide Idle / Show Idle button at the right end of the top bar; a window whose tabs are all idle is hidden with them (user request, 2026-10-21);
+  - the list's sort order (Manual, Activity, Alphabetically, Tokens (by the share of the context window in use), Created Time, Memory Usage, CPU Usage, Status Change), also chosen with the Sort pop-up above the list, or by clicking a column's title: first click sorts, second reverses, third goes back to Manual (user requests, 2026-10-26);
+  - whether idle tabs are hidden, chosen with the Hide Idle / Show Idle button at the right of the top bar (user request, 2026-10-26); a window whose tabs are all idle is hidden with them (user request, 2026-10-21);
   - which agent tools to detect (Claude Code, Codex), and the launch command for each;
-  - stuck time limit (default 10 minutes);
   - how long a crashed agent session's row stays (default 5 minutes);
   - the importance rules (R26);
   - Codex usage bars on or off, and how often they are re-read (default 1 minute);

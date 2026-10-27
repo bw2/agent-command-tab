@@ -11,9 +11,9 @@ AppKit's own mouse tracking is left out. Steps:
 2. The second window's right-click menu item "New tab with Claude Code session…" adds a tab.
 3. The new tab and the second window are renamed in the list.
 4. The new tab is dragged above the other tab of its window.
-5. The second window is dragged above the first in the list.
-6. The first window's agent runs a 20-second command; while it runs, its tab is dragged into
-   the second window. The command must finish (the screen shows the last number), so the move
+5. Whichever test window is lower in the list is dragged above the other.
+6. The first window's agent runs a 21-second command; while it runs, its tab is dragged into
+   the second window. The command must finish (the screen shows its last line), so the move
    didn't interrupt the agent.
 7. "Show tab" brings that tab and its window to the front.
 Closes its windows at the end. Touches nothing else.
@@ -21,9 +21,11 @@ Closes its windows at the end. Touches nothing else.
 
 import asyncio
 import os
+import re
 import sys
 import threading
 import time
+import traceback
 
 import iterm2
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered,
@@ -31,13 +33,16 @@ from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBac
 
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.screen_readings import clean_screen_line
 from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
 from agent_command_tab.user_interface.popover_container import POPOVER_WIDTH, ListPanelController
 
 CLAUDE_TEST_FOLDER = os.path.realpath(sys.argv[1])
 CLAUDE_LAUNCH_COMMAND = "claude --permission-mode default --model haiku"
-COUNTING_COMMAND = 'python3 -c "import time; [print(i, flush=True) or time.sleep(1) for i in range(20)]"'
+# Three lines over 21 seconds: Claude Code shows a finished command's output in full only up to three lines.
+COUNTING_COMMAND = 'python3 -c "import time; [print(f\'count {i} of 3\', flush=True) or time.sleep(7) for i in range(1, 4)]"'
+LAST_COUNT_LINE_PATTERN = re.compile(r"^\W*count 3 of 3\s*$", re.MULTILINE)  # not in the prompt, which holds the code
 NEW_TAB_TITLE = "list-check-renamed-tab"
 NEW_WINDOW_TITLE = "list-check-renamed-window"
 
@@ -182,7 +187,8 @@ def main():
 
     async def read_screen(session_id):
         contents = await core.app.get_session_by_id(session_id).async_get_screen_contents()
-        return "\n".join(contents.line(index).string for index in range(contents.number_of_lines))
+        # iTerm2's empty cells (NULs) as spaces, so patterns with spaces and line ends match.
+        return "\n".join(clean_screen_line(contents.line(index).string) for index in range(contents.number_of_lines))
 
     async def read_front_tab_and_window():
         window = core.app.current_terminal_window
@@ -198,6 +204,8 @@ def main():
         results["both agents listed and idle"] = wait_until(lambda: all(
             find_entry(session_id)[1] is not None and find_entry(session_id)[1].status in ("idle", "done")
             for session_id in (first_session_id, second_session_id)), 60)
+        if not results["both agents listed and idle"]:
+            return  # not at their prompts (a folder trust question, say), so nothing is typed; the exit code is 1
 
         # 2. Right-click menu of the second window: "New tab with Claude Code session…"
         second_window_item = find_list_item("window", second_window_id)
@@ -230,14 +238,17 @@ def main():
             lambda: [entry.tab_id for entry in find_window_entry(second_window_id).agent_sessions] == [new_tab_id, second_tab_id], 15)
         print("tab order in iTerm2 now:", run_on_core_loop(read_tab_ids_of_window(second_window_id)))
 
-        # 5. Drag the second window above the first in the list (one monitor: windows are the top level).
+        # 5. Drag the lower test window above the other in the list (one monitor: windows are the top
+        # level). New windows go on top of the list, so the second is likely above the first already,
+        # and dragging it there would change nothing.
         window_ids = list_window_ids_in_list_order()
-        first_window_item = find_list_item("window", first_window_id)
+        lower_window_id, upper_window_id = sorted((first_window_id, second_window_id), key=window_ids.index, reverse=True)
+        upper_window_item = find_list_item("window", upper_window_id)
         results["window drop accepted"] = play_back_drag(
-            list_controller, find_list_item("window", second_window_id), first_window_item.parent_item,
-            window_ids.index(first_window_id))
-        results["second window now above the first in the list"] = wait_until(
-            lambda: list_window_ids_in_list_order().index(second_window_id) < list_window_ids_in_list_order().index(first_window_id), 15)
+            list_controller, find_list_item("window", lower_window_id), upper_window_item.parent_item,
+            window_ids.index(upper_window_id))
+        results["the lower test window now above the other in the list"] = wait_until(
+            lambda: list_window_ids_in_list_order().index(lower_window_id) < list_window_ids_in_list_order().index(upper_window_id), 15)
 
         # 6. Drag the first window's tab into the second window while its agent runs a command.
         run_on_core_loop(type_prompt(first_session_id, f"Use the Bash tool to run exactly this command: {COUNTING_COMMAND}"))
@@ -249,7 +260,8 @@ def main():
             lambda: find_entry(first_session_id)[0] is not None and find_entry(first_session_id)[0].window_id == second_window_id, 15)
         results["still working right after the move"] = find_entry(first_session_id)[1].status == "working"
         results["turn ended after the command"] = wait_until(lambda: find_entry(first_session_id)[1].status in ("idle", "done"), 90)
-        results["screen shows the command's last number (19)"] = "19" in run_on_core_loop(read_screen(first_session_id))
+        results["screen shows the command's last line (count 3 of 3)"] = bool(
+            LAST_COUNT_LINE_PATTERN.search(run_on_core_loop(read_screen(first_session_id))))
 
         # 7. "Show tab" (also what a double-click does).
         list_controller.show_item(find_list_item("tab", second_tab_id))
@@ -259,6 +271,9 @@ def main():
         results["every action the list sent succeeded"] = not failed_actions
         if failed_actions:
             print("failed actions:", failed_actions)
+    except BaseException:
+        traceback.print_exc()  # os._exit below would drop it
+        results["ran to the end without an error"] = False
     finally:
         for check, passed in results.items():
             print(("PASS  " if passed else "FAIL  ") + check)

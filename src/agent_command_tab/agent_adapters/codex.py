@@ -11,6 +11,7 @@ from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMA
 from agent_command_tab.agent_process_tree import read_process_current_folder, read_process_info
 from agent_command_tab.context_window_usage import (find_codex_conversation_files,
                                                     read_context_tokens_from_codex_conversation_file,
+                                                    read_context_window_tokens_from_codex_conversation_file,
                                                     read_turn_started_at_from_codex_conversation_file)
 from agent_command_tab.session_preview_computation import read_preview_fields_from_codex_conversation_file
 
@@ -56,7 +57,10 @@ class CodexAdapter(AgentToolAdapter):
 
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         """Returns the conversation ID from the conversation file's name, only when exactly one
-        file fits: a Duplicate must not fork another session's conversation."""
+        file fits, so a Duplicate doesn't fork an older conversation of this process (after /new).
+        One file fitting can still be another Codex session's in the same folder (a later one,
+        while this one has no file yet); callers check that with
+        DashboardCore.codex_conversation_may_be_another_sessions."""
         conversation_files = await asyncio.to_thread(self.find_conversation_files, agent_process_id)
         return CONVERSATION_FILE_PATTERN.search(conversation_files[0]).group(1) if len(conversation_files) == 1 else None
 
@@ -78,6 +82,9 @@ class CodexAdapter(AgentToolAdapter):
 
     def read_context_tokens(self, conversation_file_path):
         return read_context_tokens_from_codex_conversation_file(conversation_file_path)
+
+    def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
+        return read_context_window_tokens_from_codex_conversation_file(conversation_file_path)
 
     def read_turn_started_at(self, conversation_file_path):
         return read_turn_started_at_from_codex_conversation_file(conversation_file_path)

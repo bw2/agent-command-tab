@@ -47,6 +47,26 @@ class SortAgentSessionEntriesTests(unittest.TestCase):
                    ENTRIES[3]._replace(cpu_percent=16)]
         self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "cpu_usage")], ["2", "4", "1", "3"])
 
+    def test_tokens_put_the_fullest_context_window_first_and_unknown_shares_last(self):
+        # 120k of a 200k window is fuller than 467k of a 1M one.
+        entries = [ENTRIES[0]._replace(context_tokens=120_000, context_fill_percent=60), ENTRIES[1],
+                   ENTRIES[2]._replace(context_tokens=467_000, context_fill_percent=47),
+                   ENTRIES[3]._replace(context_tokens=30_000, context_fill_percent=3)]
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "context_percent")], ["1", "3", "4", "2"])
+
+    def test_status_change_puts_the_latest_change_first(self):
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(ENTRIES, "state_duration")], ["1", "4", "2", "3"])
+
+    def test_reversed_orders_keep_unknown_values_last_and_equal_ones_in_tab_order(self):
+        entries = [ENTRIES[0]._replace(memory_bytes=200), ENTRIES[1], ENTRIES[2]._replace(memory_bytes=900),
+                   ENTRIES[3]._replace(memory_bytes=200)]
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "memory_usage", is_reversed=True)],
+                         ["1", "4", "3", "2"])
+        self.assertEqual([entry.tab_title for entry in sort_agent_session_entries(ENTRIES, "alphabet", is_reversed=True)],
+                         ["Reviews", "planning", "docs", "api"])
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(ENTRIES, "manual", is_reversed=True)],
+                         ["1", "2", "3", "4"])  # the manual order has no other direction
+
     def test_sorting_leaves_the_manual_order_alone(self):
         sort_agent_session_entries(ENTRIES, "alphabet")
         self.assertEqual([entry.tab_id for entry in ENTRIES], ["1", "2", "3", "4"])
@@ -68,6 +88,17 @@ class SortWindowEntriesTests(unittest.TestCase):
                    make_window("w2", "two", [ENTRIES[1]._replace(memory_bytes=100), ENTRIES[2]._replace(memory_bytes=500)]),
                    make_window("w3", "three", [ENTRIES[3]]), make_window("w4", "empty", [])]
         self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")], ["w2", "w1", "w3", "w4"])
+
+    def test_reversed_orders_rank_windows_by_their_first_tab_in_that_direction(self):
+        windows = [make_window("w1", "one", [ENTRIES[0]._replace(memory_bytes=50)]),
+                   make_window("w2", "two", [ENTRIES[1]._replace(memory_bytes=100), ENTRIES[2]._replace(memory_bytes=500)]),
+                   make_window("w3", "three", [ENTRIES[3]]), make_window("w4", "empty", [])]
+        self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")], ["w2", "w1", "w3", "w4"])
+        # The smallest first: w1's 50 bytes, then w2's smallest tab; unknown usage and no tabs still last.
+        self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage", is_reversed=True)],
+                         ["w1", "w2", "w3", "w4"])
+        self.assertEqual([window.title for window in sort_window_entries(windows, "alphabet", is_reversed=True)],
+                         ["two", "three", "one", "empty"])
 
     def test_a_window_ranks_by_the_agent_sessions_the_list_shows(self):
         # With Hide Idle on, w1's idle tab (the largest) is hidden, so w2's 800M tab comes first.

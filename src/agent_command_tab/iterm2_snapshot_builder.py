@@ -10,7 +10,8 @@ Shape of a gathered window (see DashboardCore.gather_iterm2_windows and Dashboar
                "first_session": {"session_id": str, "command_line": str, "job_pid": int or None,
                                  "job_folder": str (the job process's current folder, or ""),
                                  "job_started_at": float or None (when the job process started),
-                                 "status": str or None, "path": str}}]}
+                                 "status_set_in_iterm2": str or None,
+                                 "status": str or None (the one the row goes by), "path": str}}]}
 """
 
 import collections
@@ -88,6 +89,14 @@ def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_a
     return agent_sessions
 
 
+def compute_context_fill_percent(context_tokens, context_window_tokens):
+    """Returns the share of the context window in use as a whole percent (in parentheses in the
+    Tokens column), or None while either number is unknown."""
+    if not context_tokens or not context_window_tokens:
+        return None
+    return round(100 * context_tokens / context_window_tokens)
+
+
 def compute_displayed_state_since(state, raw_status_change_time, previous_displayed_state, now):
     """Returns since when the shown state holds, for the elapsed time in the row.
 
@@ -129,7 +138,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
             snapshot, or None.
         screen_reading: The core's latest screen reading for the session, or None (see
             session_status_computation.compute_session_status_from_sources).
-        stuck_threshold_seconds: The stuck time limit from the settings.
+        stuck_threshold_seconds: The stuck time limit (iterm2_connection_thread.STUCK_THRESHOLD_SECONDS).
         seen_session_id: The session being seen right now (selected in the key iTerm2 window
             while iTerm2 is active), or None.
         highlighted_session_id: The session shown as in front (R41), or None.
@@ -210,6 +219,8 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         running_command_started_at=running_command[1] if running_command else None,
         preview_line=choose_preview_text(state, (screen_reading or {}).get("conversation_preview")),
         context_tokens=(screen_reading or {}).get("context_tokens"),
+        context_fill_percent=compute_context_fill_percent((screen_reading or {}).get("context_tokens"),
+                                                          (screen_reading or {}).get("context_window_tokens")),
         memory_bytes=(screen_reading or {}).get("memory_bytes"),
         cpu_percent=(screen_reading or {}).get("cpu_percent"),
         started_at=agent_session.get("started_at"),
@@ -255,7 +266,7 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
         session_tracking_by_session_id: Per-session tracking dicts (see build_agent_session_entry).
         displayed_state_by_session_id: {session_id: DisplayedState} from the previous snapshot.
         screen_readings_by_session_id: The core's latest screen readings (see build_agent_session_entry).
-        stuck_threshold_seconds: The stuck time limit from the settings.
+        stuck_threshold_seconds: See build_agent_session_entry.
         claude_agents_by_process_id: {process ID: record from `claude agents --json`}.
         seen_session_id: See build_agent_session_entry.
         highlighted_session_id: See build_agent_session_entry.

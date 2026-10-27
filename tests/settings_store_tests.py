@@ -14,11 +14,11 @@ from agent_command_tab.settings_store import (DEFAULT_SETTINGS, build_core_setti
 class MergeSettingsTests(unittest.TestCase):
     def test_valid_values_are_kept_and_invalid_or_unknown_ones_dropped(self):
         settings = merge_settings_with_defaults({
-            "show_as": "window", "icon_color": "chartreuse", "sidebar_width": 5000, "sidebar_edge": "left",
+            "show_as": "window", "global_shortcut": "control_space", "sidebar_width": 5000, "sidebar_edge": "left",
             "agent_tools": [{"agent_tool_name": "Aider", "launch_command": " "}], "something_else": 1})
         self.assertEqual(settings["show_as"], "window")
         self.assertEqual(settings["sidebar_edge"], "left")
-        self.assertEqual(settings["icon_color"], DEFAULT_SETTINGS["icon_color"])
+        self.assertEqual(settings["global_shortcut"], DEFAULT_SETTINGS["global_shortcut"])
         self.assertEqual(settings["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])
         self.assertEqual(settings["agent_tools"], DEFAULT_SETTINGS["agent_tools"])
         self.assertNotIn("something_else", settings)
@@ -53,9 +53,10 @@ class MergeSettingsTests(unittest.TestCase):
         self.assertEqual(list_left_out_agent_tool_names(settings), ["Codex"])
 
     def test_core_settings_read_memory_and_cpu_only_while_their_columns_are_shown_or_sort_the_list(self):
-        settings = merge_settings_with_defaults({"stuck_minutes": 4})
+        settings = merge_settings_with_defaults({"stuck_minutes": 4})  # a setting until 2026-10-26, now dropped
+        self.assertNotIn("stuck_minutes", settings)
         self.assertEqual(build_core_settings(settings, {"codex": "/opt/homebrew/bin/codex"}.get),
-                         {"stuck_threshold_seconds": 240, "left_out_agent_tool_names": [], "resource_usage_is_read": False,
+                         {"left_out_agent_tool_names": [], "resource_usage_is_read": False,
                           "codex_command_path": "/opt/homebrew/bin/codex"})
         settings["shown_columns"] = ["state", "cpu_usage"]
         self.assertTrue(build_core_settings(settings)["resource_usage_is_read"])
@@ -70,6 +71,7 @@ class MergeSettingsTests(unittest.TestCase):
                 {"agent_tool_name": "Codex", "launch_command": launch_command, "is_included": True}]})
             return find_codex_command_path(settings, {"codex": "/usr/local/bin/codex"}.get)
         self.assertEqual(codex_command_path_for("/opt/codex/bin/codex -s read-only"), "/opt/codex/bin/codex")
+        self.assertEqual(codex_command_path_for("~/.local/bin/codex"), os.path.expanduser("~/.local/bin/codex"))
         self.assertEqual(codex_command_path_for("codex"), "/usr/local/bin/codex")  # a bare name, looked up on PATH
         self.assertEqual(codex_command_path_for("node /opt/codex/codex.js"), "/usr/local/bin/codex")  # a wrapper
 
@@ -133,6 +135,10 @@ class LaunchCommandProblemTests(unittest.TestCase):
         self.assertIn("command not found", self.check("not-installed"))
         self.assertIn("doesn't exist", self.check("/no/such/program"))
         self.assertEqual(self.check("   "), "No command")
+
+    def test_a_name_the_login_shell_did_not_answer_about_in_time_counts_as_fine(self):
+        # e.g. an alias in start-up files that take longer to read than the check waits
+        self.assertEqual(find_launch_command_problem("yc", lambda name: None, lambda name: None), "")
 
     def test_environment_settings_are_skipped_and_shell_expansions_are_not_judged(self):
         self.assertEqual(self.check("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude"), "")

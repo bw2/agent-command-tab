@@ -27,6 +27,9 @@ MAXIMUM_CHILD_PROCESSES = 1024
 # Shells and wrappers that agents run commands in: the command's name is the first process
 # below them (python3 rather than the zsh that Claude Code runs it in).
 SHELL_AND_WRAPPER_PROCESS_NAMES = frozenset({"bash", "zsh", "sh", "dash", "fish", "env", "login", "sandbox-exec", "timeout"})
+# The names agent programs are started as. One started inside a tab's agent (a `claude -p` or
+# `codex exec` run by its shell tool) fires the same user-level hooks, so it sets the tab's status too.
+NAMES_OF_AGENT_PROGRAMS = frozenset({"claude", "codex"})
 # A command counts as started in this turn even if it started this long before the dashboard
 # noticed the turn begin.
 SECONDS_OF_SLACK_AT_TURN_START = 2
@@ -240,20 +243,32 @@ def process_has_its_terminal(process_id):
     return bsd_info is not None and bsd_info.e_tpgid != 0 and bsd_info.pbi_pgid == bsd_info.e_tpgid
 
 
-def read_name_the_process_was_started_as(process_id):
-    """Returns the base name of the process's first argument, the program name as typed ("claude"
-    rather than its executable's name, the version number "2.1.303"), or "" if unknown."""
+def read_process_arguments_and_environment(process_id):
+    """Returns (the arguments the process was started with, the first being its program name as
+    typed, {name: value} of the environment it was started with), or ([], {}) if unknown."""
     sysctl_name = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, process_id)
     size = ctypes.c_size_t(0)
     if LIBC.sysctl(sysctl_name, 3, None, ctypes.byref(size), None, ctypes.c_size_t(0)) != 0:  # asks for the size
-        return ""
+        return [], {}
     buffer = ctypes.create_string_buffer(size.value)
     if LIBC.sysctl(sysctl_name, 3, buffer, ctypes.byref(size), None, ctypes.c_size_t(0)) != 0:
-        return ""
-    # The argument count (an int), the executable's path, NUL padding, then the arguments.
-    _, _, arguments = buffer.raw[ctypes.sizeof(ctypes.c_int):size.value].partition(b"\0")
-    first_argument = arguments.lstrip(b"\0").split(b"\0", 1)[0]
-    return os.path.basename(first_argument.decode(errors="replace"))
+        return [], {}
+    # The argument count (an int), the executable's path, NUL padding, the arguments, the
+    # environment, then an empty string before the kernel's own "name=value" strings.
+    argument_count = ctypes.c_int.from_buffer_copy(buffer.raw[:ctypes.sizeof(ctypes.c_int)]).value
+    _, _, arguments_and_environment = buffer.raw[ctypes.sizeof(ctypes.c_int):size.value].partition(b"\0")
+    words = [word.decode(errors="replace") for word in arguments_and_environment.lstrip(b"\0").split(b"\0")]
+    environment_words = words[argument_count:]
+    if "" in environment_words:
+        environment_words = environment_words[:environment_words.index("")]
+    return words[:argument_count], dict(word.partition("=")[::2] for word in environment_words)
+
+
+def read_name_the_process_was_started_as(process_id):
+    """Returns the base name of the process's first argument, the program name as typed ("claude"
+    rather than its executable's name, the version number "2.1.303"), or "" if unknown."""
+    arguments = read_process_arguments_and_environment(process_id)[0]
+    return os.path.basename(arguments[0]) if arguments else ""
 
 
 def list_child_process_ids(process_id):
@@ -295,6 +310,42 @@ def list_descendant_processes_and_other_users_process_ids(process_id, maximum_de
                     other_users_process_ids.append(child_process_id)
         parent_process_ids = next_parent_process_ids
     return descendants, other_users_process_ids
+
+
+def choose_helper_process_ids(descendant_processes):
+    """Returns the IDs of the processes running below an agent between its turns (MCP servers, for
+    example), which choose_command_the_agent_is_waiting_on never takes for a command, nor anything
+    below them. Shells and wrappers (Codex keeps a terminal open between commands) and the agent's
+    own program (Codex's below its node launcher) are left out, since a later turn's commands run
+    below them."""
+    return frozenset(process.process_id for process in descendant_processes
+                     if process.name not in SHELL_AND_WRAPPER_PROCESS_NAMES and process.name not in NAMES_OF_AGENT_PROGRAMS)
+
+
+def an_agent_program_runs_through_a_shell_below(descendant_processes, read_started_as_name):
+    """Returns whether one of the processes (all below an agent) is an agent program
+    (NAMES_OF_AGENT_PROGRAMS) started through a shell or wrapper below the agent, as the agent's
+    shell tool starts a `claude -p` or `codex exec`. The agent's own parts aren't started through
+    one (Codex's program below its node launcher).
+
+    Args:
+        descendant_processes: ProcessInfo of every process below the agent process.
+        read_started_as_name: Returns the name a process was started as
+            (read_name_the_process_was_started_as); asked only about processes below a shell.
+    """
+    process_by_id = {process.process_id: process for process in descendant_processes}
+
+    def runs_below_a_shell(process):
+        visited_process_ids = {process.process_id}  # a process ID reused while the tree was read can't loop
+        parent = process_by_id.get(process.parent_process_id)
+        while parent is not None and parent.process_id not in visited_process_ids:
+            if parent.name in SHELL_AND_WRAPPER_PROCESS_NAMES:
+                return True
+            visited_process_ids.add(parent.process_id)
+            parent = process_by_id.get(parent.parent_process_id)
+        return False
+    return any(runs_below_a_shell(process) and read_started_as_name(process.process_id) in NAMES_OF_AGENT_PROGRAMS
+               for process in descendant_processes)
 
 
 def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at, helper_process_names, now,

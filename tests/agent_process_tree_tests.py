@@ -10,7 +10,9 @@ import unittest
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_adapters.codex import CONVERSATION_FILE_PATTERN, CodexAdapter
 from agent_command_tab.agent_adapters.generic import GenericAdapter
-from agent_command_tab.agent_process_tree import (ProcessInfo, choose_command_the_agent_is_waiting_on, compute_cpu_percent,
+from agent_command_tab.agent_process_tree import (ProcessInfo, an_agent_program_runs_through_a_shell_below,
+                                                  choose_command_the_agent_is_waiting_on, choose_helper_process_ids,
+                                                  compute_cpu_percent,
                                                   list_descendant_processes, read_name_the_process_was_started_as,
                                                   read_process_info, read_process_resource_usage,
                                                   read_process_tree_resource_usage)
@@ -58,6 +60,34 @@ class CommandTheAgentIsWaitingOnTests(unittest.TestCase):
         self.assertEqual(choose_command_the_agent_is_waiting_on(
             descendants + [make_process(6, 1, "zsh", 1040.0), pytest_process],
             TURN_STARTED_AT, {"codex-code-mode-host"}, NOW, helper_process_ids={4, 5}), (pytest_process, 1040.0))
+
+
+class HelperProcessTests(unittest.TestCase):
+    def test_commands_below_codex_and_its_open_terminal_still_count_after_an_idle_recording(self):
+        # Agent 1 is Codex's node launcher, with its own program (4), an MCP server (9) and an open terminal (7).
+        between_turns = [make_process(4, 1, "codex", 10.0), make_process(9, 4, "node", 10.5), make_process(7, 4, "bash", 20.0)]
+        helper_process_ids = choose_helper_process_ids(between_turns)
+        self.assertEqual(helper_process_ids, frozenset({9}))
+        python_process = make_process(8, 7, "python3", 1030.0)
+        self.assertEqual(choose_command_the_agent_is_waiting_on(between_turns + [python_process], TURN_STARTED_AT,
+                                                                {"codex-code-mode-host"}, NOW, helper_process_ids),
+                         (python_process, 1030.0))
+
+
+class AgentProgramInsideAnAgentTests(unittest.TestCase):
+    def test_an_agent_program_counts_only_when_a_shell_started_it(self):
+        started_as_names = {3: "claude", 5: "node", 6: "codex", 8: "python3"}
+        # A `claude -p` run by Claude Code's shell tool (agent 1, its shell 2).
+        self.assertTrue(an_agent_program_runs_through_a_shell_below(
+            [make_process(2, 1, "zsh", 10.0), make_process(3, 2, "2.1.310", 11.0)], started_as_names.get))
+        # A `codex exec` run by Codex's shell tool, below its node launcher (agent 1 is Codex's node launcher).
+        self.assertTrue(an_agent_program_runs_through_a_shell_below(
+            [make_process(4, 1, "codex", 10.0), make_process(7, 4, "bash", 11.0), make_process(5, 7, "node", 11.5),
+             make_process(6, 5, "codex", 11.6)], started_as_names.get))
+        # Codex's own program below its node launcher, and a command that isn't an agent.
+        self.assertFalse(an_agent_program_runs_through_a_shell_below(
+            [make_process(6, 1, "codex", 10.0), make_process(7, 6, "bash", 11.0), make_process(8, 7, "python3", 11.5)],
+            started_as_names.get))
 
 
 class ProcessTreeReadingTests(unittest.TestCase):
@@ -148,6 +178,17 @@ class DuplicateLaunchCommandTests(unittest.TestCase):
             "CLAUDE_CONFIG_DIR=/Users/me/.claude_work yc --resume abc-123 --fork-session")
         self.assertEqual(ClaudeCodeAdapter().build_launch_command_for_a_copy("yc", "abc-123", {"config_folder": None}),
                          "yc --resume abc-123 --fork-session")
+
+    def test_a_config_folder_set_in_the_launch_command_gives_way_to_the_originals(self):
+        launch_command = "ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude"  # the shell applies the last setting
+        self.assertEqual(ClaudeCodeAdapter().build_launch_command_for_a_copy(
+            launch_command, "abc-123", {"config_folder": "/Users/me/.claude_personal"}),
+            "CLAUDE_CONFIG_DIR=/Users/me/.claude_personal ANTHROPIC_MODEL=x claude --resume abc-123 --fork-session")
+        self.assertEqual(ClaudeCodeAdapter().build_launch_command_for_a_copy(launch_command, "abc-123", {"config_folder": None}),
+                         "ANTHROPIC_MODEL=x claude --resume abc-123 --fork-session")
+        self.assertEqual(ClaudeCodeAdapter().build_launch_command_for_a_copy(
+            "CLAUDE_CONFIG_DIR=\"$HOME/my claude\" claude --verbose", "abc-123", {"config_folder": None}),
+            "claude --verbose --resume abc-123 --fork-session")
 
     def test_codex_forks_the_conversation(self):
         self.assertEqual(CodexAdapter().build_launch_command_for_a_copy("codex", "abc-123"), "codex fork abc-123")

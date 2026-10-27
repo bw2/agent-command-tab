@@ -19,6 +19,7 @@ import time
 
 import iterm2
 
+from agent_command_tab.agent_process_tree import list_descendant_processes, read_process_arguments_and_environment
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
 
@@ -58,6 +59,14 @@ def main():
     def screen_shows(session_id, text):
         return any(text in line for line in run_on_core_loop(read_screen_lines(session_id)))
 
+    def claude_code_runs_its_command():
+        # Looked for below the agent: the command's text is on screen before it runs, in the launch
+        # command and in Claude Code's echo of the prompt.
+        agent_session = core.agent_sessions.get(claude_session_id)
+        return bool(agent_session) and any(
+            "import time; time.sleep(30)" in read_process_arguments_and_environment(process.process_id)[0]
+            for process in list_descendant_processes(agent_session["process_id"]))
+
     def wait_until(condition, timeout):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -73,7 +82,7 @@ def main():
         results["both agent sessions are found"] = wait_until(
             lambda: core.agent_sessions.get(claude_session_id) and core.agent_sessions.get(codex_session_id), 40)
         results["both run their command"] = wait_until(
-            lambda: screen_shows(claude_session_id, "time.sleep(30)") and screen_shows(codex_session_id, "esc to interrupt"), 40)
+            lambda: claude_code_runs_its_command() and screen_shows(codex_session_id, "esc to interrupt"), 40)
         action_result_by_name = {}
         action_done = threading.Event()
 

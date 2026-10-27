@@ -92,12 +92,15 @@ def main():
     try:
         snapshot = wait_for_snapshot(lambda snapshot: len(find_test_entries(snapshot)) == 3)
         entries = find_test_entries(snapshot) if snapshot else {}
-        results["listed stand-in agent tabs (expect 3; the shell tab is hidden)"] = len(entries)
+        print("stand-in agent tabs listed:", len(entries))
+        results["3 stand-in agent tabs listed; the shell tab is hidden (expect True)"] = len(entries) == 3
         snapshot = wait_for_snapshot(lambda snapshot: sorted(entry.status for _, entry in find_test_entries(snapshot).values())
                                      == ["asking", "unknown", "working"])
         results["states reach asking, unknown, working (expect True)"] = snapshot is not None
-        results["window A total_tab_count (expect 3)"] = next(
+        window_a_total_tab_count = next(
             (window_entry.total_tab_count for window_entry, _ in entries.values() if window_entry.window_id == window_a_id), None)
+        print("window A total_tab_count:", window_a_total_tab_count)
+        results["window A counts its 3 tabs, the hidden shell tab too (expect True)"] = window_a_total_tab_count == 3
 
         connection_thread.submit_action(ActionRequest("rename_tab", {"tab_id": window_a_tab_ids[0]}, {"new_title": "renamed \\(tab)"}))
         snapshot = wait_for_snapshot(lambda snapshot: any(entry.tab_title == "renamed \\(tab)" for _, entry in find_test_entries(snapshot).values()))
@@ -122,9 +125,10 @@ def main():
             for window_entry, _ in find_test_entries(snapshot).values()))
         results["reorder within window B (expect True)"] = snapshot is not None
 
-        connection_thread.submit_action(ActionRequest("focus_agent_session", {"session_id": sorted(test_session_ids)[0]}))
+        focus_result = connection_thread.submit_action(
+            ActionRequest("focus_agent_session", {"session_id": sorted(test_session_ids)[0]})).result(15)
         time.sleep(1.5)
-        results["focus action ran without error (see output above)"] = True
+        results["focus action succeeded (expect True)"] = focus_result.succeeded
 
         before = [window_entry.window_id for window_entry in snapshots[-1].monitors[0].windows]
         connection_thread.submit_action(ActionRequest("reorder_window_list", {"window_id": before[-1]}, {"drop_before_window_id": before[0]}))
@@ -161,7 +165,7 @@ def main():
         print(f"{question}: {answer}")
     os.remove(os.path.join(stand_in_folder, "claude"))
     os.rmdir(stand_in_folder)
-    return 0
+    return 0 if all(results.values()) else 1
 
 
 if __name__ == "__main__":

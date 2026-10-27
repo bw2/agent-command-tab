@@ -1,17 +1,35 @@
 """Adapter for Anthropic's Claude Code."""
 
 import asyncio
+import os
 import re
 import shlex
 
 from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL,
                                                    AgentToolAdapter, split_command_line_into_program_names)
-from agent_command_tab.context_window_usage import (find_claude_code_transcript,
+from agent_command_tab.agent_process_tree import read_process_arguments_and_environment
+from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens, find_claude_code_transcript,
+                                                    read_claude_code_model_setting,
                                                     read_context_tokens_from_claude_code_transcript,
                                                     read_turn_started_at_from_claude_code_transcript)
 from agent_command_tab.session_preview_computation import read_preview_fields_from_claude_code_transcript
 
 ELAPSED_TIME = r"(?:\d+h )?(?:\d+m )?\d+s"
+# One "NAME=value " word in front of a launch command's program, the value maybe quoted
+# ("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude").
+LEADING_ENVIRONMENT_SETTING_PATTERN = re.compile(r"""([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])*\s+""")
+
+
+def remove_config_folder_settings_from_launch_command(launch_command):
+    """Returns the launch command without the CLAUDE_CONFIG_DIR=... words in front of its
+    program, keeping its other environment settings."""
+    kept_settings = []
+    rest = launch_command.lstrip()
+    while (match := LEADING_ENVIRONMENT_SETTING_PATTERN.match(rest)):
+        if match.group(1) != "CLAUDE_CONFIG_DIR":
+            kept_settings.append(match.group(0))
+        rest = rest[match.end():]
+    return "".join(kept_settings) + rest
 
 
 class ClaudeCodeAdapter(AgentToolAdapter):
@@ -51,14 +69,22 @@ class ClaudeCodeAdapter(AgentToolAdapter):
         return (claude_agent_record or {}).get("sessionId")
 
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
-        """Returns the transcript named after the record's `sessionId` in one of the config folders."""
+        """Returns the transcript named after the record's `sessionId`: in the record's own config
+        folder first (one created after the app started is in no list made then), else in one of
+        the config folders."""
         conversation_id = await self.find_conversation_id(agent_process_id, claude_agent_record)
         if not conversation_id:
             return None
-        return await asyncio.to_thread(find_claude_code_transcript, claude_config_folders, conversation_id)
+        own_config_folder = (claude_agent_record or {}).get("config_folder") or os.path.expanduser("~/.claude")
+        return await asyncio.to_thread(find_claude_code_transcript, [own_config_folder, *claude_config_folders], conversation_id)
 
     def read_context_tokens(self, conversation_file_path):
         return read_context_tokens_from_claude_code_transcript(conversation_file_path)
+
+    def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
+        return choose_claude_code_context_window_tokens(read_claude_code_model_setting(
+            *read_process_arguments_and_environment(agent_process_id), (claude_agent_record or {}).get("config_folder")),
+            context_tokens)
 
     def read_turn_started_at(self, conversation_file_path):
         return read_turn_started_at_from_claude_code_transcript(conversation_file_path)
@@ -68,10 +94,12 @@ class ClaudeCodeAdapter(AgentToolAdapter):
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
         """Continues a copy of the conversation under a new session ID (`--resume <id> --fork-session`),
-        with the original's config folder when it isn't the default one (Claude Code finds the
-        conversation only there)."""
+        in the original's config folder (Claude Code finds the conversation only there): a
+        CLAUDE_CONFIG_DIR set in front of the launch command gives way to the original's folder,
+        or to none for an original in the default folder."""
         if not conversation_id:
             return launch_command
         config_folder = (claude_agent_record or {}).get("config_folder")
         environment_prefix = f"CLAUDE_CONFIG_DIR={shlex.quote(config_folder)} " if config_folder else ""
-        return f"{environment_prefix}{launch_command} --resume {shlex.quote(conversation_id)} --fork-session"
+        return (f"{environment_prefix}{remove_config_folder_settings_from_launch_command(launch_command)}"
+                f" --resume {shlex.quote(conversation_id)} --fork-session")

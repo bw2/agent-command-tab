@@ -1,7 +1,22 @@
+import asyncio
+import os
+import tempfile
 import unittest
 
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters, find_agent_tool_adapter_for_tab
 from agent_command_tab.agent_adapters.base import command_line_runs_a_shell, split_command_line_into_program_names
+from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+
+
+class ClaudeCodeTranscriptLookupTests(unittest.TestCase):
+    def test_the_records_own_config_folder_is_searched_even_if_no_list_has_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            new_config_folder = os.path.join(folder, ".claude_new")  # created after the app made its list of folders
+            transcript_path = os.path.join(new_config_folder, "projects", "-Users-me-code", "abc-123.jsonl")
+            os.makedirs(os.path.dirname(transcript_path))
+            open(transcript_path, "w").close()
+            record = {"sessionId": "abc-123", "config_folder": new_config_folder}
+            self.assertEqual(asyncio.run(ClaudeCodeAdapter().find_conversation_file(4242, record, [])), transcript_path)
 
 
 class SplitCommandLineTests(unittest.TestCase):

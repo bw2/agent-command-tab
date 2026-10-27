@@ -12,9 +12,9 @@ from agent_command_tab.snapshot_data_classes import iterate_agent_session_entrie
 from agent_command_tab.user_interface.named_colors import build_color_from_name
 from agent_command_tab.user_interface.row_text_rendering import DOT_GLYPH_AND_COLOR_BY_STATE
 
-# The "auto" icon color of the most urgent state: the rows' dot color for that state, otherwise green.
-AUTOMATIC_ICON_COLOR_NAME_BY_MOST_URGENT_STATE = {state: DOT_GLYPH_AND_COLOR_BY_STATE[state][1]
-                                                  for state in ("asking", "error", "stuck")}
+# The icon color of the most urgent state: the rows' dot color for that state, otherwise green.
+ICON_COLOR_NAME_BY_MOST_URGENT_STATE = {state: DOT_GLYPH_AND_COLOR_BY_STATE[state][1]
+                                        for state in ("asking", "error", "stuck")}
 
 
 def count_asking_agent_sessions(snapshot):
@@ -23,18 +23,18 @@ def count_asking_agent_sessions(snapshot):
                if agent_session_entry.status == "asking")
 
 
-def choose_automatic_icon_color_name(snapshot):
-    """Returns the color of the "auto" icon color setting: light blue while any agent session is
-    asking, else red if any has an error, else orange if any is stuck, otherwise green."""
+def choose_icon_color_name(snapshot):
+    """Returns the icon's color: light blue while any agent session is asking, else red if any has
+    an error, else orange if any is stuck, otherwise green."""
     states = [agent_session_entry.status for _, _, agent_session_entry in iterate_agent_session_entries(snapshot)]
-    return AUTOMATIC_ICON_COLOR_NAME_BY_MOST_URGENT_STATE.get(pick_most_urgent_state(states), "green")
+    return ICON_COLOR_NAME_BY_MOST_URGENT_STATE.get(pick_most_urgent_state(states), "green")
 
 
 class MenuBarStatusItemController(NSObject):
     """Owns the NSStatusItem. A left click shows the list (the owner decides how: toggle_popover
     for the dropdown); a right click shows a small menu.
 
-    The owner (the app controller) has settings, menu_bar_icon_clicked(), open_settings(),
+    The owner (the app controller) has menu_bar_icon_clicked(), open_settings(),
     show_sidebar_for_a_few_seconds(), quit() and note_application_in_front_before_dropdown(application).
     """
 
@@ -45,7 +45,7 @@ class MenuBarStatusItemController(NSObject):
         self.popover = popover
         self.owner = owner
         self.asking_count = 0
-        self.automatic_icon_color_name = "green"
+        self.icon_color_name = "green"
         self.has_connection_problem = False
         self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
         button = self.status_item.button()
@@ -57,10 +57,9 @@ class MenuBarStatusItemController(NSObject):
 
     @objc.python_method
     def show_snapshot(self, snapshot):
-        """Shows how many agent sessions are asking (when the settings ask for it) and, with the
-        "auto" icon color, the color of the most urgent agent session."""
+        """Shows how many agent sessions are asking, in the color of the most urgent agent session."""
         self.asking_count = count_asking_agent_sessions(snapshot)
-        self.automatic_icon_color_name = choose_automatic_icon_color_name(snapshot)
+        self.icon_color_name = choose_icon_color_name(snapshot)
         self.has_connection_problem = False
         self.redraw()
 
@@ -72,18 +71,16 @@ class MenuBarStatusItemController(NSObject):
 
     @objc.python_method
     def redraw(self):
-        """Draws the "C" in the chosen color, or the most urgent agent session's color with "auto"
-        (gray during a connection problem), plus the asking count in light blue (the color of "asking" everywhere)."""
-        settings = self.owner.settings
-        color_name = self.automatic_icon_color_name if settings["icon_color"] == "auto" else settings["icon_color"]
+        """Draws the "C" in the most urgent agent session's color (gray during a connection problem),
+        plus the asking count in light blue (the color of "asking" everywhere)."""
         letter_color = (NSColor.secondaryLabelColor() if self.has_connection_problem
-                        else build_color_from_name(color_name, NSColor.systemGreenColor))
+                        else build_color_from_name(self.icon_color_name, NSColor.systemGreenColor))
         font = NSFont.menuBarFontOfSize_(0)
         title = NSMutableAttributedString.alloc().init()
         title.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
             "C", {NSFontAttributeName: NSFont.systemFontOfSize_weight_(font.pointSize(), NSFontWeightBold),
                   NSForegroundColorAttributeName: letter_color}))
-        if self.asking_count and settings["icon_shows_asking_count"] and not self.has_connection_problem:
+        if self.asking_count and not self.has_connection_problem:
             title.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
                 f" {self.asking_count}", {NSFontAttributeName: font, NSForegroundColorAttributeName: build_color_from_name(
                     DOT_GLYPH_AND_COLOR_BY_STATE["asking"][1])}))

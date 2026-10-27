@@ -9,29 +9,32 @@ import unittest
 import unittest.mock
 
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
-                    NSBitmapImageFileTypePNG, NSColorSpace, NSDragOperationMove, NSDragOperationNone,
-                    NSEventModifierFlagCommand, NSMakeRect,
+                    NSBitmapImageFileTypePNG, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
+                    NSEventModifierFlagCommand, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSMakePoint, NSMakeRect,
                     NSFloatingWindowLevel, NSMenu, NSNormalWindowLevel, NSParagraphStyleAttributeName, NSTextAlignmentRight,
-                    NSTextField, NSWindow, NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
+                    NSTextField, NSWindow, NSWindowOcclusionStateVisible, NSWindowStyleMaskBorderless,
+                    NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
 
-from agent_command_tab.settings_store import DEFAULT_SETTINGS, ICON_COLOR_NAMES, SMALLEST_WINDOW_SIZES
+from agent_command_tab.app_controller import AppController
+from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
                                                                 PANEL_SIDE_MARGIN, POPOVER_WIDTH, TOP_BAR_HEIGHT,
                                                                 ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
-from agent_command_tab.user_interface.agent_session_outline_view import (ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
-                                                                         AgentSessionListController, RowButton,
+from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
+                                                                         GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW,
+                                                                         TEXT_FIELD_INSETS, AgentSessionListController, RowButton,
                                                                          RowViewWithSelectionOutline, build_index_set,
                                                                          compute_selection_outline_rect)
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
 from agent_command_tab.user_interface.list_window import ListWindowController
-from agent_command_tab.user_interface.screen_layout import frame_is_on_a_screen, grow_frame_to_smallest_size
+from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
+                                                            frame_is_on_a_screen, grow_frame_to_smallest_size)
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
-from agent_command_tab.user_interface.menu_bar_status_item import choose_automatic_icon_color_name
-from agent_command_tab.user_interface.named_colors import COLOR_MAKERS_BY_NAME
-from agent_command_tab.user_interface.settings_window import ROW_SPACING, SettingsWindowController
+from agent_command_tab.user_interface.menu_bar_status_item import choose_icon_color_name
+from agent_command_tab.user_interface.settings_window import LAUNCH_COMMAND_FIELD_WIDTH, ROW_SPACING, SettingsWindowController
 from agent_command_tab.user_interface.sidebar_panel import (SidebarController,
                                                             allow_pointer_changes_while_another_app_is_in_front)
 from agent_command_tab.user_interface.sidebar_placement import SidebarPlacement
@@ -88,8 +91,8 @@ class RecordingOwner:
     def submit_action_and_report_failure(self, action_request, failure_title):
         self.submitted_actions.append(action_request)
 
-    def list_sort_order_chosen(self, list_sort_order):
-        self.chosen_list_sort_orders.append(list_sort_order)
+    def list_sort_order_chosen(self, list_sort_order, list_sort_order_is_reversed):
+        self.chosen_list_sort_orders.append((list_sort_order, list_sort_order_is_reversed))
 
     def idle_tabs_are_hidden_chosen(self, idle_tabs_are_hidden):
         self.idle_tabs_are_hidden_choices.append(idle_tabs_are_hidden)
@@ -210,21 +213,23 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_sort_orders_change_only_the_order_of_the_rows(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
-        outline_view = self.list_controller.outline_view
 
-        def list_first_window_tab_titles():
-            return [outline_view.itemAtRow_(row).entry.tab_title for row in range(1, 4)]
+        def list_first_window_tab_titles():  # in the order the list shows them
+            return [item.entry.tab_title for item in self.list_controller.items_by_key[("window", "w1")].child_items]
         self.assertEqual(list_first_window_tab_titles(), ["planning", "phase0-tests", "codex-review"])
-        self.list_controller.set_list_sort_order("activity")  # asking, working, done
+        self.list_controller.set_list_sort_order("activity", False)  # asking, working, done
         self.assertEqual(list_first_window_tab_titles(), ["phase0-tests", "planning", "codex-review"])
-        self.list_controller.set_list_sort_order("alphabet")
+        self.list_controller.set_list_sort_order("alphabet", False)
         self.assertEqual(list_first_window_tab_titles(), ["codex-review", "phase0-tests", "planning"])
-        self.list_controller.set_list_sort_order("manual")  # iTerm2's own order, unchanged
+        self.list_controller.set_list_sort_order("alphabet", True)
+        self.assertEqual(list_first_window_tab_titles(), ["planning", "phase0-tests", "codex-review"])
+        self.assertEqual([item.entry.title for item in self.list_controller.top_level_items], ["tandem-repeats", "agent-command-tab"])
+        self.list_controller.set_list_sort_order("manual", False)  # iTerm2's own order, unchanged
         self.assertEqual(list_first_window_tab_titles(), ["planning", "phase0-tests", "codex-review"])
 
     def test_sorted_rows_allow_moves_to_another_window_or_monitor_but_no_reordering(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
-        self.list_controller.set_list_sort_order("alphabet")
+        self.list_controller.set_list_sort_order("alphabet", False)
         outline_view = self.list_controller.outline_view
         first_window_item, second_window_item = self.list_controller.top_level_items
         self.list_controller.dragged_item = first_window_item.child_items[0]
@@ -269,6 +274,115 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # Only the tool icon column is left: it shows by itself, since Claude Code and Codex both run.
         self.assertEqual(self.list_controller.measure_right_columns_width(), self.list_controller.column_widths["agent_tool_icon"])
 
+    def test_column_titles_sit_over_their_columns_between_the_top_bar_and_the_list(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # no context sizes known: no token columns
+        self.window.contentView().layoutSubtreeIfNeeded()
+        titles_row_view = self.list_controller.column_titles_row_view
+        titles_row_view.layoutSubtreeIfNeeded()
+        row_view = self.lay_out_row_view(1)
+        titles_row_frame = titles_row_view.frame()
+        self.assertFalse(titles_row_view.isHidden())
+        # Two lines for "Time Since Last" over "Status Change", right under the top bar and right above the list.
+        self.assertEqual(titles_row_frame.size.height, 2 * COLUMN_TITLE_LINE_HEIGHT + 2 * COLUMN_TITLES_ROW_PADDING)
+        self.assertEqual(titles_row_frame.origin.y + titles_row_frame.size.height,
+                         self.window.contentView().frame().size.height - TOP_BAR_HEIGHT)
+        scroll_view_frame = self.list_controller.outline_view.enclosingScrollView().frame()
+        self.assertEqual(scroll_view_frame.origin.y + scroll_view_frame.size.height, titles_row_frame.origin.y)
+        title_fields = titles_row_view.column_title_text_fields
+        self.assertEqual(titles_row_view.name_title_text_field.stringValue(), "Name")
+        self.assertEqual(title_fields["state_duration"].stringValue(), "Time Since Last\nStatus Change")
+        for column_name in ("state", "state_duration"):  # in the row's x, which is the panel's
+            self.assertFalse(title_fields[column_name].isHidden())
+            self.assertEqual((title_fields[column_name].frame().origin.x, title_fields[column_name].frame().size.width),
+                             (row_view.column_views[column_name].frame().origin.x, row_view.column_views[column_name].frame().size.width))
+        self.assertTrue(title_fields["context_tokens"].isHidden())
+        # "Name" is centered over the names' room, which ends before the leftmost column (here the tool icon's).
+        name_title_frame = titles_row_view.name_title_text_field.frame()
+        self.assertEqual(name_title_frame.origin.x + name_title_frame.size.width,
+                         row_view.column_views["agent_tool_icon"].frame().origin.x - GAP_BEFORE_DETAILS)
+        # The column is as wide as the longer line of its title, much wider than "23h 59m".
+        self.assertGreaterEqual(self.list_controller.column_widths["state_duration"], TEXT_FIELD_INSETS
+                                + self.list_controller.measure_text_width("Time Since Last", self.list_controller.column_title_font))
+
+    def click_column_title(self, title_name):
+        """Clicks the middle of a title, as AppKit delivers the click: to the row of titles, whatever label is under it."""
+        titles_row_view = self.list_controller.column_titles_row_view
+        titles_row_view.layoutSubtreeIfNeeded()
+        text_field = (titles_row_view.name_title_text_field if title_name == "name"
+                      else titles_row_view.column_title_text_fields[title_name])
+        frame = text_field.frame()
+        point_in_the_row = NSMakePoint(frame.origin.x + frame.size.width / 2, frame.origin.y + frame.size.height / 2)
+        self.assertIs(titles_row_view.hitTest_(titles_row_view.convertPoint_toView_(point_in_the_row, titles_row_view.superview())),
+                      titles_row_view)
+        point_in_the_window = titles_row_view.convertPoint_toView_(point_in_the_row, None)
+        for event_type, row_view_method in ((NSEventTypeLeftMouseDown, titles_row_view.mouseDown_),
+                                            (NSEventTypeLeftMouseUp, titles_row_view.mouseUp_)):
+            row_view_method(NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+                event_type, point_in_the_window, 0, 0, self.window.windowNumber(), None, 0, 1, 1.0))
+
+    def test_clicking_a_column_title_sorts_by_it_then_the_other_way_then_not_at_all(self):
+        snapshot = make_sample_snapshot()
+        window_one = snapshot.monitors[0].windows[0]
+        # Context sizes known for planning (467k of 1M) and codex-review (91k of 200k), not for phase0-tests.
+        window_one = window_one._replace(agent_sessions=(
+            window_one.agent_sessions[0]._replace(context_tokens=467_000, context_fill_percent=47),
+            window_one.agent_sessions[1],
+            window_one.agent_sessions[2]._replace(context_tokens=91_000, context_fill_percent=46)))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, snapshot.monitors[0].windows[1])),)))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        outline_view = self.list_controller.outline_view
+
+        def choose_and_show(list_sort_order, list_sort_order_is_reversed):  # as the app controller does, for every list
+            self.owner.chosen_list_sort_orders.append((list_sort_order, list_sort_order_is_reversed))
+            self.list_controller.set_list_sort_order(list_sort_order, list_sort_order_is_reversed)
+        self.owner.list_sort_order_chosen = choose_and_show
+        column_widths_before = dict(self.list_controller.column_widths)
+        title_fields = self.list_controller.column_titles_row_view.column_title_text_fields
+        for expected_sort, expected_tokens_title, expected_tab_titles in (
+                (("context_percent", False), "Tokens ▾", ["planning", "codex-review", "phase0-tests"]),
+                (("context_percent", True), "Tokens ▴", ["codex-review", "planning", "phase0-tests"]),  # unknown size last both ways
+                (("manual", False), "Tokens", ["planning", "phase0-tests", "codex-review"])):
+            self.click_column_title("context_tokens")
+            self.assertEqual(self.owner.chosen_list_sort_orders[-1], expected_sort)
+            self.assertEqual(title_fields["context_tokens"].stringValue(), expected_tokens_title)
+            self.assertEqual([outline_view.itemAtRow_(row).entry.tab_title for row in range(1, 4)], expected_tab_titles)
+            self.assertEqual(self.list_controller.column_widths, column_widths_before)  # the arrow had room already
+        self.click_column_title("state")  # another title starts over in its first direction
+        self.assertEqual(self.owner.chosen_list_sort_orders[-1], ("activity", False))
+        self.assertEqual(title_fields["state"].stringValue(), "Status ▾")
+        self.click_column_title("name")
+        self.assertEqual(self.owner.chosen_list_sort_orders[-1], ("alphabet", False))
+        self.assertEqual((self.list_controller.column_titles_row_view.name_title_text_field.stringValue(),
+                          title_fields["state"].stringValue()), ("Name ▴", "Status"))  # A to Z: up, as in Finder
+
+    def test_the_pointer_is_the_pointing_hand_above_the_titles_that_sort(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        titles_row_view = self.list_controller.column_titles_row_view
+        titles_row_view.layoutSubtreeIfNeeded()
+        title_frames = {"name": titles_row_view.name_title_text_field.frame(),
+                        **{column_name: text_field.frame() for column_name, text_field in titles_row_view.column_title_text_fields.items()}}
+        for x, expected_cursor in ((title_frames["name"].origin.x + 1, NSCursor.pointingHandCursor()),
+                                   (title_frames["agent_tool_icon"].origin.x + 1, NSCursor.arrowCursor()),  # no title, no sorting
+                                   (title_frames["state"].origin.x + 1, NSCursor.pointingHandCursor()),
+                                   (title_frames["state_duration"].origin.x - 1, NSCursor.arrowCursor()),  # between two columns
+                                   (title_frames["state_duration"].origin.x + 1, NSCursor.pointingHandCursor())):
+            titles_row_view.show_the_pointer_at(NSMakePoint(x, 1))  # near the bottom: the whole height above a column sorts
+            self.assertEqual(NSCursor.currentCursor(), expected_cursor)
+
+    def test_the_column_titles_row_hides_while_no_titled_column_shows(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.list_controller.set_shown_columns([])  # only the tool icon column is left, which has no title
+        titles_row_view = self.list_controller.column_titles_row_view
+        self.assertTrue(titles_row_view.isHidden())
+        self.assertEqual(titles_row_view.frame().size.height, 0)
+        scroll_view_frame = self.list_controller.outline_view.enclosingScrollView().frame()
+        self.assertEqual(scroll_view_frame.origin.y + scroll_view_frame.size.height,
+                         self.window.contentView().frame().size.height - TOP_BAR_HEIGHT)
+        self.list_controller.set_shown_columns(["state"])  # "Status", one line
+        self.assertFalse(titles_row_view.isHidden())
+        self.assertEqual(titles_row_view.frame().size.height, COLUMN_TITLE_LINE_HEIGHT + 2 * COLUMN_TITLES_ROW_PADDING)
+
     def test_memory_and_cpu_columns_show_the_agents_use(self):
         snapshot = make_sample_snapshot()
         window_one = snapshot.monitors[0].windows[0]
@@ -292,34 +406,45 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # Two windows with running agents: the expand or collapse and the pause or resume buttons show.
         self.list_controller.apply_snapshot(make_sample_snapshot())
         # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's
-        # smallest width and 200 the sidebar's (150 can't happen, but check the later steps).
-        for width, label_shown, popup_shown, popup_width in (
-                (460, True, True, 124), (320, True, True, 124), (265, True, True, 124), (264, False, True, 124),
-                (233, False, True, 124), (232, False, True, 123), (200, False, True, 91), (169, False, True, 60),
-                (168, False, False, 59), (150, False, False, 41), (460, True, True, 124)):
+        # smallest width, 250 the list window's and 200 the sidebar's. Only a sidebar under 231
+        # points hides the pop-up (the column titles still sort the list).
+        for width, label_shown, popup_shown, popup_width, settings_button_is_centered in (
+                (460, True, True, 124, True), (327, True, True, 124, False), (326, False, True, 124, False),
+                (320, False, True, 124, False), (265, False, True, 94, False), (250, False, True, 79, False),
+                (231, False, True, 60, False), (230, False, False, 59, False), (200, False, False, 29, False),
+                (460, True, True, 124, True)):
             self.window.setContentSize_((width, 260))
             self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden(),
                               panel.list_sort_order_popup.frame().size.width), (label_shown, popup_shown, popup_width), width)
-            idle_tabs_button_frame = panel.idle_tabs_button.frame()  # just left of the expand or collapse button
+            # Hide Idle right before the expand button; Settings in the middle of the bar when the
+            # whole sort control fits on its left, and never past Hide Idle.
+            idle_tabs_button_frame = panel.idle_tabs_button.frame()
             self.assertFalse(panel.idle_tabs_button.isHidden())
             self.assertEqual(idle_tabs_button_frame.origin.x + idle_tabs_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
                              panel.expand_or_collapse_all_button.frame().origin.x)
+            settings_button_frame = panel.settings_button.frame()
+            self.assertEqual(abs(settings_button_frame.origin.x + settings_button_frame.size.width / 2 - width / 2) < 0.5,
+                             settings_button_is_centered, width)
+            self.assertLessEqual(settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                                 idle_tabs_button_frame.origin.x)
             if popup_shown:
                 popup_frame = panel.list_sort_order_popup.frame()
-                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, idle_tabs_button_frame.origin.x)
+                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, settings_button_frame.origin.x)
             message_frame = panel.message_text_field.frame()
             self.assertTrue(message_frame.size.width == 0
-                            or message_frame.origin.x + message_frame.size.width <= idle_tabs_button_frame.origin.x,
+                            or message_frame.origin.x + message_frame.size.width <= settings_button_frame.origin.x,
                             width)  # never covers the buttons
             pause_button_frame = panel.pause_or_resume_all_button.frame()  # at the bottom bar's right end
             self.assertEqual(pause_button_frame.origin.x + pause_button_frame.size.width, width - PANEL_SIDE_MARGIN)
             self.assertLessEqual(pause_button_frame.origin.y + pause_button_frame.size.height, BOTTOM_BAR_HEIGHT)
-        self.assertGreater(panel.message_text_field.frame().size.width, 100)  # room again for a connection message
         self.window.setContentSize_((320, 260))
         panel.show_message("iTerm2 can't be reached; retrying")  # the sort control and Hide Idle step aside for it
         self.assertTrue(panel.list_sort_order_popup.isHidden())
         self.assertTrue(panel.idle_tabs_button.isHidden())
-        self.assertGreater(panel.message_text_field.frame().size.width, 100)
+        settings_button_frame = panel.settings_button.frame()  # moved to the right end, before the expand button
+        self.assertEqual(settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                         panel.expand_or_collapse_all_button.frame().origin.x)
+        self.assertGreater(panel.message_text_field.frame().size.width, 150)
         panel.show_message("")
         self.assertFalse(panel.list_sort_order_popup.isHidden())
         self.assertFalse(panel.idle_tabs_button.isHidden())
@@ -383,8 +508,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
     def test_sort_popup_reports_the_choice_to_the_owner(self):
         self.dropdown_panel_controller.list_sort_order_popup.selectItemWithTitle_("Activity")
         self.dropdown_panel_controller.listSortOrderChosen_(self.dropdown_panel_controller.list_sort_order_popup)
-        self.assertEqual(self.owner.chosen_list_sort_orders, ["activity"])
-        self.dropdown_panel_controller.show_list_sort_order("alphabet")
+        self.assertEqual(self.owner.chosen_list_sort_orders, [("activity", False)])  # the pop-up's orders start in their first direction
+        self.dropdown_panel_controller.show_list_sort_order("alphabet", False)
         self.assertEqual(self.dropdown_panel_controller.list_sort_order_popup.titleOfSelectedItem(), "Alphabetically")
         self.assertEqual(self.list_controller.list_sort_order, "alphabet")
 
@@ -718,7 +843,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_rows_dont_reorder_under_a_held_button(self):
         # Activity order: a peek marks a "done" tab as seen ("idle"), which would move its row.
-        self.list_controller.set_list_sort_order("activity")
+        self.list_controller.set_list_sort_order("activity", False)
         self.list_controller.apply_snapshot(make_sample_snapshot())
         outline_view = self.list_controller.outline_view
         held_item = outline_view.itemAtRow_(1)
@@ -763,6 +888,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.window.contentView().layoutSubtreeIfNeeded()
         self.list_controller.begin_rename(self.list_controller.outline_view.itemAtRow_(1))
         self.assertTrue(self.list_controller.rename_in_progress)
+        # A new name typed, so a rename submitted instead of cancelled would show.
+        self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False).name_text_field.currentEditor() \
+            .setString_("typed but cancelled")
         self.list_controller.cancel_rename()
         self.assertFalse(self.list_controller.rename_in_progress)
         self.assertEqual(self.submitted_actions, [])  # nothing was renamed
@@ -782,27 +910,32 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.menuToggleExpansion_(None)
 
     def test_collapsing_the_window_of_a_tab_being_renamed_submits_the_rename_first(self):
-        for collapse in (lambda: self.click_row_arrow(0), lambda: self.list_controller.set_all_expanded(False),
-                         lambda: self.collapse_from_the_right_click_menu(0)):
+        for collapse_number, collapse in enumerate((lambda: self.click_row_arrow(0), lambda: self.list_controller.set_all_expanded(False),
+                                                    lambda: self.collapse_from_the_right_click_menu(0)), 1):
             self.list_controller.set_all_expanded(True)
             self.list_controller.apply_snapshot(make_sample_snapshot())
             self.window.contentView().layoutSubtreeIfNeeded()
+            del self.submitted_actions[:]  # so each way of collapsing must submit its own rename
             self.list_controller.begin_rename(self.list_controller.outline_view.itemAtRow_(1))
             self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False).name_text_field.currentEditor() \
-                .setString_("renamed")
+                .setString_(f"renamed {collapse_number}")
             collapse()  # AppKit raised an exception here while the name was being edited
             self.assertFalse(self.list_controller.rename_in_progress)
             self.assertIn(("window", "w1"), self.list_controller.collapsed_item_keys)
-            self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].arguments),
-                             ("rename_tab", {"new_title": "renamed"}))
+            self.assertEqual([(action.action, action.arguments) for action in self.submitted_actions],
+                             [("rename_tab", {"new_title": f"renamed {collapse_number}"})])
 
     def test_opening_previews_during_a_rename_submits_the_rename_first(self):
         self.apply_snapshot_with_previews()
         self.window.contentView().layoutSubtreeIfNeeded()
         tab_item = self.list_controller.outline_view.itemAtRow_(1)
         self.list_controller.begin_rename(tab_item)
+        self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False).name_text_field.currentEditor() \
+            .setString_("renamed")
         self.list_controller.set_previews_open([tab_item], True)
         self.assertFalse(self.list_controller.rename_in_progress)
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].arguments),
+                         ("rename_tab", {"new_title": "renamed"}))
         self.assertTrue(self.lay_out_row_view(1).has_preview_line)  # refilled now that its name isn't being edited
 
     def test_expand_or_collapse_from_the_right_click_menu(self):
@@ -845,6 +978,26 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.submitted_actions[-1].action, "move_window_to_monitor")
         self.assertEqual(self.submitted_actions[-1].arguments, {"monitor_id": "2"})
 
+    def test_dropdown_keeps_its_width_as_the_numbers_and_states_change(self):
+        self.list_controller.set_shown_columns(LIST_COLUMNS)
+        now = time.time()
+
+        def measure_dropdown_width(**changed_fields):
+            snapshot = make_sample_snapshot()
+            monitor = snapshot.monitors[0]
+            self.list_controller.apply_snapshot(snapshot._replace(monitors=(monitor._replace(windows=tuple(
+                window._replace(agent_sessions=tuple(entry._replace(**changed_fields) for entry in window.agent_sessions))
+                for window in monitor.windows)),)))
+            self.dropdown_panel_controller.fit_size_to_rows()
+            return self.dropdown_panel_controller.preferredContentSize()[0]
+
+        # "99k (9%)", "9M", "0%", "done" and "5s" grow to "100k (100%)", "1024M", "100%", "working" and "23h 59m".
+        self.assertEqual(
+            measure_dropdown_width(context_tokens=99_000, context_fill_percent=9, memory_bytes=9 * 1024 ** 2, cpu_percent=0,
+                                   started_at=now - 5, status="done", status_since=now - 5),
+            measure_dropdown_width(context_tokens=100_000, context_fill_percent=100, memory_bytes=1024 ** 3 - 1, cpu_percent=100,
+                                   started_at=now - 86399, status="working", status_since=now - 86399))
+
     def test_dropdown_fits_its_size_to_all_rows(self):
         long_name_snapshot = make_sample_snapshot()
         window_one = long_name_snapshot.monitors[0].windows[0]
@@ -878,6 +1031,22 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             for window in snapshot.monitors[0].windows)),))
         self.list_controller.apply_snapshot(snapshot)
         return self.list_controller.outline_view
+
+    def test_the_previews_button_has_a_column_of_its_own_at_the_right_edge(self):
+        self.apply_snapshot_with_previews()
+        self.window.contentView().layoutSubtreeIfNeeded()
+        button_frame = self.lay_out_row_view(0).preview_toggle_button.frame()  # the first window's row
+        last_column_frame = self.lay_out_row_view(1).column_views["state_duration"].frame()  # its first tab's
+        # The tab rows' columns and their titles end a gap before the button, which has no title.
+        self.assertEqual(last_column_frame.origin.x + last_column_frame.size.width + GAP_BETWEEN_COLUMNS, button_frame.origin.x)
+        titles_row_view = self.list_controller.column_titles_row_view
+        titles_row_view.layoutSubtreeIfNeeded()
+        last_title_frame = titles_row_view.column_title_text_fields["state_duration"].frame()
+        self.assertEqual(last_title_frame.origin.x + last_title_frame.size.width, last_column_frame.origin.x + last_column_frame.size.width)
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # no previews, so no button: the columns end at the right margin
+        self.window.contentView().layoutSubtreeIfNeeded()
+        last_column_frame = self.lay_out_row_view(1).column_views["state_duration"].frame()
+        self.assertEqual(last_column_frame.origin.x + last_column_frame.size.width, button_frame.origin.x + button_frame.size.width)
 
     def click_row_arrow(self, row):
         outline_view = self.list_controller.outline_view
@@ -951,9 +1120,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         button = panel.expand_or_collapse_all_button
         panel_width = panel.view().bounds().size.width
         self.assertEqual(button.frame().origin.x + button.frame().size.width, panel_width - PANEL_SIDE_MARGIN)  # the top right corner
-        settings_frame = panel.settings_button.frame()  # a button with its name, at the bottom left
-        self.assertEqual((panel.settings_button.title(), settings_frame.origin.x), ("Settings", PANEL_SIDE_MARGIN))
-        self.assertLess(settings_frame.origin.y + settings_frame.size.height, BOTTOM_BAR_HEIGHT)
+        settings_frame = panel.settings_button.frame()  # a button with its name, in the top bar
+        self.assertEqual(panel.settings_button.title(), "Settings")
+        self.assertGreater(settings_frame.origin.y, panel.view().bounds().size.height - TOP_BAR_HEIGHT)
         self.assertEqual(button.toolTip(), "Collapse all")  # fully expanded: a click collapses
         panel.expandOrCollapseAllClicked_(button)
         self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (3, "Expand all"))
@@ -1018,16 +1187,32 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(one_window_snapshot)
         self.assertTrue(button.isHidden())
         self.window.setContentSize_((320, 260))
-        idle_tabs_button = panel.idle_tabs_button  # at the right edge instead
-        self.assertEqual(idle_tabs_button.frame().origin.x + idle_tabs_button.frame().size.width,
-                         panel.view().bounds().size.width - PANEL_SIDE_MARGIN)
+        # Without the expand button, Hide Idle is at the right end; the 320-point dropdown has no
+        # room to center Settings, so it follows the whole sort control.
+        idle_tabs_button_frame = panel.idle_tabs_button.frame()
+        self.assertEqual(idle_tabs_button_frame.origin.x + idle_tabs_button_frame.size.width, 320 - PANEL_SIDE_MARGIN)
+        popup_frame = panel.list_sort_order_popup.frame()
+        settings_button_frame = panel.settings_button.frame()
+        self.assertGreater(settings_button_frame.origin.x, popup_frame.origin.x + popup_frame.size.width)
+        self.assertNotAlmostEqual(settings_button_frame.origin.x + settings_button_frame.size.width / 2, 160)
+        # A message (iTerm2 can't be reached) takes the room up to the Settings button, at the right
+        # end, with the Hide Idle button hidden.
+        panel.show_message("iTerm2 can't be reached")
         message_frame = panel.message_text_field.frame()
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, idle_tabs_button.frame().origin.x - 8)
+        settings_button_frame = panel.settings_button.frame()
+        self.assertEqual(settings_button_frame.origin.x + settings_button_frame.size.width, 320 - PANEL_SIDE_MARGIN)
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, settings_button_frame.origin.x - 8)
+        panel.show_message("")
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertFalse(button.isHidden())
         self.assertEqual(button.frame().origin.x + button.frame().size.width, panel.view().bounds().size.width - PANEL_SIDE_MARGIN)
+        panel.show_message("iTerm2 can't be reached")  # then Settings sits right before the expand button
         message_frame = panel.message_text_field.frame()
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, idle_tabs_button.frame().origin.x - 8)
+        settings_button_frame = panel.settings_button.frame()
+        self.assertEqual(settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                         button.frame().origin.x)
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, settings_button_frame.origin.x - 8)
+        panel.show_message("")
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # one window per monitor
         self.assertFalse(button.isHidden())
 
@@ -1144,19 +1329,7 @@ class AutomaticIconColorTests(unittest.TestCase):
                 (["working", "stuck", "done"], "orange"),
                 (["working", "idle", "done", "unknown"], "green"),
                 ([], "green")):
-            self.assertEqual(choose_automatic_icon_color_name(self.snapshot_with_states(states)), expected_color_name)
-
-    def test_every_icon_color_choice_looks_different(self):
-        # Current macOS makes system purple a magenta and system pink nearly its red.
-        components_by_name = {}
-        for color_name in ICON_COLOR_NAMES[1:]:  # all but "auto"
-            color = COLOR_MAKERS_BY_NAME[color_name]().colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
-            components_by_name[color_name] = (color.redComponent() * 255, color.greenComponent() * 255, color.blueComponent() * 255)
-        for first_name, first in components_by_name.items():
-            for second_name, second in components_by_name.items():
-                if first_name < second_name:
-                    distance = sum((a - b) ** 2 for a, b in zip(first, second)) ** 0.5
-                    self.assertGreater(distance, 60, f"{first_name} and {second_name} look alike")
+            self.assertEqual(choose_icon_color_name(self.snapshot_with_states(states)), expected_color_name)
 
 
 class SidebarWidthDragTests(unittest.TestCase):
@@ -1198,6 +1371,74 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.assertIsNone(self.controller.hide_timer)
         self.assertEqual(self.controller.keep_shown_until, 0)
 
+    def test_a_sidebar_that_hides_by_itself_watches_for_clicks_in_other_apps_only_while_it_is_in(self):
+        # A screen far outside every monitor, so the sidebar shown here stays out of sight.
+        self.controller.screens = [{"name": "Far away", "frame": (-4000, -4000, 1500, 1000),
+                                    "visible_frame": (-4000, -4000, 1500, 970)}]
+        self.addCleanup(self.controller.watch_for_clicks_in_other_apps, False)
+        self.addCleanup(self.controller.window.orderOut_, None)
+        for settings_change, hides_by_itself in (({"show_as": "sidebar", "sidebar_mode": "auto_hide"}, True),
+                                                 ({"show_as": "popup", "sidebar_mode": "floating"}, True),  # "Show the sidebar"
+                                                 ({"show_as": "sidebar", "sidebar_mode": "floating"}, False),
+                                                 ({"show_as": "sidebar", "sidebar_mode": "docked"}, False)):
+            self.controller.settings = dict(self.controller.settings, **settings_change)
+            self.controller.set_shown(True, animate=False)
+            self.assertEqual(self.controller.click_monitor is not None, hides_by_itself, settings_change)
+            self.controller.hide_now(animate=False)
+            self.assertIsNone(self.controller.click_monitor)
+            self.assertFalse(self.controller.window.isVisible())  # gone at once, without sliding
+
+    def test_its_top_bar_dragged_turns_it_into_the_list_window_at_the_windows_last_size(self):
+        # With Show as: Sidebar, settings_changed shows the window. With Show as: Window already
+        # ("Show the sidebar" while the window was closed), top_bar_dragged has to.
+        self.controller.screens = [{"name": "Far away", "frame": (-4000, -4000, 1500, 1000),
+                                    "visible_frame": (-4000, -4000, 1500, 970)}]
+        self.addCleanup(self.controller.watch_for_clicks_in_other_apps, False)
+        list_window_controller = ListWindowController.alloc().initWithOwner_(self.owner)
+        list_window_controller.list_controller.refresh_timer.invalidate()
+        # Recorded rather than shown: macOS would pull the titled window from the far-away monitor onto a real one.
+        shown_frames = []
+        list_window_controller.show = lambda saved_frame, takes_keyboard_focus=True: shown_frames.append(saved_frame)
+        followed_pointer_offsets = []
+        list_window_controller.follow_the_pointer_until_the_button_comes_up = followed_pointer_offsets.append
+
+        class StandInAppController:
+            sidebar_controller = self.controller
+            dropdown_panel_controller = None
+            popover = unittest.mock.Mock(isShown=lambda: False)
+            # Open, so the test app isn't made active, and kept in front of the window shown.
+            settings_window_controller = unittest.mock.Mock(is_open=lambda: True)
+
+            def settings_changed(self, new_settings):
+                self.settings = new_settings  # shows no window, unlike the real one when "Show as" changes
+
+            def place_the_settings_window_above_the_lists(self, dropdown_is_open):
+                self.settings_window_placements += 1
+        stand_in_app_controller = StandInAppController()
+        stand_in_app_controller.list_window_controller = list_window_controller
+        # Never shown, the window takes the size it was built with (480 by 560 inside the frame); then its saved size.
+        saved_frame_rect = list_window_controller.window.frameRectForContentRect_(NSMakeRect(0, 0, 300, 400))
+        saved_frame = (saved_frame_rect.origin.x, saved_frame_rect.origin.y, saved_frame_rect.size.width,
+                       saved_frame_rect.size.height)
+        for show_as_before, show_call_count, list_window_frame, (content_width, content_height) in (
+                ("sidebar", 0, None, (480, 560)), ("window", 1, saved_frame, (300, 400))):
+            stand_in_app_controller.settings = self.controller.settings = dict(
+                self.controller.settings, show_as=show_as_before, list_window_frame=list_window_frame)
+            stand_in_app_controller.settings_window_placements = 0
+            self.controller.set_shown(True, animate=False)  # 400 wide at x -2900, its top at y -3030
+            shown_frames.clear()
+            AppController.top_bar_dragged(stand_in_app_controller, self.controller.list_panel_controller, (-2700, -3040))
+            self.assertFalse(self.controller.is_shown or self.controller.window.isVisible(), show_as_before)
+            window_frame = stand_in_app_controller.settings["list_window_frame"]
+            self.assertEqual(shown_frames, [window_frame] * show_call_count, show_as_before)
+            self.assertEqual(stand_in_app_controller.settings_window_placements, show_call_count, show_as_before)
+            content_rect = list_window_controller.window.contentRectForFrameRect_(NSMakeRect(*window_frame))
+            # The pointer halfway across it and 10 below its top.
+            self.assertEqual((content_rect.origin.x, content_rect.origin.y + content_rect.size.height,
+                              content_rect.size.width, content_rect.size.height),
+                             (-2700 - content_width / 2, -3030, content_width, content_height), show_as_before)
+        self.assertEqual(len(followed_pointer_offsets), 2)
+
     def test_shown_from_the_menu_it_stays_for_the_whole_five_seconds(self):
         self.controller.keep_shown_until = time.time() + 4
         self.controller.hideTimerFired_(None)
@@ -1230,6 +1471,9 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.controller.window.contentView().layoutSubtreeIfNeeded()
         list_controller.begin_rename(list_controller.outline_view.itemAtRow_(1))
         self.assertTrue(list_controller.rename_in_progress)
+        # A new name typed, so a rename submitted instead of cancelled would show.
+        list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False).name_text_field.currentEditor() \
+            .setString_("typed but cancelled")
         self.controller.windowDidResignKey_(None)
         self.assertFalse(list_controller.rename_in_progress)
         self.assertEqual(self.owner.submitted_actions, [])  # nothing was renamed
@@ -1280,6 +1524,12 @@ class ListWindowSmokeTests(unittest.TestCase):
         self.assertEqual(grow_frame_to_smallest_size([100, 800, 327, 148], (250, 200)), [100, 748, 327, 200])
         self.assertEqual(grow_frame_to_smallest_size([100, 800, 400, 300], (250, 200)), [100, 800, 400, 300])
 
+    def test_a_sidebar_dragged_by_its_top_bar_turns_into_the_window_with_the_pointer_still_on_the_top_bar(self):
+        # The pointer 3/4 across a 400-wide sidebar and 10 below its top: 3/4 across a 200-wide
+        # window, 10 below its top.
+        self.assertEqual(compute_list_window_content_rect_for_a_dragged_sidebar([1100, 0, 400, 970], (1400, 960), (200, 300)),
+                         [1250, 670, 200, 300])
+
     def test_the_window_holds_its_own_list_and_reports_its_frame(self):
         owner = RecordingOwner()
         owner.reported_frames = []
@@ -1315,6 +1565,13 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
     def setUp(self):
+        # One monitor whatever this Mac has connected, since the edge choices and the placement note follow the
+        # monitors; tests of other arrangements patch it again.
+        monitors_patch = unittest.mock.patch(
+            "agent_command_tab.user_interface.settings_window.read_monitors_from_screens",
+            return_value=[{"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)}])
+        monitors_patch.start()
+        self.addCleanup(monitors_patch.stop)
         self.owner = SettingsRecordingOwner(dict(DEFAULT_SETTINGS))
         self.controller = SettingsWindowController.alloc().initWithOwner_(self.owner)
         self.controller.settings = dict(self.owner.settings)
@@ -1332,9 +1589,9 @@ class SettingsWindowSmokeTests(unittest.TestCase):
 
     def test_changing_one_control_keeps_changes_made_elsewhere(self):
         self.owner.settings = dict(self.owner.settings, sidebar_width=555)  # dragged at the sidebar's edge meanwhile
-        self.controller.stuck_minutes_field.setStringValue_("25")
-        self.controller.controlChanged_(self.controller.stuck_minutes_field)
-        self.assertEqual(self.owner.settings["stuck_minutes"], 25)
+        self.controller.list_window_always_on_top_checkbox.setState_(1)
+        self.controller.controlChanged_(self.controller.list_window_always_on_top_checkbox)
+        self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
         self.assertEqual(self.owner.settings["sidebar_width"], 555)
 
     def test_both_edges_stay_choosable_when_the_menu_bar_monitor_stands_between_two_others(self):
@@ -1357,11 +1614,53 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             self.controller.controlChanged_(self.controller.edge_popup)
         self.assertEqual(self.owner.settings["sidebar_edge"], "left")
 
+    def test_the_window_closes_once_no_part_of_it_shows(self):
+        for occlusion_state, is_visible, closes in ((0, True, True),  # covered, on another desktop, or the screen locked
+                                                    (NSWindowOcclusionStateVisible, True, False),  # some of it shows
+                                                    (0, False, False)):  # already closed, or not yet shown
+            window = unittest.mock.Mock()
+            window.isVisible.return_value = is_visible
+            window.occlusionState.return_value = occlusion_state
+            self.controller.window = window
+            self.controller.windowDidChangeOcclusionState_(unittest.mock.Mock(object=lambda: window))
+            self.assertEqual(window.close.called, closes)
+
+    def test_the_settings_window_opens_clear_of_a_shown_sidebar_and_stays_at_the_normal_level(self):
+        # A stand-in app controller, as in the top bar drag test: only the windows this looks at.
+        # The sidebar is 400 wide at the right edge of a 1500-point monitor; the settings window
+        # (540 wide) reaches into it.
+        for sidebar_is_shown, expected_frames in ((True, [(560, 200, 540, 600)]), (False, [])):
+            levels, frames = [], []
+            stand_in_app_controller = unittest.mock.Mock(settings={"list_window_is_always_on_top": False})
+            stand_in_app_controller.list_window_controller.window.isVisible.return_value = False
+            sidebar_controller = stand_in_app_controller.sidebar_controller
+            sidebar_controller.window.isVisible.return_value = sidebar_is_shown
+            sidebar_controller.window.frame.return_value = NSMakeRect(1100, 0, 400, 970)
+            sidebar_controller.placement = SidebarPlacement(0, "right", True)
+            sidebar_controller.screens = [{"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)}]
+            settings_window = stand_in_app_controller.settings_window_controller.window
+            settings_window.frame.return_value = NSMakeRect(900, 200, 540, 600)
+            settings_window.setFrame_display_.side_effect = lambda rect, display: frames.append(
+                (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height))
+            stand_in_app_controller.settings_window_controller.set_window_level = levels.append
+            AppController.move_the_settings_window_clear_of_the_sidebar(stand_in_app_controller)
+            AppController.place_the_settings_window_above_the_lists(stand_in_app_controller, False)
+            self.assertEqual(frames, expected_frames)
+            self.assertEqual(levels, [None])  # the normal level, so other apps' windows can cover it and close it
+
+    def test_a_number_being_typed_is_saved_when_the_window_closes(self):
+        window = self.controller.window  # built, not shown: no close button to click, so its close notification is sent
+        window.makeFirstResponder_(self.controller.sidebar_width_field)
+        self.controller.sidebar_width_field.currentEditor().setString_("555")
+        self.controller.windowWillClose_(unittest.mock.Mock(object=lambda: window))
+        self.assertEqual(self.owner.settings["sidebar_width"], 555)
+
     def test_column_checkboxes_choose_the_shown_columns_in_their_left_to_right_order(self):
         checkboxes = self.controller.column_checkboxes
         self.assertEqual([title for title in (checkbox.title() for checkbox in checkboxes.values())],
-                         ["State", "State Duration", "Used Token Count", "Created Time", "Time Since Created", "Memory Usage",
-                          "CPU Usage"])
+                         ["Status", "Time Since Last Status Change", "Tokens Used", "Created Time", "Time Since Created",
+                          "Memory Usage", "CPU Usage"])
+        self.assertEqual([checkbox.state() for checkbox in checkboxes.values()], [1, 1, 1, 0, 0, 0, 0])  # the defaults
         checkboxes["state"].setState_(0)
         self.controller.controlChanged_(checkboxes["state"])
         checkboxes["created_time"].setState_(1)
@@ -1369,7 +1668,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertEqual(self.owner.settings["shown_columns"], ["context_tokens", "created_time", "state_duration"])
 
     def test_text_fields_save_when_they_lose_focus_too(self):
-        self.assertTrue(self.controller.stuck_minutes_field.cell().sendsActionOnEndEditing())
+        self.assertTrue(self.controller.sidebar_width_field.cell().sendsActionOnEndEditing())
 
     def test_invalid_number_puts_the_current_value_back(self):
         self.controller.sidebar_width_field.setStringValue_("5")
@@ -1380,20 +1679,18 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_changes_made_elsewhere_show_in_the_open_window_and_are_kept(self):
         self.owner.settings = dict(self.owner.settings, show_as="sidebar", sidebar_width=650)
         self.controller.reflect_settings(self.owner.settings)
-        self.assertEqual([radio_button.state() for radio_button in self.controller.show_as_radio_buttons], [0, 1, 0])  # Sidebar
+        self.assertEqual(self.controller.show_as_popup.titleOfSelectedItem(), "Sidebar")
         self.assertEqual(self.controller.sidebar_width_field.stringValue(), "650")
-        self.controller.asking_count_checkbox.setState_(0)
-        self.controller.controlChanged_(self.controller.asking_count_checkbox)
+        self.controller.list_window_always_on_top_checkbox.setState_(1)
+        self.controller.controlChanged_(self.controller.list_window_always_on_top_checkbox)
         self.assertEqual((self.owner.settings["show_as"], self.owner.settings["sidebar_width"]), ("sidebar", 650))
-        self.assertFalse(self.owner.settings["icon_shows_asking_count"])
+        self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
 
-    def test_show_as_radio_buttons_save_the_choice(self):
-        self.assertEqual([radio_button.title() for radio_button in self.controller.show_as_radio_buttons],
-                         ["Window", "Sidebar", "Popup"])
-        self.assertEqual([radio_button.state() for radio_button in self.controller.show_as_radio_buttons], [0, 0, 1])
-        window_radio_button = self.controller.show_as_radio_buttons[0]
-        window_radio_button.setState_(1)
-        self.controller.controlChanged_(window_radio_button)
+    def test_the_show_as_popup_offers_the_three_ways_and_saves_the_choice(self):
+        self.assertEqual(self.controller.show_as_popup.itemTitles(), ["Window", "Sidebar", "Popup"])
+        self.assertEqual(self.controller.show_as_popup.titleOfSelectedItem(), "Popup")  # the default
+        self.controller.show_as_popup.selectItemWithTitle_("Window")
+        self.controller.controlChanged_(self.controller.show_as_popup)
         self.assertEqual(self.owner.settings["show_as"], "window")
 
     def test_always_on_top_keeps_the_list_window_above_other_windows(self):
@@ -1414,15 +1711,36 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         texts_top_to_bottom = [subview.stringValue() for subview in sorted(
             (subview for subview in rows_view.subviews() if isinstance(subview, NSTextField)),
             key=lambda subview: subview.frame().origin.y)]
-        for earlier, later in (("Show as:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Harnesses"),
-                               ("Harnesses", "Include:"), ("Include:", "Agent is stuck if it thinks for more than:")):
+        self.assertEqual(texts_top_to_bottom[0], "General")
+        for earlier, later in (("General", "Show as:"), ("Show as:", "Keyboard shortcut:"),
+                               ("Keyboard shortcut:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Display Columns"),
+                               ("Display Columns", "Harnesses"), ("Harnesses", "Use:")):
             self.assertLess(texts_top_to_bottom.index(earlier), texts_top_to_bottom.index(later), (earlier, later))
         self.assertTrue(self.controller.window.styleMask() & NSWindowStyleMaskResizable)
         self.assertIs(self.controller.window.contentView().documentView(), rows_view)
-        command_field = self.controller.launch_command_fields[0]
-        width_before = command_field.frame().size.width
+        width_before = rows_view.frame().size.width
         self.controller.window.setContentSize_((self.controller.window.contentView().frame().size.width + 160, 300))
-        self.assertEqual(command_field.frame().size.width, width_before + 160)  # the command fields widen with the window
+        self.assertEqual(rows_view.frame().size.width, width_before + 160)  # the rows follow the window's width
+
+    def test_the_command_fields_start_together_keep_their_width_and_scroll_a_longer_command(self):
+        command_fields = self.controller.launch_command_fields
+        self.controller.window.setContentSize_((self.controller.window.contentView().frame().size.width + 160, 300))
+        self.assertEqual({(command_field.frame().origin.x, command_field.frame().size.width) for command_field in command_fields},
+                         {(command_fields[0].frame().origin.x, LAUNCH_COMMAND_FIELD_WIDTH)})
+        self.assertTrue(all(command_field.cell().isScrollable() for command_field in command_fields))
+
+    def test_every_section_starts_one_blank_row_below_the_last_thing_shown_above_it(self):
+        subviews = list(self.controller.rows_view.subviews())  # flipped: y grows downward
+        section_titles = [subview for subview in subviews if isinstance(subview, NSTextField)
+                          and subview.stringValue() in ("Window", "Sidebar", "Display Columns", "Harnesses")]
+        self.assertEqual(len(section_titles), 4)
+        for section_title in section_titles:
+            # The hidden accessibility button and the empty placement note show nothing.
+            shown_above = [subview.frame().origin.y for subview in subviews if subview.frame().origin.y < section_title.frame().origin.y
+                           and not subview.isHidden() and not (isinstance(subview, NSTextField) and not subview.stringValue())]
+            # Two rows: the last thing's own row, then the blank one (a label's text sits 1 point lower than a control).
+            self.assertAlmostEqual(section_title.frame().origin.y - max(shown_above), 2 * ROW_SPACING, delta=1,
+                                   msg=section_title.stringValue())
 
     def test_the_settings_window_reports_its_frame_and_uses_a_saved_one(self):
         reported_frames = []
@@ -1458,12 +1776,6 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.owner.shortcut_lacks_permission = False
         self.controller.reflect_settings(self.owner.settings)
         self.assertTrue(button.isHidden())
-
-    def test_icon_color_popup_offers_auto_first_and_stores_lowercase_names(self):
-        self.assertEqual(self.controller.icon_color_popup.titleOfSelectedItem(), "Auto")
-        self.controller.icon_color_popup.selectItemWithTitle_("Orange")
-        self.controller.controlChanged_(self.controller.icon_color_popup)
-        self.assertEqual(self.owner.settings["icon_color"], "orange")
 
     def test_reflecting_settings_before_the_window_was_opened_does_nothing(self):
         controller = SettingsWindowController.alloc().initWithOwner_(self.owner)

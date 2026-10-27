@@ -72,8 +72,10 @@ class TalkToEachOtherTests(unittest.TestCase):
         self.paste_result = ActionResult(True)
         self.queued = []  # (conversation ID, message)
         self.claude_code_status_by_process_id = {}  # what Claude Code's session files say right now; none by default
+        self.claude_code_statuses_at_each_paste = []
 
         async def paste(app, session_id, message, adapter):
+            self.claude_code_statuses_at_each_paste.append(dict(self.claude_code_status_by_process_id))
             if self.paste_result is not None:
                 self.pasted.append((session_id, message))
             return self.paste_result
@@ -118,6 +120,7 @@ class TalkToEachOtherTests(unittest.TestCase):
             return await ask_to_talk(core, ["s1", "s3"])
         self.assertEqual(asyncio.run(run()), ActionResult(True))
         self.assertEqual([session_id for session_id, _ in self.pasted], ["s1"])
+        self.assertEqual(self.claude_code_statuses_at_each_paste, [{101: "idle"}])  # pasted only once Claude Code said idle
         self.claude_code_status_by_process_id[101] = "busy"
         core.agent_sessions["s1"]["adapter"] = ClaudeCodeAdapter()
         action_result = asyncio.run(core.handle_send_slash_command(
@@ -178,7 +181,7 @@ class TalkToEachOtherTests(unittest.TestCase):
         # would find the later one's conversation file.
         core.agent_sessions["s6"] = make_agent_session(StandInCodexAdapter(), 601, "Codex", "/p/codex")
         action_result = asyncio.run(ask_to_talk(core, ["s1", "s3"]))
-        self.assertIn("\"codex tests\": another Codex session runs in the same folder", action_result.message)
+        self.assertIn("\"codex tests\": another Codex session runs or ran in the same folder", action_result.message)
 
     def test_nothing_is_sent_when_fewer_than_two_can_take_part(self):
         action_result = asyncio.run(ask_to_talk(make_core(), ["s1", "s4"]))

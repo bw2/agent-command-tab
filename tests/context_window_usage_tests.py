@@ -5,10 +5,12 @@ import tempfile
 import time
 import unittest
 
-from agent_command_tab.context_window_usage import (find_claude_code_transcript, find_codex_conversation_files,
-                                                    format_token_count,
+from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens, find_claude_code_transcript,
+                                                    find_codex_conversation_files, format_token_count,
+                                                    read_claude_code_model_setting,
                                                     read_context_tokens_from_claude_code_transcript,
-                                                    read_context_tokens_from_codex_conversation_file, read_last_lines,
+                                                    read_context_tokens_from_codex_conversation_file,
+                                                    read_context_window_tokens_from_codex_conversation_file, read_last_lines,
                                                     read_last_records,
                                                     read_turn_started_at_from_claude_code_transcript,
                                                     read_turn_started_at_from_codex_conversation_file)
@@ -60,6 +62,27 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "response_item", "payload": {"type": "message"}},
         ])
         self.assertEqual(read_context_tokens_from_codex_conversation_file(path), 40546)
+
+    def test_codex_reports_its_context_window_with_its_usage(self):
+        path = self.write_lines("rollout_with_window.jsonl", [
+            {"type": "event_msg", "payload": {"type": "token_count",
+                                              "info": {"last_token_usage": {"total_tokens": 40546}, "model_context_window": 258400}}},
+            {"type": "event_msg", "payload": {"type": "token_count", "info": None}},  # a rate-limit-only report
+        ])
+        self.assertEqual(read_context_window_tokens_from_codex_conversation_file(path), 258400)
+
+    def test_a_claude_code_sessions_context_window_follows_the_model_it_was_started_with(self):
+        self.write_lines("config/settings.json", [{"model": "opus[1m]"}])
+        config_folder = os.path.join(self.folder.name, "config")
+        environment = {"ANTHROPIC_MODEL": "sonnet[1m]"}  # "ANTHROPIC_MODEL=sonnet[1m] claude"
+        self.assertEqual(read_claude_code_model_setting(["claude", "--model", "sonnet"], environment, config_folder), "sonnet")
+        self.assertEqual(read_claude_code_model_setting(["claude", "--model=haiku"], {}, config_folder), "haiku")
+        self.assertEqual(read_claude_code_model_setting(["claude", "--verbose"], environment, config_folder), "sonnet[1m]")
+        self.assertEqual(read_claude_code_model_setting(["claude", "--verbose"], {}, config_folder), "opus[1m]")
+        self.assertIsNone(read_claude_code_model_setting(["claude"], {}, os.path.join(self.folder.name, "no-config")))
+        self.assertEqual(choose_claude_code_context_window_tokens("opus[1m]", 40_000), 1_000_000)
+        self.assertEqual(choose_claude_code_context_window_tokens("sonnet", 40_000), 200_000)
+        self.assertEqual(choose_claude_code_context_window_tokens(None, 250_000), 1_000_000)  # more than 200k fits only in 1M
 
     def test_files_without_usage_or_missing_files_give_none(self):
         self.assertIsNone(read_context_tokens_from_claude_code_transcript(self.write_lines("empty.jsonl", [{"type": "user"}])))
@@ -122,7 +145,8 @@ class ContextWindowUsageTests(unittest.TestCase):
                          datetime.datetime(2026, 10, 19, 2, 43, 17, 92000, datetime.timezone.utc).timestamp())
 
     def test_token_counts(self):
-        self.assertEqual([format_token_count(count) for count in (425_300, 999, 1_234_567)], ["425k", "1k", "1.2M"])
+        self.assertEqual([format_token_count(count) for count in (425_300, 999, 999_499, 999_500, 1_234_567)],
+                         ["425k", "1k", "999k", "1.0M", "1.2M"])
 
 
 if __name__ == "__main__":

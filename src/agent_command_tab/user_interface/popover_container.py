@@ -1,4 +1,4 @@
-"""The panel around the list: the sort order, Hide Idle and expand or collapse all at the top; a Settings button at the bottom left and pause or resume all at the bottom right.
+"""The panel around the list: the sort order, Settings, Hide Idle and expand or collapse all at the top, then the column titles; pause or resume all at the bottom right.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
 sidebar and in the list window, each with its own list controller.
@@ -7,9 +7,9 @@ sidebar and in the list window, each with its own list controller.
 import math
 
 import objc
-from AppKit import (NSBezelStyleRecessed, NSBezelStyleRounded, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont,
+from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont,
                     NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
-                    NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
+                    NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
@@ -19,8 +19,9 @@ from agent_command_tab.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_N
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 
 # The Sort pop-up's titles for settings_store.LIST_SORT_ORDERS.
-LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabetically", "created_time": "Created Time",
-                          "memory_usage": "Memory Usage", "cpu_usage": "CPU Usage"}
+LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabetically", "context_percent": "Tokens",
+                          "created_time": "Created Time", "memory_usage": "Memory Usage",
+                          "cpu_usage": "CPU Usage", "state_duration": "Status Change"}
 POPOVER_WIDTH = 460  # before the first fit
 SMALLEST_POPOVER_WIDTH = 320
 LARGEST_SHARE_OF_SCREEN_WIDTH = 0.9
@@ -54,8 +55,12 @@ SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
 
 class ListPanelView(NSView):
     """The panel's root view: tells its controller when its size changes, so the top bar fits,
-    and when the top bar's empty space is dragged (the dropdown then detaches into the list
-    window; user request, 2026-10-19). The top bar's controls take their own clicks."""
+    and when the top bar's empty space is dragged (the dropdown or the sidebar then turns into
+    the list window; user requests, 2026-10-19 and 2026-10-22). The top bar's controls take
+    their own clicks."""
+
+    def acceptsFirstMouse_(self, event):
+        return True  # the sidebar's top bar drags from the first click, though the dashboard isn't the active app
 
     def resizeSubviewsWithOldSize_(self, old_size):
         objc.super(ListPanelView, self).resizeSubviewsWithOldSize_(old_size)
@@ -79,10 +84,12 @@ class ListPanelView(NSView):
 
 
 class ListPanelController(NSViewController):
-    """Holds a list controller's outline view in a scroll view, with a top and a bottom bar.
+    """Holds a list controller's outline view in a scroll view, with a top and a bottom bar and the
+    list controller's row of column titles between the top bar and the list.
 
     The owner is the list controller's owner (see AgentSessionListController); the panel also
-    calls its open_settings(), list_sort_order_chosen(list_sort_order),
+    calls its open_settings(), list_sort_order_chosen(list_sort_order, list_sort_order_is_reversed)
+    (as the list controller does when a column's title is clicked),
     idle_tabs_are_hidden_chosen(idle_tabs_are_hidden) and
     top_bar_dragged(list_panel_controller, start_point_on_screen).
     """
@@ -108,10 +115,17 @@ class ListPanelController(NSViewController):
         scroll_view.setDrawsBackground_(False)
         scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         root_view.addSubview_(scroll_view)
+        # The column titles, between the top bar and the list (user request, 2026-10-26), as tall
+        # as their titles need (fit_list_under_column_titles).
+        column_titles_row_view = self.list_controller.column_titles_row_view
+        column_titles_row_view.setFrame_(NSMakeRect(0, height - TOP_BAR_HEIGHT, width, 0))
+        column_titles_row_view.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
+        root_view.addSubview_(column_titles_row_view)
+        self.list_controller.on_column_titles_row_height_changed = self.fit_list_under_column_titles
 
-        # Top bar (user requests, milestone 2, 2026-10-19 to 2026-10-21): the sort order on the
-        # left; at the right, Hide Idle and one button that expands or collapses all (R8.1); a
-        # message line between them.
+        # Top bar (user requests, milestone 2, 2026-10-19 to 2026-10-26): the sort order on the
+        # left; Settings in the middle; at the right, Hide Idle and one button that expands or
+        # collapses all (R8.1); a message line after the sort order.
         self.sort_label = NSTextField.labelWithString_("Sort:")
         self.sort_label.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.sort_label.sizeToFit()
@@ -165,20 +179,24 @@ class ListPanelController(NSViewController):
         self.message_text_field.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.message_text_field)
 
-        # Bottom bar: a Settings button with its name, at the left, easier to see than an icon (R34),
-        # and one button that pauses or resumes all, at the right; a new window with an agent
-        # session (R13.1) is the "+" row at the end of the list (user requests, 2026-10-19 to 2026-10-21).
-        self.settings_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 22))
+        # A Settings button with its name, easier to see than an icon (R34), in the middle of the top
+        # bar, a gray pill like the controls beside it (user request, 2026-10-26; at the bottom left before).
+        self.settings_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
         self.settings_button.setTitle_("Settings")
-        self.settings_button.setBezelStyle_(NSBezelStyleRounded)
+        self.settings_button.setBezelStyle_(NSBezelStyleRecessed)
+        self.settings_button.setShowsBorderOnlyWhileMouseInside_(False)
         self.settings_button.setControlSize_(NSControlSizeSmall)
         self.settings_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.settings_button.setTarget_(self)
         self.settings_button.setAction_("settingsClicked:")
         self.settings_button.sizeToFit()
-        self.settings_button.setFrameOrigin_((PANEL_SIDE_MARGIN, (BOTTOM_BAR_HEIGHT - self.settings_button.frame().size.height) / 2))
-        self.settings_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMaxXMargin)  # stays at the bottom left
+        self.settings_button.setFrame_(NSMakeRect(  # fit_top_bar_to_width sets x
+            0, height - TOP_BAR_HEIGHT + 3, self.settings_button.frame().size.width, self.list_sort_order_popup.frame().size.height))
+        self.settings_button.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.settings_button)
+
+        # Bottom bar: one button that pauses or resumes all, at the right; a new window with an agent
+        # session (R13.1) is the "+" row at the end of the list (user requests, 2026-10-19 to 2026-10-21).
         self.pause_or_resume_all_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(
             width - PANEL_SIDE_MARGIN - button_width, (BOTTOM_BAR_HEIGHT - button_height) / 2, button_width, button_height))
         self.pause_or_resume_all_button.setBordered_(False)
@@ -190,28 +208,54 @@ class ListPanelController(NSViewController):
         root_view.controller = self
         self.update_top_and_bottom_bar_buttons()
         self.fit_top_bar_to_width()
+        self.fit_list_under_column_titles()
+
+    @objc.python_method
+    def fit_list_under_column_titles(self):
+        """Gives the row of column titles the height its titles need (none, hidden, while no
+        titled column shows) and the list the room below it."""
+        bounds = self.view().bounds()
+        column_titles_row_height = self.list_controller.measure_column_titles_row_height()
+        list_top = bounds.size.height - TOP_BAR_HEIGHT - column_titles_row_height
+        column_titles_row_view = self.list_controller.column_titles_row_view
+        column_titles_row_view.setFrame_(NSMakeRect(0, list_top, bounds.size.width, column_titles_row_height))
+        column_titles_row_view.setHidden_(not column_titles_row_height)  # its titles would show above a 0-high row
+        self.list_controller.outline_view.enclosingScrollView().setFrame_(
+            NSMakeRect(0, BOTTOM_BAR_HEIGHT, bounds.size.width, list_top - BOTTOM_BAR_HEIGHT))
 
     @objc.python_method
     def fit_top_bar_to_width(self):
-        """Puts the shown buttons at the right end (expand or collapse all rightmost, then Hide
-        Idle) and fits the sort control between the panel's left edge and them: with its "Sort:"
-        label when there is room, without it in a narrow sidebar, and then with the pop-up
-        narrowed, cutting its title short, since it is the only place to choose the sort order
-        (the dropdown, at least 320 points wide, always shows both in full). The pop-up hides only
-        below SMALLEST_SORT_POPUP_WIDTH, narrower than the sidebar can be. The message line takes
-        the room left before the buttons, so it never covers them; while it shows a message
-        (iTerm2 can't be reached, so there are no rows to sort or hide) the sort control and the
-        Hide Idle button step aside for it."""
+        """Puts the expand or collapse all button at the right end, the Hide Idle button just left
+        of it (user request, 2026-10-26; in the middle of the bar before) and the Settings button
+        in the middle of the bar (user request, 2026-10-26), though never over the whole sort
+        control on its left nor past the Hide Idle button on its right: in a narrow dropdown it
+        sits just after the sort control, and in a narrow sidebar beside Hide Idle. The sort
+        control fits between the panel's left edge and the Settings button: with its "Sort:" label
+        when there is room, without it in a narrower one, and then with the pop-up narrowed,
+        cutting its title short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar
+        narrower than about 250 points, where the column titles still sort the list). The message
+        line takes the room left before the buttons, so it never covers them; while it shows a
+        message (iTerm2 can't be reached, so there are no rows to sort or hide) the sort control
+        and the Hide Idle button step aside for it, and the Settings button moves to the right end."""
         label_x, label_width = self.sort_label.frame().origin.x, self.sort_label.frame().size.width
         popup_frame = self.list_sort_order_popup.frame()
         is_showing_a_message = bool(self.message_text_field.stringValue())
         self.idle_tabs_button.setHidden_(is_showing_a_message)
-        right_end_x = self.view().bounds().size.width - PANEL_SIDE_MARGIN
-        shown_buttons = [button for button in (self.expand_or_collapse_all_button, self.idle_tabs_button)
-                         if not button.isHidden()]
-        for index, button in enumerate(shown_buttons):  # right to left
-            right_end_x -= button.frame().size.width + (GAP_BETWEEN_TOP_BAR_BUTTONS if index else 0)
-            button.setFrameOrigin_((right_end_x, button.frame().origin.y))
+        bar_width = self.view().bounds().size.width
+        right_end_x = bar_width - PANEL_SIDE_MARGIN  # then the left end of the leftmost button placed
+        gap_before_the_buttons_placed = 0
+        for button in (self.expand_or_collapse_all_button, self.idle_tabs_button):  # side by side from the right end
+            if not button.isHidden():
+                right_end_x -= gap_before_the_buttons_placed + button.frame().size.width
+                button.setFrameOrigin_((right_end_x, button.frame().origin.y))
+                gap_before_the_buttons_placed = GAP_BETWEEN_TOP_BAR_BUTTONS
+        settings_button_width = self.settings_button.frame().size.width
+        settings_button_x_at_the_right = right_end_x - gap_before_the_buttons_placed - settings_button_width
+        whole_sort_control_right_end_x = label_x + label_width + 2 + self.sort_popup_width_for_its_widest_title
+        right_end_x = (settings_button_x_at_the_right if is_showing_a_message
+                       else min(max((bar_width - settings_button_width) / 2, whole_sort_control_right_end_x + 2),
+                                settings_button_x_at_the_right))
+        self.settings_button.setFrameOrigin_((right_end_x, self.settings_button.frame().origin.y))
         room_right_edge = right_end_x - 2
         popup_x_after_label = label_x + label_width + 2
         label_fits = not is_showing_a_message and popup_x_after_label + self.sort_popup_width_for_its_widest_title <= room_right_edge
@@ -263,14 +307,15 @@ class ListPanelController(NSViewController):
             self.fit_top_bar_to_width()
 
     def listSortOrderChosen_(self, sender):
-        self.list_controller.owner.list_sort_order_chosen(read_popup_choice(sender))
+        self.list_controller.owner.list_sort_order_chosen(read_popup_choice(sender), False)  # in its first direction
 
     @objc.python_method
-    def show_list_sort_order(self, list_sort_order):
-        """Shows the rows in this order and the pop-up with it chosen (the dropdown and the sidebar share one choice)."""
+    def show_list_sort_order(self, list_sort_order, is_reversed):
+        """Shows the rows in this order (reversed when is_reversed) and the pop-up with it chosen
+        (the dropdown, the sidebar and the list window share one choice)."""
         self.view()
         select_popup_choice(self.list_sort_order_popup, list_sort_order)
-        self.list_controller.set_list_sort_order(list_sort_order)
+        self.list_controller.set_list_sort_order(list_sort_order, is_reversed)
 
     def idleTabsButtonClicked_(self, sender):
         self.list_controller.owner.idle_tabs_are_hidden_chosen(not self.list_controller.idle_tabs_are_hidden)
@@ -308,7 +353,7 @@ class ListPanelController(NSViewController):
         window = self.view().window()
         screen = (window.screen() if window is not None else None) or NSScreen.screens()[0]
         usable_frame = screen.visibleFrame()
-        bars_height = TOP_BAR_HEIGHT + BOTTOM_BAR_HEIGHT
+        bars_height = TOP_BAR_HEIGHT + BOTTOM_BAR_HEIGHT + self.list_controller.measure_column_titles_row_height()  # and the column titles
         list_height = self.list_controller.measure_fully_expanded_list_height()  # the list has no spacing between rows
         largest_list_height = usable_frame.size.height - bars_height - SPACE_FOR_POPOVER_ARROW_AND_MARGIN
         list_height = min(max(list_height + LIST_BOTTOM_PADDING, SMALLEST_LIST_HEIGHT), largest_list_height)

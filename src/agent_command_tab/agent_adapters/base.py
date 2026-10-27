@@ -117,6 +117,18 @@ class AgentToolAdapter:
         The core calls this, and read_turn_started_at, in a worker thread."""
         return None
 
+    def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
+        """Returns the size of the session's context window, for the share of it in use, or None
+        if unknown. The core calls this in a worker thread, after read_context_tokens.
+
+        Args:
+            conversation_file_path: The conversation's file.
+            agent_process_id: The agent's process ID.
+            claude_agent_record: The process's record from `claude agents --json`, or None.
+            context_tokens: What read_context_tokens returned.
+        """
+        return None
+
     def read_turn_started_at(self, conversation_file_path):
         """Returns when the current turn began, from the conversation file, or None."""
         return None

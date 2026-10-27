@@ -2,7 +2,9 @@
 
 1. Docked area: opens a window covering most of the screen, reserves a 400-point strip at the
    right edge through the core, checks the window was made narrower so it ends at the strip,
-   then ends the reservation and checks the window got its old frame back.
+   then ends the reservation and checks the window got its old frame back. Your own iTerm2
+   windows reaching into the strip are narrowed and given their room back too, also when a
+   step fails.
 2. Move to monitor: with only one display here, tells the core that the screen's left and right
    halves are two monitors, puts the window on the left half, moves it to the "right monitor"
    and checks it now lies within the right half with its size kept.
@@ -58,16 +60,20 @@ def main():
 
     wide_frame = (visible_x + 40, visible_y + 60, visible_width - 80, visible_height - 120)
     run_on_core_loop(open_window(wide_frame))
+    results = {}
     try:
         time.sleep(1.5)
         before = run_on_core_loop(read_frame())
         strip = (visible_x + visible_width - 400, visible_y, 400, visible_height)
-        connection_thread.send_reserved_screen_area(strip)
+        connection_thread.send_reserved_screen_area({"frame": strip, "edge": "right",
+                                                     "monitor_visible_frame": real_monitors[0]["visible_frame"]})
         docked = wait_for_frame(lambda frame: frame[0] + frame[2] <= strip[0] + 1)
-        print("window ends at the docked strip:", docked[0] + docked[2] <= strip[0] + 1, "| before", before, "| docked", docked)
+        print("before", before, "| docked", docked)
+        results["window ends at the docked strip"] = docked[0] + docked[2] <= strip[0] + 1
         connection_thread.send_reserved_screen_area(None)
         restored = wait_for_frame(lambda frame: abs(frame[2] - before[2]) <= 20)
-        print("window got its room back:", abs(restored[2] - before[2]) <= 20, "| restored", restored)
+        print("restored", restored)
+        results["window got its room back"] = abs(restored[2] - before[2]) <= 20
 
         half_width = visible_width / 2
         left_half = {"monitor_id": "left-half", "name": "Left half", "frame": (visible_x, visible_y, half_width, visible_height),
@@ -82,15 +88,20 @@ def main():
         connection_thread.submit_action(ActionRequest("move_window_to_monitor", {"window_id": state["window"].window_id},
                                                       {"monitor_id": "right-half"}))
         moved = wait_for_frame(lambda frame: frame[0] >= visible_x + half_width - 1)
-        print("window moved into the right half with its size kept:",
-              moved[0] >= visible_x + half_width - 1 and abs(moved[2] - placed[2]) <= 20, "| placed", placed, "| moved", moved)
+        print("placed", placed, "| moved", moved)
+        results["window moved into the right half with its size kept"] = (moved[0] >= visible_x + half_width - 1
+                                                                          and abs(moved[2] - placed[2]) <= 20)
     finally:
+        for check, passed in results.items():
+            print(("PASS  " if passed else "FAIL  ") + check)
+        # Also when a step failed: your own windows reaching into the strip were narrowed too.
+        connection_thread.give_room_back_and_wait(15)
         connection_thread.send_monitors(real_monitors)
 
         async def close():
             await state["window"].async_close(force=True)
         run_on_core_loop(close())
-    return 0
+    return 0 if all(results.values()) else 1
 
 
 if __name__ == "__main__":

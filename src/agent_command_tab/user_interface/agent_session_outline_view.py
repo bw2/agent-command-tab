@@ -16,17 +16,20 @@ How snapshots are applied without breaking expansion, renames or drags:
 import time
 
 import objc
-from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundStyleNormal, NSBezierPath, NSColor,
+from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundStyleNormal, NSBezierPath, NSColor, NSCursor,
                     NSDragOperationMove, NSDragOperationNone, NSEventModifierFlagControl, NSFont, NSFontAttributeName,
-                    NSFontWeightBold, NSFontWeightRegular, NSForegroundColorAttributeName, NSGraphicsContext,
+                    NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSForegroundColorAttributeName,
+                    NSGraphicsContext,
                     NSImageOnly, NSImageScaleNone,
                     NSImageView, NSInsetRect, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
                     NSMakeRect, NSMenu, NSMenuItem, NSMutableAttributedString, NSMutableParagraphStyle, NSOutlineView,
                     NSParagraphStyleAttributeName, NSPasteboardItem,
                     NSTableCellView, NSTableColumn, NSTableColumnAutoresizingMask, NSTableRowView,
                     NSTableViewLastColumnOnlyAutoresizingStyle, NSTableViewSelectionHighlightStyleRegular,
-                    NSTableViewStylePlain, NSTextAlignmentRight, NSTextField, NSWindowStyleMaskNonactivatingPanel,
-                    NSZeroRect)
+                    NSTableViewStylePlain, NSTextAlignmentCenter, NSTextAlignmentLeft, NSTextAlignmentRight, NSTextField,
+                    NSTrackingActiveAlways, NSTrackingArea, NSTrackingCursorUpdate, NSTrackingInVisibleRect,
+                    NSTrackingMouseEnteredAndExited, NSTrackingMouseMoved, NSView,
+                    NSWindowStyleMaskNonactivatingPanel, NSZeroRect)
 from Foundation import NSMutableIndexSet, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 from agent_command_tab.agent_adapters import (list_agent_tool_names_whose_sessions_can_talk_to_each_other,
@@ -42,7 +45,9 @@ from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_i
 from agent_command_tab.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
 from agent_command_tab.user_interface.named_colors import build_color_from_name
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
-from agent_command_tab.user_interface.row_text_rendering import (RowTextParts, build_agent_session_row_text_parts,
+from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
+                                                                 LONGEST_TEXT_BY_COLUMN_FIELD_NAME, RowTextParts,
+                                                                 build_agent_session_row_text_parts,
                                                                  build_dot_text, build_monitor_row_text_parts,
                                                                  build_tree_connector_text,
                                                                  build_window_row_text_parts)
@@ -73,7 +78,8 @@ GAP_BEFORE_DETAILS = 8
 GAP_BETWEEN_COLUMNS = 6  # between the columns at a tab row's right edge
 ROW_RIGHT_MARGIN = 8
 TEXT_FIELD_INSETS = 5  # a label's text sits a few points inside its field
-ROOM_FOR_GROWING_DETAILS = "0000"  # elapsed times grow ("9m" becomes "10m") without a refit
+# A collapsed window's state counts can grow ("9 idle" becomes "10 idle") without widening the dropdown.
+ROOM_FOR_GROWING_DETAILS = "0000"
 SECONDS_TO_HOLD_BEFORE_PEEKING = 0.15
 SMALLEST_TAB_NAME_WIDTH = 80  # a narrower sidebar or window drops columns (COLUMN_NAMES_IN_DROP_ORDER)
 # A tab row's columns at its right edge, left to right: settings_store.LIST_COLUMNS, which the
@@ -91,6 +97,31 @@ TAB_ROW_COLUMNS = [
     ("state_duration", "elapsed_time_text"),
 ]
 LEFT_ALIGNED_COLUMN_NAMES = {"state"}
+# The names shown over the columns, in a row between the top bar and the list (user request,
+# 2026-10-26), with "Name" at the left. A name wider than its column's texts is on two lines (the
+# user's choice over one line in wider columns, or names cut short), so its column widens only to
+# the longer line. The icon column has none.
+COLUMN_TITLES = {
+    "context_tokens": "Tokens", "created_time": "Created", "existence_duration": "Time Since\nCreated",
+    "memory_usage": "Memory", "cpu_usage": "CPU", "agent_tool_icon": "", "state": "Status",
+    "state_duration": "Time Since Last\nStatus Change",  # "Time" added 2026-10-26 (user request)
+}
+NAME_COLUMN_TITLE = "Name"
+# The sort order (list_sorting.py) a click on a title chooses, by the title's column ("name" for
+# Name; user requests, 2026-10-26). Tokens sorts by the share of the context window in use (user
+# request, 2026-10-26); Created and Time Since Created both sort by when the agent started.
+LIST_SORT_ORDER_BY_TITLE_NAME = {
+    "name": "alphabet", "context_tokens": "context_percent", "created_time": "created_time", "existence_duration": "created_time", "memory_usage": "memory_usage",
+    "cpu_usage": "cpu_usage", "state": "activity", "state_duration": "state_duration",
+}
+# The sorted column's title ends in an arrow, as in Finder: up while its values go from the
+# smallest at the top (A, the shortest time) to the largest, down while they go from the largest
+# (the fullest context window, the newest start, the most urgent state). These titles' orders start smallest first.
+TITLE_NAMES_WHOSE_ORDER_STARTS_ASCENDING = {"name", "existence_duration", "state_duration"}
+SORT_ARROWS_BY_IS_ASCENDING = {True: " ▴", False: " ▾"}  # a space before the arrow (user request, 2026-10-26)
+COLUMN_TITLE_FONT_SIZE = 11
+COLUMN_TITLE_LINE_HEIGHT = 14
+COLUMN_TITLES_ROW_PADDING = 2  # above and below the titles
 # A narrow sidebar or window drops columns in this order to keep room for names (the dot's color still shows the state).
 COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usage", "cpu_usage", "context_tokens",
                               "agent_tool_icon", "state"]
@@ -296,6 +327,127 @@ def make_row_icon_button():
     return button
 
 
+def place_columns_from_the_right(right_edge, column_widths):
+    """Returns {column name: (x, width)} for the TAB_ROW_COLUMNS with a width (a hidden column's
+    is 0), placed right to left from right_edge with GAP_BETWEEN_COLUMNS between them: where a tab
+    row shows them, and the row of column titles their titles."""
+    placed_columns = {}
+    for column_name, _ in reversed(TAB_ROW_COLUMNS):
+        if column_widths[column_name] > 0:
+            right_edge -= column_widths[column_name]
+            placed_columns[column_name] = (right_edge, column_widths[column_name])
+            right_edge -= GAP_BETWEEN_COLUMNS
+    return placed_columns
+
+
+class ColumnTitlesRowView(NSView):
+    """The row of column titles between the top bar and the list (user request, 2026-10-26):
+    "Name" centered over the names (user request, 2026-10-26), and each shown column's title over it, aligned as its texts are, with its
+    last line just above the first row. The list controller fills it and sets the columns' widths;
+    the columns are placed as a tab row places them, from the outline view's right edge, which is
+    left of this row's while the list shows a scroller that takes room. A click on a title, or
+    anywhere above its column, reports the title's name ("name", or the column's) to
+    on_title_clicked, which sorts the list. The pointer is the pointing hand where a click sorts
+    (user request, 2026-10-26), set as PointingHandButton sets it: from a cursor rect in the
+    dropdown and the list window, and from a tracking area in the sidebar, which turns cursor
+    rects off."""
+
+    def initWithOutlineView_(self, outline_view):
+        self = objc.super(ColumnTitlesRowView, self).initWithFrame_(NSMakeRect(0, 0, 400, 0))
+        if self is None:
+            return None
+        self.addTrackingArea_(NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            NSZeroRect, NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingCursorUpdate
+            | NSTrackingActiveAlways | NSTrackingInVisibleRect, self, None))
+        self.outline_view = outline_view
+        self.name_title_text_field = make_label_text_field()
+        self.column_title_text_fields = {column_name: make_multiline_label_text_field(2) for column_name, _ in TAB_ROW_COLUMNS}
+        for subview in (self.name_title_text_field, *self.column_title_text_fields.values()):
+            self.addSubview_(subview)
+        self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}  # set by the list controller
+        self.room_for_the_previews_button = 0  # set by the list controller; the column at the right edge has no title
+        self.on_title_clicked = lambda title_name: None  # set by the list controller
+        self.title_name_under_press = None
+        return self
+
+    def acceptsFirstMouse_(self, event):
+        return True  # the sidebar's titles sort from the first click, though the dashboard isn't the active app
+
+    def hitTest_(self, point):
+        # The row takes the clicks on its titles itself, rather than the labels.
+        return self if objc.super(ColumnTitlesRowView, self).hitTest_(point) is not None else None
+
+    def mouseDown_(self, event):
+        self.title_name_under_press = self.find_title_name_at(self.convertPoint_fromView_(event.locationInWindow(), None))
+
+    def mouseUp_(self, event):
+        """Reports a click: the button went down and came up above the same title."""
+        title_name = self.find_title_name_at(self.convertPoint_fromView_(event.locationInWindow(), None))
+        if title_name is not None and title_name == self.title_name_under_press:
+            self.on_title_clicked(title_name)
+        self.title_name_under_press = None
+
+    @objc.python_method
+    def list_titles_that_sort(self):
+        """Returns [(title name, its label's frame)] for the shown titles that sort."""
+        return [(title_name, text_field.frame())
+                for title_name, text_field in [("name", self.name_title_text_field), *self.column_title_text_fields.items()]
+                if title_name in LIST_SORT_ORDER_BY_TITLE_NAME and not text_field.isHidden()]
+
+    @objc.python_method
+    def find_title_name_at(self, point):
+        """Returns the name ("name", or the column's) of the shown title that sorts and whose
+        column holds point's x, or None."""
+        for title_name, frame in self.list_titles_that_sort():
+            if frame.origin.x <= point.x < frame.origin.x + frame.size.width:
+                return title_name
+        return None
+
+    def resetCursorRects(self):
+        if not self.isHiddenOrHasHiddenAncestor():
+            for _, frame in self.list_titles_that_sort():
+                self.addCursorRect_cursor_(NSMakeRect(frame.origin.x, 0, frame.size.width, self.bounds().size.height),
+                                           NSCursor.pointingHandCursor())
+
+    @objc.python_method
+    def show_the_pointer_at(self, point):
+        """Shows the pointing hand above a title that sorts, and the arrow elsewhere in the row."""
+        if not self.isHiddenOrHasHiddenAncestor() and self.find_title_name_at(point) is not None:
+            NSCursor.pointingHandCursor().set()
+        else:
+            NSCursor.arrowCursor().set()
+
+    def cursorUpdate_(self, event):
+        self.show_the_pointer_at(self.convertPoint_fromView_(self.window().mouseLocationOutsideOfEventStream(), None))
+
+    def mouseEntered_(self, event):
+        self.show_the_pointer_at(self.convertPoint_fromView_(event.locationInWindow(), None))
+
+    def mouseMoved_(self, event):
+        self.show_the_pointer_at(self.convertPoint_fromView_(event.locationInWindow(), None))
+
+    def mouseExited_(self, event):
+        NSCursor.arrowCursor().set()
+
+    def layout(self):
+        objc.super(ColumnTitlesRowView, self).layout()
+        placed_columns = place_columns_from_the_right(
+            self.outline_view.frame().size.width - ROW_RIGHT_MARGIN - self.room_for_the_previews_button, self.column_widths)
+        # "Name" is centered over the room the rows' names have, up to the columns.
+        names_right_edge = min((column_x for column_x, _ in placed_columns.values()), default=ROW_LEFT_MARGIN) - GAP_BEFORE_DETAILS
+        name_title_size = self.name_title_text_field.fittingSize()
+        self.name_title_text_field.setFrame_(NSMakeRect(ROW_LEFT_MARGIN, COLUMN_TITLES_ROW_PADDING,
+                                                        max(names_right_edge - ROW_LEFT_MARGIN, name_title_size.width),
+                                                        name_title_size.height))
+        for column_name, text_field in self.column_title_text_fields.items():
+            text_field.setHidden_(column_name not in placed_columns)
+            if column_name in placed_columns:
+                column_x, column_width = placed_columns[column_name]
+                text_field.setFrame_(NSMakeRect(column_x, COLUMN_TITLES_ROW_PADDING, column_width, text_field.fittingSize().height))
+        if self.window() is not None:
+            self.window().invalidateCursorRectsForView_(self)  # the hand's areas follow the titles
+
+
 class AgentListRowView(NSTableCellView):
     """A row: [tree connector] [arrow] [dot] [name] [details] ... then, on a tab row, the
     TAB_ROW_COLUMNS at the right edge. The arrow opens or closes the row (a monitor's or
@@ -303,7 +455,8 @@ class AgentListRowView(NSTableCellView):
     controller sets each column's width, 0 for a hidden column, so the columns line up from row
     to row. A tab row whose preview is open has two more lines, [tree lines] [preview], with the
     preview starting under the name. An expanded window row with previews ends in a button that
-    opens or closes them all."""
+    opens or closes them all, in a column of its own at the right edge: the tab rows' columns
+    end room_for_the_previews_button before it (user request, 2026-10-26)."""
 
     def initWithFrame_(self, frame):
         self = objc.super(AgentListRowView, self).initWithFrame_(frame)
@@ -319,6 +472,7 @@ class AgentListRowView(NSTableCellView):
         self.column_views = {column_name: make_label_text_field() if parts_field_name else icon_image_view
                              for column_name, parts_field_name in TAB_ROW_COLUMNS}
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}  # set by the list controller
+        self.room_for_the_previews_button = 0  # set by the list controller
         self.preview_connector_text_field = make_multiline_label_text_field(PREVIEW_LINE_COUNT)
         self.preview_text_field = make_multiline_label_text_field(PREVIEW_LINE_COUNT)
         self.preview_toggle_button = make_row_icon_button()
@@ -365,20 +519,20 @@ class AgentListRowView(NSTableCellView):
                 button_x, preview_area_height + (main_line_height - PREVIEW_BUTTON_SIZE) / 2, PREVIEW_BUTTON_SIZE, PREVIEW_BUTTON_SIZE))
             text_right_limit = button_x - GAP_BEFORE_DETAILS
         row_has_state = bool(self.column_views["state"].stringValue())  # tab rows only
-        column_right_edge = bounds.size.width - ROW_RIGHT_MARGIN
-        for column_name, parts_field_name in reversed(TAB_ROW_COLUMNS):  # right to left
-            column_view, column_width = self.column_views[column_name], self.column_widths[column_name]
-            is_shown = row_has_state and column_width > 0
-            column_view.setHidden_(not is_shown)
-            if not is_shown:
+        placed_columns = (place_columns_from_the_right(bounds.size.width - ROW_RIGHT_MARGIN - self.room_for_the_previews_button,
+                                                       self.column_widths) if row_has_state else {})
+        for column_name, parts_field_name in TAB_ROW_COLUMNS:
+            column_view = self.column_views[column_name]
+            column_view.setHidden_(column_name not in placed_columns)
+            if column_name not in placed_columns:
                 continue
-            column_x = column_right_edge - column_width
+            column_x, column_width = placed_columns[column_name]
             if parts_field_name is None:  # the icon, centered in the row's main line
                 column_view.setFrame_(NSMakeRect(column_x, preview_area_height, column_width, main_line_height))
             else:
                 column_view.setFrame_(NSMakeRect(column_x, y, column_width, text_height))
-            text_right_limit = column_x - GAP_BEFORE_DETAILS
-            column_right_edge = column_x - GAP_BETWEEN_COLUMNS
+        if placed_columns:
+            text_right_limit = min(column_x for column_x, _ in placed_columns.values()) - GAP_BEFORE_DETAILS
         available_width = max(text_right_limit - name_x, 0)
         name_fitting_width = self.name_text_field.fittingSize().width + NAME_FIELD_PADDING
         details_fitting_width = self.details_text_field.fittingSize().width
@@ -422,6 +576,8 @@ class AgentSessionListController(NSObject):
             session right after it.
         find_launch_command(agent_tool_name): the tool's launch command from the settings, or "".
         start_peek(session_id), end_peek(): a tab row is held (shown for a moment), then released.
+        list_sort_order_chosen(list_sort_order, list_sort_order_is_reversed): a column's title
+            was clicked; the owner shows the order in every list (set_list_sort_order).
         ask_for_note_asking_agent_sessions_to_talk_to_each_other(agent_session_entries,
             left_out_agent_session_entries): shows the Talk to Each Other window; returns the
             note the user may have edited, or None for Cancel.
@@ -438,6 +594,8 @@ class AgentSessionListController(NSObject):
         # Called after every snapshot and expansion change; the panel sets it so its top bar's
         # buttons (expand or collapse all, pause or resume all) follow along.
         self.on_snapshot_or_expansion_changed = lambda: None
+        # Called when the row of column titles needs another height; the panel sets it so the list moves under it.
+        self.on_column_titles_row_height_changed = lambda: None
         self.items_by_key = {}
         self.top_level_items = []
         self.new_window_row_item = OutlineListItem.alloc().initWithKind_itemId_("new_window", "new_window")
@@ -465,6 +623,13 @@ class AgentSessionListController(NSObject):
         self.regular_font = NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, NSFontWeightRegular)
         self.bold_font = NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, NSFontWeightBold)
         self.preview_font = NSFont.monospacedSystemFontOfSize_weight_(PREVIEW_FONT_SIZE, NSFontWeightRegular)
+        self.column_title_font = NSFont.monospacedSystemFontOfSize_weight_(COLUMN_TITLE_FONT_SIZE, NSFontWeightMedium)
+        # The longer line of each column's title with a sort arrow after it: a shown column is at
+        # least this wide, so sorting by another column doesn't change the columns' widths.
+        self.column_title_widths = {column_name: max(self.measure_text_width(line, self.column_title_font)
+                                                     for sort_arrow in SORT_ARROWS_BY_IS_ASCENDING.values()
+                                                     for line in (COLUMN_TITLES[column_name] + sort_arrow).split("\n"))
+                                    for column_name, _ in TAB_ROW_COLUMNS}
         self.right_aligned_paragraph_style = NSMutableParagraphStyle.alloc().init()
         self.right_aligned_paragraph_style.setAlignment_(NSTextAlignmentRight)
         self.right_aligned_paragraph_style.setLineBreakMode_(NSLineBreakByTruncatingTail)
@@ -477,11 +642,17 @@ class AgentSessionListController(NSObject):
         self.agent_tool_icons_by_name = build_agent_tool_icons()
         # Each TAB_ROW_COLUMNS column's width, 0 while it is hidden or no row has text for it (measure_right_columns).
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}
+        # The room the window rows' previews button takes at the right edge, in a column of its
+        # own, while a tab has a preview (measure_right_columns; user request, 2026-10-26).
+        self.room_for_the_previews_button = 0
         self.width_is_set_by_the_user = False  # True for the sidebar's and the list window's lists; the dropdown fits its width to the rows
-        self.list_sort_order = "manual"  # set by the Sort pop-up (list_sorting.py)
+        self.list_sort_order = "manual"  # set by the Sort pop-up or a column title's click (list_sorting.py)
+        self.list_sort_order_is_reversed = False
         self.idle_tabs_are_hidden = False  # set by the Hide Idle / Show Idle button
         self.shown_columns = list(DEFAULT_SETTINGS["shown_columns"])  # set from the settings (settings_store.LIST_COLUMNS)
         self.outline_view = self.build_outline_view()
+        self.column_titles_row_view = self.build_column_titles_row_view()
+        self.fill_column_titles()
         self.refresh_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.6, self, "refreshTimerFired:", None, True)
         return self
@@ -520,6 +691,34 @@ class AgentSessionListController(NSObject):
         outline_view.setMenu_(menu)
         return outline_view
 
+    @objc.python_method
+    def build_column_titles_row_view(self):
+        """Returns the row of column titles, whose clicks sort the list (column_title_clicked)."""
+        row_view = ColumnTitlesRowView.alloc().initWithOutlineView_(self.outline_view)
+        row_view.on_title_clicked = self.column_title_clicked
+        return row_view
+
+    @objc.python_method
+    def fill_column_titles(self):
+        """Puts the titles in the row of column titles, those of the columns the list is sorted by
+        ending in an arrow (SORT_ARROWS_BY_IS_ASCENDING); update_column_titles_row sets the widths."""
+        row_view = self.column_titles_row_view
+        names_titles_alignments_and_text_fields = [("name", NAME_COLUMN_TITLE, NSTextAlignmentCenter, row_view.name_title_text_field)] + [
+            (column_name, COLUMN_TITLES[column_name],
+             NSTextAlignmentLeft if column_name in LEFT_ALIGNED_COLUMN_NAMES else NSTextAlignmentRight,
+             row_view.column_title_text_fields[column_name]) for column_name, _ in TAB_ROW_COLUMNS]
+        for title_name, title, alignment, text_field in names_titles_alignments_and_text_fields:
+            if self.list_sort_order != "manual" and LIST_SORT_ORDER_BY_TITLE_NAME.get(title_name) == self.list_sort_order:
+                title += SORT_ARROWS_BY_IS_ASCENDING[
+                    (title_name in TITLE_NAMES_WHOSE_ORDER_STARTS_ASCENDING) != self.list_sort_order_is_reversed]
+            paragraph_style = NSMutableParagraphStyle.alloc().init()
+            paragraph_style.setAlignment_(alignment)
+            paragraph_style.setMinimumLineHeight_(COLUMN_TITLE_LINE_HEIGHT)
+            paragraph_style.setMaximumLineHeight_(COLUMN_TITLE_LINE_HEIGHT)
+            text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(title, {
+                NSFontAttributeName: self.column_title_font, NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+                NSParagraphStyleAttributeName: paragraph_style}))
+
     # ----- applying snapshots -----
 
     @objc.python_method
@@ -540,7 +739,8 @@ class AgentSessionListController(NSObject):
                                 monitor_entry.windows, self.list_sort_order,
                                 list_ranked_agent_sessions=lambda window_entry: [
                                     entry for entry in window_entry.agent_sessions
-                                    if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden)])
+                                    if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden)],
+                                is_reversed=self.list_sort_order_is_reversed)
                             if not window_row_is_hidden(window_entry, self.idle_tabs_are_hidden)]
             if show_monitor_rows:
                 monitor_item = self.find_or_make_item("monitor", monitor_entry.monitor_id, monitor_entry, live_keys)
@@ -571,18 +771,33 @@ class AgentSessionListController(NSObject):
         window_item = self.find_or_make_item("window", window_entry.window_id, window_entry, live_keys)
         self.set_child_items(window_item, [self.find_or_make_item("tab", agent_session_entry.tab_id, agent_session_entry, live_keys)
                                            for agent_session_entry in sort_agent_session_entries(
-                                               window_entry.agent_sessions, self.list_sort_order)
+                                               window_entry.agent_sessions, self.list_sort_order, self.list_sort_order_is_reversed)
                                            if not tab_row_is_hidden(agent_session_entry, self.idle_tabs_are_hidden)])
         return window_item
 
     @objc.python_method
-    def set_list_sort_order(self, list_sort_order):
-        """Shows the rows in this order from now on (one of list_sorting.LIST_SORT_ORDERS)."""
-        if list_sort_order == self.list_sort_order:
+    def set_list_sort_order(self, list_sort_order, is_reversed):
+        """Shows the rows in this order from now on (one of list_sorting.LIST_SORT_ORDERS), in its
+        other direction when is_reversed, with an arrow after the titles of the columns it sorts by."""
+        if (list_sort_order, is_reversed) == (self.list_sort_order, self.list_sort_order_is_reversed):
             return
         self.list_sort_order = list_sort_order
+        self.list_sort_order_is_reversed = is_reversed
+        self.fill_column_titles()
         if self.held_snapshot is None and self.snapshot is not None:
             self.apply_snapshot(self.snapshot)  # (a held snapshot is sorted when it is applied)
+
+    @objc.python_method
+    def column_title_clicked(self, title_name):
+        """Sorts by the clicked title's column, a click at a time: in its first direction, then
+        the other, then back to the manual order (user requests, 2026-10-26)."""
+        list_sort_order = LIST_SORT_ORDER_BY_TITLE_NAME[title_name]
+        if list_sort_order != self.list_sort_order:
+            self.owner.list_sort_order_chosen(list_sort_order, False)
+        elif not self.list_sort_order_is_reversed:
+            self.owner.list_sort_order_chosen(list_sort_order, True)
+        else:
+            self.owner.list_sort_order_chosen("manual", False)
 
     @objc.python_method
     def set_idle_tabs_are_hidden(self, idle_tabs_are_hidden):
@@ -803,7 +1018,8 @@ class AgentSessionListController(NSObject):
         window rows (also collapsed ones, and tabs whose rows Hide Idle hides), once each, in list order."""
         entry_by_session_id = {}
         for item in self.list_selected_items():
-            agent_session_entries = (sort_agent_session_entries(item.entry.agent_sessions, self.list_sort_order)
+            agent_session_entries = (sort_agent_session_entries(item.entry.agent_sessions, self.list_sort_order,
+                                                                self.list_sort_order_is_reversed)
                                      if item.kind == "window" else [item.entry])
             for entry in agent_session_entries:
                 entry_by_session_id.setdefault(entry.session_id, entry)
@@ -884,7 +1100,7 @@ class AgentSessionListController(NSObject):
         # again, which keeps the 0.6-second refresh cheap with many rows.
         look = (parts, item.kind, is_in_front, parts.dot_blinks and self.blink_phase_is_dim, self.preview_is_open(item),
                 shows_disclosure_button, self.row_is_open(item), shows_preview_toggle_button, all_previews_are_open,
-                tuple(self.column_widths.values()))
+                tuple(self.column_widths.values()), self.room_for_the_previews_button)
         if look == row_view.look:
             return
         row_view.look = look
@@ -900,9 +1116,9 @@ class AgentSessionListController(NSObject):
             dot_color = dot_color.colorWithAlphaComponent_(0.25)
         row_view.dot_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             build_dot_text(parts.dot_glyph), {NSFontAttributeName: self.regular_font, NSForegroundColorAttributeName: dot_color}))
-        name_color = NSColor.controlAccentColor() if is_in_front else NSColor.labelColor()
+        # The tab in front is marked by its bold name only, in the same color as the others (blue until 2026-10-26, user request).
         row_view.name_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
-            parts.name_text, {NSFontAttributeName: self.choose_name_font(item), NSForegroundColorAttributeName: name_color}))
+            parts.name_text, {NSFontAttributeName: self.choose_name_font(item), NSForegroundColorAttributeName: NSColor.labelColor()}))
         secondary_text_attributes = {NSFontAttributeName: self.regular_font,
                                      NSForegroundColorAttributeName: NSColor.secondaryLabelColor()}
         # Alignment goes in the text itself: styled text overrides a field's own alignment.
@@ -911,15 +1127,20 @@ class AgentSessionListController(NSObject):
         row_view.details_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             parts.details_text,
             right_aligned_secondary_text_attributes if item.kind == "window" else secondary_text_attributes))
+        # The columns' texts in the names' color rather than gray (user request, 2026-10-26).
+        column_text_attributes = {NSFontAttributeName: self.regular_font, NSForegroundColorAttributeName: NSColor.labelColor()}
+        right_aligned_column_text_attributes = dict(
+            column_text_attributes, **{NSParagraphStyleAttributeName: self.right_aligned_paragraph_style})
         for column_name, parts_field_name in TAB_ROW_COLUMNS:
             column_view = row_view.column_views[column_name]
             if parts_field_name is None:
                 column_view.setImage_(self.find_agent_tool_icon(parts.agent_tool_name) if parts.agent_tool_name else None)
             else:
                 column_view.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
-                    getattr(parts, parts_field_name), secondary_text_attributes if column_name in LEFT_ALIGNED_COLUMN_NAMES
-                    else right_aligned_secondary_text_attributes))
+                    getattr(parts, parts_field_name), column_text_attributes if column_name in LEFT_ALIGNED_COLUMN_NAMES
+                    else right_aligned_column_text_attributes))
         row_view.column_widths = dict(self.column_widths)
+        row_view.room_for_the_previews_button = self.room_for_the_previews_button
         row_view.has_preview_line = self.preview_is_open(item)
         row_view.tree_line_x = self.measure_tree_line_x() if item.kind == "new_window" else None
         row_view.shows_preview_toggle_button = shows_preview_toggle_button
@@ -964,14 +1185,19 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def measure_right_columns(self):
-        """Sets each TAB_ROW_COLUMNS column's width to fit its widest text, or 0 when the settings
-        hide it or no row has text for it (no context size known yet); the icon column's fits the
-        widest tool icon, or is 0 when all agent sessions use the same tool. A narrow sidebar or
-        window then drops columns in COLUMN_NAMES_IN_DROP_ORDER to keep room for names."""
+        """Sets each TAB_ROW_COLUMNS column's width to fit its widest text and its title, or 0 when
+        the settings hide it or no row has text for it (no context size known yet). In the dropdown, a shown
+        column is at least as wide as LONGEST_TEXT_BY_COLUMN_FIELD_NAME's text, so the dropdown's
+        width doesn't follow the numbers and states; the sidebar and the list window, whose width
+        the user sets, leave that room to the names. The icon column's width fits the widest tool
+        icon, or is 0 when all agent sessions use the same tool. A narrow sidebar or window then
+        drops columns in COLUMN_NAMES_IN_DROP_ORDER to keep room for names."""
         agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)
                                  if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden)] if self.snapshot else []
         now = time.time()
         all_parts = [build_agent_session_row_text_parts(entry, [], now) for entry in agent_session_entries]
+        self.room_for_the_previews_button = (PREVIEW_BUTTON_SIZE + GAP_BETWEEN_COLUMNS
+                                             if any(entry.preview_line for entry in agent_session_entries) else 0)
         for column_name, parts_field_name in TAB_ROW_COLUMNS:
             if parts_field_name is None:
                 agent_tool_names = {entry.agent_tool_name for entry in agent_session_entries}
@@ -980,12 +1206,34 @@ class AgentSessionListController(NSObject):
                 continue
             # Each distinct text is measured once; many sessions share "idle" or "2m".
             texts = {getattr(parts, parts_field_name) for parts in all_parts} if column_name in self.shown_columns else set()
+            if any(texts) and not self.width_is_set_by_the_user:  # the dropdown keeps its width as the texts change
+                texts.add(LONGEST_TEXT_BY_COLUMN_FIELD_NAME[parts_field_name])
             widest_text_width = max((self.measure_text_width(text, self.regular_font) for text in texts if text), default=0)
-            self.column_widths[column_name] = TEXT_FIELD_INSETS + widest_text_width if widest_text_width else 0
+            self.column_widths[column_name] = (TEXT_FIELD_INSETS + max(widest_text_width, self.column_title_widths[column_name])
+                                               if widest_text_width else 0)
         if self.width_is_set_by_the_user:
             for column_name in COLUMN_NAMES_IN_DROP_ORDER:
                 if self.measure_room_left_for_tab_names() < SMALLEST_TAB_NAME_WIDTH:
                     self.column_widths[column_name] = 0
+        self.update_column_titles_row()
+
+    @objc.python_method
+    def update_column_titles_row(self):
+        """Gives the row of column titles the columns' widths, and has the panel fit the list under
+        it when it needs another height."""
+        self.column_titles_row_view.column_widths = dict(self.column_widths)
+        self.column_titles_row_view.room_for_the_previews_button = self.room_for_the_previews_button
+        self.column_titles_row_view.setNeedsLayout_(True)
+        if self.measure_column_titles_row_height() != self.column_titles_row_view.frame().size.height:
+            self.on_column_titles_row_height_changed()
+
+    @objc.python_method
+    def measure_column_titles_row_height(self):
+        """Returns the height of the row of column titles: room for the shown columns' titles, or 0
+        while none shows (no tab rows, or every titled column turned off or dropped)."""
+        line_counts = [COLUMN_TITLES[column_name].count("\n") + 1 for column_name, width in self.column_widths.items()
+                       if width and COLUMN_TITLES[column_name]]
+        return max(line_counts) * COLUMN_TITLE_LINE_HEIGHT + 2 * COLUMN_TITLES_ROW_PADDING if line_counts else 0
 
     @objc.python_method
     def measure_room_left_for_tab_names(self):
@@ -998,9 +1246,11 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def measure_right_columns_width(self):
-        """Returns the width of a tab row's right-hand columns with the gaps between them (0-width columns are hidden)."""
+        """Returns the width of a tab row's right-hand columns with the gaps between them (0-width
+        columns are hidden), and the previews button's column after them."""
         shown_column_widths = [width for width in self.column_widths.values() if width]
-        return sum(shown_column_widths) + GAP_BETWEEN_COLUMNS * max(len(shown_column_widths) - 1, 0)
+        return (sum(shown_column_widths) + GAP_BETWEEN_COLUMNS * max(len(shown_column_widths) - 1, 0)
+                + self.room_for_the_previews_button)
 
     @objc.python_method
     def choose_name_font(self, item):
@@ -1026,6 +1276,11 @@ class AgentSessionListController(NSObject):
         the rows inside collapsed windows and a window's counts as if it were collapsed, so the
         dropdown keeps one size while rows are expanded and collapsed (user request, milestone 2)."""
         measure_text_width = self.measure_text_width
+        # The state dots' glyphs come from fonts other than the monospaced one and differ by a
+        # fraction of a point, so each row is measured with the widest, and a state change doesn't
+        # change the dropdown's width.
+        widest_dot_glyph = max((dot_glyph for dot_glyph, _ in DOT_GLYPH_AND_COLOR_BY_STATE.values()),
+                               key=lambda dot_glyph: measure_text_width(dot_glyph, self.regular_font))
         widest_row_width = 0
         preview_buttons_width = GAP_BEFORE_DETAILS + PREVIEW_BUTTON_SIZE
         for item in self.list_all_items():
@@ -1036,7 +1291,7 @@ class AgentSessionListController(NSObject):
             else:
                 parts_and_button_widths = [(self.build_row_text_parts(item), 0)]
             for parts, button_width in parts_and_button_widths:
-                row_width = (self.measure_name_x(parts.connector_text, parts.dot_glyph)
+                row_width = (self.measure_name_x(parts.connector_text, widest_dot_glyph if parts.dot_glyph else "")
                              + measure_text_width(parts.name_text, self.choose_name_font(item)) + NAME_FIELD_PADDING
                              + GAP_BEFORE_DETAILS + measure_text_width(parts.details_text + ROOM_FOR_GROWING_DETAILS, self.regular_font)
                              + 2 * TEXT_FIELD_INSETS + ROW_RIGHT_MARGIN + button_width)

@@ -1,13 +1,17 @@
 import time
 import unittest
 
+from agent_command_tab.context_window_usage import format_token_count
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, MonitorEntry, WindowEntry
-from agent_command_tab.user_interface.row_text_rendering import (build_agent_session_row_text_parts,
+from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
+                                                                 LONGEST_TEXT_BY_COLUMN_FIELD_NAME,
+                                                                 build_agent_session_row_text_parts,
                                                                  build_monitor_row_text_parts,
                                                                  build_tree_connector_text,
                                                                  build_tree_continuation_text,
                                                                  build_window_row_text_parts,
-                                                                 format_elapsed_time, format_memory_size)
+                                                                 format_clock_time, format_elapsed_time,
+                                                                 format_memory_size)
 
 
 def make_entry(status, tab_title="reviews", status_since=0.0):
@@ -34,6 +38,26 @@ class FormatElapsedTimeTests(unittest.TestCase):
         self.assertEqual(format_elapsed_time(2 * 86400 + 5), "2d")
 
 
+class LongestColumnTextTests(unittest.TestCase):
+    def test_no_column_text_is_longer_than_its_longest_text(self):
+        """The dropdown's width stays put only if each format stays within its column's longest text."""
+        longest_length = {field_name: len(text) for field_name, text in LONGEST_TEXT_BY_COLUMN_FIELD_NAME.items()}
+        elapsed_seconds_samples = list(range(0, 2 * 86400, 7)) + [999 * 86400 + 5]
+        self.assertLessEqual(max(len(format_elapsed_time(seconds)) for seconds in elapsed_seconds_samples),
+                             min(longest_length["elapsed_time_text"], longest_length["existence_duration_text"]))
+        self.assertLessEqual(max(len(format_token_count(count)) for count in range(0, 2_000_000, 37)),  # context windows hold up to 1M
+                             longest_length["context_text"])
+        memory_bytes_samples = [megabytes * 1024 ** 2 for megabytes in range(0, 100 * 1024 - 52)] + [1024 ** 3 - 1]
+        self.assertLessEqual(max(len(format_memory_size(memory_bytes)) for memory_bytes in memory_bytes_samples),
+                             longest_length["memory_text"])
+        day_start = time.mktime((2026, 10, 25, 0, 0, 0, 0, 0, -1))
+        self.assertLessEqual(max(len(format_clock_time(day_start + minutes * 60, day_start + 12 * 3600))
+                                 for minutes in range(0, 365 * 1440, 13)),
+                             longest_length["created_time_text"])
+        self.assertLessEqual(max(len(state) for state in list(DOT_GLYPH_AND_COLOR_BY_STATE) + ["running"]),
+                             longest_length["state_text"])
+
+
 class TreeConnectorTests(unittest.TestCase):
     def test_connectors(self):
         self.assertEqual(build_tree_connector_text([]), "")
@@ -56,6 +80,11 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual(parts.name_text, "reviews")
         self.assertEqual((parts.agent_tool_name, parts.details_text, parts.state_text, parts.elapsed_time_text),
                          ("Claude Code", "", "working", "3m"))
+        self.assertEqual(parts.context_text, "")  # the context's size isn't known yet
+        filled_entry = make_entry("working", status_since=100.0)._replace(context_tokens=84_000)
+        self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_text, "84k")  # nor the window's
+        filled_entry = filled_entry._replace(context_fill_percent=42)
+        self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_text, "84k (42%)")
 
     def test_a_session_waiting_on_its_command_shows_running_and_the_commands_time(self):
         entry = make_entry("working", status_since=100.0)._replace(running_command_name="python3",

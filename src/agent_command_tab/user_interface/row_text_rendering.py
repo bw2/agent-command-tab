@@ -12,12 +12,14 @@ from agent_command_tab.session_status_computation import pick_most_urgent_state,
 
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
-                     "agent_tool_name", "state_text", "elapsed_time_text", "context_text", "created_time_text",
-                     "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text", "preview_text"],
+                     "agent_tool_name", "state_text", "elapsed_time_text", "context_text",
+                     "created_time_text", "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text",
+                     "preview_text"],
     defaults=["", "", "", "", "", "", "", "", "", ""])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
-                        "context_text (the context's size, \"425k\"), created_time_text (when the agent session "
+                        "context_text (the context's size and its share of the context window, "
+                        "\"425k (42%)\"), created_time_text (when the agent session "
                         "started) and existence_duration_text (how long ago), memory_text and cpu_text (what the "
                         "agent and the processes it started use), the icon for agent_tool_name, state_text and "
                         "elapsed_time_text (the state's duration). Under it, a tab row has a gray preview line "
@@ -35,6 +37,22 @@ DOT_GLYPH_AND_COLOR_BY_STATE = {
     "paused": ("‖", "purple"),
     "unknown": ("◌", "gray"),
     "exited": ("⊘", "gray"),
+}
+
+# The longest text each column at a tab row's right edge can get, by RowTextParts field (the font
+# is monospaced, so the longest is the widest). The dropdown makes each shown column this wide,
+# so its width stays put as numbers grow ("99k" to "100k", "9m" to "10m") and states change
+# (user request, 2026-10-25).
+LONGEST_TEXT_BY_COLUMN_FIELD_NAME = {
+    # format_token_count: "425k", or "1.2M" from 999,500 up; the share is over 100% only for a
+    # context larger than the window it is measured against.
+    "context_text": "999k (100%)",
+    "created_time_text": "12:59 PM",  # format_clock_time: "6:08 AM" today, otherwise "Oct 17"
+    "existence_duration_text": "23h 59m",  # format_elapsed_time
+    "memory_text": "1024M",  # format_memory_size: "1024M" just under a gigabyte, then "1.4G" up to "99.9G"
+    "cpu_text": "100%",  # an agent using ten cores or more gets a wider column
+    "state_text": "working",  # the longest states: working, running, unknown
+    "elapsed_time_text": "23h 59m",  # format_elapsed_time
 }
 
 
@@ -61,6 +79,17 @@ def format_memory_size(memory_bytes):
     if memory_bytes >= 1024 ** 3:
         return f"{memory_bytes / 1024 ** 3:.1f}G"
     return f"{round(memory_bytes / 1024 ** 2)}M"
+
+
+def format_context_text(context_tokens, context_fill_percent):
+    """Returns the Tokens column's text: the context's size and its share of the context window,
+    such as "134k (13%)" (user request, 2026-10-26), the size alone while the window's size isn't
+    known, or "" while the context's size isn't."""
+    if not context_tokens:
+        return ""
+    if context_fill_percent is None:
+        return format_token_count(context_tokens)
+    return f"{format_token_count(context_tokens)} ({context_fill_percent}%)"
 
 
 def format_clock_time(timestamp, now):
@@ -114,7 +143,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         elapsed_time_text=format_elapsed_time(now - (agent_session_entry.running_command_started_at
                                                      if agent_session_entry.running_command_name
                                                      else agent_session_entry.status_since)),
-        context_text=format_token_count(agent_session_entry.context_tokens) if agent_session_entry.context_tokens else "",
+        context_text=format_context_text(agent_session_entry.context_tokens, agent_session_entry.context_fill_percent),
         created_time_text=format_clock_time(started_at, now) if started_at is not None else "",
         existence_duration_text=format_elapsed_time(now - started_at) if started_at is not None else "",
         memory_text=format_memory_size(agent_session_entry.memory_bytes) if agent_session_entry.memory_bytes is not None else "",

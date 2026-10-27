@@ -2,32 +2,38 @@
 
 Usage: live_agent_sessions_check.py CLAUDE_TEST_FOLDER CODEX_TRUSTED_FOLDER
 
-1. Claude Code (Haiku) runs a 20-second command that prints a number each second. While it
+1. Claude Code (Haiku) runs a 21-second command that prints three counting lines. While it
    runs, the dashboard's own move_tab action (what a drag between windows does) moves the tab
    into a second window. The check confirms the row shows "running", the tab now sits in the
    other window with the same session, and the command finishes (the turn ends and the screen
-   shows the last number), so the move didn't interrupt the agent.
+   shows its last line), so the move didn't interrupt the agent.
 2. Codex starts in a folder its config already trusts (no trust question, no config change),
-   is asked to reply "OK", and the check confirms it is listed as Codex and goes from working
-   back to idle.
+   is asked to reply "OK", and the check confirms it is listed as Codex and that its turn timer
+   shows on screen and then goes away (Codex 0.155 reports no state to iTerm2, so its row
+   shows "unknown").
 Closes its windows at the end. Touches nothing else.
 """
 
 import asyncio
 import os
+import re
 import sys
 import threading
 import time
 
 import iterm2
 
+from agent_command_tab.agent_adapters.codex import TURN_TIMER_PATTERN
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.screen_readings import clean_screen_line
 from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
 
 CLAUDE_TEST_FOLDER = os.path.realpath(sys.argv[1])
 CODEX_TRUSTED_FOLDER = os.path.realpath(sys.argv[2])
-COUNTING_COMMAND = 'python3 -c "import time; [print(i, flush=True) or time.sleep(1) for i in range(20)]"'
+# Three lines over 21 seconds: Claude Code shows a finished command's output in full only up to three lines.
+COUNTING_COMMAND = 'python3 -c "import time; [print(f\'count {i} of 3\', flush=True) or time.sleep(7) for i in range(1, 4)]"'
+LAST_COUNT_LINE_PATTERN = re.compile(r"^\W*count 3 of 3\s*$", re.MULTILINE)  # not in the prompt, which holds the code
 
 
 def main():
@@ -81,7 +87,18 @@ def main():
 
     async def read_screen(session_id):
         contents = await core.app.get_session_by_id(session_id).async_get_screen_contents()
-        return "\n".join(contents.line(index).string for index in range(contents.number_of_lines))
+        # iTerm2's empty cells (NULs) as spaces, so patterns with spaces match.
+        return "\n".join(clean_screen_line(contents.line(index).string) for index in range(contents.number_of_lines))
+
+    def wait_until_screen_matches(session_id, pattern, should_match, timeout):
+        """Like wait_until, for the screen, which is read on the core's loop, so not while holding
+        snapshot_arrived, which the core takes to publish."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if bool(pattern.search(run_on_core_loop(read_screen(session_id)))) == should_match:
+                return True
+            time.sleep(0.5)
+        return False
 
     results = {}
     try:
@@ -90,6 +107,8 @@ def main():
         target_window_id, _, _ = run_on_core_loop(open_window(None, CLAUDE_TEST_FOLDER))
         results["claude listed and idle"] = wait_until(
             lambda: (find_entry(claude_session_id)[1] or ()) and find_entry(claude_session_id)[1].status in ("idle", "done"), 60)
+        if not results["claude listed and idle"]:
+            return 1  # not at its prompt (its folder trust question, say), so nothing is typed
         run_on_core_loop(type_prompt(claude_session_id, f"Use the Bash tool to run exactly this command: {COUNTING_COMMAND}"))
         results["row shows running"] = wait_until(
             lambda: find_entry(claude_session_id)[1] is not None and find_entry(claude_session_id)[1].running_command_name != "", 60)
@@ -102,7 +121,8 @@ def main():
         results["still working right after the move"] = find_entry(claude_session_id)[1].status in ("working",)
         results["turn ended after the command"] = wait_until(
             lambda: find_entry(claude_session_id)[1].status in ("idle", "done"), 90)
-        results["screen shows the command's last number (19)"] = "19" in run_on_core_loop(read_screen(claude_session_id))
+        results["screen shows the command's last line (count 3 of 3)"] = bool(
+            LAST_COUNT_LINE_PATTERN.search(run_on_core_loop(read_screen(claude_session_id))))
 
         _, _, codex_session_id = run_on_core_loop(open_window(
             "codex -c check_for_update_on_startup=false", CODEX_TRUSTED_FOLDER))
@@ -110,8 +130,12 @@ def main():
             lambda: find_entry(codex_session_id)[1] is not None and find_entry(codex_session_id)[1].agent_tool_name == "Codex", 60)
         time.sleep(3)  # its prompt box draws
         run_on_core_loop(type_prompt(codex_session_id, "Reply with just the word OK."))
-        results["codex row shows working"] = wait_until(lambda: find_entry(codex_session_id)[1].status == "working", 60)
-        results["codex back to idle or done"] = wait_until(lambda: find_entry(codex_session_id)[1].status in ("idle", "done"), 120)
+        # Codex 0.155 reports no state to iTerm2 (its row shows "unknown"), so its turn is looked for on
+        # screen: the turn timer, "(5s • esc to interrupt)", shows only while a turn runs.
+        results["codex turn timer shows on screen"] = wait_until_screen_matches(codex_session_id, TURN_TIMER_PATTERN, True, 60)
+        results["codex turn timer gone after the turn"] = wait_until_screen_matches(codex_session_id, TURN_TIMER_PATTERN, False, 120)
+        results["codex row shows idle, done, or unknown when Codex reports no state"] = \
+            find_entry(codex_session_id)[1].status in ("idle", "done", "unknown")
         results["codex context size known"] = wait_until(lambda: find_entry(codex_session_id)[1].context_tokens, 40)
         print("codex context tokens:", find_entry(codex_session_id)[1].context_tokens)
         conversation_id = run_on_core_loop(core.agent_sessions[codex_session_id]["adapter"].find_conversation_id(

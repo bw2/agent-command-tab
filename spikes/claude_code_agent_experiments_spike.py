@@ -15,6 +15,7 @@ window and renamed; an interrupted turn (Esc); a denied tool call with a comment
 import asyncio
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -99,7 +100,8 @@ class TimelineRecorder:
     async def mark(self, name):
         """Records a named step together with the bottom of the screen."""
         contents = await self.session.async_get_screen_contents()
-        lines = [contents.line(index).string for index in range(contents.number_of_lines)]
+        # iTerm2's empty cells (NULs) as spaces, so rows of them count as blank.
+        lines = [contents.line(index).string.replace("\x00", " ") for index in range(contents.number_of_lines)]
         non_blank_lines = [line for line in lines if line.strip()]
         self.write({"kind": "mark", "step": name, "screen_bottom": non_blank_lines[-14:]})
 
@@ -113,6 +115,50 @@ async def wait_for_status(session, wanted_values, timeout_seconds):
             return value
         await asyncio.sleep(0.3)
     return None
+
+
+def read_hook_events_since(start_time):
+    """Returns the hook log records received at or after start_time."""
+    if not os.path.exists(HOOK_LOG_PATH):
+        return []
+    with open(HOOK_LOG_PATH) as log_file:
+        records = [json.loads(line) for line in log_file if line.strip()]
+    return [record for record in records if record["received_at"] >= start_time]
+
+
+async def wait_for_turn_end_of_the_tabs_own_agent(start_time, timeout_seconds):
+    """Waits for the Stop hook of the session whose prompt came first after start_time (the tab's
+    own agent), not that of a `claude -p` it runs; returns whether it came."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        records = read_hook_events_since(start_time)
+        own_session_id = next((record["session_id"] for record in records if record["hook_event_name"] == "UserPromptSubmit"), None)
+        if any(record["hook_event_name"] == "Stop" and record["session_id"] == own_session_id for record in records):
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def wait_for_permission_prompt(session, step_name):
+    """Waits for the session's permission prompt and returns its status; stops the run when none
+    appears, since the approval key would otherwise be typed into the input box."""
+    status = await wait_for_status(session, ("waiting",), 60)
+    if status is None:
+        raise RuntimeError(f"no permission prompt in {step_name}; stopping so no stray keys are typed")
+    return status
+
+
+async def find_number_of_the_no_option(session):
+    """Returns the number of the permission menu's "No" option on screen ("4" in `4. No`), or None.
+    The menu's numbers differ between Claude Code versions (3 was "No" before "Yes, and switch to
+    auto mode" took its place), so the number is read rather than assumed."""
+    contents = await session.async_get_screen_contents()
+    no_option_number = None
+    for index in range(contents.number_of_lines):
+        match = re.search(r"(\d)\.\s*No\b", contents.line(index).string)
+        if match:
+            no_option_number = match.group(1)  # the last one: the menu is at the bottom
+    return no_option_number
 
 
 async def screen_contains(session, text):
@@ -158,8 +204,10 @@ async def run_experiments(connection):
         await recorder.mark("ready")
 
         # Step 1: a tool call needing permission; approve it; move and rename the tab mid-turn.
-        await type_prompt_and_submit(session, "Use the Bash tool to run exactly this command: sleep 6 && echo phase0-step1-done")
-        status_after_prompt = await wait_for_status(session, ("waiting",), 60)
+        # perl needs permission here; sleep and echo are allowed without asking.
+        await type_prompt_and_submit(session, "Use the Bash tool to run exactly this command: "
+                                     "perl -e 'sleep 6; print \"phase0-step1-done\\n\"'")
+        status_after_prompt = await wait_for_permission_prompt(session, "step 1")
         await recorder.mark(f"step 1 permission prompt (status {status_after_prompt})")
         await session.async_send_text("1", suppress_broadcast=True)
         await asyncio.sleep(1.5)
@@ -174,8 +222,8 @@ async def run_experiments(connection):
                         "titleOverrideFormat": await test_tab.async_get_variable("titleOverrideFormat")})
 
         # Step 2: interrupt a long command with Esc.
-        await type_prompt_and_submit(session, "Use the Bash tool to run exactly this command: sleep 40")
-        await wait_for_status(session, ("waiting",), 60)
+        await type_prompt_and_submit(session, "Use the Bash tool to run exactly this command: perl -e 'sleep 40'")
+        await wait_for_permission_prompt(session, "step 2")
         await session.async_send_text("1", suppress_broadcast=True)
         await asyncio.sleep(4)
         await recorder.mark("step 2 before Esc")
@@ -184,10 +232,14 @@ async def run_experiments(connection):
         await recorder.mark("step 2 after Esc")
 
         # Step 3: deny a tool call with a comment.
-        await type_prompt_and_submit(session, "Use the Bash tool to run exactly this command: echo phase0-step3-first")
-        await wait_for_status(session, ("waiting",), 60)
+        await type_prompt_and_submit(session, "Use the Bash tool to run exactly this command: "
+                                     "perl -e 'print \"phase0-step3-first\\n\"'")
+        await wait_for_permission_prompt(session, "step 3")
         await recorder.mark("step 3 permission prompt")
-        await session.async_send_text("3", suppress_broadcast=True)
+        no_option_number = await find_number_of_the_no_option(session)
+        if no_option_number is None:
+            raise RuntimeError("no \"No\" option in step 3's permission menu; stopping so no stray keys are typed")
+        await session.async_send_text(no_option_number, suppress_broadcast=True)
         await asyncio.sleep(1.5)
         await recorder.mark("step 3 after choosing No")
         await type_prompt_and_submit(session, "run echo phase0-step3-second instead")
@@ -199,10 +251,13 @@ async def run_experiments(connection):
         await recorder.mark("step 3 finished")
 
         # Step 4: a nested claude -p run started by the agent's Bash tool.
+        step_start = time.time()
         await type_prompt_and_submit(session, "Use the Bash tool to run exactly this command: claude -p 'reply with the single word pong' --model haiku")
-        await wait_for_status(session, ("waiting",), 60)
+        await wait_for_permission_prompt(session, "step 4")
         await session.async_send_text("1", suppress_broadcast=True)
-        await wait_for_status(session, ("idle", "done"), 120)
+        # The nested run sets the tab's status too (idle, working, done, idle), so its end isn't the turn's.
+        if not await wait_for_turn_end_of_the_tabs_own_agent(step_start, 120):
+            raise RuntimeError("the tab's own agent didn't end its turn in step 4; stopping before /exit")
         await asyncio.sleep(2)
         await recorder.mark("step 4 finished")
 

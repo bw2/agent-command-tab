@@ -19,12 +19,10 @@ SETTINGS_FOLDER = os.path.expanduser("~/Library/Application Support/agent-comman
 # The app's folder before it was renamed from llm-sidebar-dashboard to AgentCommandTab (2026-10-19).
 SETTINGS_FOLDER_OF_THE_OLD_NAME = os.path.expanduser("~/Library/Application Support/llm-sidebar-dashboard")
 SETTINGS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "settings.json")
-SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL = 5
+# Reading the shell's start-up files can take several seconds (7.7 for one .bash_profile, 2026-10-25)
+SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL = 20
 ENVIRONMENT_SETTING_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # "ANTHROPIC_MODEL=x claude"
 
-# "auto" follows the most urgent agent session: light blue while one is asking, red for an
-# error, orange when one is stuck, otherwise green.
-ICON_COLOR_NAMES = ["auto", "teal", "blue", "purple", "pink", "red", "orange", "green"]
 # How the list is shown (user request, 2026-10-19): window, a regular window (then the menu bar
 # icon brings it to the front); sidebar, at the edge of the screen (then the icon slides it in);
 # popup, the dropdown under the menu bar icon.
@@ -53,16 +51,14 @@ DEFAULT_SETTINGS = {
     "sidebar_mode": "auto_hide",
     "sidebar_edge": "right",  # of the menu-bar monitor
     "sidebar_width": 400,
-    "icon_color": "auto",
-    "icon_shows_asking_count": True,
     # The settings window's Harnesses section: a tool not included is left out of the list and of
     # the menus that start new agent sessions (user request, 2026-10-19).
     "agent_tools": [
         {"agent_tool_name": "Claude Code", "launch_command": "claude", "is_included": True},
         {"agent_tool_name": "Codex", "launch_command": "codex", "is_included": True},
     ],
-    "stuck_minutes": 10,
     "list_sort_order": "manual",
+    "list_sort_order_is_reversed": False,  # a second click on a sorted column's title (user request, 2026-10-26)
     "shown_columns": ["context_tokens", "state", "state_duration"],
     "idle_tabs_are_hidden": False,  # the Hide Idle / Show Idle button at the top of the list (user request, 2026-10-21)
 }
@@ -71,8 +67,6 @@ DEFAULT_SETTINGS = {
 def is_valid_setting_value(name, value):
     """Returns whether a stored value has the right shape for the setting (else the default is used)."""
     default_value = DEFAULT_SETTINGS[name]
-    if name == "icon_color":
-        return value in ICON_COLOR_NAMES
     if name == "show_as":
         return value in SHOW_AS_CHOICES
     if name == "global_shortcut":
@@ -92,8 +86,6 @@ def is_valid_setting_value(name, value):
         return isinstance(value, list) and all(column_name in LIST_COLUMNS for column_name in value)
     if name == "sidebar_width":
         return isinstance(value, (int, float)) and not isinstance(value, bool) and 200 <= value <= 1200
-    if name == "stuck_minutes":
-        return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 240
     if name == "agent_tools":
         return (isinstance(value, list) and value
                 and all(isinstance(tool, dict) and isinstance(tool.get("agent_tool_name"), str) and tool["agent_tool_name"]
@@ -142,19 +134,18 @@ def find_codex_command_path(settings, find_command_path=shutil.which):
     another program (a wrapper) gives the codex found on PATH."""
     launch_command = next((agent_tool["launch_command"] for agent_tool in settings["agent_tools"]
                            if agent_tool["agent_tool_name"] == "Codex"), "")
-    first_word = (launch_command.split() or [""])[0]
+    first_word = os.path.expanduser((launch_command.split() or [""])[0])  # "~/bin/codex" too, as Settings accepts
     if os.path.basename(first_word) != "codex":
         first_word = "codex"
     return first_word if os.path.isabs(first_word) else find_command_path(first_word)
 
 
 def build_core_settings(settings, find_command_path=shutil.which):
-    """Returns the part of the settings that the core uses: the stuck time limit, the agent
-    tools left out of the list, whether memory and CPU use are read (only while one of
-    their columns is shown or the list is sorted by one of them), and the codex program for
-    `codex queue` (find_codex_command_path)."""
+    """Returns the part of the settings that the core uses: the agent tools left out of the
+    list, whether memory and CPU use are read (only while one of their columns is shown or the
+    list is sorted by one of them), and the codex program for `codex queue`
+    (find_codex_command_path)."""
     return {
-        "stuck_threshold_seconds": settings["stuck_minutes"] * 60,
         "left_out_agent_tool_names": list_left_out_agent_tool_names(settings),
         "resource_usage_is_read": bool({"memory_usage", "cpu_usage"} & {*settings["shown_columns"], settings["list_sort_order"]}),
         "codex_command_path": find_codex_command_path(settings, find_command_path),
@@ -206,11 +197,12 @@ def resolve_launch_command_paths(settings, find_command_path=shutil.which):
     return resolved_settings
 
 
-def command_is_known_to_the_login_shell(command_name):
-    """Returns whether the user's login shell knows command_name as an alias, function, builtin
-    or program. New agent sessions start by typing the launch command into that shell, so an
-    alias such as `yc` works there although it is on no PATH. Takes a moment (it reads the
-    shell's start-up files), so the settings window calls it off the main thread."""
+def ask_the_login_shell_whether_it_knows_command(command_name):
+    """Returns True if the user's login shell knows command_name as an alias, function, builtin or
+    program, False if it doesn't, and None if the shell couldn't be asked or didn't answer in time.
+    New agent sessions start by typing the launch command into that shell, so an alias such as
+    `yc` works there although it is on no PATH. Takes a moment (it reads the shell's start-up
+    files), so the settings window calls it off the main thread."""
     shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
     try:
         completed_process = subprocess.run(
@@ -218,18 +210,19 @@ def command_is_known_to_the_login_shell(command_name):
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL)
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return None
     return completed_process.returncode == 0
 
 
 def find_launch_command_problem(launch_command, find_command_path=shutil.which,
-                                ask_the_login_shell=command_is_known_to_the_login_shell):
+                                ask_the_login_shell=ask_the_login_shell_whether_it_knows_command):
     """Returns "" when the launch command's program can be run, else a short explanation.
 
     Leading NAME=value words (environment settings) are skipped. A path must be an executable
-    file; a bare name must be on PATH or known to the login shell. A program written with a
-    shell variable or quotes ("$HOME/bin/claude") can't be checked without running the shell's
-    expansion, so it counts as fine.
+    file; a bare name must be on PATH or known to the login shell (such as an alias). A program
+    written with a shell variable or quotes ("$HOME/bin/claude") can't be checked without running
+    the shell's expansion, and a name the login shell didn't answer about in time may well be an
+    alias, so both count as fine.
     """
     words = launch_command.split()
     while words and ENVIRONMENT_SETTING_PATTERN.match(words[0]):
@@ -245,7 +238,7 @@ def find_launch_command_problem(launch_command, find_command_path=shutil.which,
         if not os.access(first_word, os.X_OK):
             return f"{words[0]} can't be run (it isn't executable)"
         return ""
-    if find_command_path(first_word) or ask_the_login_shell(first_word):
+    if find_command_path(first_word) or ask_the_login_shell(first_word) is not False:
         return ""
     return f"{first_word}: command not found (not on PATH, and not an alias or function in your shell)"
 

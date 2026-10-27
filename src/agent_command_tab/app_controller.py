@@ -15,7 +15,7 @@ from AppKit import (NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn
                     NSApplicationActivationPolicyAccessory, NSApplicationDidBecomeActiveNotification,
                     NSApplicationDidChangeScreenParametersNotification, NSApplicationDidResignActiveNotification,
                     NSApplicationWillTerminateNotification, NSEvent, NSEventModifierFlagCommand, NSEventModifierFlagShift,
-                    NSMenu, NSMenuItem, NSMouseInRect, NSPopoverBehaviorApplicationDefined,
+                    NSMakeRect, NSMenu, NSMenuItem, NSModalPanelWindowLevel, NSMouseInRect, NSPopoverBehaviorApplicationDefined,
                     NSPopoverBehaviorTransient, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
                     NSWorkspaceDidActivateApplicationNotification)
 from Foundation import NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
@@ -27,6 +27,7 @@ from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
 from agent_command_tab.global_shortcut_key_filter import GlobalShortcutKeyFilter
 from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.monitor_assignment import compute_frame_clear_of_area
 from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
 from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
                                               load_settings_resolving_paths_at_first_run,
@@ -36,7 +37,8 @@ from agent_command_tab.user_interface.agent_session_outline_view import AgentSes
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.menu_bar_status_item import MenuBarStatusItemController
 from agent_command_tab.user_interface.popover_container import ListPanelController, build_dropdown_popover
-from agent_command_tab.user_interface.screen_layout import (convert_rect_to_frame_list, grow_frame_to_smallest_size,
+from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
+                                                            convert_rect_to_frame_list, grow_frame_to_smallest_size,
                                                             read_monitors_from_screens)
 from agent_command_tab.user_interface.settings_window import SettingsWindowController
 from agent_command_tab.user_interface.sidebar_panel import SidebarController
@@ -298,21 +300,45 @@ class AppController(NSObject):
 
     # Dragging the dropdown's top bar detaches it into the list window, and dropping the list
     # window on the menu bar icon turns it back into the dropdown (user request, 2026-10-19).
+    # Dragging the sidebar's top bar turns it into the list window too (user request, 2026-10-22).
 
     @objc.python_method
     def top_bar_dragged(self, list_panel_controller, start_point_on_screen):
         """A list's top bar was dragged: the dropdown's turns into the list window where the
-        dropdown was, which then follows the pointer until the button comes up."""
-        if list_panel_controller is not self.dropdown_panel_controller or not self.popover.isShown():
+        dropdown was, and the sidebar's into the list window at the window's last size (the user's
+        choice), its top bar under the pointer. The window then follows the pointer until the
+        button comes up."""
+        list_window = self.list_window_controller.window
+        if list_panel_controller is self.dropdown_panel_controller and self.popover.isShown():
+            dropdown_window = list_panel_controller.view().window()
+            content_rect = dropdown_window.convertRectToScreen_(list_panel_controller.view().frame())
+            # A dropdown with few rows is shorter than the list window may be; it grows downward.
+            window_frame = grow_frame_to_smallest_size(
+                convert_rect_to_frame_list(list_window.frameRectForContentRect_(content_rect)),
+                SMALLEST_WINDOW_SIZES["list_window_frame"])
+        elif list_panel_controller is self.sidebar_controller.list_panel_controller:
+            # Its saved frame, or the size it was built with if it has never been shown.
+            saved_frame = self.settings["list_window_frame"]
+            content_size = list_window.contentRectForFrameRect_(
+                NSMakeRect(*saved_frame) if saved_frame is not None else list_window.frame()).size
+            content_rect = compute_list_window_content_rect_for_a_dragged_sidebar(
+                convert_rect_to_frame_list(self.sidebar_controller.window.frame()), start_point_on_screen,
+                (content_size.width, content_size.height))
+            window_frame = convert_rect_to_frame_list(list_window.frameRectForContentRect_(NSMakeRect(*content_rect)))
+            # Even a sidebar shown from the menu, which "Show as: Window" would leave in for a few seconds.
+            self.sidebar_controller.hide_now(animate=False)
+        else:
             return
-        dropdown_window = list_panel_controller.view().window()
-        content_rect = dropdown_window.convertRectToScreen_(list_panel_controller.view().frame())
-        # A dropdown with few rows is shorter than the list window may be; it grows downward.
-        window_frame = grow_frame_to_smallest_size(
-            convert_rect_to_frame_list(self.list_window_controller.window.frameRectForContentRect_(content_rect)),
-            SMALLEST_WINDOW_SIZES["list_window_frame"])
         pointer_offset = (start_point_on_screen[0] - window_frame[0], start_point_on_screen[1] - window_frame[1])
+        show_as_before = self.settings["show_as"]
         self.settings_changed(dict(self.settings, show_as="window", list_window_frame=window_frame))
+        if show_as_before == "window":
+            # A sidebar shown from the menu while the list shows as a window, which may be closed
+            # or behind other windows: settings_changed shows it only when "Show as" changes.
+            self.list_window_controller.show(window_frame, takes_keyboard_focus=not self.settings_window_controller.is_open())
+            if self.settings_window_controller.is_open():  # it stays in front, as when settings_changed shows the window
+                self.place_the_settings_window_above_the_lists(self.popover.isShown())
+                self.settings_window_controller.window.orderFront_(None)
         self.list_window_controller.follow_the_pointer_until_the_button_comes_up(pointer_offset)
 
     @objc.python_method
@@ -487,10 +513,18 @@ class AppController(NSObject):
     @objc.python_method
     def run_alert_in_front(self, alert):
         """Shows an alert and returns the button chosen, after closing the dropdown, which (with a
-        settings window kept above it) would cover the alert while it waits for an answer."""
+        settings window kept above it) would cover the alert while it waits for an answer. The
+        sidebar, above other apps' windows at the status bar's level, goes just under the alert's
+        level meanwhile: a wide one would cover it."""
         self.close_dropdown()
         NSApp.activateIgnoringOtherApps_(True)
-        return alert.runModal()
+        sidebar_window = self.sidebar_controller.window
+        sidebar_window_level = sidebar_window.level()
+        sidebar_window.setLevel_(NSModalPanelWindowLevel - 1)
+        try:
+            return alert.runModal()
+        finally:
+            sidebar_window.setLevel_(sidebar_window_level)
 
     @objc.python_method
     def submit_action_and_report_failure(self, action_request, failure_title):
@@ -539,16 +573,35 @@ class AppController(NSObject):
 
     @objc.python_method
     def open_settings(self):
-        """Opens the settings window; over an open dropdown, which stays open while it is (user request, 2026-10-19)."""
+        """Opens the settings window; over an open dropdown, which stays open while it is (user request, 2026-10-19),
+        and clear of a shown sidebar."""
         self.settings_window_controller.show(self.settings)
+        self.move_the_settings_window_clear_of_the_sidebar()
         self.place_the_settings_window_above_the_lists(self.popover.isShown())
         self.update_dropdown_closing_behavior()
+
+    @objc.python_method
+    def move_the_settings_window_clear_of_the_sidebar(self):
+        """Moves the settings window sideways, keeping its size where the monitor has room, off a
+        shown sidebar's strip: the sidebar is above other windows and would cover it."""
+        sidebar_controller = self.sidebar_controller
+        if not sidebar_controller.window.isVisible() or sidebar_controller.placement is None:
+            return
+        settings_window = self.settings_window_controller.window
+        settings_frame = convert_rect_to_frame_list(settings_window.frame())
+        frame_clear_of_the_sidebar = compute_frame_clear_of_area(
+            settings_frame, convert_rect_to_frame_list(sidebar_controller.window.frame()), sidebar_controller.placement.edge,
+            sidebar_controller.screens[sidebar_controller.placement.screen_index]["visible_frame"], settings_frame[2])
+        if frame_clear_of_the_sidebar is not None:
+            settings_window.setFrame_display_(NSMakeRect(*frame_clear_of_the_sidebar), True)
 
     @objc.python_method
     def place_the_settings_window_above_the_lists(self, dropdown_is_open):
         """Puts the settings window at the level of the windows it would otherwise open under: just
         above an open dropdown, and level with the list window while that is shown and always on
-        top (in front of it when opened); otherwise at the normal level."""
+        top (in front of it when opened); otherwise at the normal level. Not the sidebar's: the
+        settings window opens clear of it instead (move_the_settings_window_clear_of_the_sidebar),
+        so other apps' windows can still cover it and close it."""
         window_levels = []
         if dropdown_is_open:
             window_levels.append(self.dropdown_panel_controller.view().window().level() + 1)
@@ -561,9 +614,8 @@ class AppController(NSObject):
 
     @objc.python_method
     def settings_changed(self, new_settings):
-        """Saves new settings and applies them to the global shortcut, the menu bar item, the
-        sidebar, the list window (shown when "Show as" turns to Window, hidden when it turns away)
-        and an open settings window."""
+        """Saves new settings and applies them to the global shortcut, the sidebar, the list window
+        (shown when "Show as" turns to Window, hidden when it turns away) and an open settings window."""
         show_as_before = self.settings["show_as"]
         list_window_was_always_on_top = self.settings["list_window_is_always_on_top"]
         if new_settings["global_shortcut"] != self.settings["global_shortcut"]:
@@ -571,7 +623,6 @@ class AppController(NSObject):
         self.settings = new_settings
         save_settings(new_settings)
         self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
-        self.status_item_controller.redraw()
         list_window_is_shown_now = new_settings["show_as"] == "window" and show_as_before != "window"
         if new_settings["show_as"] != show_as_before:
             self.close_dropdown()
@@ -598,10 +649,13 @@ class AppController(NSObject):
         self.apply_list_settings(settings)
 
     @objc.python_method
-    def list_sort_order_chosen(self, list_sort_order):
-        """The Sort pop-up at the top of the dropdown, the sidebar or the list window: one choice for all, saved with the settings."""
-        if list_sort_order != self.settings["list_sort_order"]:
-            self.settings_changed(dict(self.settings, list_sort_order=list_sort_order))
+    def list_sort_order_chosen(self, list_sort_order, list_sort_order_is_reversed):
+        """The Sort pop-up at the top of the dropdown, the sidebar or the list window, or a click
+        on a column's title: one choice for all, saved with the settings."""
+        if ((list_sort_order, list_sort_order_is_reversed)
+                != (self.settings["list_sort_order"], self.settings["list_sort_order_is_reversed"])):
+            self.settings_changed(dict(self.settings, list_sort_order=list_sort_order,
+                                       list_sort_order_is_reversed=list_sort_order_is_reversed))
 
     @objc.python_method
     def idle_tabs_are_hidden_chosen(self, idle_tabs_are_hidden):
@@ -613,7 +667,7 @@ class AppController(NSObject):
     def apply_list_settings(self, settings):
         """Gives the dropdown's, the sidebar's and the list window's lists the same sort order, idle tabs shown or hidden, and shown columns."""
         for list_panel_controller in self.list_all_list_panel_controllers():
-            list_panel_controller.show_list_sort_order(settings["list_sort_order"])
+            list_panel_controller.show_list_sort_order(settings["list_sort_order"], settings["list_sort_order_is_reversed"])
             list_panel_controller.show_idle_tabs_are_hidden(settings["idle_tabs_are_hidden"])
             list_panel_controller.list_controller.set_shown_columns(settings["shown_columns"])
 
@@ -643,6 +697,7 @@ class AppController(NSObject):
     def screenParametersChanged_(self, notification):
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.sidebar_controller.screen_layout_changed()
+        self.settings_window_controller.screen_layout_changed()
 
     def anotherApplicationBecameActive_(self, notification):
         if self.peek_in_progress is None and self.peek_waiting_for_put_back is None:  # a peek activates iTerm2 only for a moment

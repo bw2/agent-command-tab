@@ -92,6 +92,15 @@ def permission_dialog_was_answered(state, iterm2_status_change_time, screen_read
             and "permission_dialog_gone_since" in screen_reading)
 
 
+def status_values_put_the_agent_in_the_same_state(first_status_value, second_status_value):
+    """Returns whether two iTerm2 status values give the same state, idle and done counting as
+    one (both wait at the prompt; whether a turn just ended is tracked apart)."""
+    def at_prompt_or_state(status_value):
+        state = map_iterm2_status_value_to_state(status_value)
+        return "at its prompt" if state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT else state
+    return at_prompt_or_state(first_status_value) == at_prompt_or_state(second_status_value)
+
+
 def status_change_ends_a_turn(previous_state, new_state):
     """Returns whether iTerm2's status changing from previous_state to new_state (as mapped by
     map_iterm2_status_value_to_state) ends a turn: done, or idle after working or asking (Codex
