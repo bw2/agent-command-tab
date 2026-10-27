@@ -7,8 +7,9 @@ sidebar and in the list window, each with its own list controller.
 import math
 
 import objc
-from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont,
-                    NSLineBreakByTruncatingTail, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSScreen,
+from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont, NSFontWeightRegular,
+                    NSImage, NSImageLeading, NSImageSymbolConfiguration,
+                    NSLineBreakByTruncatingTail, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSRectFill, NSScreen,
                     NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
@@ -17,6 +18,7 @@ from agent_command_tab.session_status_computation import split_agent_sessions_in
 from agent_command_tab.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_NAMES, add_popup_choices,
                                                               read_popup_choice, select_popup_choice,
                                                               show_symbol_on_button)
+from agent_command_tab.user_interface.named_colors import appearance_is_dark
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 
 # The Sort pop-up's titles for settings_store.LIST_SORT_ORDERS.
@@ -87,6 +89,15 @@ class ListPanelView(NSView):
 
     def acceptsFirstMouse_(self, event):
         return True  # the sidebar's top bar drags from the first click, though the dashboard isn't the active app
+
+    def drawRect_(self, rect):
+        # In dark mode, the top bar, the column titles and the bottom bar are on the list's own
+        # background (the outline view's default, controlBackgroundColor) rather than the lighter
+        # gray of the window, the popover or the sidebar around it; light mode keeps that gray
+        # around the white list (user requests, 2026-10-27). AppKit redraws views when the mode changes.
+        if appearance_is_dark(self.effectiveAppearance()):
+            NSColor.controlBackgroundColor().set()
+            NSRectFill(rect)
 
     def resizeSubviewsWithOldSize_(self, old_size):
         objc.super(ListPanelView, self).resizeSubviewsWithOldSize_(old_size)
@@ -215,6 +226,12 @@ class ListPanelController(NSViewController):
         self.settings_button.setShowsBorderOnlyWhileMouseInside_(False)
         self.settings_button.setControlSize_(NSControlSizeSmall)
         self.settings_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        # A gear before its name (user request, 2026-10-27), as tall as the small text; the name alone where the symbol is missing.
+        gear_image = NSImage.imageWithSystemSymbolName_accessibilityDescription_("gearshape", None)
+        if gear_image is not None:
+            self.settings_button.setImage_(gear_image.imageWithSymbolConfiguration_(
+                NSImageSymbolConfiguration.configurationWithPointSize_weight_(NSFont.smallSystemFontSize(), NSFontWeightRegular)))
+            self.settings_button.setImagePosition_(NSImageLeading)
         self.settings_button.setTarget_(self)
         self.settings_button.setAction_("settingsClicked:")
         self.settings_button.sizeToFit()
@@ -281,7 +298,7 @@ class ListPanelController(NSViewController):
         control fits between the panel's left edge and the Settings button: with its "Sort:" label
         when there is room, without it in a narrower one, and then with the pop-up narrowed,
         cutting its title short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar
-        narrower than about 250 points, where the column titles still sort the list). The message
+        or a list window narrower than 251 points, where the column titles still sort the list). The message
         line takes the room left before the buttons, so it never covers them; while it shows a
         message (iTerm2 can't be reached, so there are no rows to sort or hide) the sort control
         and the Hide Idle button step aside for it, and the Settings button moves to the right end."""

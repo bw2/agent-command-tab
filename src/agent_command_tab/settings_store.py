@@ -23,10 +23,11 @@ SETTINGS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "settings.json")
 SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL = 20
 ENVIRONMENT_SETTING_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # "ANTHROPIC_MODEL=x claude"
 
-# How the list is shown (user request, 2026-10-19): window, a regular window (then the menu bar
-# icon brings it to the front); sidebar, at the edge of the screen (then the icon slides it in);
-# popup, the dropdown under the menu bar icon.
-SHOW_AS_CHOICES = ["window", "sidebar", "popup"]
+# How the list is shown (user request, 2026-10-19): popup, the dropdown under the menu bar icon;
+# sidebar, at the edge of the screen (then the icon slides it in); window, a regular window (then
+# the menu bar icon brings it to the front). In the settings pop-up's order (window first until
+# 2026-10-27, user request).
+SHOW_AS_CHOICES = ["popup", "sidebar", "window"]
 # The global shortcut that shows the list from any app (global_shortcut_key_filter; user request,
 # 2026-10-19).
 GLOBAL_SHORTCUT_CHOICES = ["shift_command_tab", "command_fn_tab", "off"]

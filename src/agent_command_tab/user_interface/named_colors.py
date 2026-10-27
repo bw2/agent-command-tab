@@ -10,11 +10,16 @@ def make_srgb_color_maker(red, green, blue):
     return lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(red / 255, green / 255, blue / 255, 1)
 
 
+def appearance_is_dark(appearance):
+    """Returns whether this NSAppearance (a view's effectiveAppearance, for example) is dark mode's."""
+    return appearance.bestMatchFromAppearancesWithNames_([NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) == NSAppearanceNameDarkAqua
+
+
 def make_light_and_dark_mode_color_maker(light_mode_color_maker, dark_mode_color_maker):
     """Returns a function that makes a color drawn as light_mode_color_maker's in light mode and
     as dark_mode_color_maker's in dark mode, as the system colors are."""
     def choose_color_for_appearance(appearance):
-        if appearance.bestMatchFromAppearancesWithNames_([NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) == NSAppearanceNameDarkAqua:
+        if appearance_is_dark(appearance):
             return dark_mode_color_maker()
         return light_mode_color_maker()
     return lambda: NSColor.colorWithName_dynamicProvider_(None, choose_color_for_appearance)

@@ -40,8 +40,7 @@ MOST_BACKGROUND_TASK_LIGHTS = 4
 # and a gray middle dot otherwise, the same width, so the commands line up.
 CHILD_PROCESS_DOT_GLYPHS_AND_COLORS = {True: (BACKGROUND_TASK_LIGHT, BACKGROUND_TASK_LIGHTS_COLOR_NAME), False: ("·", "gray")}
 CHILD_PROCESS_DOT_TOOL_TIPS = {
-    True: "Running in the background: the agent left this command running and went on (one of the yellow lights "
-          "after the tab's name)",
+    True: "Running in the background: the agent left this command running and went on",
     False: "Not a background task: a command from the agent's current turn, or a helper the agent runs for "
            "itself, such as a language server",
 }
@@ -66,7 +65,7 @@ MEANING_BY_STATE = {
     "error": "the agent reported an error",
     "stuck": "the agent has been thinking for 10 minutes with nothing new on screen and no command running",
     "working": "the agent is thinking or running a command",
-    "done": "the agent finished its turn after you last looked at the tab",
+    "done": "the agent is done and you haven't looked at its last message yet",  # the user's wording, 2026-10-27
     "idle": "the agent is waiting at its prompt, with nothing new since you last looked at the tab",
     "paused": "the agent is stopped until it is resumed",
     "unknown": "the app can't tell what the agent is doing",
@@ -180,7 +179,7 @@ def describe_background_task_lights(background_task_count):
 
 
 def describe_state(state):
-    """Returns a state dot's hover text, such as "Done: the agent finished its turn after you last looked at the tab"."""
+    """Returns a state dot's hover text, such as "Done: the agent is done and you haven't looked at its last message yet"."""
     return f"{state.capitalize()}: {MEANING_BY_STATE[state]}"
 
 
@@ -273,7 +272,8 @@ def build_window_row_text_parts(window_entry, is_last_child_at_each_level, is_ex
         dot_glyph=dot_glyph,
         dot_color_name=dot_color_name,
         dot_blinks=most_urgent_state == "working",  # blinks like its working tab's dot
-        dot_tool_tip=f"The most urgent status among this window's tabs:\n{describe_state(most_urgent_state)}",
+        # Its most urgent tab's state, without "The most urgent status among this window's tabs:" before it (user request, 2026-10-27).
+        dot_tool_tip=describe_state(most_urgent_state),
         name_text=window_entry.title,
         details_text=details_text,
     )

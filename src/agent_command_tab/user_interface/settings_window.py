@@ -9,7 +9,7 @@ import threading
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxSeparator, NSButton,
                     NSButtonTypeSwitch, NSColor, NSControlSizeSmall, NSFont, NSMakeRect, NSNormalWindowLevel, NSPopUpButton,
-                    NSScrollView, NSTextField, NSView, NSViewWidthSizable, NSWindow, NSWindowOcclusionStateVisible,
+                    NSScreen, NSScrollView, NSTextField, NSView, NSViewWidthSizable, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskClosable,
                     NSWindowStyleMaskResizable, NSWindowStyleMaskTitled, NSWorkspace)
 from Foundation import NSURL
@@ -34,12 +34,14 @@ GAP_BEFORE_CONTROL = 8  # between a right-aligned label and its control
 CONTROL_COLUMN_X = SIDE_MARGIN + LABEL_WIDTH  # where the rows' controls start
 CONTROL_COLUMN_WIDTH = WINDOW_WIDTH - CONTROL_COLUMN_X - SIDE_MARGIN  # to the right margin
 ROW_SPACING = 30
+# Below the last row's 22-point control, down to the window's bottom edge (12 until 2026-10-27, user request: twice that).
+ROOM_BELOW_THE_LAST_CONTROL = 24
 INDENT_UNDER_A_CHECKBOX = 20  # where a checkbox's title starts
 LAUNCH_COMMAND_FIELD_WIDTH = 200  # a longer command scrolls inside the field (user request, 2026-10-25)
 # The titles of the choices in settings_store (SHOW_AS_CHOICES, GLOBAL_SHORTCUT_CHOICES,
 # APPEARANCE_CHOICES, SIDEBAR_MODES, SIDEBAR_EDGES, LIST_COLUMNS); setting_choice_titles_tests
 # checks that each table names every choice.
-SHOW_AS_TITLES = {"window": "Window", "sidebar": "Sidebar", "popup": "Popup"}
+SHOW_AS_TITLES = {"popup": "Popup", "sidebar": "Sidebar", "window": "Window"}
 GLOBAL_SHORTCUT_TITLES = {"shift_command_tab": "Shift-Command-Tab", "command_fn_tab": "Command-Fn-Tab", "off": "Off"}
 APPEARANCE_TITLES = {"auto": "Auto", "dark": "Dark", "light": "Light"}  # in the user's order (user request, 2026-10-27)
 # System Settings > Privacy & Security > Accessibility, which the global shortcut's key filter needs.
@@ -95,12 +97,14 @@ class SettingsWindowController(WindowFrameSavingController):
     @objc.python_method
     def show(self, settings):
         """Opens (or brings forward) the window showing these settings, at its last frame while
-        that is on a connected screen, else in the middle of the main screen."""
+        that is on a connected screen, else in the middle of the main screen, as tall as its rows."""
         self.settings = dict(settings)
         if self.window is not None:
             self.window.close()
         self.window = self.build_window()
         place_window_at_saved_frame_or_center(self.window, settings["settings_window_frame"])
+        # The saved height can be from other sections, shown for another "Show as", or from older margins.
+        self.fit_window_height_to_rows()
         NSApp.activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
 
@@ -137,10 +141,8 @@ class SettingsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def build_window(self):
-        # From top to bottom: (label or None, control or None, units after the control or None), a SettingsSection,
+        # Rows from top to bottom: (label or None, control or None, units after the control or None), a SettingsSection,
         # or a NoteRow. Every section but the last ends in a blank row (or the note), so the gaps between them match.
-        rows = []
-        # Shown as a popup or a window, the sidebar still appears for a few seconds from the menu bar icon's "Show the sidebar".
         # A pop-up, as the keyboard shortcut's is (radio buttons until 2026-10-26, user request).
         self.show_as_popup = self.make_popup(SHOW_AS_TITLES, self.settings["show_as"])
         self.global_shortcut_popup = self.make_popup(GLOBAL_SHORTCUT_TITLES, self.settings["global_shortcut"])
@@ -172,15 +174,15 @@ class SettingsWindowController(WindowFrameSavingController):
         # A General section first: "Show as", the keyboard shortcut with its accessibility button
         # under it (a row left empty while the shortcut has its permission), then Appearance (user
         # requests, 2026-10-25 to 2026-10-27; Appearance last, the user's choice over after "Show as").
-        rows += [SettingsSection("General"), ("Show as", self.show_as_popup, None),
-                 ("Keyboard shortcut", self.global_shortcut_popup, None), (None, self.accessibility_settings_button, None),
-                 ("Appearance", self.appearance_popup, None), (None, None, None)]
+        general_rows = [SettingsSection("General"), ("Show as", self.show_as_popup, None),
+                        ("Keyboard shortcut", self.global_shortcut_popup, None), (None, self.accessibility_settings_button, None),
+                        ("Appearance", self.appearance_popup, None), (None, None, None)]
         self.list_window_always_on_top_checkbox = self.make_checkbox("Always on top", self.settings["list_window_is_always_on_top"])
-        rows += [SettingsSection("Window"), (None, self.list_window_always_on_top_checkbox, None), (None, None, None)]
-        rows += [SettingsSection("Sidebar"), ("Show", self.sidebar_mode_popup, None), ("Window Edge", self.edge_popup, None),
-                 ("Width", self.sidebar_width_field, "points"), NoteRow(self.edge_note)]
+        window_rows = [SettingsSection("Window"), (None, self.list_window_always_on_top_checkbox, None), (None, None, None)]
+        sidebar_rows = [SettingsSection("Sidebar"), ("Show", self.sidebar_mode_popup, None), ("Window Edge", self.edge_popup, None),
+                        ("Width", self.sidebar_width_field, "points"), NoteRow(self.edge_note)]
         # The columns in a section of their own, above Harnesses (user request, 2026-10-25).
-        rows.append(SettingsSection("Display Columns"))
+        rows = [SettingsSection("Display Columns")]
         rows += [(None, checkbox, None) for checkbox in self.column_checkboxes.values()]
         rows.append((None, None, None))
         # Each agent tool: whether it is included, and below that, indented, its launch command (user request, 2026-10-19).
@@ -198,14 +200,18 @@ class SettingsWindowController(WindowFrameSavingController):
             self.launch_command_fields.append(launch_command_field)
             rows += [("Use" if index == 0 else None, include_checkbox, None),  # "Include" until 2026-10-25 (user request)
                      (None, self.make_labeled_field_row(command_label, launch_command_field, command_field_x), None)]
+        # The Window section shows only while "Show as" is Window, and the Sidebar section only while
+        # it is Sidebar (user request, 2026-10-27); the sidebar shown for a few seconds from the menu
+        # bar icon's "Show the sidebar" still uses the Sidebar section's edge and width. Each group of
+        # rows: (the "Show as" choice it shows for, or None for every choice, its rows).
+        self.row_groups = [(None, general_rows), ("window", window_rows), ("sidebar", sidebar_rows), (None, rows)]
 
         # Resizable, with the rows in a scroll view, so a window made shorter than its rows scrolls
         # (user request, 2026-10-19). The rows' view is flipped: rows go from the top down.
-        rows_height = 12 + ROW_SPACING * len(rows) + 12
-        rows_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, WINDOW_WIDTH, rows_height))
+        rows_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, WINDOW_WIDTH, 0))
         self.rows_view = rows_view
-        for index, row in enumerate(rows):
-            self.add_row(rows_view, row, 20 + ROW_SPACING * index)  # each control's top
+        self.lay_out_rows(self.settings["show_as"])
+        rows_height = rows_view.frame().size.height
         scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, WINDOW_WIDTH, rows_height))
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setAutohidesScrollers_(True)
@@ -226,6 +232,35 @@ class SettingsWindowController(WindowFrameSavingController):
         return window
 
     @objc.python_method
+    def lay_out_rows(self, show_as):
+        """Lays out, from the top of rows_view, the rows of every group shown for this "Show as"
+        choice, in place of the rows there, and makes rows_view as tall as they need."""
+        rows = [row for shown_for_show_as, group_rows in self.row_groups if shown_for_show_as in (None, show_as)
+                for row in group_rows]
+        for subview in list(self.rows_view.subviews()):
+            subview.removeFromSuperview()
+        # The last control's bottom is 20 + ROW_SPACING * (len(rows) - 1) + 22 from the top.
+        self.rows_view.setFrameSize_((self.rows_view.frame().size.width,
+                                      ROW_SPACING * len(rows) + 12 + ROOM_BELOW_THE_LAST_CONTROL))
+        for index, row in enumerate(rows):
+            self.add_row(self.rows_view, row, 20 + ROW_SPACING * index)  # each control's top
+        self.show_as_of_the_laid_out_rows = show_as
+
+    @objc.python_method
+    def fit_window_height_to_rows(self):
+        """Makes the window as tall as its rows, keeping its top edge and its width, but no taller
+        than the room below its top on its screen, where the rows then scroll (user request,
+        2026-10-27, over keeping the window's height)."""
+        frame = self.window.frame()
+        top = frame.origin.y + frame.size.height
+        height = self.window.frameRectForContentRect_(
+            NSMakeRect(0, 0, frame.size.width, self.rows_view.frame().size.height)).size.height
+        screen = self.window.screen() or NSScreen.mainScreen()
+        if screen is not None:
+            height = min(height, top - screen.visibleFrame().origin.y)
+        self.window.setFrame_display_(NSMakeRect(frame.origin.x, top - height, frame.size.width, height), True)
+
+    @objc.python_method
     def add_row(self, rows_view, row, top):
         """Adds one row at top (rows_view is flipped): a label in the label column, the control and
         its units; a section's title; or a note. Text sits 1 point below a control's top, which
@@ -234,7 +269,9 @@ class SettingsWindowController(WindowFrameSavingController):
             self.add_section_title(rows_view, row.title, top)
             return
         if isinstance(row, NoteRow):
-            row.note_field.setFrame_(NSMakeRect(CONTROL_COLUMN_X, top + 2, CONTROL_COLUMN_WIDTH, ROW_SPACING - 2))
+            # As wide as the control column of rows_view as it is now: a wider window's too.
+            row.note_field.setFrame_(NSMakeRect(CONTROL_COLUMN_X, top + 2, rows_view.frame().size.width - CONTROL_COLUMN_X - SIDE_MARGIN,
+                                                ROW_SPACING - 2))
             row.note_field.setAutoresizingMask_(NSViewWidthSizable)
             rows_view.addSubview_(row.note_field)
             return
@@ -261,7 +298,7 @@ class SettingsWindowController(WindowFrameSavingController):
         title_field.setFrame_(NSMakeRect(SIDE_MARGIN, top + 1, title_width, 18))
         rows_view.addSubview_(title_field)
         line_x = SIDE_MARGIN + title_width + 8
-        line = NSBox.alloc().initWithFrame_(NSMakeRect(line_x, top + 10, WINDOW_WIDTH - SIDE_MARGIN - line_x, 1))
+        line = NSBox.alloc().initWithFrame_(NSMakeRect(line_x, top + 10, rows_view.frame().size.width - SIDE_MARGIN - line_x, 1))
         line.setBoxType_(NSBoxSeparator)
         line.setAutoresizingMask_(NSViewWidthSizable)  # reaches the right edge of a wider window
         rows_view.addSubview_(line)
@@ -435,3 +472,9 @@ class SettingsWindowController(WindowFrameSavingController):
         if not width_is_being_typed:
             self.sidebar_width_field.setStringValue_(str(int(settings["sidebar_width"])))
         self.show_placement_fallback_note(settings)
+        if settings["show_as"] != self.show_as_of_the_laid_out_rows:  # a section shows or hides
+            # A width being typed is saved first, as when the window closes: its field would end
+            # editing, and save, as it is taken out during the layout.
+            self.window.makeFirstResponder_(None)
+            self.lay_out_rows(settings["show_as"])
+            self.fit_window_height_to_rows()

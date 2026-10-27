@@ -123,12 +123,11 @@ class RowTextPartsTests(unittest.TestCase):
     def test_every_state_dot_says_what_it_means(self):  # user request, 2026-10-27
         self.assertEqual(set(MEANING_BY_STATE), set(STATES_IN_URGENCY_ORDER))
         self.assertEqual(build_agent_session_row_text_parts(make_entry("done"), [False], 1.0).dot_tool_tip,
-                         "Done: the agent finished its turn after you last looked at the tab")
+                         "Done: the agent is done and you haven't looked at its last message yet")
         self.assertTrue(build_agent_session_row_text_parts(make_entry("no such state"), [False], 1.0).dot_tool_tip
                         .startswith("Unknown: "))  # the gray "unknown" dot
         self.assertEqual(build_window_row_text_parts(make_window(["idle", "asking"]), [], True).dot_tool_tip,
-                         "The most urgent status among this window's tabs:\nAsking: the agent is waiting for your "
-                         "answer: a question, or permission to use a tool")
+                         "Asking: the agent is waiting for your answer: a question, or permission to use a tool")
         self.assertEqual(build_monitor_row_text_parts(MonitorEntry("m", "Built-in", (0, 0, 1, 1), (0, 0, 1, 1), ())).dot_tool_tip, "")
 
     def test_window_row_expanded_and_collapsed(self):

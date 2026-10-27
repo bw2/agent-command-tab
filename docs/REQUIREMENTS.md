@@ -161,7 +161,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 - R40. A collapsed window shows a gray one-line summary in place of its tabs, like pyinstrument's "[33 frames hidden]".
 - R41. The tab in front is marked by a highlighted name (like pyinstrument's highlighted frames) rather than by extra icons.
 - R42. Menu item titles are in sentence case: "Kill session", "Pause 3 sessions", "Talk to each other…" (user request, 2026-10-27).
-- R43. Resting the pointer on a row's status dot, a process row's dot or a tab's background task lights shows what they mean, for example "Done: the agent finished its turn after you last looked at the tab" (user request, 2026-10-27). The rest of the row shows nothing on hover.
+- R43. Resting the pointer on a row's status dot, a process row's dot or a tab's background task lights shows what they mean, for example "Done: the agent is done and you haven't looked at its last message yet" (user requests, 2026-10-27). The rest of the row shows nothing on hover.
 
 ## Known gaps for Codex
 

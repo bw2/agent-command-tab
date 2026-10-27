@@ -13,7 +13,7 @@ from AppKit import (NSApp, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameD
                     NSBitmapImageFileTypePNG, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSEventModifierFlagCommand, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSMakePoint, NSMakeRect,
                     NSFloatingWindowLevel, NSForegroundColorAttributeName, NSMenu, NSNormalWindowLevel, NSPopover,
-                    NSParagraphStyleAttributeName, NSTextAlignmentRight, NSTextField, NSWindow, NSWindowOcclusionStateVisible,
+                    NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
 
@@ -280,6 +280,35 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # Only the tool icon column is left: it shows by itself, since Claude Code and Codex both run.
         self.assertEqual(self.list_controller.measure_right_columns_width(), self.list_controller.column_widths["agent_tool_icon"])
 
+    def test_the_bars_around_the_list_are_on_the_lists_background_in_dark_mode_and_on_the_window_in_light_mode(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        view = self.window.contentView()
+        for appearance_name in (NSAppearanceNameDarkAqua, NSAppearanceNameAqua):
+            self.window.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
+            view.layoutSubtreeIfNeeded()
+            image = view.bitmapImageRepForCachingDisplayInRect_(view.bounds())
+            view.cacheDisplayInRect_toBitmapImageRep_(view.bounds(), image)
+            scale = image.pixelsWide() / view.bounds().size.width
+
+            def read_drawn_color(x, y_from_the_top):
+                """Returns the (red, green, blue, alpha) drawn at this point of the panel."""
+                color = image.colorAtX_y_(int(x * scale), int(y_from_the_top * scale)).colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
+                return (color.redComponent(), color.greenComponent(), color.blueComponent(), color.alphaComponent())
+            # The list's background: the empty right end of the "+" row, the list's last.
+            outline_view = self.list_controller.outline_view
+            plus_row_rect = view.convertRect_fromView_(outline_view.rectOfRow_(outline_view.numberOfRows() - 1), outline_view)
+            list_background = read_drawn_color(plus_row_rect.origin.x + plus_row_rect.size.width - 40,
+                                               view.bounds().size.height - plus_row_rect.origin.y - plus_row_rect.size.height / 2)
+            # 2 points in from the top bar's and the bottom bar's left ends, left of their controls. In light mode the
+            # panel draws nothing there, so this test window's own background shows: nothing.
+            for name, y_from_the_top in (("top bar", 2), ("bottom bar", view.bounds().size.height - 3)):
+                drawn = read_drawn_color(2, y_from_the_top)
+                if appearance_name == NSAppearanceNameDarkAqua:
+                    for drawn_component, list_component in zip(drawn, list_background):
+                        self.assertAlmostEqual(drawn_component, list_component, delta=0.02, msg=name)
+                else:
+                    self.assertEqual(drawn[3], 0, name)
+
     def test_the_name_title_stands_on_the_same_line_as_the_column_titles(self):
         snapshot = make_sample_snapshot()
         window_one = snapshot.monitors[0].windows[0]
@@ -467,12 +496,13 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # Two windows with running agents: the expand or collapse and the pause or resume buttons show.
         self.list_controller.apply_snapshot(make_sample_snapshot())
         # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's
-        # smallest width, 250 the list window's and 200 the sidebar's. Only a sidebar under 231
-        # points hides the pop-up (the column titles still sort the list).
+        # smallest width, 250 the list window's and 200 the sidebar's. A sidebar or a list window
+        # under 251 points hides the pop-up (the column titles still sort the list); 231 before the
+        # Settings button had its gear (2026-10-27).
         for width, label_shown, popup_shown, popup_width, settings_button_is_centered in (
-                (460, True, True, 124, True), (327, True, True, 124, False), (326, False, True, 124, False),
-                (320, False, True, 124, False), (265, False, True, 94, False), (250, False, True, 79, False),
-                (231, False, True, 60, False), (230, False, False, 59, False), (200, False, False, 29, False),
+                (460, True, True, 124, True), (346, True, True, 124, False), (345, False, True, 124, False),
+                (320, False, True, 124, False), (265, False, True, 74.5, False), (251, False, True, 60.5, False),
+                (250, False, False, 59.5, False), (200, False, False, 9.5, False),
                 (460, True, True, 124, True)):
             self.window.setContentSize_((width, 260))
             self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden(),
@@ -1850,7 +1880,14 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             self.assertEqual(frames, expected_frames)
             self.assertEqual(levels, [None])  # the normal level, so other apps' windows can cover it and close it
 
+    def show_the_sidebar_section(self):
+        """Chooses "Show as: Sidebar" as the app controller does once the pop-up changed, so the
+        Sidebar section, with the width field, is laid out (it shows only for Sidebar)."""
+        self.owner.settings = dict(self.owner.settings, show_as="sidebar")
+        self.controller.reflect_settings(self.owner.settings)
+
     def test_a_number_being_typed_is_saved_when_the_window_closes(self):
+        self.show_the_sidebar_section()
         window = self.controller.window  # built, not shown: no close button to click, so its close notification is sent
         window.makeFirstResponder_(self.controller.sidebar_width_field)
         self.controller.sidebar_width_field.currentEditor().setString_("555")
@@ -1889,17 +1926,19 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
 
     def test_a_width_being_typed_survives_a_click_on_another_control(self):
+        self.show_the_sidebar_section()
         width_field = self.controller.sidebar_width_field
         self.assertTrue(self.controller.window.makeFirstResponder_(width_field))
         width_field.currentEditor().setString_("500")  # typed, without Return or Tab
-        self.controller.list_window_always_on_top_checkbox.setState_(1)
-        self.controller.controlChanged_(self.controller.list_window_always_on_top_checkbox)
+        self.controller.column_checkboxes["created_time"].setState_(1)
+        self.controller.controlChanged_(self.controller.column_checkboxes["created_time"])
         self.controller.reflect_settings(self.owner.settings)  # as the app controller does after every change
         self.assertEqual(width_field.currentEditor().string(), "500")
         self.controller.window.makeFirstResponder_(None)  # editing ends, as a click elsewhere does
         self.assertEqual(self.owner.settings["sidebar_width"], 500)
 
     def test_a_width_field_that_only_has_the_focus_follows_a_width_dragged_at_the_sidebar(self):
+        self.show_the_sidebar_section()
         width_field = self.controller.sidebar_width_field
         self.assertTrue(self.controller.window.makeFirstResponder_(width_field))  # as the first text field when the window opens
         self.owner.settings = dict(self.owner.settings, sidebar_width=555)  # dragged at the sidebar's edge
@@ -1909,6 +1948,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertEqual(self.owner.settings["sidebar_width"], 555)  # not the 400 it showed before the drag
 
     def test_quit_saves_a_width_being_typed_first(self):
+        self.show_the_sidebar_section()
         width_field = self.controller.sidebar_width_field
         self.assertTrue(self.controller.window.makeFirstResponder_(width_field))
         width_field.currentEditor().setString_("500")  # typed, without Return or Tab
@@ -1924,7 +1964,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertEqual(steps, ["save a moved window's frame", "give room back", "exit 0"])
 
     def test_the_show_as_popup_offers_the_three_ways_and_saves_the_choice(self):
-        self.assertEqual(self.controller.show_as_popup.itemTitles(), ["Window", "Sidebar", "Popup"])
+        self.assertEqual(self.controller.show_as_popup.itemTitles(), ["Popup", "Sidebar", "Window"])  # user request, 2026-10-27
         self.assertEqual(self.controller.show_as_popup.titleOfSelectedItem(), "Popup")  # the default
         self.controller.show_as_popup.selectItemWithTitle_("Window")
         self.controller.controlChanged_(self.controller.show_as_popup)
@@ -1945,19 +1985,30 @@ class SettingsWindowSmokeTests(unittest.TestCase):
 
     def test_settings_are_grouped_under_section_titles_in_a_resizable_scrolling_window(self):
         rows_view = self.controller.rows_view  # flipped: y grows downward
-        texts_top_to_bottom = [subview.stringValue() for subview in sorted(
-            (subview for subview in rows_view.subviews() if isinstance(subview, NSTextField)),
-            key=lambda subview: subview.frame().origin.y)]
-        self.assertEqual(texts_top_to_bottom[0], "General")
-        for earlier, later in (("General", "Show as:"), ("Show as:", "Keyboard shortcut:"), ("Keyboard shortcut:", "Appearance:"),
-                               ("Appearance:", "Window"), ("Window", "Sidebar"), ("Sidebar", "Show:"), ("Width:", "Display Columns"),
-                               ("Display Columns", "Harnesses"), ("Harnesses", "Use:")):
-            self.assertLess(texts_top_to_bottom.index(earlier), texts_top_to_bottom.index(later), (earlier, later))
+        titles_and_labels = ["General", "Show as:", "Keyboard shortcut:", "Appearance:", "Window", "Sidebar", "Show:", "Window Edge:",
+                             "Width:", "Display Columns", "Harnesses", "Use:"]
+        # The Window section only for "Show as: Window", the Sidebar section only for Sidebar (user request, 2026-10-27).
+        for show_as, titles_and_labels_left_out in (("popup", ["Window", "Sidebar", "Show:", "Window Edge:", "Width:"]),
+                                                    ("window", ["Sidebar", "Show:", "Window Edge:", "Width:"]),
+                                                    ("sidebar", ["Window"])):
+            self.owner.settings = dict(self.owner.settings, show_as=show_as)
+            self.controller.reflect_settings(self.owner.settings)
+            texts_top_to_bottom = [subview.stringValue() for subview in sorted(
+                (subview for subview in rows_view.subviews() if isinstance(subview, NSTextField)),
+                key=lambda subview: subview.frame().origin.y)]
+            self.assertEqual([text for text in texts_top_to_bottom if text in titles_and_labels],
+                             [text for text in titles_and_labels if text not in titles_and_labels_left_out], show_as)
         self.assertTrue(self.controller.window.styleMask() & NSWindowStyleMaskResizable)
         self.assertIs(self.controller.window.contentView().documentView(), rows_view)
         width_before = rows_view.frame().size.width
         self.controller.window.setContentSize_((self.controller.window.contentView().frame().size.width + 160, 300))
         self.assertEqual(rows_view.frame().size.width, width_before + 160)  # the rows follow the window's width
+
+    def test_the_rows_end_24_points_below_the_last_control(self):  # 12 until 2026-10-27 (user request: twice that)
+        rows_view = self.controller.rows_view
+        last_command_field = self.controller.launch_command_fields[-1]
+        last_control_bottom = rows_view.convertRect_fromView_(last_command_field.bounds(), last_command_field)
+        self.assertEqual(rows_view.frame().size.height - (last_control_bottom.origin.y + last_control_bottom.size.height), 24)
 
     def test_the_command_fields_start_together_keep_their_width_and_scroll_a_longer_command(self):
         command_fields = self.controller.launch_command_fields
@@ -1967,17 +2018,42 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertTrue(all(command_field.cell().isScrollable() for command_field in command_fields))
 
     def test_every_section_starts_one_blank_row_below_the_last_thing_shown_above_it(self):
-        subviews = list(self.controller.rows_view.subviews())  # flipped: y grows downward
-        section_titles = [subview for subview in subviews if isinstance(subview, NSTextField)
-                          and subview.stringValue() in ("Window", "Sidebar", "Display Columns", "Harnesses")]
-        self.assertEqual(len(section_titles), 4)
-        for section_title in section_titles:
-            # The hidden accessibility button and the empty placement note show nothing.
-            shown_above = [subview.frame().origin.y for subview in subviews if subview.frame().origin.y < section_title.frame().origin.y
-                           and not subview.isHidden() and not (isinstance(subview, NSTextField) and not subview.stringValue())]
-            # Two rows: the last thing's own row, then the blank one (a label's text sits 1 point lower than a control).
-            self.assertAlmostEqual(section_title.frame().origin.y - max(shown_above), 2 * ROW_SPACING, delta=1,
-                                   msg=section_title.stringValue())
+        for show_as, shown_section_titles in (("popup", ["Display Columns", "Harnesses"]),
+                                              ("window", ["Window", "Display Columns", "Harnesses"]),
+                                              ("sidebar", ["Sidebar", "Display Columns", "Harnesses"])):
+            self.owner.settings = dict(self.owner.settings, show_as=show_as)
+            self.controller.reflect_settings(self.owner.settings)
+            subviews = list(self.controller.rows_view.subviews())  # flipped: y grows downward
+            section_titles = [subview for subview in subviews if isinstance(subview, NSTextField)
+                              and subview.stringValue() in ("Window", "Sidebar", "Display Columns", "Harnesses")]
+            self.assertEqual([section_title.stringValue() for section_title in section_titles], shown_section_titles)
+            for section_title in section_titles:
+                # The hidden accessibility button and the empty placement note show nothing.
+                shown_above = [subview.frame().origin.y for subview in subviews if subview.frame().origin.y < section_title.frame().origin.y
+                               and not subview.isHidden() and not (isinstance(subview, NSTextField) and not subview.stringValue())]
+                # Two rows: the last thing's own row, then the blank one (a label's text sits 1 point lower than a control).
+                self.assertAlmostEqual(section_title.frame().origin.y - max(shown_above), 2 * ROW_SPACING, delta=1,
+                                       msg=(show_as, section_title.stringValue()))
+
+    def test_the_window_fits_its_height_to_the_sections_shown_keeping_its_top_edge_and_width(self):
+        window = self.controller.window  # built, not shown
+        visible_frame = NSScreen.mainScreen().visibleFrame()
+        left, top = visible_frame.origin.x + 50, visible_frame.origin.y + visible_frame.size.height - 50
+        window.setFrame_display_(NSMakeRect(left, top - 300, 600, 300), False)
+        content_heights = {}
+        for show_as in ("sidebar", "popup", "window"):
+            self.owner.settings = dict(self.owner.settings, show_as=show_as)
+            self.controller.reflect_settings(self.owner.settings)
+            frame = window.frame()
+            self.assertEqual((frame.origin.x, frame.size.width, frame.origin.y + frame.size.height), (left, 600, top), show_as)
+            # As tall as the rows, or as the room below the window's top, where the rows scroll.
+            rows_frame_height = window.frameRectForContentRect_(
+                NSMakeRect(0, 0, 600, self.controller.rows_view.frame().size.height)).size.height
+            self.assertEqual(frame.size.height, min(rows_frame_height, top - visible_frame.origin.y), show_as)
+            content_heights[show_as] = self.controller.rows_view.frame().size.height
+        # The Sidebar section's 5 rows, the Window section's 3.
+        self.assertEqual((content_heights["sidebar"] - content_heights["popup"], content_heights["window"] - content_heights["popup"]),
+                         (5 * ROW_SPACING, 3 * ROW_SPACING))
 
     def test_the_settings_window_reports_its_frame_and_uses_a_saved_one(self):
         reported_frames = []
