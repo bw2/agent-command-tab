@@ -2,7 +2,9 @@
 
 Settings are added here as the features that use them are built; PLAN.md section 8 lists the
 full set. Command paths are resolved once, at first run, and saved, because an app started at
-login gets a minimal PATH (PLAN.md section 8, "Settings").
+login gets a minimal PATH (PLAN.md section 8, "Settings"); so does one opened from Finder at
+its first run, so the folders programs are usually installed in are looked in too
+(USUAL_PROGRAM_FOLDERS).
 """
 
 import json
@@ -21,6 +23,13 @@ SETTINGS_FOLDER_OF_THE_OLD_NAME = os.path.expanduser("~/Library/Application Supp
 SETTINGS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "settings.json")
 # Reading the shell's start-up files can take several seconds (7.7 for one .bash_profile, 2026-10-25)
 SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL = 20
+# The shells whose syntax the login shell check uses (`-i -l -c` and "$1"); fish, tcsh and csh take
+# other syntax, so they aren't asked (code review, 2026-10-28).
+LOGIN_SHELLS_THAT_CAN_BE_ASKED = frozenset({"bash", "zsh", "sh", "dash", "ksh"})
+# Where programs such as claude and codex are usually installed (Homebrew on Apple silicon and on
+# Intel, Claude Code's installer), which an app opened from Finder or at login has no PATH to: it
+# gets launchd's /usr/bin:/bin:/usr/sbin:/sbin (code review, 2026-10-28).
+USUAL_PROGRAM_FOLDERS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin")
 ENVIRONMENT_SETTING_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # "ANTHROPIC_MODEL=x claude"
 
 # How the list is shown (user request, 2026-10-19): popup, the dropdown under the menu bar icon;
@@ -141,11 +150,17 @@ def replace_agent_tool_field(agent_tools, tool_index, field_name, value):
             for index, agent_tool in enumerate(agent_tools)]
 
 
-def find_codex_command_path(settings, find_command_path=shutil.which):
+def find_program_on_path_or_in_the_usual_folders(program_name):
+    """Returns the full path of a program found on PATH, else in USUAL_PROGRAM_FOLDERS, or None."""
+    return shutil.which(program_name) or shutil.which(
+        program_name, path=os.pathsep.join(os.path.expanduser(folder) for folder in USUAL_PROGRAM_FOLDERS))
+
+
+def find_codex_command_path(settings, find_command_path=find_program_on_path_or_in_the_usual_folders):
     """Returns the codex program that "Talk to Each Other" runs `codex queue` with: the first word
     of the Codex tool's launch command (resolved to a full path at first run), looked up on PATH
-    when it is a bare name, or None when it isn't found. A launch command that starts with
-    another program (a wrapper) gives the codex found on PATH."""
+    and in the usual folders when it is a bare name, or None when it isn't found. A launch
+    command that starts with another program (a wrapper) gives the codex found that way."""
     launch_command = next((agent_tool["launch_command"] for agent_tool in settings["agent_tools"]
                            if agent_tool["agent_tool_name"] == "Codex"), "")
     first_word = os.path.expanduser((launch_command.split() or [""])[0])  # "~/bin/codex" too, as Settings accepts
@@ -154,7 +169,7 @@ def find_codex_command_path(settings, find_command_path=shutil.which):
     return first_word if os.path.isabs(first_word) else find_command_path(first_word)
 
 
-def build_core_settings(settings, find_command_path=shutil.which):
+def build_core_settings(settings, find_command_path=find_program_on_path_or_in_the_usual_folders):
     """Returns the part of the settings that the core uses: the agent tools left out of the
     list, whether memory and CPU use are read (only while one of their columns is shown or the
     list is sorted by one of them), and the codex program for `codex queue`
@@ -193,8 +208,9 @@ def save_settings(settings, settings_file_path=SETTINGS_FILE_PATH):
     write_json_file_atomically(settings, settings_file_path)
 
 
-def resolve_launch_command_paths(settings, find_command_path=shutil.which):
-    """Returns settings whose bare launch commands ("claude") are replaced by full paths found on PATH.
+def resolve_launch_command_paths(settings, find_command_path=find_program_on_path_or_in_the_usual_folders):
+    """Returns settings whose bare launch commands ("claude") are replaced by full paths found on
+    PATH or in the usual folders.
 
     Only the first word is resolved, and only when it is a bare name that is found, so a
     command the user typed with a path or extra arguments is kept as written.
@@ -216,8 +232,11 @@ def ask_the_login_shell_whether_it_knows_command(command_name):
     program, False if it doesn't, and None if the shell couldn't be asked or didn't answer in time.
     New agent sessions start by typing the launch command into that shell, so an alias such as
     `yc` works there although it is on no PATH. Takes a moment (it reads the shell's start-up
-    files), so the settings window calls it off the main thread."""
+    files), so the settings window calls it off the main thread. A shell not in
+    LOGIN_SHELLS_THAT_CAN_BE_ASKED (fish, tcsh) isn't asked."""
     shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
+    if os.path.basename(shell) not in LOGIN_SHELLS_THAT_CAN_BE_ASKED:
+        return None
     try:
         completed_process = subprocess.run(
             [shell, "-i", "-l", "-c", 'command -v -- "$1" > /dev/null', shell, command_name],
@@ -228,7 +247,7 @@ def ask_the_login_shell_whether_it_knows_command(command_name):
     return completed_process.returncode == 0
 
 
-def find_launch_command_problem(launch_command, find_command_path=shutil.which,
+def find_launch_command_problem(launch_command, find_command_path=find_program_on_path_or_in_the_usual_folders,
                                 ask_the_login_shell=ask_the_login_shell_whether_it_knows_command):
     """Returns "" when the launch command's program can be run, else a short explanation.
 

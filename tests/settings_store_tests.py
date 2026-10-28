@@ -2,8 +2,11 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 
-from agent_command_tab.settings_store import (DEFAULT_SETTINGS, build_core_settings, find_codex_command_path,
+from agent_command_tab import settings_store
+from agent_command_tab.settings_store import (DEFAULT_SETTINGS, ask_the_login_shell_whether_it_knows_command,
+                                              build_core_settings, find_codex_command_path,
                                               find_launch_command_problem,
                                               list_included_agent_tool_names, list_left_out_agent_tool_names,
                                               load_settings, merge_settings_with_defaults,
@@ -134,6 +137,26 @@ class ResolveLaunchCommandPathsTests(unittest.TestCase):
         self.assertEqual(settings["agent_tools"][0]["launch_command"], "claude --model opus")  # input unchanged
         json.dumps(resolved)
 
+    def test_a_program_off_the_apps_minimal_path_is_found_in_the_usual_folders(self):  # code review, 2026-10-28
+        # As for an app opened from Finder, whose PATH is launchd's.
+        with tempfile.TemporaryDirectory() as usual_folder, tempfile.TemporaryDirectory() as folder_on_path:
+            def write_program(folder, name):
+                path = os.path.join(folder, name)
+                with open(path, "w") as program_file:
+                    program_file.write("#!/bin/sh\n")
+                os.chmod(path, 0o755)
+                return path
+            codex_path = write_program(usual_folder, "codex")
+            write_program(usual_folder, "claude")
+            claude_on_path = write_program(folder_on_path, "claude")  # a newer one the user put first
+            with unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}), \
+                    unittest.mock.patch.object(settings_store, "USUAL_PROGRAM_FOLDERS", ("/nowhere", usual_folder)):
+                self.assertEqual(settings_store.find_program_on_path_or_in_the_usual_folders("codex"), codex_path)
+                self.assertIsNone(settings_store.find_program_on_path_or_in_the_usual_folders("not-installed"))
+            with unittest.mock.patch.dict(os.environ, {"PATH": f"{folder_on_path}:/usr/bin:/bin"}), \
+                    unittest.mock.patch.object(settings_store, "USUAL_PROGRAM_FOLDERS", (usual_folder,)):
+                self.assertEqual(settings_store.find_program_on_path_or_in_the_usual_folders("claude"), claude_on_path)  # PATH first
+
 
 class LaunchCommandProblemTests(unittest.TestCase):
     def check(self, launch_command, known_names=("claude",), login_shell_names=("yc",)):
@@ -151,6 +174,13 @@ class LaunchCommandProblemTests(unittest.TestCase):
     def test_a_name_the_login_shell_did_not_answer_about_in_time_counts_as_fine(self):
         # e.g. an alias in start-up files that take longer to read than the check waits
         self.assertEqual(find_launch_command_problem("yc", lambda name: None, lambda name: None), "")
+
+    def test_a_fish_or_tcsh_login_shell_isnt_asked(self):  # code review, 2026-10-28
+        # Their syntax differs from the check's (`-i -l -c`, "$1"), so they couldn't be asked, not "not found".
+        for shell in ("/opt/homebrew/bin/fish", "/bin/tcsh"):
+            with unittest.mock.patch.dict(os.environ, {"SHELL": shell}), \
+                    unittest.mock.patch.object(settings_store.subprocess, "run", side_effect=AssertionError("run")):
+                self.assertIsNone(ask_the_login_shell_whether_it_knows_command("claude"), shell)
 
     def test_environment_settings_are_skipped_and_shell_expansions_are_not_judged(self):
         self.assertEqual(self.check("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude"), "")

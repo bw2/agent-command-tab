@@ -88,6 +88,17 @@ class ComputeSessionStatusTests(unittest.TestCase):
         tracking = track_status_value(dict(tracking, last_time_tab_was_seen=125), "idle", 150)  # Codex's end of a turn
         self.assertEqual((tracking["last_turn_ended_at"], tracking["last_time_tab_was_seen"]), (150, 125))
 
+    def test_a_permission_prompt_answered_no_or_esc_ends_the_turn_so_the_next_working_is_a_new_one(self):  # code review, 2026-10-28
+        tracking = track_status_value(track_status_value(None, "idle", 100), "working", 120)
+        tracking = track_status_value(tracking, "waiting", 142)
+        answered_no = {"permission_dialog_is_showing": False, "permission_dialog_gone_since": 143,
+                       "turn_was_interrupted": True}
+        self.assertEqual(track_status_value(tracking, "working", 145, dict(answered_no, permission_dialog_checked_at=143))
+                         ["turn_started_at"], 145)
+        # A screen check from before this prompt appeared belongs to an earlier one.
+        self.assertEqual(track_status_value(tracking, "working", 145, dict(answered_no, permission_dialog_checked_at=141))
+                         ["turn_started_at"], 120)
+
     def test_status_changes_that_end_a_turn(self):
         self.assertTrue(status_change_ends_a_turn("working", "done"))
         self.assertTrue(status_change_ends_a_turn("working", "idle"))

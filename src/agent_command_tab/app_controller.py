@@ -101,6 +101,14 @@ def choose_what_the_global_shortcut_does(show_as, sidebar_mode, sidebar_is_shown
     return "close_dropdown" if dropdown_is_open else "open_dropdown"
 
 
+def yield_activation_to(application):
+    """Lets an app (an NSRunningApplication) become the active one when it asks: macOS 14 and
+    later may refuse another app's activation while this one is active unless this one hands it
+    over. Older macOS has no such hand-over and needs none (code review, 2026-10-28)."""
+    if NSApp.respondsToSelector_("yieldActivationToApplication:"):
+        NSApp.yieldActivationToApplication_(application)
+
+
 class AppController(NSObject):
     """Owns the views, the settings and the connection thread."""
 
@@ -236,6 +244,7 @@ class AppController(NSObject):
         permission, since the sidebar slides in without making the app active (the other retry)."""
         self.settings_window_controller.close_if_open()
         self.retry_the_global_shortcut_if_it_lacks_permission()
+        self.close_a_dropdown_the_menu_showed()
         if self.settings["show_as"] == "sidebar":
             if self.settings["sidebar_mode"] == "auto_hide" and self.sidebar_controller.is_shown:
                 self.sidebar_controller.hide_now()
@@ -290,10 +299,19 @@ class AppController(NSObject):
             self.sidebar_controller.show_for_a_few_seconds()
 
     @objc.python_method
+    def close_a_dropdown_the_menu_showed(self):
+        """Closes a dropdown that the menu bar icon's menu's Show popup opened while "Show as" is
+        Sidebar or Window (an open settings window keeps it open), before a click on the icon or
+        the global shortcut shows the list the way the settings ask (code review, 2026-10-28)."""
+        if self.settings["show_as"] != "popup":
+            self.close_dropdown()
+
+    @objc.python_method
     def global_shortcut_pressed(self):
         """The global shortcut shows the list as the menu bar icon does and, pressed again, hides
         it, giving the keyboard back to the app that had it (user request, 2026-10-21)
         (choose_what_the_global_shortcut_does)."""
+        self.close_a_dropdown_the_menu_showed()
         what_to_do = choose_what_the_global_shortcut_does(
             self.settings["show_as"], self.settings["sidebar_mode"], self.sidebar_controller.is_shown,
             self.list_window_controller.is_in_front(), self.popover.isShown())
@@ -325,7 +343,7 @@ class AppController(NSObject):
     def give_activation_to(self, application):
         """Makes an app the active one again (nothing for None)."""
         if application is not None:
-            NSApp.yieldActivationToApplication_(application)
+            yield_activation_to(application)
             application.activateWithOptions_(0)
 
     @objc.python_method
@@ -457,7 +475,7 @@ class AppController(NSObject):
         if action_request.action in ("focus_agent_session", "focus_window", "peek_agent_session"):
             # macOS may refuse another app's activation while the dashboard is active, so hand it over first.
             for iterm2_application in NSRunningApplication.runningApplicationsWithBundleIdentifier_(ITERM2_BUNDLE_IDENTIFIER):
-                NSApplication.sharedApplication().yieldActivationToApplication_(iterm2_application)
+                yield_activation_to(iterm2_application)
         return self.connection_thread.submit_action(action_request)
 
     def popoverDidShow_(self, notification):

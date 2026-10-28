@@ -110,20 +110,24 @@ def status_change_ends_a_turn(previous_state, new_state):
     return new_state == "done" or (new_state == "idle" and previous_state in STATES_OF_A_TURN_UNDER_WAY)
 
 
-def track_status_value(session_tracking, iterm2_status_value, now):
+def track_status_value(session_tracking, iterm2_status_value, now, screen_reading=None):
     """Returns a session's tracking updated for its iTerm2 status value read now.
 
     The tracking records when the value last changed, when the current turn started (working
     after anything but working or asking: a permission prompt in between doesn't start a new
-    turn) and when the last turn ended (status_change_ends_a_turn). The turn's end is kept when
-    the status changes again, so done lasts until the tab is seen. A session first seen as done
-    ended its turn by then.
+    turn, unless it was answered No or Esc, which ended the turn) and when the last turn ended
+    (status_change_ends_a_turn). The turn's end is kept when the status changes again, so done
+    lasts until the tab is seen. A session first seen as done ended its turn by then.
 
     Args:
         session_tracking: The session's tracking so far, or None for a session seen for the
             first time; it is not changed.
         iterm2_status_value: iTerm2's `status` variable for the session's first pane.
         now: The time of the reading.
+        screen_reading: The session's screen reading (compute_session_status_from_sources), or
+            None: a permission prompt that a check since it appeared found answered No or Esc
+            ended the turn, though iTerm2 still says waiting, so working next is the turn the
+            next prompt starts (code review, 2026-10-28).
 
     Returns:
         session_tracking itself when the value is unchanged, else a new dict with "status_value",
@@ -140,7 +144,9 @@ def track_status_value(session_tracking, iterm2_status_value, now):
         return session_tracking
     previous_state = map_iterm2_status_value_to_state(session_tracking["status_value"])
     tracking = dict(session_tracking, status_value=iterm2_status_value, status_change_time=now)
-    if new_state == "working" and previous_state not in STATES_OF_A_TURN_UNDER_WAY:
+    turn_was_interrupted = (permission_dialog_was_answered(previous_state, session_tracking["status_change_time"], screen_reading)
+                            and bool(screen_reading.get("turn_was_interrupted")))
+    if new_state == "working" and (previous_state not in STATES_OF_A_TURN_UNDER_WAY or turn_was_interrupted):
         tracking["turn_started_at"] = now
     if status_change_ends_a_turn(previous_state, new_state):
         tracking["last_turn_ended_at"] = now

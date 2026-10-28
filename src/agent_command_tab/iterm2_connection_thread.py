@@ -9,7 +9,6 @@ import asyncio
 import glob
 import json
 import os
-import shutil
 import signal
 import socket
 import threading
@@ -38,6 +37,7 @@ from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, ch
 from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
                                                      pause_has_ended, resume_agent_session, send_signal_to_processes)
 from agent_command_tab.pause_records_store import load_pause_records, save_pause_records
+from agent_command_tab.settings_store import find_program_on_path_or_in_the_usual_folders
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
 from agent_command_tab.agent_adapters.base import (COMMAND_THAT_STARTS_A_NEW_CONVERSATION, MESSAGES_THROUGH_CODEX_QUEUE,
                                                    MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, command_line_runs_a_shell)
@@ -109,9 +109,9 @@ SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER = 5
 
 
 def find_claude_command_path():
-    """Returns the path of the `claude` command (the stable link on PATH, not a versioned file), or None."""
-    return shutil.which("claude") or next(
-        (path for path in [os.path.expanduser("~/.local/bin/claude")] if os.path.exists(path)), None)
+    """Returns the path of the `claude` command (the stable link on PATH or in the usual folders,
+    not a versioned file), or None."""
+    return find_program_on_path_or_in_the_usual_folders("claude")
 
 
 def list_folders_that_may_hold_claude_code_transcripts():
@@ -323,7 +323,8 @@ class DashboardCore:
         self.computer_id = socket.gethostname()
         self.computer_name = socket.gethostname().split(".")[0]
         self.claude_command_path = find_claude_command_path()
-        self.codex_command_path = shutil.which("codex")  # for `codex queue`; the app's settings then name it (set_core_settings)
+        # For `codex queue`; the app's settings then name it (set_core_settings).
+        self.codex_command_path = find_program_on_path_or_in_the_usual_folders("codex")
         self.message_typing_lock_by_session_id = {}  # two held messages are never pasted into one tab at once
         self.gathered_windows = []
         self.windows_were_gathered = False  # till the first gather, saved frames can't be matched to windows
@@ -1177,7 +1178,8 @@ class DashboardCore:
                         and find_when_the_hooks_ended_the_turn(self.hook_state_by_agent_process_id.get(agent_session["process_id"]),
                                                                status_set_in_iterm2_and_since[1]) is not None):
                     first_session["status"] = "idle"  # its turn ended, though iTerm2 still says working while a background task runs
-                tracking = track_status_value(previous_tracking, first_session["status"], now)
+                tracking = track_status_value(previous_tracking, first_session["status"], now,
+                                              self.screen_readings_by_session_id.get(session_id))
                 self.session_tracking_by_session_id[session_id] = tracking
                 if (previous_tracking is not None and tracking is not previous_tracking
                         and map_iterm2_status_value_to_state(first_session["status"]) == "asking"):
@@ -1335,6 +1337,11 @@ class DashboardCore:
             **{process_id: record for process_id, record in self.claude_agents_by_process_id.items()
                if process_id in claude_code_process_ids},
             **claude_agents_read_now}
+        if claude_code_process_ids - self.process_ids_asked_about_in_claude_agents:
+            # Asked about again while this run was under way (a /clear typed then, note_hook_event),
+            # so this run may have read the record from before it: the next gather runs again at
+            # once (code review, 2026-10-28).
+            self.regather_needed.set()
         retry_is_due = False
         for process_id in claude_code_process_ids - set(self.claude_agents_by_process_id):
             self.claude_agents_retry_count_by_process_id[process_id] = self.claude_agents_retry_count_by_process_id.get(process_id, 0) + 1
@@ -1867,11 +1874,18 @@ class DashboardCore:
         read_child_processes_periodically; the conversation's ID and the agent's start find its
         detached processes. Whether it is in a turn goes by the status value its row goes by, the
         tracked one: a paused agent's tab has none from iTerm2 while the shell is in front, and
-        its turn goes on once it is back (code review, 2026-10-28)."""
+        its turn goes on once it is back. With no value from iTerm2 at all (after iTerm2
+        restarted), it goes by the state the row shows, from Claude Code's own report (code
+        review, 2026-10-28)."""
+        def agent_is_in_a_turn(session_id):
+            status_value = self.session_tracking_by_session_id.get(session_id, {}).get("status_value")
+            if status_value is None:
+                displayed_state = self.displayed_state_by_session_id.get(session_id)
+                return displayed_state is not None and (displayed_state.state in STATES_OF_A_TURN_UNDER_WAY
+                                                        or displayed_state.state == "stuck")
+            return map_iterm2_status_value_to_state(status_value) in STATES_OF_A_TURN_UNDER_WAY
         return {
-            session_id: (agent_session["process_id"],
-                         map_iterm2_status_value_to_state(
-                             self.session_tracking_by_session_id.get(session_id, {}).get("status_value")) in STATES_OF_A_TURN_UNDER_WAY,
+            session_id: (agent_session["process_id"], agent_is_in_a_turn(session_id),
                          self.session_tracking_by_session_id.get(session_id, {}).get("turn_started_at"),
                          (self.claude_agents_by_process_id.get(agent_session["process_id"]) or {}).get("sessionId"),
                          agent_session.get("started_at"))

@@ -22,7 +22,7 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
 
-from agent_command_tab.app_controller import AppController
+from agent_command_tab.app_controller import AppController, yield_activation_to
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry
@@ -787,7 +787,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             windows=(window_one, window_two)),)))
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)  # idle, but its tool takes no commands
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
-        self.assertIn("Aider", menu_items_by_title["/compact"].toolTip())
+        # Worded as in the menu of several rows (code review, 2026-10-28).
+        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "AgentCommandTab can't type commands into Aider")
         menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # working: its row says "thinking"
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
         self.assertEqual(menu_items_by_title["/compact"].toolTip(),
@@ -1813,8 +1814,17 @@ class AutomaticIconColorTests(unittest.TestCase):
             def retry_the_global_shortcut_if_it_lacks_permission(self):
                 pass
 
+            def close_dropdown(self):  # one the menu's Show popup opened (code review, 2026-10-28)
+                calls.append("close dropdown")
+
+            def close_a_dropdown_the_menu_showed(self):
+                AppController.close_a_dropdown_the_menu_showed(self)
+
             def show_the_sidebar(self):
                 AppController.show_the_sidebar(self)
+
+            def show_the_list_window(self):
+                calls.append("show window")
         stand_in_app_controller = StandInAppController()
         # One that stays visible stays, or comes back if the menu's Show popup or Show window hid it.
         for sidebar_mode, sidebar_is_shown, expected_call in (("auto_hide", False, "show"), ("auto_hide", True, "hide"),
@@ -1824,7 +1834,19 @@ class AutomaticIconColorTests(unittest.TestCase):
             stand_in_app_controller.sidebar_controller.is_shown = sidebar_is_shown
             calls.clear()
             AppController.menu_bar_icon_clicked(stand_in_app_controller)
-            self.assertEqual(calls, ["close settings", expected_call], sidebar_mode)
+            self.assertEqual(calls, ["close settings", "close dropdown", expected_call], sidebar_mode)
+        stand_in_app_controller.settings = {"show_as": "window", "sidebar_mode": "auto_hide"}
+        calls.clear()
+        AppController.menu_bar_icon_clicked(stand_in_app_controller)
+        self.assertEqual(calls, ["close settings", "close dropdown", "show window"])
+        # The global shortcut does so too (code review, 2026-10-28).
+        stand_in_app_controller.settings = {"show_as": "sidebar", "sidebar_mode": "auto_hide"}
+        stand_in_app_controller.sidebar_controller.is_shown = False
+        stand_in_app_controller.list_window_controller = unittest.mock.Mock(is_in_front=lambda: False)
+        stand_in_app_controller.popover = unittest.mock.Mock(isShown=lambda: True)
+        calls.clear()
+        AppController.global_shortcut_pressed(stand_in_app_controller)
+        self.assertEqual(calls, ["close dropdown", "show"])
 
 
 class AgentToolIconTests(unittest.TestCase):
@@ -2178,14 +2200,29 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.window = self.controller.build_window()  # built without showing it
 
     def test_every_control_fits_in_the_narrowest_window(self):
+        # In every "Show as" layout, with the accessibility button shown too, each control ends inside
+        # the narrowest window and starts right of its row's label: one too wide would grow leftward
+        # over it (code review, 2026-10-28).
         narrowest_width = SMALLEST_WINDOW_SIZES["settings_window_frame"][0]
         self.assertEqual(self.controller.window.minSize().width, narrowest_width)
-        for subview in self.controller.rows_view.subviews():
-            right_edge = subview.frame().origin.x + subview.frame().size.width
-            self.assertLessEqual(right_edge, narrowest_width, subview)
-            for inner_view in subview.subviews():  # the radio buttons and the command rows' fields
-                self.assertLessEqual(subview.frame().origin.x + inner_view.frame().origin.x + inner_view.frame().size.width,
-                                     narrowest_width, inner_view)
+        self.owner.shortcut_lacks_permission = True
+
+        def find_middle(view):
+            return view.frame().origin.y + view.frame().size.height / 2
+        for show_as in ("popup", "window", "sidebar"):
+            self.owner.settings = dict(self.owner.settings, show_as=show_as)
+            self.controller.reflect_settings(self.owner.settings)
+            subviews = self.controller.rows_view.subviews()
+            labels = [subview for subview in subviews if isinstance(subview, NSTextField) and not subview.isEditable()]
+            for subview in subviews:
+                self.assertLessEqual(subview.frame().origin.x + subview.frame().size.width, narrowest_width, (show_as, subview))
+                if isinstance(subview, NSBox) or subview in labels:
+                    continue
+                for label in labels:
+                    if (label.frame().origin.x < subview.frame().origin.x
+                            and abs(find_middle(label) - find_middle(subview)) < SETTINGS_ROW_HEIGHT / 2):
+                        self.assertLessEqual(label.frame().origin.x + label.frame().size.width, subview.frame().origin.x,
+                                             (show_as, label.stringValue()))
 
     def test_changing_one_control_keeps_changes_made_elsewhere(self):
         self.owner.settings = dict(self.owner.settings, sidebar_width=555)  # dragged at the sidebar's edge meanwhile
@@ -2653,6 +2690,19 @@ class ShowTheListAsTests(unittest.TestCase):
             calls.clear()
             AppController.list_window_drag_ended(StandInAppController(show_as))
             self.assertEqual(calls, expected_calls, show_as)
+
+
+class YieldActivationTests(unittest.TestCase):
+    def test_activation_is_handed_over_only_where_macos_has_the_hand_over(self):  # code review, 2026-10-28
+        iterm2_application = object()
+        for macos_has_it in (True, False):  # macOS 14 and later; older
+            application = unittest.mock.Mock()
+            application.respondsToSelector_.return_value = macos_has_it
+            with unittest.mock.patch("agent_command_tab.app_controller.NSApp", application):
+                yield_activation_to(iterm2_application)
+            application.respondsToSelector_.assert_called_with("yieldActivationToApplication:")
+            self.assertEqual(application.yieldActivationToApplication_.call_args_list,
+                             [unittest.mock.call(iterm2_application)] if macos_has_it else [])
 
 
 if __name__ == "__main__":

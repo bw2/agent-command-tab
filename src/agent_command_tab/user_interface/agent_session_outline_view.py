@@ -1775,7 +1775,8 @@ class AgentSessionListController(NSObject):
                     command_item.setToolTip_("The agent has ended")
                 elif command not in item.entry.slash_commands:
                     command_item.setEnabled_(False)
-                    command_item.setToolTip_(f"The dashboard can't type commands into {item.entry.agent_tool_name or 'this agent'}")
+                    # As the menu of several rows says it (code review, 2026-10-28).
+                    command_item.setToolTip_(f"AgentCommandTab can't type commands into {item.entry.agent_tool_name or 'this agent'}")
                 elif item.entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
                     command_item.setEnabled_(False)
                     # The user's wording, 2026-10-28, with the state as the row names it ("thinking", not "working").

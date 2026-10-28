@@ -16,6 +16,7 @@ from agent_command_tab import hook_event_forwarder, iterm2_connection_thread
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_process_tree import ProcessInfo
 from agent_command_tab.iterm2_connection_thread import EXITED_ROW_SECONDS, DashboardCore, another_process_listens_at
+from agent_command_tab.iterm2_snapshot_builder import DisplayedState
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry
 
 
@@ -245,6 +246,15 @@ class ChildProcessReadingTests(unittest.TestCase):
                                                "idle": {"status_value": "idle"}}
         self.assertEqual(core.list_agent_processes_and_their_turns(),
                          {"paused": (101, True, 900.0, None, 10.0), "idle": (102, False, None, None, 10.0)})
+
+    def test_with_no_status_from_iterm2_an_agent_is_in_a_turn_by_the_state_its_row_shows(self):  # code review, 2026-10-28
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.agent_sessions = {"busy": make_agent_session(101), "idle": make_agent_session(102)}
+        # After iTerm2 restarted: no value from it yet, so the rows show Claude Code's own report.
+        core.session_tracking_by_session_id = {"busy": {"status_value": None}, "idle": {"status_value": None}}
+        core.displayed_state_by_session_id = {"busy": DisplayedState("working", 50.0, 50.0), "idle": DisplayedState("idle", 50.0, 50.0)}
+        self.assertEqual({session_id: in_a_turn for session_id, (_, in_a_turn, _, _, _) in core.list_agent_processes_and_their_turns().items()},
+                         {"busy": True, "idle": False})
 
     def test_entries_with_their_cpu_use_since_the_reading_before(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
