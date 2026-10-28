@@ -1861,6 +1861,22 @@ class DashboardCore:
                 self.note_reading_value(session_id, "memory_bytes", memory_bytes)
                 self.note_reading_value(session_id, "cpu_percent", cpu_percent)
 
+    def list_agent_processes_and_their_turns(self):
+        """Returns {session ID: (agent process ID, whether it is in a turn, when that turn began or
+        None, its Claude Code conversation's ID or None, when the agent started or None)} for
+        read_child_processes_periodically; the conversation's ID and the agent's start find its
+        detached processes. Whether it is in a turn goes by the status value its row goes by, the
+        tracked one: a paused agent's tab has none from iTerm2 while the shell is in front, and
+        its turn goes on once it is back (code review, 2026-10-28)."""
+        return {
+            session_id: (agent_session["process_id"],
+                         map_iterm2_status_value_to_state(
+                             self.session_tracking_by_session_id.get(session_id, {}).get("status_value")) in STATES_OF_A_TURN_UNDER_WAY,
+                         self.session_tracking_by_session_id.get(session_id, {}).get("turn_started_at"),
+                         (self.claude_agents_by_process_id.get(agent_session["process_id"]) or {}).get("sessionId"),
+                         agent_session.get("started_at"))
+            for session_id, agent_session in self.agent_sessions.items() if agent_session["process_id"]}
+
     async def read_child_processes_periodically(self):
         """Keeps each agent session's child processes ("child_processes", the sub rows of its open
         tab row; user request, 2026-10-27) and its background shells ("background_shell_count",
@@ -1870,18 +1886,7 @@ class DashboardCore:
         cpu_time_readings_by_child = {}  # {(process ID, started at): (CPU seconds, read at)} from the last reading
         while True:  # read at once, then every CHILD_PROCESS_CHECK_INTERVAL_SECONDS (dump-snapshot shows them too)
             reads_resource_usage = self.resource_usage_is_read
-            # Whether each agent is in a turn, by the status value its row goes by, and since when.
-            status_value_by_session_id = {gathered_tab["first_session"]["session_id"]: gathered_tab["first_session"]["status"]
-                                          for gathered_window in self.gathered_windows for gathered_tab in gathered_window["tabs"]
-                                          if gathered_tab["first_session"]}
-            # Also the Claude Code conversation's ID and the agent's start, for its detached processes.
-            agent_process_and_turn_by_session_id = {
-                session_id: (agent_session["process_id"],
-                             map_iterm2_status_value_to_state(status_value_by_session_id.get(session_id)) in STATES_OF_A_TURN_UNDER_WAY,
-                             self.session_tracking_by_session_id.get(session_id, {}).get("turn_started_at"),
-                             (self.claude_agents_by_process_id.get(agent_session["process_id"]) or {}).get("sessionId"),
-                             agent_session.get("started_at"))
-                for session_id, agent_session in self.agent_sessions.items() if agent_session["process_id"]}
+            agent_process_and_turn_by_session_id = self.list_agent_processes_and_their_turns()
 
             def read_every_agents_child_processes():
                 # launchd's children are read once for all the agents, only when a conversation's ID is known.

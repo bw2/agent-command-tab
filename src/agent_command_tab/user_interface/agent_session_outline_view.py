@@ -139,6 +139,8 @@ COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usag
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
 AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER = list_agent_tool_names_whose_sessions_can_talk_to_each_other()
 SELECTABLE_ROW_KINDS = ("window", "tab")  # not monitor rows or the "+" row (user request, 2026-10-21)
+# The hover text of the greyed-out items in the menu of several selected rows that have all exited.
+AGENTS_HAVE_ENDED_TOOL_TIP = "The agents have ended"
 SELECTION_OUTLINE_WIDTH = 1.5
 SELECTION_OUTLINE_INSET = 1
 SELECTION_OUTLINE_CORNER_RADIUS = 4
@@ -1830,7 +1832,8 @@ class AgentSessionListController(NSObject):
             if not agent_sessions_that_take_it:
                 agent_tool_names = sorted({entry.agent_tool_name or "these agents" for entry in agent_session_entries})
                 command_item.setEnabled_(False)
-                command_item.setToolTip_("Only available after the paused sessions are resumed"  # the user's wording, 2026-10-28
+                command_item.setToolTip_(AGENTS_HAVE_ENDED_TOOL_TIP if not agent_session_entries
+                                         else "Only available after the paused sessions are resumed"  # the user's wording, 2026-10-28
                                          if any(command in entry.slash_commands for entry in agent_session_entries)
                                          else f"AgentCommandTab can't type commands into {' or '.join(agent_tool_names)}")
                 continue
@@ -1842,8 +1845,11 @@ class AgentSessionListController(NSObject):
             if any(entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT for entry in agent_sessions_that_take_it):
                 tool_tip_lines.append("A session in the middle of a turn will get this command when the turn ends")  # the user's wording, 2026-10-28
             command_item.setToolTip_("\n".join(tool_tip_lines) or None)
-        self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}" if a_window_row_is_selected
-                           else "Kill sessions", "menuKillSelectedSessions:")
+        kill_item = self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}" if a_window_row_is_selected
+                                       else "Kill sessions", "menuKillSelectedSessions:")
+        if not agent_session_entries:  # every selected row has exited (code review, 2026-10-28)
+            kill_item.setEnabled_(False)
+            kill_item.setToolTip_(AGENTS_HAVE_ENDED_TOOL_TIP)
         menu.addItem_(NSMenuItem.separatorItem())
         self.add_pause_and_resume_menu_items(menu, agent_session_entries)
         menu.addItem_(NSMenuItem.separatorItem())

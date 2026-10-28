@@ -875,6 +875,19 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(menu_items_by_title["/compact"].toolTip(), "Only available after the paused sessions are resumed")
         self.assertIn("Resume 2 sessions", menu_items_by_title)
 
+    def test_the_menu_of_several_rows_that_all_exited_has_nothing_to_send_or_kill(self):  # code review, 2026-10-28
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_two = window_two._replace(agent_sessions=tuple(entry._replace(status="exited", slash_commands=(), ended_abnormally_at=1.0)
+                                                              for entry in window_two.agent_sessions))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two)),)))
+        self.select_rows(5, 6)  # both exited
+        menu_items_by_title = self.build_right_click_menu_items_by_title(5)
+        for title in ("/compact", "/clear", "Kill sessions"):
+            self.assertFalse(menu_items_by_title[title].isEnabled(), title)
+            self.assertEqual(menu_items_by_title[title].toolTip(), "The agents have ended", title)
+
     def test_slash_commands_and_kill_for_several_sessions_ask_first_where_one_session_would(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(1, 5)  # planning (working) and analysis-0 (idle)

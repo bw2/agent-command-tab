@@ -235,6 +235,17 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
 
 
 class ChildProcessReadingTests(unittest.TestCase):
+    def test_a_paused_agent_is_still_in_the_turn_its_tracking_last_saw(self):  # code review, 2026-10-28
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.agent_sessions = {"paused": make_agent_session(101), "idle": make_agent_session(102)}
+        # The paused tab's shell is in front, so iTerm2 sets no status: its tracking keeps the turn's.
+        core.gathered_windows = [{"tabs": [{"first_session": {"session_id": "paused", "status": None}},
+                                           {"first_session": {"session_id": "idle", "status": "idle"}}]}]
+        core.session_tracking_by_session_id = {"paused": {"status_value": "working", "turn_started_at": 900.0},
+                                               "idle": {"status_value": "idle"}}
+        self.assertEqual(core.list_agent_processes_and_their_turns(),
+                         {"paused": (101, True, 900.0, None, 10.0), "idle": (102, False, None, None, 10.0)})
+
     def test_entries_with_their_cpu_use_since_the_reading_before(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
         core.agent_sessions = {"s1": make_agent_session(101)}
