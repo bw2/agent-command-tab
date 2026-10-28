@@ -1659,12 +1659,14 @@ class AutomaticIconColorTests(unittest.TestCase):
                 dropdown_is_shown, dropdown_closed_at, button_pressed_at), expected,
                 (dropdown_is_shown, dropdown_closed_at, button_pressed_at))
 
-    def test_a_click_slides_an_auto_hiding_sidebar_in_or_out_and_leaves_one_that_stays_visible(self):
+    def test_a_click_closes_settings_and_slides_an_auto_hiding_sidebar_in_or_out_and_leaves_one_that_stays_visible(self):
         calls = []
 
         class StandInAppController:
             sidebar_controller = unittest.mock.Mock(show_for_a_few_seconds=lambda: calls.append("show"),
                                                     hide_now=lambda: calls.append("hide"))
+            # Closed first, so a dropdown it kept open closes too (user request, 2026-10-28).
+            settings_window_controller = unittest.mock.Mock(close_if_open=lambda: calls.append("close settings"))
 
             def retry_the_global_shortcut_if_it_lacks_permission(self):
                 pass
@@ -1675,7 +1677,7 @@ class AutomaticIconColorTests(unittest.TestCase):
             stand_in_app_controller.sidebar_controller.is_shown = sidebar_is_shown
             calls.clear()
             AppController.menu_bar_icon_clicked(stand_in_app_controller)
-            self.assertEqual(calls, [expected_call], sidebar_mode)
+            self.assertEqual(calls, ["close settings", expected_call], sidebar_mode)
 
 
 class AgentToolIconTests(unittest.TestCase):
@@ -1994,6 +1996,14 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             self.controller.window = window
             self.controller.windowDidChangeOcclusionState_(unittest.mock.Mock(object=lambda: window))
             self.assertEqual(window.close.called, closes)
+
+    def test_close_if_open_closes_only_an_open_window(self):  # for a click on the menu bar icon (user request, 2026-10-28)
+        for is_visible in (True, False):
+            window = unittest.mock.Mock()
+            window.isVisible.return_value = is_visible
+            self.controller.window = window
+            self.controller.close_if_open()
+            self.assertEqual(window.close.called, is_visible)
 
     def test_the_settings_window_opens_clear_of_a_shown_sidebar_and_stays_at_the_normal_level(self):
         # A stand-in app controller, as in the top bar drag test: only the windows this looks at.

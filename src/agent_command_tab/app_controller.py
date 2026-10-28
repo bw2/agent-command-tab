@@ -226,8 +226,11 @@ class AppController(NSObject):
         """A left click on the menu bar icon shows the list the way the settings ask: the dropdown
         opens or closes, an auto-hiding sidebar slides in for a few seconds or, while it is in, out
         (user request, 2026-10-28; a sidebar set to stay visible stays, as for the global
-        shortcut), or the window comes to the front. It also retries a global shortcut that lacked
-        the permission, since the sidebar slides in without making the app active (the other retry)."""
+        shortcut), or the window comes to the front. An open settings window closes first (user
+        request, 2026-10-28), so a dropdown it kept open closes too. It also retries a global
+        shortcut that lacked the permission, since the sidebar slides in without making the app
+        active (the other retry)."""
+        self.settings_window_controller.close_if_open()
         self.retry_the_global_shortcut_if_it_lacks_permission()
         if self.settings["show_as"] == "sidebar":
             if self.settings["sidebar_mode"] == "auto_hide" and self.sidebar_controller.is_shown:

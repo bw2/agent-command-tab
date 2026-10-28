@@ -113,6 +113,12 @@ class SettingsWindowController(WindowFrameSavingController):
         return self.window is not None and bool(self.window.isVisible())
 
     @objc.python_method
+    def close_if_open(self):
+        """Closes the window as its close button does (windowWillClose_ saves a field being typed in)."""
+        if self.is_open():
+            self.window.close()
+
+    @objc.python_method
     def set_window_level(self, window_level):
         """Puts the window at this level (above an open dropdown), or back at the normal level for None."""
         if self.window is not None:
