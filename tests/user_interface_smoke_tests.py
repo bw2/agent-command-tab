@@ -13,7 +13,8 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSEventModifierFlagCommand, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSMakePoint, NSMakeRect,
-                    NSFloatingWindowLevel, NSForegroundColorAttributeName, NSMenu, NSNormalWindowLevel, NSPopover,
+                    NSFloatingWindowLevel, NSForegroundColorAttributeName, NSImageScaleNone, NSImageView, NSMenu,
+                    NSNormalWindowLevel, NSPopover,
                     NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
@@ -31,6 +32,7 @@ from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_
                                                                          AgentSessionListController, RowButton,
                                                                          RowViewWithSelectionOutline, build_index_set,
                                                                          compute_selection_outline_rect)
+from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
@@ -1357,6 +1359,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                 row_views.append(row_view)
         return row_views
 
+    def test_the_tool_icons_name_their_tool_on_hover(self):
+        row_views = self.lay_out_tab_row_views(make_sample_snapshot())  # planning, phase0-tests, codex-review, analysis-0, -1
+        self.assertEqual([row_view.column_views["agent_tool_icon"].toolTip() for row_view in row_views],
+                         ["Claude Code", "Claude Code", "OpenAI Codex", "Claude Code", "Claude Code"])
+
     def test_tool_icon_state_and_time_columns_line_up_when_two_tools_run(self):
         row_views = self.lay_out_tab_row_views(make_sample_snapshot())  # Claude Code and Codex
         column_views_by_name = {"icon": [row_view.column_views["agent_tool_icon"] for row_view in row_views],
@@ -1603,6 +1610,26 @@ class AutomaticIconColorTests(unittest.TestCase):
                 (["working", "idle", "done", "unknown"], "green"),
                 ([], "green")):
             self.assertEqual(choose_icon_color_name(self.snapshot_with_states(states)), expected_color_name)
+
+
+class AgentToolIconTests(unittest.TestCase):
+    def test_codex_shows_the_openai_logo_in_the_names_color(self):
+        logo = build_agent_tool_icons()["Codex"]
+        self.assertEqual(tuple(logo.size()), (12, 12))
+        for appearance_name, expected_red in ((NSAppearanceNameAqua, 0), (NSAppearanceNameDarkAqua, 0.85)):
+            image_view = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 12, 12))
+            image_view.setImageScaling_(NSImageScaleNone)
+            image_view.setImage_(logo)
+            image_view.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
+            bitmap = image_view.bitmapImageRepForCachingDisplayInRect_(image_view.bounds())
+            image_view.cacheDisplayInRect_toBitmapImageRep_(image_view.bounds(), bitmap)
+            colors = [bitmap.colorAtX_y_(x, y).colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
+                      for x in range(bitmap.pixelsWide()) for y in range(bitmap.pixelsHigh())]
+            drawn_colors = [color for color in colors if color.alphaComponent() > 0.5]
+            self.assertGreater(len(drawn_colors), len(colors) / 5, appearance_name)
+            self.assertLess(len(drawn_colors), len(colors) / 2, appearance_name)  # the logo's shape, not the whole square
+            for color in drawn_colors:  # labelColor: black in light mode, white at 85% opacity in dark mode
+                self.assertAlmostEqual(color.redComponent(), expected_red, delta=0.1, msg=appearance_name)
 
 
 class SidebarWidthDragTests(unittest.TestCase):

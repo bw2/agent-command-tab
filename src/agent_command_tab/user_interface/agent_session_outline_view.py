@@ -41,7 +41,7 @@ from agent_command_tab.session_status_computation import (STATES_OF_AN_AGENT_WAI
                                                           split_agent_sessions_into_pausable_and_resumable)
 from agent_command_tab.settings_store import DEFAULT_SETTINGS
 from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries, replace_title_in_snapshot
-from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image
+from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image, describe_agent_tool_icon
 from agent_command_tab.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
 from agent_command_tab.user_interface.named_colors import build_color_from_name
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
@@ -1184,6 +1184,7 @@ class AgentSessionListController(NSObject):
             column_view = row_view.column_views[column_name]
             if parts_field_name is None:
                 column_view.setImage_(self.find_agent_tool_icon(parts.agent_tool_name) if parts.agent_tool_name else None)
+                column_view.setToolTip_(describe_agent_tool_icon(parts.agent_tool_name) if parts.agent_tool_name else None)
             else:
                 column_text = NSMutableAttributedString.alloc().initWithString_attributes_(
                     getattr(parts, parts_field_name), column_text_attributes if column_name in LEFT_ALIGNED_COLUMN_NAMES

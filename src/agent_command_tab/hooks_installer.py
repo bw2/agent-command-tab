@@ -13,9 +13,11 @@ to <file>.agent-command-tab-backup.
   reads its hooks when it starts, so only sessions started afterwards report.
 - Codex: hooks.json in its home folder. Codex runs a new hook only once the user approves it in
   its /hooks screen, which records the approval in config.toml under
-  [hooks.state."<hooks.json path>:<event>:<group>:<hook>"] (PHASE0_RESULTS.md).
+  [hooks.state."<hooks.json path>:<event>:<group>:<hook>"] (PHASE0_RESULTS.md), with a hash of
+  the hook as it was then, so a changed hook needs approving again (compute_codex_approval_hash).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -40,6 +42,11 @@ HOOK_EVENTS_BY_AGENT_TOOL_NAME = {
                     ("SessionEnd", None), ("PostToolUse", "Bash|Agent|Task")],
     "Codex": [("SessionStart", None), ("Stop", None), ("SessionEnd", None)],
 }
+# Codex's /hooks screen shows a hook's statusMessage as its name, "Unnamed hook" without one, and
+# its status line shows it while the hook runs (user request, 2026-10-27). Claude Code's hooks have
+# no names (its statusMessage is only spinner text), so its entries go without.
+HOOK_NAMES_BY_AGENT_TOOL_NAME = {"Codex": "Report to AgentCommandTab"}
+CODEX_SESSION_END_LONGEST_TIMEOUT = 3  # seconds: Codex lowers a longer SessionEnd hook timeout to this
 HOOKS_ARE_INSTALLED = "installed"
 HOOKS_ARE_MISSING = "missing"
 HOOKS_AWAIT_APPROVAL = "needs approval"  # Codex: in hooks.json, not yet approved in its /hooks screen
@@ -76,24 +83,26 @@ def remove_the_apps_hooks(settings):
     return dict(settings, hooks=kept_hooks)
 
 
-def build_the_apps_hook_group(command, matcher):
+def build_the_apps_hook_group(command, matcher, hook_name=None):
+    hook = {"type": "command", "command": command, "async": True, "timeout": SECONDS_A_HOOK_MAY_RUN}
     return dict({"matcher": matcher} if matcher else {},
-                hooks=[{"type": "command", "command": command, "async": True, "timeout": SECONDS_A_HOOK_MAY_RUN}])
+                hooks=[dict(hook, statusMessage=hook_name) if hook_name else hook])
 
 
-def add_the_apps_hooks(settings, command, events):
+def add_the_apps_hooks(settings, command, events, hook_name=None):
     """Returns the settings with one entry of the app's per event, after the user's own, in place
-    of any the app added before (with another command or other events).
+    of any the app added before (with another command, other events or another name).
 
     Args:
         settings: The settings file's contents.
         command: build_forwarder_command's command.
         events: [(event name, matcher or None)], from HOOK_EVENTS_BY_AGENT_TOOL_NAME.
+        hook_name: From HOOK_NAMES_BY_AGENT_TOOL_NAME, or None for unnamed entries.
     """
     settings = remove_the_apps_hooks(settings)
     hooks = dict(settings.get("hooks") or {})
     for event_name, matcher in events:
-        hooks[event_name] = list(hooks.get(event_name) or []) + [build_the_apps_hook_group(command, matcher)]
+        hooks[event_name] = list(hooks.get(event_name) or []) + [build_the_apps_hook_group(command, matcher, hook_name)]
     return dict(settings, hooks=hooks)
 
 
@@ -122,7 +131,7 @@ def hook_group_is_the_same_as(hook_group, expected_hook_group):
             and normalize_forwarder_command(str(hook.get("command", ""))) == normalize_forwarder_command(expected_hook["command"]))
 
 
-def list_positions_of_the_apps_hooks(settings, command, events):
+def list_positions_of_the_apps_hooks(settings, command, events, hook_name=None):
     """Returns [(event name, entry index, hook index)] of the app's hook for each event, or None
     unless every event has the entry add_the_apps_hooks adds (hook_group_is_the_same_as)."""
     hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
@@ -130,7 +139,7 @@ def list_positions_of_the_apps_hooks(settings, command, events):
     for event_name, matcher in events:
         hook_groups = hooks.get(event_name) if isinstance(hooks.get(event_name), list) else []
         group_indexes = [index for index, hook_group in enumerate(hook_groups)
-                         if hook_group_is_the_same_as(hook_group, build_the_apps_hook_group(command, matcher))]
+                         if hook_group_is_the_same_as(hook_group, build_the_apps_hook_group(command, matcher, hook_name))]
         if not group_indexes:
             return None
         positions.append((event_name, group_indexes[0], 0))
@@ -142,12 +151,33 @@ def convert_event_name_to_codex_hook_state_name(event_name):
     return re.sub(r"(?<!^)(?=[A-Z])", "_", event_name).lower()
 
 
-def codex_has_approved_the_hooks(config_text, hooks_file_path, positions):
-    """Whether Codex's config.toml records an approval for the hook at each position
-    (list_positions_of_the_apps_hooks). It can't tell whether an approval recorded at the same
-    position was for another hook: Codex keeps a hash of the hook it approved, whose recipe isn't known."""
-    return all(f'[hooks.state."{hooks_file_path}:{convert_event_name_to_codex_hook_state_name(event_name)}:'
-               f'{group_index}:{hook_index}"]' in config_text for event_name, group_index, hook_index in positions)
+def compute_codex_approval_hash(event_name, hook_group):
+    """Returns the trusted_hash Codex records in config.toml when the user approves the hook in an
+    entry of the app's (hook_hash in Codex's codex-rs/hooks/src/engine/discovery.rs): SHA-256 of
+    the event's name and the entry, as JSON with sorted keys and no spaces. Of the changes Codex
+    makes to an entry before hashing it, only one touches the app's: a SessionEnd hook's timeout
+    is lowered to CODEX_SESSION_END_LONGEST_TIMEOUT."""
+    hook = dict(hook_group["hooks"][0])
+    if event_name == "SessionEnd":
+        hook["timeout"] = min(hook["timeout"], CODEX_SESSION_END_LONGEST_TIMEOUT)
+    identity = dict(hook_group, event_name=convert_event_name_to_codex_hook_state_name(event_name), hooks=[hook])
+    return "sha256:" + hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def codex_has_approved_the_hooks(config_text, hooks_file_path, settings, positions):
+    """Whether Codex's config.toml records an approval of the hook at each position
+    (list_positions_of_the_apps_hooks) as it is in the settings now. An approval of an earlier
+    version, such as one without its name, doesn't count: Codex skips the changed hook until the
+    user approves it again."""
+    for event_name, group_index, hook_index in positions:
+        state_name = f"{hooks_file_path}:{convert_event_name_to_codex_hook_state_name(event_name)}:{group_index}:{hook_index}"
+        state_section = re.search(rf'^\[hooks\.state\."{re.escape(state_name)}"\]$(.*?)(?=^\[|\Z)', config_text,
+                                  re.MULTILINE | re.DOTALL)
+        trusted_hash_line = f'trusted_hash = "{compute_codex_approval_hash(event_name, settings["hooks"][event_name][group_index])}"'
+        if state_section is None or trusted_hash_line not in state_section.group(1):
+            return False
+    return True
 
 
 def find_codex_home_folder():
@@ -205,12 +235,13 @@ def install_hooks(agent_tool_name):
     """
     command = build_forwarder_command(agent_tool_name)
     events = HOOK_EVENTS_BY_AGENT_TOOL_NAME[agent_tool_name]
+    hook_name = HOOK_NAMES_BY_AGENT_TOOL_NAME.get(agent_tool_name)
     changed_file_paths = []
     for file_path in list_settings_file_paths(agent_tool_name):
         settings = read_settings_file(file_path)
-        if list_positions_of_the_apps_hooks(settings, command, events) is not None:
+        if list_positions_of_the_apps_hooks(settings, command, events, hook_name) is not None:
             continue
-        new_settings = add_the_apps_hooks(settings, command, events)
+        new_settings = add_the_apps_hooks(settings, command, events, hook_name)
         if new_settings != settings:
             write_settings_file(new_settings, file_path)
             changed_file_paths.append(file_path)
@@ -236,13 +267,17 @@ def check_hooks(agent_tool_name):
     command = build_forwarder_command(agent_tool_name)
     events = HOOK_EVENTS_BY_AGENT_TOOL_NAME[agent_tool_name]
     file_paths = list_settings_file_paths(agent_tool_name)
-    positions_by_file_path = {}
+    settings_and_positions_by_file_path = {}
     for file_path in file_paths:
         try:
-            positions_by_file_path[file_path] = list_positions_of_the_apps_hooks(read_settings_file(file_path), command, events)
+            settings = read_settings_file(file_path)
         except (OSError, ValueError):
-            positions_by_file_path[file_path] = None
-    if not file_paths or None in positions_by_file_path.values():
+            return HOOKS_ARE_MISSING
+        positions = list_positions_of_the_apps_hooks(settings, command, events, HOOK_NAMES_BY_AGENT_TOOL_NAME.get(agent_tool_name))
+        if positions is None:
+            return HOOKS_ARE_MISSING
+        settings_and_positions_by_file_path[file_path] = (settings, positions)
+    if not file_paths:
         return HOOKS_ARE_MISSING
     if agent_tool_name == "Codex":
         try:
@@ -250,7 +285,7 @@ def check_hooks(agent_tool_name):
                 config_text = config_file.read()
         except OSError:
             config_text = ""
-        if not all(codex_has_approved_the_hooks(config_text, file_path, positions)
-                   for file_path, positions in positions_by_file_path.items()):
+        if not all(codex_has_approved_the_hooks(config_text, file_path, settings, positions)
+                   for file_path, (settings, positions) in settings_and_positions_by_file_path.items()):
             return HOOKS_AWAIT_APPROVAL
     return HOOKS_ARE_INSTALLED

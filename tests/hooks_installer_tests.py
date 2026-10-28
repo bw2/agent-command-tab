@@ -9,14 +9,27 @@ import unittest
 import unittest.mock
 
 from agent_command_tab import hooks_installer
-from agent_command_tab.hooks_installer import (BACKUP_FILE_SUFFIX, HOOK_EVENTS_BY_AGENT_TOOL_NAME, HOOKS_ARE_INSTALLED,
-                                               HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL, add_the_apps_hooks,
-                                               build_forwarder_command, check_hooks, codex_has_approved_the_hooks,
+from agent_command_tab.hooks_installer import (BACKUP_FILE_SUFFIX, HOOK_EVENTS_BY_AGENT_TOOL_NAME, HOOK_NAMES_BY_AGENT_TOOL_NAME,
+                                               HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL,
+                                               add_the_apps_hooks, build_forwarder_command, check_hooks,
+                                               codex_has_approved_the_hooks, compute_codex_approval_hash,
                                                convert_event_name_to_codex_hook_state_name, install_hooks,
                                                list_positions_of_the_apps_hooks, remove_hooks, remove_the_apps_hooks)
 
 COMMAND = build_forwarder_command("Claude Code", "/venv/bin/python", "/code/hook_event_forwarder.py")
 EVENTS = HOOK_EVENTS_BY_AGENT_TOOL_NAME["Claude Code"]
+CODEX_COMMAND = build_forwarder_command("Codex", "/venv/bin/python", "/code/hook_event_forwarder.py")
+CODEX_EVENTS = HOOK_EVENTS_BY_AGENT_TOOL_NAME["Codex"]
+CODEX_HOOK_NAME = HOOK_NAMES_BY_AGENT_TOOL_NAME["Codex"]
+
+
+def write_codex_approvals(config_file_path, hooks_file_path, settings, positions):
+    """Writes config.toml as Codex's /hooks screen does once the user approves the hooks at the positions."""
+    with open(config_file_path, "w") as config_file:
+        for event_name, group_index, hook_index in positions:
+            config_file.write(f'[hooks.state."{hooks_file_path}:{convert_event_name_to_codex_hook_state_name(event_name)}:'
+                              f'{group_index}:{hook_index}"]\ntrusted_hash = '
+                              f'"{compute_codex_approval_hash(event_name, settings["hooks"][event_name][group_index])}"\n\n')
 # The user's own settings, as in ~/.claude/settings.json on this Mac (trimmed).
 USERS_SETTINGS = {
     "model": "opus",
@@ -71,13 +84,37 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNotNone(list_positions_of_the_apps_hooks(settings, build_forwarder_command("Claude Code", link_path, "/f.py"), EVENTS))
         self.assertIsNone(list_positions_of_the_apps_hooks(settings, build_forwarder_command("Codex", link_path, "/f.py"), EVENTS))
 
-    def test_codex_approvals_are_found_by_position(self):
+    def test_only_codex_hooks_are_named(self):
+        codex_settings = add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME)
+        self.assertEqual(codex_settings["hooks"]["Stop"][0]["hooks"][0]["statusMessage"], "Report to AgentCommandTab")
+        self.assertNotIn("statusMessage", add_the_apps_hooks({}, COMMAND, EVENTS)["hooks"]["Stop"][0]["hooks"][0])
+        # The unnamed entries installed before 2026-10-27 aren't the app's current ones, so installing replaces them.
+        self.assertIsNone(list_positions_of_the_apps_hooks(add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS),
+                                                           CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME))
+
+    def test_codex_approval_hashes_match_the_ones_codex_computes(self):
+        # The currentHash Codex 0.165's app server gave in its hooks/list answer for these entries in a
+        # hooks.json; the SessionEnd hash is of the hook with its timeout lowered to 3 seconds.
+        command = build_forwarder_command("Codex", "/Users/someone/code/agent-command-tab/.venv/bin/python3.11",
+                                          "/Users/someone/code/agent-command-tab/src/agent_command_tab/hook_event_forwarder.py")
+        settings = add_the_apps_hooks({}, command, CODEX_EVENTS, CODEX_HOOK_NAME)
+        self.assertEqual({event_name: compute_codex_approval_hash(event_name, settings["hooks"][event_name][0])
+                          for event_name, _ in CODEX_EVENTS},
+                         {"SessionStart": "sha256:dc397b963b34e2260a57bcbb1bf2347c40a56bb134acc371ad0535700b7e9723",
+                          "Stop": "sha256:ea167a66a070ccd0b9702719b74024694040cd7c7436592103bfcd11ac2404bd",
+                          "SessionEnd": "sha256:82220384c7f34da95e780dd41805395863546c94417a22412a7999da4fab1b02"})
+
+    def test_codex_approvals_are_found_by_position_and_must_be_of_the_hook_as_it_is(self):
         self.assertEqual(convert_event_name_to_codex_hook_state_name("SessionEnd"), "session_end")
-        positions = [("SessionEnd", 0, 0), ("Stop", 1, 0)]
-        config_text = ('[hooks.state."/h/hooks.json:session_end:0:0"]\ntrusted_hash = "sha256:1"\n'
-                       '[hooks.state."/h/hooks.json:stop:1:0"]\ntrusted_hash = "sha256:2"\n')
-        self.assertTrue(codex_has_approved_the_hooks(config_text, "/h/hooks.json", positions))
-        self.assertFalse(codex_has_approved_the_hooks(config_text, "/h/hooks.json", positions + [("SessionStart", 0, 0)]))
+        settings = add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME)
+        positions = list_positions_of_the_apps_hooks(settings, CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME)
+        config_file_path = os.path.join(tempfile.mkdtemp(), "config.toml")
+        unnamed_settings = add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS)  # approved before the hooks had a name
+        for approved_settings, approved_positions, expected in ((settings, positions[:-1], False), (settings, positions, True),
+                                                                (unnamed_settings, positions, False)):
+            write_codex_approvals(config_file_path, "/h/hooks.json", approved_settings, approved_positions)
+            with open(config_file_path) as config_file:
+                self.assertEqual(codex_has_approved_the_hooks(config_file.read(), "/h/hooks.json", settings, positions), expected)
 
 
 class FilesTests(unittest.TestCase):
@@ -114,12 +151,9 @@ class FilesTests(unittest.TestCase):
     def test_codex_hooks_need_its_approval(self):
         self.assertEqual(install_hooks("Codex"), [self.codex_hooks_path])  # a new hooks.json
         self.assertEqual(check_hooks("Codex"), HOOKS_AWAIT_APPROVAL)
-        positions = list_positions_of_the_apps_hooks(self.read_json(self.codex_hooks_path), build_forwarder_command("Codex"),
-                                                     HOOK_EVENTS_BY_AGENT_TOOL_NAME["Codex"])
-        with open(os.path.join(self.codex_home_folder, "config.toml"), "w") as config_file:  # as Codex's /hooks screen writes it
-            for event_name, group_index, hook_index in positions:
-                config_file.write(f'[hooks.state."{self.codex_hooks_path}:{convert_event_name_to_codex_hook_state_name(event_name)}:'
-                                  f'{group_index}:{hook_index}"]\ntrusted_hash = "sha256:0"\n\n')
+        settings = self.read_json(self.codex_hooks_path)
+        positions = list_positions_of_the_apps_hooks(settings, build_forwarder_command("Codex"), CODEX_EVENTS, CODEX_HOOK_NAME)
+        write_codex_approvals(os.path.join(self.codex_home_folder, "config.toml"), self.codex_hooks_path, settings, positions)
         self.assertEqual(check_hooks("Codex"), HOOKS_ARE_INSTALLED)
         # Installing again, from another link to the same Python, leaves the approved file alone.
         with unittest.mock.patch.object(hooks_installer.sys, "executable", os.path.realpath(sys.executable)):
