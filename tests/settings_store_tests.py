@@ -28,6 +28,13 @@ class MergeSettingsTests(unittest.TestCase):
         self.assertEqual(merge_settings_with_defaults({"appearance": "dark"})["appearance"], "dark")
         self.assertEqual(merge_settings_with_defaults({"appearance": "sepia"})["appearance"], "auto")
 
+    def test_actions_that_run_without_asking_keep_only_known_actions(self):
+        self.assertEqual(merge_settings_with_defaults({})["actions_that_run_without_asking"], [])
+        self.assertEqual(merge_settings_with_defaults({"actions_that_run_without_asking": ["kill", "clear"]})
+                         ["actions_that_run_without_asking"], ["kill", "clear"])
+        self.assertEqual(merge_settings_with_defaults({"actions_that_run_without_asking": ["kill", "reboot"]})
+                         ["actions_that_run_without_asking"], [])
+
     def test_list_sort_order_and_shown_columns(self):
         settings = merge_settings_with_defaults({"list_sort_order": "created_time", "shown_columns": ["state", "created_time"]})
         self.assertEqual((settings["list_sort_order"], settings["shown_columns"]), ("created_time", ["state", "created_time"]))

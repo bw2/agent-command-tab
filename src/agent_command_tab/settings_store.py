@@ -33,6 +33,9 @@ SHOW_AS_CHOICES = ["popup", "sidebar", "window"]
 GLOBAL_SHORTCUT_CHOICES = ["shift_command_tab", "command_fn_tab", "off"]
 # The app's look (user request, 2026-10-27): auto follows macOS's Light or Dark setting.
 APPEARANCE_CHOICES = ["auto", "dark", "light"]
+# The actions that ask "Are you sure?" with a "Remember my choice" checkbox: a Yes with it checked
+# puts the action in actions_that_run_without_asking (user request, 2026-10-27).
+ACTIONS_THAT_ASK_FOR_CONFIRMATION = ["clear", "kill", "close_window"]
 # The windows whose frames ([x, y, width, height]) are saved, with their smallest sizes.
 # The settings window is never narrower than the width its rows are laid out for.
 SMALLEST_WINDOW_SIZES = {"list_window_frame": (250, 200), "settings_window_frame": (540, 240)}
@@ -49,6 +52,8 @@ DEFAULT_SETTINGS = {
     "show_as": "popup",
     "global_shortcut": "shift_command_tab",
     "appearance": "auto",
+    # Never shown in the settings window (the user's choice): to be asked again, take an action out of this list in the file.
+    "actions_that_run_without_asking": [],
     "list_window_frame": None,  # [x, y, width, height] of the "Show as: Window" window, once it has been shown
     "settings_window_frame": None,  # the settings window's, once it has been moved or resized (user request, 2026-10-19)
     "list_window_is_always_on_top": False,
@@ -77,6 +82,8 @@ def is_valid_setting_value(name, value):
         return value in GLOBAL_SHORTCUT_CHOICES
     if name == "appearance":
         return value in APPEARANCE_CHOICES
+    if name == "actions_that_run_without_asking":
+        return isinstance(value, list) and all(action_name in ACTIONS_THAT_ASK_FOR_CONFIRMATION for action_name in value)
     if name in SMALLEST_WINDOW_SIZES:
         smallest_width, smallest_height = SMALLEST_WINDOW_SIZES[name]
         return value is None or (isinstance(value, list) and len(value) == 4

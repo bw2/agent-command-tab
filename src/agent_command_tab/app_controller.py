@@ -494,19 +494,31 @@ class AppController(NSObject):
                        f'session{"" if agent_session_count == 1 else "s"} running in it')
         if other_tab_count:
             explanation += f' and closes its {other_tab_count} other tab{"" if other_tab_count == 1 else "s"}'
-        return self.ask_for_confirmation(explanation + ".")
+        return self.ask_for_confirmation(explanation + ".", "close_window")
 
     @objc.python_method
-    def ask_for_confirmation(self, explanation):
-        """Asks "Are you sure?" with this explanation; returns True for Yes. No is the default
-        button, so Return keeps things as they are."""
+    def ask_for_confirmation(self, explanation, action_name):
+        """Asks "Are you sure?" with this explanation before the action (one of
+        settings_store.ACTIONS_THAT_ASK_FOR_CONFIRMATION); returns True for Yes. No is the default
+        button, so Return keeps things as they are. A Yes with "Remember my choice" checked is
+        saved, and the action then runs without asking; a No isn't remembered, so a menu item
+        never silently does nothing (user request, 2026-10-27, with no setting to ask again)."""
+        if action_name in self.settings["actions_that_run_without_asking"]:
+            return True
         alert = NSAlert.alloc().init()
         alert.setAlertStyle_(NSAlertStyleWarning)
         alert.setMessageText_("Are you sure?")
         alert.setInformativeText_(explanation)
         alert.addButtonWithTitle_("No")  # the first button is the default and sits rightmost
         alert.addButtonWithTitle_("Yes")
-        return self.run_alert_in_front(alert) == NSAlertSecondButtonReturn
+        alert.setShowsSuppressionButton_(True)  # AppKit's "Do not show this message again" checkbox
+        alert.suppressionButton().setTitle_("Remember my choice")
+        alert.suppressionButton().setToolTip_("With Yes, this action runs without asking from now on. A No isn't remembered.")
+        answer_is_yes = self.run_alert_in_front(alert) == NSAlertSecondButtonReturn
+        if answer_is_yes and alert.suppressionButton().state():
+            self.settings_changed(dict(self.settings, actions_that_run_without_asking=[
+                *self.settings["actions_that_run_without_asking"], action_name]))
+        return answer_is_yes
 
     @objc.python_method
     def install_hooks(self, agent_tool_names):

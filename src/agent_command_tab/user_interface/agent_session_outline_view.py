@@ -583,7 +583,8 @@ class AgentSessionListController(NSObject):
             owner chooses the folder).
         confirm_closing_window(window_entry): asks the user whether to close that window;
             returns True for yes.
-        ask_for_confirmation(explanation): asks "Are you sure?"; returns True for yes.
+        ask_for_confirmation(explanation, action_name): asks "Are you sure?" before the action
+            ("clear" or "kill"), unless a remembered Yes lets it run; returns True for yes.
         submit_action_and_report_failure(action_request, failure_title): like submit_action,
             and tells the user if the action failed.
         duplicate_agent_session(tab_id, folder, agent_tool_name): opens a copy of the tab's agent
@@ -1798,8 +1799,9 @@ class AgentSessionListController(NSObject):
         command = sender.representedObject()
         agent_session_entries = list_agent_sessions_that_take_slash_command(self.menu_target_agent_session_entries, command)
         if command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION and not self.owner.ask_for_confirmation(
-                f"/clear starts a new conversation in {describe_session_count(len(agent_session_entries))} "
-                f"({list_tab_titles_for_alert(agent_session_entries)}); the current ones stay in their history."):
+                f"Are you sure you want to /clear the {describe_session_count(len(agent_session_entries))} "
+                f"({list_tab_titles_for_alert(agent_session_entries)})?",  # as the one-tab question, user request, 2026-10-27
+                "clear"):
             return
         self.owner.submit_action_and_report_failure(
             ActionRequest("send_slash_command_to_agent_sessions",
@@ -1811,7 +1813,7 @@ class AgentSessionListController(NSObject):
         if self.owner.ask_for_confirmation(
                 f"Kill ends the agent processes of {describe_session_count(len(agent_session_entries))} "
                 f"({list_tab_titles_for_alert(agent_session_entries)}) at once, with whatever they were doing; "
-                "their tabs stay open with their shells."):
+                "their tabs stay open with their shells.", "kill"):
             self.owner.submit_action_and_report_failure(
                 ActionRequest("end_agent_processes", {"session_ids": [entry.session_id for entry in agent_session_entries]}),
                 "Not every session was ended")
@@ -1900,7 +1902,8 @@ class AgentSessionListController(NSObject):
     def menuSendSlashCommand_(self, sender):
         tab_item, command = self.menu_target_item, sender.representedObject()
         if command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION and not self.owner.ask_for_confirmation(
-                f'/clear starts a new conversation in "{tab_item.entry.tab_title}"; the current one stays in its history.'):
+                f'Are you sure you want to /clear the "{tab_item.entry.tab_title}" session?',  # user's wording, 2026-10-27
+                "clear"):
             return
         self.owner.submit_action_and_report_failure(
             ActionRequest("send_slash_command", {"session_id": tab_item.entry.session_id}, {"command": command}),
@@ -1909,8 +1912,8 @@ class AgentSessionListController(NSObject):
     def menuKillSession_(self, sender):
         tab_item = self.menu_target_item
         if self.owner.ask_for_confirmation(
-                f'Kill Session ends the {tab_item.entry.agent_tool_name} process in "{tab_item.entry.tab_title}" at once, '
-                "with whatever it was doing; the tab stays open with its shell."):
+                f'Kill session ends the {tab_item.entry.agent_tool_name} process in "{tab_item.entry.tab_title}" at once, '
+                "with whatever it was doing; the tab stays open with its shell.", "kill"):
             self.owner.submit_action_and_report_failure(
                 ActionRequest("end_agent_process", {"session_id": tab_item.entry.session_id}), "The session wasn't ended")
 

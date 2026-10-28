@@ -477,4 +477,5 @@ class SettingsWindowController(WindowFrameSavingController):
             # editing, and save, as it is taken out during the layout.
             self.window.makeFirstResponder_(None)
             self.lay_out_rows(settings["show_as"])
+            self.window.recalculateKeyViewLoop()  # Tab goes through the fields shown now (code review, 2026-10-27)
             self.fit_window_height_to_rows()

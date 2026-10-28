@@ -8,7 +8,8 @@ import time
 import unittest
 import unittest.mock
 
-from AppKit import (NSApp, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, NSAppearance, NSAppearanceNameAqua,
+                    NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSEventModifierFlagCommand, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSMakePoint, NSMakeRect,
@@ -51,6 +52,7 @@ class RecordingOwner:
         self.windows_asked_about_closing = []
         self.answer_to_closing_window = False
         self.confirmation_questions = []
+        self.confirmation_action_names = []  # what a remembered Yes would be kept for (ACTIONS_THAT_ASK_FOR_CONFIRMATION)
         self.answer_to_confirmation = False
         self.peeks = []
         self.chosen_list_sort_orders = []
@@ -87,8 +89,9 @@ class RecordingOwner:
         self.windows_asked_about_closing.append(window_entry.window_id)
         return self.answer_to_closing_window
 
-    def ask_for_confirmation(self, explanation):
+    def ask_for_confirmation(self, explanation, action_name):
         self.confirmation_questions.append(explanation)
+        self.confirmation_action_names.append(action_name)
         return self.answer_to_confirmation
 
     def submit_action_and_report_failure(self, action_request, failure_title):
@@ -683,6 +686,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.menuSendSlashCommand_(menu_items_by_title["/clear"])  # the user says No
         self.list_controller.menuKillSession_(menu_items_by_title["Kill session"])
         self.assertEqual(len(self.owner.confirmation_questions), 2)
+        self.assertEqual(self.owner.confirmation_action_names, ["clear", "kill"])
         self.assertEqual(len(self.submitted_actions), 1)
         self.owner.answer_to_confirmation = True
         self.list_controller.menuKillSession_(menu_items_by_title["Kill session"])
@@ -791,6 +795,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(len(self.submitted_actions), 1)
         self.assertIn('("planning", "analysis-0")', self.owner.confirmation_questions[0])
         self.assertIn('("planning", "analysis-0")', self.owner.confirmation_questions[1])
+        self.assertEqual(self.owner.confirmation_action_names, ["clear", "kill"])
         self.owner.answer_to_confirmation = True
         self.list_controller.menuKillSelectedSessions_(menu_items_by_title["Kill sessions"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
@@ -1547,6 +1552,42 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertTrue(panel.hooks_note_text_field.isHidden())
 
 
+class RememberMyChoiceTests(unittest.TestCase):
+    """The "Remember my choice" checkbox of the "Are you sure?" alerts (user request, 2026-10-27)."""
+
+    def ask_whether_to_kill(self, settings, button_chosen, remember_my_choice_is_checked):
+        """Runs AppController.ask_for_confirmation before a Kill, with a stand-in app controller whose
+        alert is answered with this button and the checkbox in this state; returns (the answer,
+        the alerts shown, the settings each change saved)."""
+        shown_alerts, saved_settings = [], []
+
+        def answer_alert(alert):
+            shown_alerts.append(alert)
+            alert.suppressionButton().setState_(1 if remember_my_choice_is_checked else 0)
+            return button_chosen
+        stand_in_app_controller = unittest.mock.Mock(settings=settings, run_alert_in_front=answer_alert,
+                                                     settings_changed=saved_settings.append)
+        answer = AppController.ask_for_confirmation(stand_in_app_controller, "Kill ends the agent processes.", "kill")
+        return answer, shown_alerts, saved_settings
+
+    def test_a_remembered_yes_lets_that_action_run_without_asking_from_then_on(self):
+        answer, shown_alerts, saved_settings = self.ask_whether_to_kill(dict(DEFAULT_SETTINGS), NSAlertSecondButtonReturn, True)
+        self.assertTrue(answer)
+        self.assertEqual(shown_alerts[0].suppressionButton().title(), "Remember my choice")
+        self.assertEqual(saved_settings[0]["actions_that_run_without_asking"], ["kill"])
+        answer, shown_alerts, _ = self.ask_whether_to_kill(saved_settings[0], NSAlertFirstButtonReturn, False)
+        self.assertEqual((answer, shown_alerts), (True, []))  # Yes, without asking
+        stand_in_app_controller = unittest.mock.Mock(settings=saved_settings[0], run_alert_in_front=lambda alert: NSAlertFirstButtonReturn)
+        self.assertFalse(AppController.ask_for_confirmation(stand_in_app_controller, "Clear?", "clear"))  # other actions still ask
+
+    def test_a_no_or_a_yes_without_the_checkbox_is_not_remembered(self):
+        for button_chosen, remember_my_choice_is_checked, expected_answer in (
+                (NSAlertFirstButtonReturn, True, False), (NSAlertSecondButtonReturn, False, True)):
+            answer, shown_alerts, saved_settings = self.ask_whether_to_kill(
+                dict(DEFAULT_SETTINGS), button_chosen, remember_my_choice_is_checked)
+            self.assertEqual((answer, len(shown_alerts), saved_settings), (expected_answer, 1, []))
+
+
 class AutomaticIconColorTests(unittest.TestCase):
     def snapshot_with_states(self, states):
         window = WindowEntry("w1", "work", False, (0, 0, 800, 600), len(states), tuple(
@@ -2034,6 +2075,11 @@ class SettingsWindowSmokeTests(unittest.TestCase):
                 # Two rows: the last thing's own row, then the blank one (a label's text sits 1 point lower than a control).
                 self.assertAlmostEqual(section_title.frame().origin.y - max(shown_above), 2 * ROW_SPACING, delta=1,
                                        msg=(show_as, section_title.stringValue()))
+
+    def test_tab_goes_through_the_fields_of_a_section_shown_after_the_window_opened(self):  # code review, 2026-10-27
+        self.controller.window.recalculateKeyViewLoop()  # as showing the window does, here as Popup
+        self.show_the_sidebar_section()
+        self.assertIs(self.controller.sidebar_width_field.nextValidKeyView(), self.controller.launch_command_fields[0])
 
     def test_the_window_fits_its_height_to_the_sections_shown_keeping_its_top_edge_and_width(self):
         window = self.controller.window  # built, not shown
