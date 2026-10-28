@@ -385,7 +385,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                 (1, "thinking", ((35, 135, 61, 255), resolve_color(NSColor.systemGreenColor(), NSAppearanceNameDarkAqua))),
                 (2, "asking", ((0, 129, 155, 255), resolve_color(NSColor.systemCyanColor(), NSAppearanceNameDarkAqua))),
                 (3, "done", (resolve_color(gray, NSAppearanceNameAqua), resolve_color(names_color, NSAppearanceNameDarkAqua))),
-                (5, "idle", (resolve_color(gray, NSAppearanceNameAqua), resolve_color(gray, NSAppearanceNameDarkAqua)))):
+                (5, "idle", ((0, 0, 0, 97), (255, 255, 255, 102)))):  # a little fainter than gray: 38% and 40%
             row_view = self.lay_out_row_view(row)
             state_text = row_view.column_views["state"].attributedStringValue()
             self.assertEqual(state_text.string(), expected_state_text)

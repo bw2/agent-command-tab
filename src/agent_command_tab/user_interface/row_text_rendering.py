@@ -71,7 +71,7 @@ STATE_TEXT_COLOR_NAME_BY_STATE = {
     "working": "green_text",  # a tab row's "thinking" and "running"
     "background": "amber",  # its "running" in yellow (user request, 2026-10-28), darker in light mode to read on white
     "done": "gray_in_light_mode_only",
-    "idle": "gray",
+    "idle": "light_gray",  # a little fainter than gray (user request, 2026-10-28)
     "paused": "purple",
     "unknown": "pure_black_or_white",
     "exited": "gray",

@@ -43,6 +43,10 @@ COLOR_MAKERS_BY_NAME = {
     "orange_text": make_light_and_dark_mode_color_maker(make_srgb_color_maker(176, 97, 28), NSColor.systemOrangeColor),
     "gray_in_light_mode_only": make_light_and_dark_mode_color_maker(NSColor.secondaryLabelColor, NSColor.labelColor),
     "pure_black_or_white": NSColor.textColor,
+    # Idle's status text, a little closer to the background than the gray (secondaryLabelColor,
+    # black at 50% or white at 55%) of done and exited (user request, 2026-10-28).
+    "light_gray": make_light_and_dark_mode_color_maker(lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(0, 0, 0, 0.38),
+                                                       lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(1, 1, 1, 0.40)),
 }
 
 
