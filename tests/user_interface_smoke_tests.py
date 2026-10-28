@@ -11,9 +11,10 @@ import unittest.mock
 from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, NSAppearance, NSAppearanceNameAqua,
                     NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
-                    NSBitmapImageFileTypePNG, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
+                    NSBitmapImageFileTypePNG, NSButton, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSEventModifierFlagCommand, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSMakePoint, NSMakeRect,
-                    NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone, NSImageView, NSMenu,
+                    NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone,
+                    NSImageScaleProportionallyUpOrDown, NSImageView, NSMenu,
                     NSNormalWindowLevel, NSPopover,
                     NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
@@ -34,6 +35,7 @@ from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_
                                                                          choose_room_for_a_columns_texts,
                                                                          compute_selection_outline_rect)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons
+from agent_command_tab.user_interface.app_icon import build_app_icon
 from agent_command_tab.user_interface.named_colors import COLOR_MAKERS_BY_NAME
 from agent_command_tab.user_interface.row_text_rendering import STATE_TEXT_COLOR_NAME_BY_STATE
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
@@ -65,6 +67,7 @@ class RecordingOwner:
         self.idle_tabs_are_hidden_choices = []
         self.talk_to_each_other_requests = []  # (agent session entries, left-out entries)
         self.note_to_send = None  # what the Talk to Each Other window returns: None for Cancel
+        self.recipient_titles_to_choose = None  # the tab chosen under "Send the message to:", or None for each of them
         self.hooks_install_requests = []
 
     def submit_action(self, action_request):
@@ -111,7 +114,10 @@ class RecordingOwner:
 
     def ask_for_note_asking_agent_sessions_to_talk_to_each_other(self, agent_session_entries, left_out_agent_session_entries):
         self.talk_to_each_other_requests.append((agent_session_entries, left_out_agent_session_entries))
-        return self.note_to_send
+        if self.note_to_send is None:
+            return None
+        return self.note_to_send, [entry for entry in agent_session_entries
+                                   if self.recipient_titles_to_choose is None or entry.tab_title in self.recipient_titles_to_choose]
 
     def install_hooks(self, agent_tool_names):
         self.hooks_install_requests.append(list(agent_tool_names))
@@ -374,6 +380,12 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual(size_color, NSColor.labelColor())
             self.assertEqual((resolve_color(share_color, NSAppearanceNameAqua), resolve_color(share_color, NSAppearanceNameDarkAqua)),
                              expected_share_colors)
+
+    def test_the_rows_are_on_a_very_light_gray_in_light_mode_only(self):  # user request, 2026-10-28
+        background = self.list_controller.outline_view.backgroundColor()
+        self.assertEqual(resolve_color(background, NSAppearanceNameAqua), (247, 247, 247, 255))
+        self.assertEqual(resolve_color(background, NSAppearanceNameDarkAqua),
+                         resolve_color(NSColor.controlBackgroundColor(), NSAppearanceNameDarkAqua))  # as before
 
     def test_the_status_text_is_in_its_states_color(self):  # user requests, 2026-10-28
         self.assertLessEqual(set(STATE_TEXT_COLOR_NAME_BY_STATE.values()), set(COLOR_MAKERS_BY_NAME))
@@ -857,22 +869,49 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.owner.note_to_send = "Sync up, please."
         self.list_controller.menuTalkToEachOther_(menu_items_by_title["Talk to each other…"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target, self.submitted_actions[-1].arguments),
-                         ("ask_agent_sessions_to_talk_to_each_other", {"session_ids": ["s3", "s11"]}, {"note": "Sync up, please."}))
+                         ("ask_agent_sessions_to_talk_to_each_other", {"session_ids": ["s3", "s11"]},
+                          {"note": "Sync up, please.", "recipient_session_ids": ["s3", "s11"]}))  # each of them
+        self.owner.recipient_titles_to_choose = {"analysis-1"}  # one of them (user request, 2026-10-28)
+        self.list_controller.menuTalkToEachOther_(menu_items_by_title["Talk to each other…"])
+        self.assertEqual((self.submitted_actions[-1].target, self.submitted_actions[-1].arguments),
+                         ({"session_ids": ["s3", "s11"]}, {"note": "Sync up, please.", "recipient_session_ids": ["s11"]}))
         self.select_rows(3, 5)  # one Codex session and the Aider one: nobody to talk to
         self.assertFalse(self.build_right_click_menu_items_by_title(3)["Talk to each other…"].isEnabled())
 
     def test_the_talk_to_each_other_window_holds_the_default_note_and_names_who_gets_it(self):
         entries = [make_entry("1", "planning", "idle"), make_entry("2", "reviews", "working")]
-        alert, note_text_view = build_talk_to_each_other_alert(entries, [make_entry("3", "aider tab", "idle", tool="Aider")])
+        alert, note_text_view, recipient_choices = build_talk_to_each_other_alert(
+            entries, [make_entry("3", "aider tab", "idle", tool="Aider")])
         self.assertEqual(note_text_view.string(), DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER)
-        self.assertIn("these 2 agents to each other:\n• planning\n• reviews", alert.informativeText())
+        self.assertTrue(alert.informativeText().startswith("Send a message instructing these 2 agents to talk to each other."))
         self.assertIn('Left out, since their tools can\'t take messages from other sessions: "aider tab".', alert.informativeText())
+        # "Send the message to:" one of them, or each of them, chosen at first (user request, 2026-10-28).
+        accessory_subviews = alert.accessoryView().subviews()
+        labels = [subview.stringValue() for subview in accessory_subviews if isinstance(subview, NSTextField)]
+        self.assertIn("Send the message to:", labels)
+        self.assertIn("The message will include the other agents' names, process IDs and working directories.", labels)
+        radio_buttons = [subview for subview in accessory_subviews if isinstance(subview, NSButton)]
+        radio_buttons.sort(key=lambda radio_button: -radio_button.frame().origin.y)  # top first
+        self.assertEqual([radio_button.title() for radio_button in radio_buttons], ["planning", "reviews", "each of the 2 agents"])
+        self.assertEqual([radio_button.state() for radio_button in radio_buttons], [0, 0, 1])
+        self.assertEqual(recipient_choices.list_chosen_recipients(), entries)
+        radio_buttons[1].performClick_(None)  # as a click does: the others turn off
+        self.assertEqual([radio_button.state() for radio_button in radio_buttons], [0, 1, 0])
+        self.assertEqual(recipient_choices.list_chosen_recipients(), [entries[1]])
         send_button, cancel_button = alert.buttons()
         self.assertEqual((send_button.title(), cancel_button.title()), ("Send", "Cancel"))
         self.assertEqual(send_button.keyEquivalentModifierMask(), NSEventModifierFlagCommand)  # Return alone starts a new line
         self.assertIs(alert.window().initialFirstResponder(), note_text_view)
         self.assertFalse(note_text_view.isAutomaticDashSubstitutionEnabled())
-        self.assertEqual(tuple(alert.icon().size()), tuple(NSApplication.sharedApplication().applicationIconImage().size()))  # the app's icon
+
+    def test_every_alert_the_app_runs_shows_the_apps_icon(self):  # rather than Python's rocket (user request, 2026-10-28)
+        stand_in_app_controller = unittest.mock.Mock()
+        stand_in_app_controller.sidebar_controller.window.level.return_value = 0
+        alert = unittest.mock.Mock()
+        AppController.run_alert_in_front(stand_in_app_controller, alert)
+        (icon,), _ = alert.setIcon_.call_args
+        self.assertEqual(tuple(icon.size()), (1024, 1024))  # app_icon.build_app_icon's
+        alert.runModal.assert_called_once()
 
     def test_dragging_one_of_several_selected_rows_drags_only_that_row(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -1693,15 +1732,21 @@ class AutomaticIconColorTests(unittest.TestCase):
 
         class StandInAppController:
             sidebar_controller = unittest.mock.Mock(show_for_a_few_seconds=lambda: calls.append("show"),
-                                                    hide_now=lambda: calls.append("hide"))
+                                                    hide_now=lambda: calls.append("hide"),
+                                                    update_placement=lambda: calls.append("show for good"))
             # Closed first, so a dropdown it kept open closes too (user request, 2026-10-28).
             settings_window_controller = unittest.mock.Mock(close_if_open=lambda: calls.append("close settings"))
 
             def retry_the_global_shortcut_if_it_lacks_permission(self):
                 pass
+
+            def show_the_sidebar(self):
+                AppController.show_the_sidebar(self)
         stand_in_app_controller = StandInAppController()
+        # One that stays visible stays, or comes back if the menu's Show popup or Show window hid it.
         for sidebar_mode, sidebar_is_shown, expected_call in (("auto_hide", False, "show"), ("auto_hide", True, "hide"),
-                                                              ("floating", True, "show")):  # show_for_a_few_seconds leaves it
+                                                              ("floating", True, "show for good"),
+                                                              ("docked", False, "show for good")):
             stand_in_app_controller.settings = {"show_as": "sidebar", "sidebar_mode": sidebar_mode}
             stand_in_app_controller.sidebar_controller.is_shown = sidebar_is_shown
             calls.clear()
@@ -1727,6 +1772,28 @@ class AgentToolIconTests(unittest.TestCase):
             self.assertLess(len(drawn_colors), len(colors) / 2, appearance_name)  # the logo's shape, not the whole square
             for color in drawn_colors:  # labelColor: black in light mode, white at 85% opacity in dark mode
                 self.assertAlmostEqual(color.redComponent(), expected_red, delta=0.1, msg=appearance_name)
+
+    def test_the_app_icon_is_a_command_key_with_a_status_dot_in_each_loop(self):  # user request, 2026-10-28
+        icon = build_app_icon()
+        self.assertEqual(tuple(icon.size()), (1024, 1024))
+        image_view = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 128, 128))  # a dialog's 64 points on a Retina screen
+        image_view.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+        image_view.setImage_(icon)
+        bitmap = image_view.bitmapImageRepForCachingDisplayInRect_(image_view.bounds())
+        image_view.cacheDisplayInRect_toBitmapImageRep_(image_view.bounds(), bitmap)
+        scale = bitmap.pixelsWide() / 1024
+
+        def read_color(x, y_from_the_top):
+            color = bitmap.colorAtX_y_(int(x * scale), int(y_from_the_top * scale)).colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
+            return tuple(round(component * 255) for component in (color.redComponent(), color.greenComponent(),
+                                                                   color.blueComponent(), color.alphaComponent()))
+        # The loops' centers are 204 points from the middle; the top left is 716 points up, 308 from the top.
+        top_left, top_right, bottom_left, bottom_right = (read_color(x, y) for x, y in ((308, 308), (716, 308), (308, 716), (716, 716)))
+        self.assertTrue(top_left[0] > 200 and top_left[1] > 150 and top_left[2] < 80, top_left)  # amber
+        self.assertTrue(top_right[2] > 200 and top_right[0] < 120, top_right)  # blue
+        self.assertTrue(abs(bottom_left[0] - bottom_left[2]) < 20 and 100 < bottom_left[0] < 180, bottom_left)  # gray
+        self.assertTrue(bottom_right[1] > 160 and bottom_right[0] < 120, bottom_right)  # green
+        self.assertEqual(read_color(20, 20)[3], 0)  # outside the rounded square: clear
 
 
 class SidebarWidthDragTests(unittest.TestCase):
@@ -2304,25 +2371,51 @@ class SettingsWindowSmokeTests(unittest.TestCase):
 
 
 class ShowTheListAsTests(unittest.TestCase):
-    def test_the_menus_show_items_show_the_list_that_way_without_changing_show_as(self):  # user request, 2026-10-28
-        shown_ways = []
+    def test_the_menus_show_items_hide_the_other_ways_first_and_do_nothing_for_the_way_shown(self):  # user requests, 2026-10-28
+        calls = []
 
         class StandInAppController:
-            settings = {"show_as": "window"}
-            popover = unittest.mock.Mock(isShown=lambda: False)
-            status_item_controller = unittest.mock.Mock(show_popover=lambda: shown_ways.append("popup"))
-            sidebar_controller = unittest.mock.Mock(show_for_a_few_seconds=lambda: shown_ways.append("sidebar"))
+            """Whichever of the dropdown, the sidebar and the window shows, and what was done to them."""
+
+            def __init__(self, show_as, sidebar_mode, shown_list_formats):
+                self.settings = {"show_as": show_as, "sidebar_mode": sidebar_mode}
+                self.popover = unittest.mock.Mock(isShown=lambda: "popup" in shown_list_formats)
+                self.status_item_controller = unittest.mock.Mock(show_popover=lambda: calls.append("show popup"))
+                self.sidebar_controller = unittest.mock.Mock(
+                    is_shown="sidebar" in shown_list_formats, show_for_a_few_seconds=lambda: calls.append("show sidebar briefly"),
+                    update_placement=lambda: calls.append("show sidebar for good"), hide_now=lambda: calls.append("hide sidebar"))
+                self.list_window_controller = unittest.mock.Mock(hide=lambda: calls.append("hide window"))
+                self.list_window_controller.window.isVisible.return_value = "window" in shown_list_formats
+
+            def close_dropdown(self):
+                calls.append("hide popup")
+
+            def reserve_screen_area(self, frame):
+                calls.append(f"reserve {frame}")
 
             def show_the_list_window(self):
-                shown_ways.append("window")
-        stand_in_app_controller = StandInAppController()
-        for show_as_choice in ("popup", "sidebar", "window"):
+                calls.append("show window")
+
+            def list_the_ways_the_list_shows(self):
+                return AppController.list_the_ways_the_list_shows(self)
+
+            def show_the_sidebar(self):
+                AppController.show_the_sidebar(self)
+
+            def hide_the_sidebar(self):
+                AppController.hide_the_sidebar(self)
+        for show_as, sidebar_mode, shown_list_formats, show_as_choice, expected_calls in (
+                ("window", "auto_hide", {"window"}, "window", []),  # already showing that way: nothing
+                ("window", "auto_hide", {"window"}, "popup", ["hide window", "show popup"]),
+                ("popup", "floating", {"popup"}, "sidebar", ["hide popup", "show sidebar briefly"]),
+                ("sidebar", "docked", {"sidebar"}, "window", ["hide sidebar", "reserve None", "show window"]),  # room given back
+                ("sidebar", "docked", set(), "sidebar", ["show sidebar for good"]),  # back after Show window hid it
+                ("popup", "auto_hide", {"popup", "window"}, "sidebar", ["hide popup", "hide window", "show sidebar briefly"])):
+            calls.clear()
+            stand_in_app_controller = StandInAppController(show_as, sidebar_mode, shown_list_formats)
             AppController.show_the_list_as(stand_in_app_controller, show_as_choice)
-        self.assertEqual(shown_ways, ["popup", "sidebar", "window"])
-        self.assertEqual(stand_in_app_controller.settings, {"show_as": "window"})
-        stand_in_app_controller.popover = unittest.mock.Mock(isShown=lambda: True)
-        AppController.show_the_list_as(stand_in_app_controller, "popup")  # an open dropdown stays open
-        self.assertEqual(shown_ways, ["popup", "sidebar", "window"])
+            self.assertEqual(calls, expected_calls, (show_as, shown_list_formats, show_as_choice))
+            self.assertEqual(stand_in_app_controller.settings["show_as"], show_as)  # never changed
 
 
 if __name__ == "__main__":

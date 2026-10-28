@@ -735,14 +735,18 @@ class DashboardCore:
     # ----- Talk to Each Other (user request, 2026-10-21) -----
 
     async def handle_ask_agent_sessions_to_talk_to_each_other(self, action_request):
-        """Sends each agent session of target {"session_ids": [...]} the note of arguments
-        {"note": ...}, followed by what it needs to send each of the others a message
+        """Sends the agent sessions of target {"session_ids": [...]} that arguments
+        {"recipient_session_ids": [...]} name (all of them when it is left out; one chosen in the
+        Talk to Each Other window, user request, 2026-10-28) the note of arguments {"note": ...},
+        followed by what each needs to send every other one of the sessions a message
         (messages_between_agent_sessions). A Codex session gets it through `codex queue`, which it
         runs after any turn under way. A Claude Code session has no supported way in from outside,
         so its message is held until the session waits at its prompt with an empty input box, then
         pasted there, giving up after SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT. Returns
-        once every message was delivered or given up on, naming each tab that didn't get one."""
+        once every message was delivered or given up on, naming each tab that didn't get one, and
+        each session that couldn't take part."""
         session_ids = action_request.target["session_ids"]
+        recipient_session_ids = action_request.arguments.get("recipient_session_ids") or session_ids
         agent_session_for_messages_by_session_id = {}
         action_result_by_session_id = {}
         for session_id in session_ids:
@@ -755,7 +759,8 @@ class DashboardCore:
             for session_id in agent_session_for_messages_by_session_id:
                 action_result_by_session_id[session_id] = ActionResult(False, "no other selected session can take part")
         else:
-            participant_session_ids = list(agent_session_for_messages_by_session_id)
+            delivered_session_ids = [session_id for session_id in agent_session_for_messages_by_session_id
+                                     if session_id in recipient_session_ids]
             delivery_results = await asyncio.gather(*(
                 self.deliver_message_to_agent_session(
                     session_id, agent_session_for_messages_by_session_id[session_id],
@@ -763,11 +768,13 @@ class DashboardCore:
                         action_request.arguments["note"], agent_session_for_messages_by_session_id[session_id],
                         [other for other_session_id, other in agent_session_for_messages_by_session_id.items()
                          if other_session_id != session_id]))
-                for session_id in participant_session_ids), return_exceptions=True)
-            for session_id, delivery_result in zip(participant_session_ids, delivery_results):
+                for session_id in delivered_session_ids), return_exceptions=True)
+            for session_id, delivery_result in zip(delivered_session_ids, delivery_results):
                 action_result_by_session_id[session_id] = convert_exception_to_action_result(delivery_result)
+        # A session that only appears in the others' messages has a result only when it couldn't take part.
+        reported_session_ids = [session_id for session_id in session_ids if session_id in action_result_by_session_id]
         return self.combine_results_naming_the_tabs_that_failed(
-            session_ids, [action_result_by_session_id[session_id] for session_id in session_ids])
+            reported_session_ids, [action_result_by_session_id[session_id] for session_id in reported_session_ids])
 
     async def describe_agent_session_for_messages(self, session_id):
         """Returns (AgentSessionForMessages, None) for an agent session that other sessions can

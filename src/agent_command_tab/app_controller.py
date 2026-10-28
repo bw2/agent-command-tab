@@ -36,6 +36,7 @@ from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_
                                               move_the_settings_folder_of_the_old_name, save_settings)
 from agent_command_tab.snapshot_data_classes import choose_folder_for_new_agent_window
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
+from agent_command_tab.user_interface.app_icon import build_app_icon
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.menu_bar_status_item import MenuBarStatusItemController
 from agent_command_tab.user_interface.popover_container import ListPanelController, build_dropdown_popover
@@ -226,17 +227,17 @@ class AppController(NSObject):
         """A left click on the menu bar icon shows the list the way the settings ask: the dropdown
         opens or closes, an auto-hiding sidebar slides in for a few seconds or, while it is in, out
         (user request, 2026-10-28; a sidebar set to stay visible stays, as for the global
-        shortcut), or the window comes to the front. An open settings window closes first (user
-        request, 2026-10-28), so a dropdown it kept open closes too. It also retries a global
-        shortcut that lacked the permission, since the sidebar slides in without making the app
-        active (the other retry)."""
+        shortcut, and comes back if the menu's Show popup or Show window hid it), or the window
+        comes to the front. An open settings window closes first (user request, 2026-10-28), so a
+        dropdown it kept open closes too. It also retries a global shortcut that lacked the
+        permission, since the sidebar slides in without making the app active (the other retry)."""
         self.settings_window_controller.close_if_open()
         self.retry_the_global_shortcut_if_it_lacks_permission()
         if self.settings["show_as"] == "sidebar":
             if self.settings["sidebar_mode"] == "auto_hide" and self.sidebar_controller.is_shown:
                 self.sidebar_controller.hide_now()
             else:
-                self.sidebar_controller.show_for_a_few_seconds()
+                self.show_the_sidebar()
         elif self.settings["show_as"] == "window":
             self.show_the_list_window()
         else:
@@ -244,17 +245,49 @@ class AppController(NSObject):
 
     @objc.python_method
     def show_the_list_as(self, show_as_choice):
-        """The menu bar icon's menu's "Show popup", "Show sidebar" and "Show window" (user request,
+        """The menu bar icon's menu's "Show popup", "Show sidebar" and "Show window" (user requests,
         2026-10-28): shows the list as that "Show as" choice would, whatever "Show as" is, without
-        changing it. A sidebar shown while "Show as" is another slides out again after a few
-        seconds, as an auto-hiding one does; one that is always shown stays as it is."""
+        changing it. Nothing happens while the list already shows that way; otherwise the other
+        ways it shows are hidden first, a sidebar set to stay visible too (until it is shown
+        again). A sidebar shown while "Show as" is another slides out again after a few seconds,
+        as an auto-hiding one does."""
+        shown_list_formats = self.list_the_ways_the_list_shows()
+        if show_as_choice in shown_list_formats:
+            return
+        if "popup" in shown_list_formats:
+            self.close_dropdown()
+        if "sidebar" in shown_list_formats:
+            self.hide_the_sidebar()
+        if "window" in shown_list_formats:
+            self.list_window_controller.hide()
         if show_as_choice == "popup":
-            if not self.popover.isShown():
-                self.status_item_controller.show_popover()
+            self.status_item_controller.show_popover()
         elif show_as_choice == "sidebar":
-            self.sidebar_controller.show_for_a_few_seconds()
+            self.show_the_sidebar()
         else:
             self.show_the_list_window()
+
+    @objc.python_method
+    def list_the_ways_the_list_shows(self):
+        """Returns which of "popup", "sidebar" and "window" show the list right now."""
+        return [show_as_choice for show_as_choice, is_shown in (
+            ("popup", self.popover.isShown()), ("sidebar", self.sidebar_controller.is_shown),
+            ("window", bool(self.list_window_controller.window.isVisible()))) if is_shown]
+
+    @objc.python_method
+    def show_the_sidebar(self):
+        """Slides the sidebar in: one set to stay visible (Show as: Sidebar, an Always mode) for
+        good, a docked one taking its room again, as after hide_the_sidebar; any other for a few seconds."""
+        if self.settings["show_as"] == "sidebar" and self.settings["sidebar_mode"] != "auto_hide":
+            self.sidebar_controller.update_placement()
+        else:
+            self.sidebar_controller.show_for_a_few_seconds()
+
+    @objc.python_method
+    def hide_the_sidebar(self):
+        """Slides the sidebar out at once; a docked one gives the iTerm2 windows its room back until it shows again."""
+        self.sidebar_controller.hide_now()
+        self.reserve_screen_area(None)
 
     @objc.python_method
     def global_shortcut_pressed(self):
@@ -577,19 +610,23 @@ class AppController(NSObject):
 
     @objc.python_method
     def ask_for_note_asking_agent_sessions_to_talk_to_each_other(self, agent_session_entries, left_out_agent_session_entries):
-        """Shows the Talk to Each Other window (user request, 2026-10-21); returns the note as the
-        user left it, or None for Cancel or an empty note."""
-        alert, note_text_view = build_talk_to_each_other_alert(agent_session_entries, left_out_agent_session_entries)
-        if self.run_alert_in_front(alert) != NSAlertFirstButtonReturn:
+        """Shows the Talk to Each Other window (user request, 2026-10-21); returns (the note as the
+        user left it, the agent session entries chosen to get it: one, or all of them, user request,
+        2026-10-28), or None for Cancel or an empty note."""
+        alert, note_text_view, recipient_choices = build_talk_to_each_other_alert(agent_session_entries,
+                                                                                  left_out_agent_session_entries)
+        if self.run_alert_in_front(alert) != NSAlertFirstButtonReturn or not note_text_view.string().strip():
             return None
-        return note_text_view.string().strip() or None
+        return note_text_view.string().strip(), recipient_choices.list_chosen_recipients()
 
     @objc.python_method
     def run_alert_in_front(self, alert):
         """Shows an alert and returns the button chosen, after closing the dropdown, which (with a
         settings window kept above it) would cover the alert while it waits for an answer. The
         sidebar, above other apps' windows at the status bar's level, goes just under the alert's
-        level meanwhile: a wide one would cover it."""
+        level meanwhile: a wide one would cover it. The alert shows the app's icon: NSAlert takes
+        Python.app's own (its rocket), whatever NSApp's icon is set to."""
+        alert.setIcon_(build_app_icon())
         self.close_dropdown()
         NSApp.activateIgnoringOtherApps_(True)
         sidebar_window = self.sidebar_controller.window
@@ -838,6 +875,7 @@ def run_menu_bar_app(verbose):
     """Runs the menu bar app until it quits; returns the exit status."""
     application = NSApplication.sharedApplication()
     application.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, no Info.plist needed
+    application.setApplicationIconImage_(build_app_icon())  # the dialogs show it, not Python's rocket (user request, 2026-10-28)
     application.setMainMenu_(build_main_menu_with_the_edit_shortcuts())
     app_controller = AppController.alloc().initWithVerbose_(verbose)
     app_controller.start()

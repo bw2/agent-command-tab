@@ -47,6 +47,9 @@ COLOR_MAKERS_BY_NAME = {
     # black at 50% or white at 55%) of done and exited (user request, 2026-10-28).
     "light_gray": make_light_and_dark_mode_color_maker(lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(0, 0, 0, 0.38),
                                                        lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(1, 1, 1, 0.40)),
+    # The list's rows' background: a very light gray in light mode rather than controlBackgroundColor's
+    # white (user request, 2026-10-28); dark mode keeps it, which the bars around the list are drawn on too.
+    "list_background": make_light_and_dark_mode_color_maker(make_srgb_color_maker(247, 247, 247), NSColor.controlBackgroundColor),
 }
 
 

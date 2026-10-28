@@ -93,7 +93,8 @@ class ListPanelView(NSView):
         # In dark mode, the top bar, the column titles and the bottom bar are on the list's own
         # background (the outline view's default, controlBackgroundColor) rather than the lighter
         # gray of the window, the popover or the sidebar around it; light mode keeps that gray
-        # around the white list (user requests, 2026-10-27). AppKit redraws views when the mode changes.
+        # around the list, whose rows are on a very light gray there (user requests, 2026-10-27 and
+        # 2026-10-28; named_colors' "list_background"). AppKit redraws views when the mode changes.
         if appearance_is_dark(self.effectiveAppearance()):
             NSColor.controlBackgroundColor().set()
             NSRectFill(rect)

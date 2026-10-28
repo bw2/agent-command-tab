@@ -61,9 +61,10 @@ def make_core():
     return core
 
 
-def ask_to_talk(core, session_ids):
+def ask_to_talk(core, session_ids, recipient_session_ids=None):
+    arguments = {"note": NOTE} if recipient_session_ids is None else {"note": NOTE, "recipient_session_ids": recipient_session_ids}
     return core.handle_ask_agent_sessions_to_talk_to_each_other(
-        ActionRequest("ask_agent_sessions_to_talk_to_each_other", {"session_ids": session_ids}, {"note": NOTE}))
+        ActionRequest("ask_agent_sessions_to_talk_to_each_other", {"session_ids": session_ids}, arguments))
 
 
 class TalkToEachOtherTests(unittest.TestCase):
@@ -109,6 +110,18 @@ class TalkToEachOtherTests(unittest.TestCase):
         self.assertEqual([conversation_id for conversation_id, _ in self.queued], ["codex-conversation-1"])
         self.assertIn('iTerm2 tab "codex tests"', self.queued[0][1])
         self.assertIn("can't hear from you directly", self.queued[0][1])  # Codex can't reach Claude Code sessions
+
+    def test_one_chosen_recipient_gets_the_message_naming_all_the_others(self):  # user request, 2026-10-28
+        core = make_core()
+        self.assertEqual(asyncio.run(ask_to_talk(core, ["s1", "s2", "s3"], recipient_session_ids=["s1"])), ActionResult(True))
+        self.assertEqual([session_id for session_id, _ in self.pasted], ["s1"])
+        self.assertEqual(self.queued, [])  # the Codex session isn't sent it
+        message_for_planning = self.pasted[0][1]
+        self.assertIn('use your SendMessage tool with to: "reviews-7f"', message_for_planning)
+        self.assertIn("codex queue --thread codex-conversation-1", message_for_planning)
+        # One that can't take part is still named, even when it isn't a recipient.
+        self.assertEqual(asyncio.run(ask_to_talk(core, ["s1", "s3", "s5"], recipient_session_ids=["s3"])),
+                         ActionResult(False, "\"new claude\": its Claude Code session name isn't known yet"))
 
     def test_a_row_shown_idle_waits_while_claude_code_itself_reports_it_busy(self):
         # The row's state may come from a `claude agents --json` record up to a minute old.

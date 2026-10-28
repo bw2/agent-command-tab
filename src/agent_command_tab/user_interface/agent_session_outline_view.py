@@ -623,8 +623,8 @@ class AgentSessionListController(NSObject):
         list_sort_order_chosen(list_sort_order, list_sort_order_is_reversed): a column's title
             was clicked; the owner shows the order in every list (set_list_sort_order).
         ask_for_note_asking_agent_sessions_to_talk_to_each_other(agent_session_entries,
-            left_out_agent_session_entries): shows the Talk to Each Other window; returns the
-            note the user may have edited, or None for Cancel.
+            left_out_agent_session_entries): shows the Talk to Each Other window; returns (the
+            note the user may have edited, the entries chosen to get it), or None for Cancel.
     """
 
     def initWithOwner_(self, owner):
@@ -727,6 +727,7 @@ class AgentSessionListController(NSObject):
         # their measured size and the dropdown can be fitted to them.
         outline_view.setStyle_(NSTableViewStylePlain)
         outline_view.setIntercellSpacing_((0, 0))
+        outline_view.setBackgroundColor_(build_color_from_name("list_background"))  # very light gray in light mode (user request, 2026-10-28)
         # A click selects a window or tab row, Command-click adds or removes one, Shift-click a
         # range (user request, 2026-10-21); RowViewWithSelectionOutline draws the selection.
         outline_view.setAllowsMultipleSelection_(True)
@@ -1837,13 +1838,16 @@ class AgentSessionListController(NSObject):
         agent_session_entries = self.list_agent_sessions_that_can_talk_to_each_other(self.menu_target_agent_session_entries)
         left_out_agent_session_entries = [entry for entry in self.menu_target_agent_session_entries
                                           if entry not in agent_session_entries]
-        note = self.owner.ask_for_note_asking_agent_sessions_to_talk_to_each_other(
+        note_and_recipients = self.owner.ask_for_note_asking_agent_sessions_to_talk_to_each_other(
             agent_session_entries, left_out_agent_session_entries)
-        if note is None:
+        if note_and_recipients is None:
             return
+        note, recipient_entries = note_and_recipients
+        # Every one of them is in the message the recipients get; only the recipients get it.
         self.owner.submit_action_and_report_failure(
             ActionRequest("ask_agent_sessions_to_talk_to_each_other",
-                          {"session_ids": [entry.session_id for entry in agent_session_entries]}, {"note": note}),
+                          {"session_ids": [entry.session_id for entry in agent_session_entries]},
+                          {"note": note, "recipient_session_ids": [entry.session_id for entry in recipient_entries]}),
             "Not every session got the message")
 
     def menuSendSlashCommandToSelectedSessions_(self, sender):
