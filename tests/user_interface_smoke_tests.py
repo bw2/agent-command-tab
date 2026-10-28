@@ -3,6 +3,7 @@
 Set AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the list looks like.
 """
 
+import math
 import os
 import time
 import unittest
@@ -26,8 +27,8 @@ from agent_command_tab.command_line import RECONNECT_EXIT_STATUS
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
-                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH, TOP_BAR_HEIGHT,
-                                                                ListPanelController)
+                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH, SMALLEST_POPOVER_WIDTH,
+                                                                SMALLEST_SORT_POPUP_WIDTH, TOP_BAR_HEIGHT, ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
                                                                          GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT, SMALLEST_TAB_NAME_WIDTH,
@@ -549,30 +550,52 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel = self.dropdown_panel_controller
         # Two windows with running agents: the expand or collapse and the pause or resume buttons show.
         self.list_controller.apply_snapshot(make_sample_snapshot())
-        # Narrowed and widened again, as dragging the sidebar's edge does; 320 is the dropdown's
-        # smallest width, 250 the list window's and 200 the sidebar's. A sidebar or a list window
-        # under 251 points hides the pop-up (the column titles still sort the list); 231 before the
-        # Settings button had its gear (2026-10-27).
-        for width, label_shown, popup_shown, popup_width, settings_button_is_centered in (
-                (460, True, True, 124, True), (346, True, True, 124, False), (345, False, True, 124, False),
-                (320, False, True, 124, False), (265, False, True, 74.5, False), (251, False, True, 60.5, False),
-                (250, False, False, 59.5, False), (200, False, False, 9.5, False),
-                (460, True, True, 124, True)):
+        # The widths where each step happens follow from the controls' measured widths, which differ
+        # between macOS versions and Python builds: on macOS 27 the label drops below 346 points and
+        # the pop-up hides below 251, while GitHub's macOS 26 runners measure the controls a few
+        # points wider or narrower (2026-10-28).
+        label_frame = panel.sort_label.frame()
+        full_popup_width = panel.sort_popup_width_for_its_widest_title
+        settings_button_width = panel.settings_button.frame().size.width
+        # From the Settings button's left edge to the panel's right edge, with Settings beside Hide Idle.
+        width_from_settings_to_the_right_edge = (
+            settings_button_width + GAP_BETWEEN_TOP_BAR_BUTTONS + panel.idle_tabs_button.frame().size.width
+            + GAP_BETWEEN_TOP_BAR_BUTTONS + panel.expand_or_collapse_all_button.frame().size.width + PANEL_SIDE_MARGIN)
+        sort_control_right_end_x = label_frame.origin.x + label_frame.size.width + 2 + full_popup_width
+        narrowest_width_with_the_label = sort_control_right_end_x + 2 + width_from_settings_to_the_right_edge
+        narrowest_width_with_the_full_popup = label_frame.origin.x + full_popup_width + 2 + width_from_settings_to_the_right_edge
+        narrowest_width_with_the_popup = label_frame.origin.x + SMALLEST_SORT_POPUP_WIDTH + 2 + width_from_settings_to_the_right_edge
+        # The label drops first, then the pop-up narrows, then it hides, which never happens in the
+        # dropdown (only in a sidebar or a list window, where the column titles still sort the list).
+        self.assertGreater(narrowest_width_with_the_label, narrowest_width_with_the_full_popup)
+        self.assertGreater(narrowest_width_with_the_full_popup, narrowest_width_with_the_popup)
+        self.assertLessEqual(narrowest_width_with_the_popup, SMALLEST_POPOVER_WIDTH)
+        # Narrowed to just above and just below each step, then to the sidebar's smallest width (200),
+        # and widened again, as dragging the sidebar's edge does.
+        widths = [POPOVER_WIDTH]
+        for step_width in (narrowest_width_with_the_label, narrowest_width_with_the_full_popup, narrowest_width_with_the_popup):
+            widths += [math.ceil(step_width), math.ceil(step_width) - 1]
+        for width in widths + [200, POPOVER_WIDTH]:
             self.window.setContentSize_((width, 260))
             self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden(),
-                              panel.list_sort_order_popup.frame().size.width), (label_shown, popup_shown, popup_width), width)
-            # Hide Idle right before the expand button; Settings in the middle of the bar when the
-            # whole sort control fits on its left, and never past Hide Idle.
+                              panel.list_sort_order_popup.frame().size.width),
+                             (width >= narrowest_width_with_the_label, width >= narrowest_width_with_the_popup,
+                              max(full_popup_width - max(narrowest_width_with_the_full_popup - width, 0), 0)), width)
+            # Hide Idle right before the expand button; Settings in the middle of the bar, though never
+            # over the whole sort control on its left nor past Hide Idle.
             idle_tabs_button_frame = panel.idle_tabs_button.frame()
             self.assertFalse(panel.idle_tabs_button.isHidden())
             self.assertEqual(idle_tabs_button_frame.origin.x + idle_tabs_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
                              panel.expand_or_collapse_all_button.frame().origin.x)
             settings_button_frame = panel.settings_button.frame()
-            self.assertEqual(abs(settings_button_frame.origin.x + settings_button_frame.size.width / 2 - width / 2) < 0.5,
-                             settings_button_is_centered, width)
+            self.assertEqual(settings_button_frame.origin.x,
+                             min(max((width - settings_button_width) / 2, sort_control_right_end_x + 2),
+                                 width - width_from_settings_to_the_right_edge), width)
+            if width == POPOVER_WIDTH:  # wide enough on any Mac for Settings to sit in the middle
+                self.assertEqual(settings_button_frame.origin.x, (width - settings_button_width) / 2)
             self.assertLessEqual(settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
                                  idle_tabs_button_frame.origin.x)
-            if popup_shown:
+            if not panel.list_sort_order_popup.isHidden():
                 popup_frame = panel.list_sort_order_popup.frame()
                 self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, settings_button_frame.origin.x)
             message_frame = panel.message_text_field.frame()
