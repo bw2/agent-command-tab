@@ -1231,8 +1231,10 @@ class AgentSessionListController(NSObject):
                                                           build_color_from_name(parts.context_fill_percent_color_name),
                                                           (share_start, len(parts.context_text) - share_start))
                 if parts_field_name == "state_text" and parts.state_color_name:  # user requests, 2026-10-28
-                    column_text.addAttributes_range_({NSForegroundColorAttributeName: build_color_from_name(parts.state_color_name),
-                                                      NSFontAttributeName: self.semibold_font}, (0, len(parts.state_text)))
+                    column_text.addAttributes_range_({
+                        NSForegroundColorAttributeName: build_color_from_name(parts.state_color_name),
+                        NSFontAttributeName: self.semibold_font if parts.state_text_is_semibold else self.regular_font},
+                        (0, len(parts.state_text)))
                 column_view.setAttributedStringValue_(column_text)
         row_view.column_widths = dict(self.column_widths)
         row_view.room_for_the_previews_button = self.room_for_the_previews_button

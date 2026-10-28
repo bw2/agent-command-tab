@@ -15,8 +15,8 @@ RowTextParts = collections.namedtuple(
                      "agent_tool_name", "state_text", "elapsed_time_text", "context_text",
                      "created_time_text", "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text",
                      "preview_text", "details_color_name", "dot_tool_tip", "details_tool_tip",
-                     "context_fill_percent_color_name", "state_color_name"],
-    defaults=["", "", "", "", "", "", "", "", "", "", "gray", "", "", "", ""])
+                     "context_fill_percent_color_name", "state_color_name", "state_text_is_semibold"],
+    defaults=["", "", "", "", "", "", "", "", "", "", "gray", "", "", "", "", False])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
                         "context_text (the context's size and its share of the context window, "
@@ -24,7 +24,8 @@ RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working sessi
                         "column's color for \"\"), created_time_text (when the agent session "
                         "started) and existence_duration_text (how long ago), memory_text and cpu_text (what the "
                         "agent and the processes it started use), the icon for agent_tool_name, state_text "
-                        "(in state_color_name) and elapsed_time_text (the state's duration). Under it, a tab "
+                        "(in state_color_name, semibold for state_text_is_semibold) and elapsed_time_text (the "
+                        "state's duration). Under it, a tab "
                         "row has a gray preview line "
                         "(R23): preview_connector_text continues the tree's lines, and preview_text starts under "
                         "the name. A tab row's details are its background task lights, in details_color_name. "
@@ -75,6 +76,10 @@ STATE_TEXT_COLOR_NAME_BY_STATE = {
     "unknown": "pure_black_or_white",
     "exited": "gray",
 }
+
+# The status text is semibold, easier to read, except idle's, the most common and least telling
+# (user requests, 2026-10-28).
+STATES_WHOSE_TEXT_IS_IN_THE_REGULAR_WEIGHT = frozenset({"idle"})
 
 # What each state means, the dot's hover text (user request, 2026-10-27). The 10 and 5 minutes are
 # iterm2_connection_thread's STUCK_THRESHOLD_SECONDS and EXITED_ROW_SECONDS.
@@ -256,6 +261,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         # While it waits on a tool, a working agent shows "running" and the tool's time.
         state_text=state_text,
         state_color_name=STATE_TEXT_COLOR_NAME_BY_STATE[state],
+        state_text_is_semibold=state not in STATES_WHOSE_TEXT_IS_IN_THE_REGULAR_WEIGHT,
         elapsed_time_text=format_elapsed_time(now - (agent_session_entry.running_tool_started_at
                                                      if agent_session_entry.running_tool_name
                                                      else agent_session_entry.status_since)),

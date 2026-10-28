@@ -389,8 +389,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             row_view = self.lay_out_row_view(row)
             state_text = row_view.column_views["state"].attributedStringValue()
             self.assertEqual(state_text.string(), expected_state_text)
+            # Semibold, easier to read, except idle (user requests, 2026-10-28).
             self.assertEqual(state_text.attribute_atIndex_effectiveRange_(NSFontAttributeName, 0, None)[0],
-                             self.list_controller.semibold_font)  # easier to read (user request, 2026-10-28)
+                             self.list_controller.regular_font if expected_state_text == "idle" else self.list_controller.semibold_font)
             state_color = state_text.attribute_atIndex_effectiveRange_(NSForegroundColorAttributeName, 0, None)[0]
             self.assertEqual((resolve_color(state_color, NSAppearanceNameAqua), resolve_color(state_color, NSAppearanceNameDarkAqua)),
                              expected_light_and_dark_mode_colors)
