@@ -17,6 +17,7 @@ from PyObjCTools import AppHelper
 
 from agent_command_tab.settings_store import (LIST_COLUMNS, SMALLEST_WINDOW_SIZES, find_launch_command_problem,
                                               is_valid_setting_value, replace_agent_tool_field)
+from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_TITLES
 from agent_command_tab.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
 from agent_command_tab.user_interface.named_colors import make_light_and_dark_mode_color_maker
 from agent_command_tab.user_interface.screen_layout import (WindowFrameSavingController,
@@ -50,8 +51,8 @@ make_section_box_fill_color = make_light_and_dark_mode_color_maker(
 make_section_box_border_color = make_light_and_dark_mode_color_maker(
     lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(0, 0, 0, 0.08), lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(1, 1, 1, 0.08))
 # The titles of the choices in settings_store (SHOW_AS_CHOICES, GLOBAL_SHORTCUT_CHOICES,
-# APPEARANCE_CHOICES, SIDEBAR_MODES, SIDEBAR_EDGES, LIST_COLUMNS); setting_choice_titles_tests
-# checks that each table names every choice.
+# APPEARANCE_CHOICES, SIDEBAR_MODES, SIDEBAR_EDGES), and the columns of LIST_COLUMNS in the
+# settings' order; setting_choice_titles_tests checks that each table names every choice.
 SHOW_AS_TITLES = {"popup": "Popup", "sidebar": "Sidebar", "window": "Window"}
 GLOBAL_SHORTCUT_TITLES = {"shift_command_tab": "Shift-Command-Tab", "command_fn_tab": "Command-Fn-Tab", "off": "Off"}
 APPEARANCE_TITLES = {"auto": "Auto", "dark": "Dark", "light": "Light"}  # in the user's order (user request, 2026-10-27)
@@ -63,18 +64,11 @@ SIDEBAR_MODE_TITLES = {
     "docked": "Always: Resize iTerm2 windows",
 }
 SIDEBAR_EDGE_TITLES = {"right": "Right", "left": "Left"}
-# The tab rows' information columns, in the order the user listed them (user request, 2026-10-19), in
-# sentence case as System Settings' labels are (title case until 2026-10-28, user request).
-LIST_COLUMN_TITLES = {
-    "state": "Status",  # "State" until 2026-10-26 (user request)
-    "state_duration": "Time since last status change",  # "State Duration" until 2026-10-26 (user request)
-    # The size and the share of the context window, in one column since 2026-10-26 (user request).
-    "context_tokens": "Tokens used",
-    "created_time": "Created time",
-    "existence_duration": "Time since created",
-    "memory_usage": "Memory usage",
-    "cpu_usage": "CPU usage",
-}
+# The tab rows' information columns, in the order the user listed them (user request, 2026-10-19).
+# Each is labeled with the title over its column in the list (COLUMN_TITLES; user request, 2026-10-28:
+# "Time Since Last Status Change", "Tokens Used" and the like until then).
+LIST_COLUMN_NAMES_IN_SETTINGS_ORDER = ["state", "state_duration", "context_tokens", "created_time", "existence_duration",
+                                       "memory_usage", "cpu_usage"]
 # One row in a section's box: its label at the left, its control at the right, and the units after the
 # control. A row that continues the one above it (a harness's command; the accessibility button under
 # the shortcut) has no line above it, and its label is indented.
@@ -185,7 +179,7 @@ class SettingsWindowController(WindowFrameSavingController):
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
         # Switches, as System Settings has, for the on/off settings (checkboxes until 2026-10-28, user request).
         self.column_switches = {column_name: self.make_switch(column_name in self.settings["shown_columns"])
-                                for column_name in LIST_COLUMN_TITLES}
+                                for column_name in LIST_COLUMN_NAMES_IN_SETTINGS_ORDER}
         self.edge_note = NSTextField.wrappingLabelWithString_("")
         self.edge_note.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
@@ -202,7 +196,8 @@ class SettingsWindowController(WindowFrameSavingController):
             SettingsRow("Show", self.sidebar_mode_popup), SettingsRow("Window edge", self.edge_popup),
             SettingsRow("Width", self.sidebar_width_field, "points")], self.edge_note)
         # The columns in a section of their own, above Harnesses (user request, 2026-10-25).
-        columns_section = SettingsSection("Columns", [SettingsRow(LIST_COLUMN_TITLES[column_name], column_switch)
+        # A title on two lines in the list (a "\n" between them) is on one here.
+        columns_section = SettingsSection("Columns", [SettingsRow(COLUMN_TITLES[column_name].replace("\n", " "), column_switch)
                                                       for column_name, column_switch in self.column_switches.items()])
         # Each agent tool: whether it is used, and below that, indented, its launch command (user request, 2026-10-19).
         self.include_switches = []

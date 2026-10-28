@@ -53,6 +53,8 @@ SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
 # The settings' Appearance (settings_store.APPEARANCE_CHOICES; user request, 2026-10-27): the
 # NSAppearance name the app is drawn in, or None to follow macOS's Light or Dark setting.
 APPEARANCE_NAMES_BY_CHOICE = {"auto": None, "dark": NSAppearanceNameDarkAqua, "light": NSAppearanceNameAqua}
+# The settings whose change can put the sidebar where an open settings window is.
+SETTINGS_THAT_PLACE_THE_SIDEBAR = ("show_as", "sidebar_mode", "sidebar_edge", "sidebar_width")
 
 
 def build_main_menu_with_the_edit_shortcuts():
@@ -738,6 +740,7 @@ class AppController(NSObject):
         open settings window."""
         show_as_before = self.settings["show_as"]
         list_window_was_always_on_top = self.settings["list_window_is_always_on_top"]
+        sidebar_may_have_moved = any(new_settings[name] != self.settings[name] for name in SETTINGS_THAT_PLACE_THE_SIDEBAR)
         if new_settings["global_shortcut"] != self.settings["global_shortcut"]:
             self.global_shortcut_key_filter.use_global_shortcut(new_settings["global_shortcut"])
         if new_settings["appearance"] != self.settings["appearance"]:
@@ -757,6 +760,8 @@ class AppController(NSObject):
         self.apply_settings_to_the_core_and_every_list(new_settings)
         self.settings_window_controller.reflect_settings(new_settings)
         if self.settings_window_controller.is_open():
+            if sidebar_may_have_moved:  # a sidebar widened at its edge or in the window would cover it (code review, 2026-10-28)
+                self.move_the_settings_window_clear_of_the_sidebar()
             self.place_the_settings_window_above_the_lists(self.popover.isShown())
             if list_window_is_shown_now or new_settings["list_window_is_always_on_top"] != list_window_was_always_on_top:
                 self.settings_window_controller.window.orderFront_(None)  # the list window just shown or put on top stays behind it

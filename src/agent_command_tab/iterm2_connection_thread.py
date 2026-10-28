@@ -104,6 +104,8 @@ LONGEST_COMMAND_TEXT = 500  # characters of a sub row's command kept in the snap
 HOOKS_CHECK_INTERVAL_SECONDS = 10  # whether the agent tools' settings hold the app's hooks
 LONGEST_HOOK_EVENT_LINE = 1024 ** 2
 SECONDS_TO_REACH_ANOTHER_HOOK_EVENTS_LISTENER = 0.5
+# How often a copy that left the hook events socket to another copy checks whether that one has ended.
+SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER = 5
 
 
 def find_claude_command_path():
@@ -1535,11 +1537,15 @@ class DashboardCore:
     async def listen_for_hook_events(self):
         """Receives the app's hook events (hook_event_forwarder), one line per connection, on the
         socket at hook_events_socket_path, taken over from an earlier run. While another copy of the
-        app (a live check's, say) receives them there, or if the socket can't be made, this one
-        goes on without hook events (this task must not end: that ends the core)."""
+        app (a live check's, or one still giving docked windows their room back as it exits)
+        receives them there, this one goes on without them, and takes the socket over once that
+        copy has ended (code review, 2026-10-28). If the socket can't be made, it goes on without
+        hook events (this task must not end: that ends the core)."""
         if another_process_listens_at(self.hook_events_socket_path):
-            print(f"another copy of the app receives the hook events at {self.hook_events_socket_path}; this one goes on without them")
-            await asyncio.Event().wait()
+            print(f"another copy of the app receives the hook events at {self.hook_events_socket_path}; "
+                  f"this one goes on without them until that copy ends")
+            while await asyncio.to_thread(another_process_listens_at, self.hook_events_socket_path):
+                await asyncio.sleep(SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER)
         try:
             if os.path.exists(self.hook_events_socket_path):
                 os.unlink(self.hook_events_socket_path)  # left by a run that ended

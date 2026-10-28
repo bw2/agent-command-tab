@@ -8,13 +8,14 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
 from agent_command_tab import hook_event_forwarder, iterm2_connection_thread
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_process_tree import ProcessInfo
-from agent_command_tab.iterm2_connection_thread import EXITED_ROW_SECONDS, DashboardCore
+from agent_command_tab.iterm2_connection_thread import EXITED_ROW_SECONDS, DashboardCore, another_process_listens_at
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry
 
 
@@ -162,9 +163,18 @@ class HookEventTests(unittest.IsolatedAsyncioTestCase):
             while not os.path.exists(socket_path):
                 await asyncio.sleep(0.01)
             inode_of_the_first = os.stat(socket_path).st_ino
-            second_listening_task = asyncio.ensure_future(second_core.listen_for_hook_events())
-            await asyncio.sleep(0.3)
-            self.assertEqual(os.stat(socket_path).st_ino, inode_of_the_first)  # not taken over
+            with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER", 0.05):
+                second_listening_task = asyncio.ensure_future(second_core.listen_for_hook_events())
+                await asyncio.sleep(0.3)
+                self.assertEqual(os.stat(socket_path).st_ino, inode_of_the_first)  # not taken over
+                # Once the first copy ends, the second takes the socket over (code review, 2026-10-28).
+                first_listening_task.cancel()
+                until = time.time() + 5
+                while time.time() < until and not (os.path.exists(socket_path) and os.stat(socket_path).st_ino != inode_of_the_first
+                                                   and another_process_listens_at(socket_path)):
+                    await asyncio.sleep(0.02)
+                self.assertTrue(another_process_listens_at(socket_path))
+                self.assertNotEqual(os.stat(socket_path).st_ino, inode_of_the_first)
         finally:
             first_listening_task.cancel()
             if second_listening_task is not None:

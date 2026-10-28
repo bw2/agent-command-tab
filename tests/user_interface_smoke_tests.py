@@ -241,6 +241,13 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         outline_view.selectRowIndexes_byExtendingSelection_(NSIndexSet.indexSetWithIndex_(5), False)
         self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=3))
         self.assertIs(outline_view.itemAtRow_(outline_view.selectedRow()), selected_item)
+        # A tab above it goes, so the item, not the row number, stays selected (code review, 2026-10-28).
+        snapshot = make_sample_snapshot(second_window_tabs=3)
+        window_one, window_two = snapshot.monitors[0].windows
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one._replace(agent_sessions=window_one.agent_sessions[:2]), window_two)),)))
+        self.assertEqual(outline_view.selectedRow(), 4)
+        self.assertIs(outline_view.itemAtRow_(4), selected_item)
 
     def test_dropping_a_tab_back_in_place_moves_nothing(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -2236,6 +2243,14 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             self.assertEqual(frames, expected_frames)
             self.assertEqual(levels, [None])  # the normal level, so other apps' windows can cover it and close it
 
+    def test_an_open_settings_window_moves_clear_of_a_sidebar_made_wider(self):  # code review, 2026-10-28
+        for changed_setting, moves in (({"sidebar_width": 550}, True), ({"shown_columns": ["state"]}, False)):
+            stand_in_app_controller = unittest.mock.Mock(settings=dict(DEFAULT_SETTINGS, show_as="sidebar"))
+            stand_in_app_controller.settings_window_controller.is_open.return_value = True
+            with unittest.mock.patch("agent_command_tab.app_controller.save_settings"):
+                AppController.settings_changed(stand_in_app_controller, dict(stand_in_app_controller.settings, **changed_setting))
+            self.assertEqual(stand_in_app_controller.move_the_settings_window_clear_of_the_sidebar.called, moves, changed_setting)
+
     def show_the_sidebar_section(self):
         """Chooses "Show as: Sidebar" as the app controller does once the pop-up changed, so the
         Sidebar section, with the width field, is laid out (it shows only for Sidebar)."""
@@ -2263,8 +2278,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_column_switches_choose_the_shown_columns_in_their_left_to_right_order(self):
         switches = self.controller.column_switches
         self.assertEqual([self.find_label_of_control(column_switch) for column_switch in switches.values()],
-                         ["Status", "Time since last status change", "Tokens used", "Created time", "Time since created",
-                          "Memory usage", "CPU usage"])  # in sentence case since 2026-10-28 (user request)
+                         ["Status", "Status Changed", "Tokens", "Created", "Age", "Memory", "CPU"])  # as over the list's columns
         self.assertEqual([column_switch.state() for column_switch in switches.values()], [1, 1, 1, 0, 0, 0, 0])  # the defaults
         switches["state"].setState_(0)
         self.controller.controlChanged_(switches["state"])
