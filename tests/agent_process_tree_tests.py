@@ -204,7 +204,8 @@ class ChildProcessTests(unittest.TestCase):
         try:
             until = time.time() + 10
             found = []
-            while time.time() < until and not found:
+            # Until it runs python: between its fork and its exec it has the shell's arguments, which name the ID too.
+            while time.time() < until and not (found and found[0][1][0] == sys.executable):
                 found = choose_detached_processes_of_the_conversation(list_detached_processes(started_at), conversation_id, started_at)
             self.assertEqual([process.process_id for process, _ in found], [detached_process_id])
             self.assertEqual(found[0][0].parent_process_id, 1)

@@ -21,6 +21,10 @@ env -u PYTHONPATH "$PACKAGING_FOLDER/build/venv/bin/pip" install --quiet "$REPOS
 cd "$PACKAGING_FOLDER"
 env -u PYTHONPATH build/venv/bin/python make_app_icon_file.py build/AgentCommandTab.icns
 env -u PYTHONPATH build/venv/bin/python setup_py2app.py py2app
+# py2app copies the build Mac's list of trusted certificate authorities, which holds any its owner or an
+# employer added, and points SSL_CERT_FILE at it. The app makes no TLS connections (app_main.py).
+rm -rf "$PACKAGING_FOLDER/dist/AgentCommandTab.app/Contents/Resources/openssl.ca"
+env -u PYTHONPATH build/venv/bin/python collect_bundled_licenses.py dist/AgentCommandTab.app
 # The source of the bundled iterm2 version, which the GPL asks to offer next to the app (NOTICE.txt).
 ITERM2_VERSION="$(build/venv/bin/python -c 'import importlib.metadata; print(importlib.metadata.version("iterm2"))')"
 env -u PYTHONPATH build/venv/bin/pip download --quiet --no-binary :all: --no-deps -d dist "iterm2==$ITERM2_VERSION"

@@ -86,13 +86,13 @@ class SettingsTests(unittest.TestCase):
 
     def test_another_link_to_the_same_python_is_the_same_command(self):
         # The app's entry point runs as .venv/bin/python3.11, `python -m ...` as .venv/bin/python, a link to it.
-        folder = tempfile.mkdtemp()
-        python_path, link_path = os.path.join(folder, "python3.11"), os.path.join(folder, "python")
-        open(python_path, "w").close()
-        os.symlink("python3.11", link_path)
-        settings = add_the_apps_hooks(USERS_SETTINGS, build_forwarder_command("Claude Code", python_path, "/f.py"), EVENTS)
-        self.assertIsNotNone(list_positions_of_the_apps_hooks(settings, build_forwarder_command("Claude Code", link_path, "/f.py"), EVENTS))
-        self.assertIsNone(list_positions_of_the_apps_hooks(settings, build_forwarder_command("Codex", link_path, "/f.py"), EVENTS))
+        with tempfile.TemporaryDirectory() as folder:
+            python_path, link_path = os.path.join(folder, "python3.11"), os.path.join(folder, "python")
+            open(python_path, "w").close()
+            os.symlink("python3.11", link_path)
+            settings = add_the_apps_hooks(USERS_SETTINGS, build_forwarder_command("Claude Code", python_path, "/f.py"), EVENTS)
+            self.assertIsNotNone(list_positions_of_the_apps_hooks(settings, build_forwarder_command("Claude Code", link_path, "/f.py"), EVENTS))
+            self.assertIsNone(list_positions_of_the_apps_hooks(settings, build_forwarder_command("Codex", link_path, "/f.py"), EVENTS))
 
     def test_only_codex_hooks_are_named(self):
         codex_settings = add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME)
@@ -118,18 +118,21 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(convert_event_name_to_codex_hook_state_name("SessionEnd"), "session_end")
         settings = add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME)
         positions = list_positions_of_the_apps_hooks(settings, CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME)
-        config_file_path = os.path.join(tempfile.mkdtemp(), "config.toml")
         unnamed_settings = add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS)  # approved before the hooks had a name
-        for approved_settings, approved_positions, expected in ((settings, positions[:-1], False), (settings, positions, True),
-                                                                (unnamed_settings, positions, False)):
-            write_codex_approvals(config_file_path, "/h/hooks.json", approved_settings, approved_positions)
-            with open(config_file_path) as config_file:
-                self.assertEqual(codex_has_approved_the_hooks(config_file.read(), "/h/hooks.json", settings, positions), expected)
+        with tempfile.TemporaryDirectory() as folder:
+            config_file_path = os.path.join(folder, "config.toml")
+            for approved_settings, approved_positions, expected in ((settings, positions[:-1], False), (settings, positions, True),
+                                                                    (unnamed_settings, positions, False)):
+                write_codex_approvals(config_file_path, "/h/hooks.json", approved_settings, approved_positions)
+                with open(config_file_path) as config_file:
+                    self.assertEqual(codex_has_approved_the_hooks(config_file.read(), "/h/hooks.json", settings, positions), expected)
 
 
 class FilesTests(unittest.TestCase):
     def setUp(self):
-        self.folder = tempfile.mkdtemp()
+        temporary_folder = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_folder.cleanup)
+        self.folder = temporary_folder.name
         self.claude_settings_path = os.path.join(self.folder, "settings.json")
         with open(self.claude_settings_path, "w") as settings_file:
             json.dump(USERS_SETTINGS, settings_file)

@@ -16,7 +16,7 @@ download (with a Homebrew cask for it). Nothing has been published yet.
   ```bash
   xcrun notarytool store-credentials agent-command-tab-notary --apple-id <the account's Apple ID email> --team-id <team ID>
   ```
-- The app bundles Homebrew's Python 3.13 (`build_app.sh`'s default), so it runs on Apple silicon and macOS 15 or later only; Intel Macs and older macOS install with pipx or the formula. To also cover those with the app, Python 3.13 from python.org's universal2 installer (https://www.python.org/downloads/macos/) makes one that runs on Intel Macs and on macOS 10.13 or later: build with `PYTHON=/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13`, and change the cask's `depends_on` lines to match. Python callbacks were checked under the hardened runtime on Apple silicon only (`packaging/macos_app/entitlements.plist`).
+- The app bundles Homebrew's Python 3.13 (`build_app.sh`'s default), so it runs on Apple silicon and macOS 15 or later only; Intel Macs and older macOS install with pipx or the formula. To also cover those with the app, Python 3.13 from python.org's universal2 installer (https://www.python.org/downloads/macos/) makes one that runs on Intel Macs and on macOS 10.13 or later: build with `PYTHON=/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13`, change the cask's `depends_on` lines to match, and check the licenses of the native libraries that Python brings (`collect_bundled_licenses.py` looks for them in Homebrew only). Python callbacks were checked under the hardened runtime on Apple silicon only (`packaging/macos_app/entitlements.plist`).
 
 ## Each release
 
@@ -45,7 +45,7 @@ download (with a Homebrew cask for it). Nothing has been published yet.
    brew audit --strict --online agent-command-tab
    ```
    Building pyobjc from source takes a few minutes and needs the Xcode command line tools.
-9. Build the app, unsigned, from a fresh build environment (about a minute). It lands in `packaging/macos_app/dist/`, next to the source archive of the `iterm2` package it bundles:
+9. Build the app, unsigned, from a fresh build environment (about a minute). It lands in `packaging/macos_app/dist/`, next to the source archive of the `iterm2` package it bundles. The build copies the licenses of everything the app bundles into its `Contents/Resources/licenses` folder (`collect_bundled_licenses.py`, which stops if it can't find one), and takes out the list of trusted certificate authorities py2app copies from this Mac:
    ```bash
    packaging/macos_app/build_app.sh
    ```

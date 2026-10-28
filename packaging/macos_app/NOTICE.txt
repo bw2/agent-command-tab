@@ -7,6 +7,9 @@ terms of that license.
 AgentCommandTab's own code is also available on its own under the MIT License (LICENSE), from
 https://github.com/bw2/agent-command-tab
 
+The licenses of the other parts the app bundles (Python, the Python packages it uses, the program
+that starts it, and the libraries they use) are in the licenses folder next to this file.
+
 Source code:
 - AgentCommandTab: each release's source archive at https://github.com/bw2/agent-command-tab/releases
 - the `iterm2` package: the source archive of the bundled version is attached to the same release,
