@@ -44,9 +44,10 @@ SIDEBAR_EDGES = ["right", "left"]
 # docked: always visible, and iTerm2 windows on that monitor are kept out of its area.
 SIDEBAR_MODES = ["auto_hide", "floating", "docked"]
 # A tab row's information columns that the settings can show or hide, in their left-to-right
-# order (the tool icon column, between cpu_usage and state, shows by itself when two or more
-# agent tools run). Memory and CPU usage count the agent and every process below it.
-LIST_COLUMNS = ["context_tokens", "created_time", "existence_duration", "memory_usage", "cpu_usage", "state", "state_duration"]
+# order (the tool icon column, right before state, shows by itself when two or more agent tools
+# run). Memory and CPU usage count the agent and every process below it. The state and its
+# duration come first, right after the name, and CPU before memory, since 2026-10-28 (user requests).
+LIST_COLUMNS = ["state", "state_duration", "context_tokens", "created_time", "existence_duration", "cpu_usage", "memory_usage"]
 
 DEFAULT_SETTINGS = {
     "show_as": "popup",

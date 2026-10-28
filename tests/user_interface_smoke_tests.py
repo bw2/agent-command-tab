@@ -377,15 +377,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         row_view = self.lay_out_row_view(1)
         titles_row_frame = titles_row_view.frame()
         self.assertFalse(titles_row_view.isHidden())
-        # Two lines for "Time Since Last" over "Status Change", right under the top bar and right above the list.
-        self.assertEqual(titles_row_frame.size.height, 2 * COLUMN_TITLE_LINE_HEIGHT + 2 * COLUMN_TITLES_ROW_PADDING)
+        # One line of titles, right under the top bar and right above the list.
+        self.assertEqual(titles_row_frame.size.height, COLUMN_TITLE_LINE_HEIGHT + 2 * COLUMN_TITLES_ROW_PADDING)
         self.assertEqual(titles_row_frame.origin.y + titles_row_frame.size.height,
                          self.window.contentView().frame().size.height - TOP_BAR_HEIGHT)
         scroll_view_frame = self.list_controller.outline_view.enclosingScrollView().frame()
         self.assertEqual(scroll_view_frame.origin.y + scroll_view_frame.size.height, titles_row_frame.origin.y)
         title_fields = titles_row_view.column_title_text_fields
         self.assertEqual(titles_row_view.name_title_text_field.stringValue(), "Name")
-        self.assertEqual(title_fields["state_duration"].stringValue(), "Time Since Last\nStatus Change")
+        self.assertEqual(title_fields["state_duration"].stringValue(), "Status Changed")
         for column_name in ("state", "state_duration"):  # in the row's x, which is the panel's
             self.assertFalse(title_fields[column_name].isHidden())
             self.assertEqual((title_fields[column_name].frame().origin.x, title_fields[column_name].frame().size.width),
@@ -395,9 +395,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         name_title_frame = titles_row_view.name_title_text_field.frame()
         self.assertEqual(name_title_frame.origin.x + name_title_frame.size.width,
                          row_view.column_views["agent_tool_icon"].frame().origin.x - GAP_BEFORE_DETAILS)
-        # The column is as wide as the longer line of its title, much wider than "23h 59m".
+        # The column is as wide as its title, much wider than "23h 59m".
         self.assertGreaterEqual(self.list_controller.column_widths["state_duration"], TEXT_FIELD_INSETS
-                                + self.list_controller.measure_text_width("Time Since Last", self.list_controller.column_title_font))
+                                + self.list_controller.measure_text_width("Status Changed", self.list_controller.column_title_font))
 
     def click_column_title(self, title_name):
         """Clicks the middle of a title, as AppKit delivers the click: to the row of titles, whatever label is under it."""
@@ -486,15 +486,18 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             window_one._replace(agent_sessions=(measured_entry,) + window_one.agent_sessions[1:]),
             snapshot.monitors[0].windows[1])),))
         self.list_controller.apply_snapshot(snapshot)
-        self.list_controller.set_shown_columns(["memory_usage", "cpu_usage", "state"])
+        self.list_controller.set_shown_columns(["memory_usage", "cpu_usage", "state", "state_duration"])
         self.window.setContentSize_((POPOVER_WIDTH + 200, 260))
         self.window.contentView().layoutSubtreeIfNeeded()
         row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
         row_view.layoutSubtreeIfNeeded()
-        memory_view, cpu_view, state_view = (row_view.column_views[column_name] for column_name in ("memory_usage", "cpu_usage", "state"))
+        state_view, state_duration_view, cpu_view, memory_view = (
+            row_view.column_views[column_name] for column_name in ("state", "state_duration", "cpu_usage", "memory_usage"))
         self.assertEqual((memory_view.stringValue(), cpu_view.stringValue()), ("512M", "12%"))
-        self.assertLess(memory_view.frame().origin.x, cpu_view.frame().origin.x)  # left to right as in the settings
-        self.assertLess(cpu_view.frame().origin.x, state_view.frame().origin.x)
+        # Left to right: the state and its duration right after the name, then CPU, then memory.
+        self.assertLess(state_view.frame().origin.x, state_duration_view.frame().origin.x)
+        self.assertLess(state_duration_view.frame().origin.x, cpu_view.frame().origin.x)
+        self.assertLess(cpu_view.frame().origin.x, memory_view.frame().origin.x)
 
     def test_top_bar_drops_the_sort_label_then_narrows_the_sort_popup_when_narrow(self):
         panel = self.dropdown_panel_controller
@@ -1972,7 +1975,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.controlChanged_(checkboxes["state"])
         checkboxes["created_time"].setState_(1)
         self.controller.controlChanged_(checkboxes["created_time"])
-        self.assertEqual(self.owner.settings["shown_columns"], ["context_tokens", "created_time", "state_duration"])
+        self.assertEqual(self.owner.settings["shown_columns"], ["state_duration", "context_tokens", "created_time"])
 
     def test_text_fields_save_when_they_lose_focus_too(self):
         self.assertTrue(self.controller.sidebar_width_field.cell().sendsActionOnEndEditing())

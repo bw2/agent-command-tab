@@ -87,30 +87,32 @@ SMALLEST_TAB_NAME_WIDTH = 80  # a narrower sidebar or window drops columns (COLU
 # settings can show or hide, and the agent tool's icon, which shows by itself when two or more
 # agent tools run. Each comes with the RowTextParts field it shows (the icon column shows the
 # tool's icon instead). The state is left-aligned in its column; the others are right-aligned.
+# The icon, the state and its duration come first, right after the name, and CPU before memory
+# (user requests, 2026-10-28).
 TAB_ROW_COLUMNS = [
-    ("context_tokens", "context_text"),
-    ("created_time", "created_time_text"),
-    ("existence_duration", "existence_duration_text"),
-    ("memory_usage", "memory_text"),
-    ("cpu_usage", "cpu_text"),
     ("agent_tool_icon", None),
     ("state", "state_text"),
     ("state_duration", "elapsed_time_text"),
+    ("context_tokens", "context_text"),
+    ("created_time", "created_time_text"),
+    ("existence_duration", "existence_duration_text"),
+    ("cpu_usage", "cpu_text"),
+    ("memory_usage", "memory_text"),
 ]
 LEFT_ALIGNED_COLUMN_NAMES = {"state"}
 # The names shown over the columns, in a row between the top bar and the list (user request,
-# 2026-10-26), with "Name" at the left. A name wider than its column's texts is on two lines (the
-# user's choice over one line in wider columns, or names cut short), so its column widens only to
-# the longer line. The icon column has none.
+# 2026-10-26), with "Name" at the left. A name can be on two lines, "\n" between them, so its
+# column widens only to the longer line; none is since they were shortened (user request,
+# 2026-10-28). The icon column has none.
 COLUMN_TITLES = {
-    "context_tokens": "Tokens", "created_time": "Created", "existence_duration": "Time Since\nCreated",
+    "context_tokens": "Tokens", "created_time": "Created", "existence_duration": "Age",  # "Time Since\nCreated" until 2026-10-28
     "memory_usage": "Memory", "cpu_usage": "CPU", "agent_tool_icon": "", "state": "Status",
-    "state_duration": "Time Since Last\nStatus Change",  # "Time" added 2026-10-26 (user request)
+    "state_duration": "Status Changed",  # "Time Since Last\nStatus Change" until 2026-10-28 (user request)
 }
 NAME_COLUMN_TITLE = "Name"
 # The sort order (list_sorting.py) a click on a title chooses, by the title's column ("name" for
 # Name; user requests, 2026-10-26). Tokens sorts by the share of the context window in use (user
-# request, 2026-10-26); Created and Time Since Created both sort by when the agent started.
+# request, 2026-10-26); Created and Age both sort by when the agent started.
 LIST_SORT_ORDER_BY_TITLE_NAME = {
     "name": "alphabet", "context_tokens": "context_percent", "created_time": "created_time", "existence_duration": "created_time", "memory_usage": "memory_usage",
     "cpu_usage": "cpu_usage", "state": "activity", "state_duration": "state_duration",
@@ -124,8 +126,8 @@ COLUMN_TITLE_FONT_SIZE = 11
 COLUMN_TITLE_LINE_HEIGHT = 14
 COLUMN_TITLES_ROW_PADDING = 2  # above and below the titles
 # A narrow sidebar or window drops columns in this order to keep room for names (the dot's color
-# still shows the state). The time since the last status change goes last, since its two-line title
-# makes its column about 107 points wide, which would leave a 200-point sidebar's names unreadable.
+# still shows the state). The time since the last status change goes last, since its title makes
+# its column about 114 points wide, which would leave a 200-point sidebar's names unreadable.
 COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usage", "cpu_usage", "context_tokens",
                               "agent_tool_icon", "state", "state_duration"]
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
