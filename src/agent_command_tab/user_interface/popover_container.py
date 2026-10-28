@@ -298,7 +298,9 @@ class ListPanelController(NSViewController):
         control fits between the panel's left edge and the Settings button: with its "Sort:" label
         when there is room, without it in a narrower one, and then with the pop-up narrowed,
         cutting its title short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar
-        or a list window narrower than 251 points, where the column titles still sort the list). The message
+        or a list window, where the column titles still sort the list). Where each step happens
+        depends on how wide macOS draws the controls: on macOS 27 the label goes below 346 points,
+        the pop-up narrows below 315 and hides below 251. The message
         line takes the room left before the buttons, so it never covers them; while it shows a
         message (iTerm2 can't be reached, so there are no rows to sort or hide) the sort control
         and the Hide Idle button step aside for it, and the Settings button moves to the right end."""
