@@ -1,3 +1,5 @@
+<a href="https://github.com/bw2/agent-command-tab/actions/workflows/test.yml"><img src="https://github.com/bw2/agent-command-tab/actions/workflows/test.yml/badge.svg" align="right" alt="unit tests"></a>
+
 # AgentCommandTab
 
 A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agents run (Claude Code, OpenAI Codex CLI, and others), shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents. The list shows as a dropdown under the menu bar icon, a sidebar at the edge of the screen, or a regular window.
