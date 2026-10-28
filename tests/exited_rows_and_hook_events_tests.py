@@ -15,7 +15,8 @@ import unittest.mock
 from agent_command_tab import hook_event_forwarder, iterm2_connection_thread
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_process_tree import ProcessInfo
-from agent_command_tab.iterm2_connection_thread import EXITED_ROW_SECONDS, DashboardCore, another_process_listens_at
+from agent_command_tab.iterm2_connection_thread import (EXITED_ROW_SECONDS, SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING,
+                                                        DashboardCore, another_process_listens_at)
 from agent_command_tab.iterm2_snapshot_builder import DisplayedState
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry
 
@@ -233,6 +234,30 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0))
         self.assertEqual(self.track(6.0, "waiting"), "waiting")
         self.assertEqual(self.track(7.0, "working"), "working")  # set after the Stop (another Stop hook kept the turn going)
+
+    def test_claude_codes_own_idle_counts_over_a_working_iterm2_set_after_the_turn(self):  # user report, 2026-10-28
+        self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
+        claude_code_status = {"value": "busy"}
+        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+                                        lambda config_folder, process_id: claude_code_status["value"]):
+            self.assertEqual(self.track(1.0), "working")
+            self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0))
+            claude_code_status["value"] = "idle"
+            self.assertEqual(self.track(6.0, "done"), "done")
+            self.assertEqual(self.track(7.0, "working"), "idle")  # set after the turn ended, with no prompt since
+            self.assertEqual(self.core.session_tracking_by_session_id["s1"]["last_turn_ended_at"], 6.0)  # not a new turn
+            self.core.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=8.0))
+            self.assertEqual(self.track(9.0), "working")  # a new turn, though Claude Code's own report still says idle
+            claude_code_status["value"] = "shell"
+            self.assertEqual(self.track(9.0 + SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING), "working")  # a command runs
+
+    def test_claude_codes_own_idle_counts_over_a_working_that_held_without_hook_events(self):
+        # As after the app restarted: no hook events since the turn ended.
+        self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
+        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+                                        lambda config_folder, process_id: "idle"):
+            self.assertEqual(self.track(1.0), "working")  # may be a turn's start, before Claude Code's own report says busy
+            self.assertEqual(self.track(1.0 + SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING), "idle")
 
 
 class ChildProcessReadingTests(unittest.TestCase):

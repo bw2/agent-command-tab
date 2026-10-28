@@ -79,6 +79,10 @@ CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "c
 # How long a working agent may think with nothing new on screen before its row shows "stuck"; no
 # longer a setting (user request, 2026-10-26).
 STUCK_THRESHOLD_SECONDS = 600
+# How long iTerm2 must have said working before Claude Code's own "idle" counts over it without a
+# turn end from the hooks: at a turn's start Claude Code's own report may lag iTerm2's for a moment
+# (DashboardCore.claude_code_reports_the_turn_over).
+SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING = 10
 SMALLEST_WINDOW_WIDTH = 400  # a docked sidebar never makes an iTerm2 window narrower than this
 FRAME_TOLERANCE_POINTS = 20  # iTerm2 rounds window sizes to whole character cells
 RETRY_DELAY_SECONDS = 1
@@ -592,6 +596,26 @@ class DashboardCore:
                 self.status_set_in_iterm2_and_since_by_session_id.get(session_id, (None, float("inf")))[1]) is not None:
             return False
         return status is not None and status != "idle"
+
+    def claude_code_reports_the_turn_over(self, agent_session, seconds_iterm2s_value_has_held):
+        """Whether Claude Code's own report of the session (read_claude_code_session_status) says
+        idle, for a tab iTerm2 says is working, at a moment that can't be a turn's start: the
+        hooks reported the turn's end and no prompt since, or iTerm2's value has held for
+        SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING. iTerm2's Claude Code integration
+        set working again after turns that had ended with nothing running, which left their rows
+        "stuck" (user report, 2026-10-28; what set it isn't known). Claude Code says "shell" while
+        a command runs and "busy" while a Stop hook keeps the turn going, so neither ends here.
+        False when Claude Code reports nothing (another tool)."""
+        process_id = agent_session["process_id"]
+        claude_agent_record = self.claude_agents_by_process_id.get(process_id)
+        if claude_agent_record is None:
+            return False
+        # No time is passed for iTerm2's value: it may have been set after the turn's end.
+        hooks_report_the_turn_over = find_when_the_hooks_ended_the_turn(
+            self.hook_state_by_agent_process_id.get(process_id), float("-inf")) is not None
+        if not hooks_report_the_turn_over and seconds_iterm2s_value_has_held < SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING:
+            return False
+        return read_claude_code_session_status(claude_agent_record.get("config_folder"), process_id) == "idle"
 
     def codex_conversation_may_be_another_sessions(self, session_id, agent_session):
         """Whether this Codex agent session shares its folder with another Codex agent session, or
@@ -1148,7 +1172,8 @@ class DashboardCore:
     def update_session_tracking(self, now):
         """Records when each session's status value changed and when its turns start and end, and
         forgets sessions that are gone. A turn end the tab agent's hooks report counts while
-        iTerm2's value still says working (find_when_the_hooks_ended_the_turn)."""
+        iTerm2's value still says working (find_when_the_hooks_ended_the_turn), and so does
+        Claude Code's own idle (claude_code_reports_the_turn_over)."""
         live_session_ids = set()
         for gathered_window in self.gathered_windows:
             for gathered_tab in gathered_window["tabs"]:
@@ -1178,6 +1203,9 @@ class DashboardCore:
                         and find_when_the_hooks_ended_the_turn(self.hook_state_by_agent_process_id.get(agent_session["process_id"]),
                                                                status_set_in_iterm2_and_since[1]) is not None):
                     first_session["status"] = "idle"  # its turn ended, though iTerm2 still says working while a background task runs
+                if (agent_session is not None and map_iterm2_status_value_to_state(first_session["status"]) == "working"
+                        and self.claude_code_reports_the_turn_over(agent_session, now - status_set_in_iterm2_and_since[1])):
+                    first_session["status"] = "idle"
                 tracking = track_status_value(previous_tracking, first_session["status"], now,
                                               self.screen_readings_by_session_id.get(session_id))
                 self.session_tracking_by_session_id[session_id] = tracking
