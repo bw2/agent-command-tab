@@ -335,6 +335,9 @@ class DashboardCore:
         # {session ID: (the status value set in iTerm2, when the dashboard first saw it)}, so a turn
         # end its hooks report counts until iTerm2 sets another value (find_when_the_hooks_ended_the_turn).
         self.status_set_in_iterm2_and_since_by_session_id = {}
+        # {session ID: when iTerm2 last reported a change of the session's status variable}; a value
+        # already set when the dashboard connected has none (find_status_set_in_iterm2_since_the_job_started).
+        self.status_set_in_iterm2_at_by_session_id = {}
         self.displayed_state_by_session_id = {}
         self.screen_readings_by_session_id = {}
         # {(session ID, agent process ID): agent_session_pausing.PauseRecord}, until the agent runs
@@ -1075,6 +1078,7 @@ class DashboardCore:
                 "job_folder": read_process_current_folder(job_process_id),
                 "job_started_at": job_process.started_at if job_process is not None else None,
                 "status_set_in_iterm2": status,
+                "status_set_in_iterm2_at": self.status_set_in_iterm2_at_by_session_id.get(first_session.session_id),
                 "status": status,  # the one the row goes by (update_session_tracking)
                 "path": path or "",
             }
@@ -1171,6 +1175,8 @@ class DashboardCore:
             del self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id[session_id]
         for session_id in set(self.status_set_in_iterm2_and_since_by_session_id) - live_session_ids:
             del self.status_set_in_iterm2_and_since_by_session_id[session_id]
+        for session_id in set(self.status_set_in_iterm2_at_by_session_id) - live_session_ids:
+            del self.status_set_in_iterm2_at_by_session_id[session_id]
 
     def choose_status_value_of_the_tabs_own_agent(self, session_id, first_session, previous_tracking, status_set_in_iterm2_changed):
         """Returns the status value a tab's row goes by: the one set in iTerm2, except while an agent
@@ -1487,8 +1493,11 @@ class DashboardCore:
         """Updates the cached commandLine or status of one session, then asks for a snapshot.
 
         A change that arrives during a gather would be written into the list that the gather
-        is about to replace, so it asks for another gather instead.
+        is about to replace, so it asks for another gather instead. The time of a status change
+        is recorded either way, since a gather reads only the value.
         """
+        if notification.name == "status":
+            self.status_set_in_iterm2_at_by_session_id[notification.identifier] = time.time()
         if self.gather_is_in_progress:
             self.regather_needed.set()
             return
@@ -1501,6 +1510,8 @@ class DashboardCore:
                     first_session[field_name] = new_value
                     if field_name == "command_line":
                         self.regather_needed.set()  # the job process ID and folder change with the job
+                    else:
+                        first_session["status_set_in_iterm2_at"] = self.status_set_in_iterm2_at_by_session_id[notification.identifier]
         self.snapshot_needed.set()
 
     async def listen_for_hook_events(self):

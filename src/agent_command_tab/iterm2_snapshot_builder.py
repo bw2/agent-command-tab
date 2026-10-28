@@ -11,6 +11,8 @@ Shape of a gathered window (see DashboardCore.gather_iterm2_windows and Dashboar
                                  "job_folder": str (the job process's current folder, or ""),
                                  "job_started_at": float or None (when the job process started),
                                  "status_set_in_iterm2": str or None,
+                                 "status_set_in_iterm2_at": float or None (when iTerm2 last reported
+                                     changing it, since the dashboard connected),
                                  "status": str or None (the one the row goes by), "path": str}}]}
 """
 
@@ -72,13 +74,30 @@ def build_folder_display_name(folder_path):
     return os.path.basename(normalized_path) or normalized_path
 
 
+def find_status_set_in_iterm2_since_the_job_started(first_session):
+    """Returns the status value iTerm2 was seen to set after the tab's foreground job started, or None.
+
+    Only such a value tells that an unknown program in front reports a status (the generic
+    adapter). An older value is left over from the program before: Claude Code's last status can
+    stay after it exits, and a `gh` command run at that prompt was listed as an agent (user report,
+    2026-10-28). A value iTerm2 already held when the dashboard connected has no time, so it
+    doesn't count either, and neither does the status iTerm2's tab bar shows.
+    """
+    status_set_at, job_started_at = first_session.get("status_set_in_iterm2_at"), first_session.get("job_started_at")
+    if status_set_at is None or job_started_at is None or status_set_at < job_started_at:
+        return None
+    return first_session.get("status_set_in_iterm2")
+
+
 def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_adapters, generic_adapter,
                            process_is_alive, process_is_stopped):
     """Returns which tabs run an agent, keeping an agent whose tab's foreground job changed while it lives.
 
     PLAN.md section 4: a `commandLine` change alone does not mean the agent exited (Claude Code's
     Ctrl+G opens an editor in the same terminal, and Ctrl+Z suspends the agent). Such a tab keeps
-    its agent, marked as in the background, while the process recorded at detection still exists.
+    its agent, marked as in the background, while the process recorded at detection still exists,
+    also when the program in front would count as an unknown agent tool (the generic adapter):
+    the agent's own hooks can set the status while Ctrl+G's editor is open.
 
     Args:
         gathered_windows: Gathered window dicts (module docstring).
@@ -100,9 +119,15 @@ def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_a
             if not first_session:
                 continue
             session_id = first_session["session_id"]
-            adapter = find_agent_tool_adapter_for_tab(first_session.get("command_line"), first_session.get("status"),
+            adapter = find_agent_tool_adapter_for_tab(first_session.get("command_line"),
+                                                      find_status_set_in_iterm2_since_the_job_started(first_session),
                                                       specific_adapters, generic_adapter)
             previous_agent_session = previous_agent_sessions.get(session_id)
+            previous_agent_lives = (previous_agent_session is not None and previous_agent_session["process_id"]
+                                    and process_is_alive(previous_agent_session["process_id"]))
+            if (adapter is generic_adapter and previous_agent_lives
+                    and previous_agent_session["process_id"] != first_session.get("job_pid")):
+                adapter = None  # an unknown program in front of a live agent doesn't replace it, whatever status it has
             if adapter is not None:
                 process_id = first_session.get("job_pid")
                 agent_sessions[session_id] = {
@@ -111,8 +136,7 @@ def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_a
                     "agent_tool_name": adapter.name_agent_tool_for_command_line(first_session.get("command_line")),
                     "working_folder": first_session.get("job_folder") or "",
                     "started_at": first_session.get("job_started_at")}
-            elif (previous_agent_session is not None and previous_agent_session["process_id"]
-                  and process_is_alive(previous_agent_session["process_id"])):
+            elif previous_agent_lives:
                 agent_sessions[session_id] = dict(previous_agent_session, is_in_background=True,
                                                   is_stopped=process_is_stopped(previous_agent_session["process_id"]))
     return agent_sessions

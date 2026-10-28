@@ -12,10 +12,12 @@ MONITOR = {"monitor_id": "display-1", "name": "Built-in", "frame": (0, 0, 2000, 
 
 
 def make_tab(tab_id, command_line, status=None, path="/Users/someone/code/project", title="claude",
-             title_override_format=None, job_pid=None):
+             title_override_format=None, job_pid=None, job_started_at=None, status_set_in_iterm2=None,
+             status_set_in_iterm2_at=None):
     return {"tab_id": tab_id, "title": title, "title_override_format": title_override_format,
             "first_session": {"session_id": f"session-{tab_id}", "command_line": command_line, "job_pid": job_pid,
-                              "status": status, "path": path}}
+                              "job_started_at": job_started_at, "status_set_in_iterm2": status_set_in_iterm2,
+                              "status_set_in_iterm2_at": status_set_in_iterm2_at, "status": status, "path": path}}
 
 
 def make_window(window_id, tabs, title="claude", title_override_format=None, frame=(10, 10, 800, 600)):
@@ -208,6 +210,31 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual((entry.status, entry.status_since, entry.tab_title), ("asking", 900.0, "reviews-1a"))
         self.assertEqual(entry.agent_tool_name, "Claude Code")
         self.assertEqual(resolve(suspended, agent_sessions, alive_process_ids=()), {})  # the agent process ended
+
+    def test_a_program_counts_as_an_unknown_agent_only_with_a_status_set_after_it_started(self):
+        def list_agent_tool_names(status, status_set_in_iterm2, status_set_in_iterm2_at):
+            tab = make_tab("1", "gh pr view 12", status=status, job_pid=77, job_started_at=500.0,
+                           status_set_in_iterm2=status_set_in_iterm2, status_set_in_iterm2_at=status_set_in_iterm2_at)
+            return [agent_session["agent_tool_name"] for agent_session in resolve([make_window("w", [tab])]).values()]
+
+        self.assertEqual(list_agent_tool_names("working", "working", 501.0), ["gh"])
+        self.assertEqual(list_agent_tool_names("idle", "idle", 499.0), [])  # left by Claude Code before it exited
+        self.assertEqual(list_agent_tool_names("idle", "idle", None), [])  # already set when the dashboard connected
+        self.assertEqual(list_agent_tool_names("idle", None, 501.0), [])  # shown only in iTerm2's tab bar
+
+    def test_an_unknown_program_with_a_status_does_not_replace_an_agent_whose_process_lives(self):
+        agent_sessions = resolve([make_window("w", [make_tab("1", "claude", status="working", job_pid=42)])])
+        # Ctrl+G during a turn: the editor is in front while the agent's hooks keep setting the status.
+        editor_in_front = [make_window("w", [make_tab("1", "vim", status="working", job_pid=77, job_started_at=500.0,
+                                                      status_set_in_iterm2="working", status_set_in_iterm2_at=501.0)])]
+        agent_session = resolve(editor_in_front, agent_sessions, alive_process_ids={42})["session-1"]
+        self.assertEqual((agent_session["agent_tool_name"], agent_session["process_id"], agent_session["is_in_background"]),
+                         ("Claude Code", 42, True))
+        self.assertEqual([agent_session["agent_tool_name"] for agent_session in resolve(editor_in_front, agent_sessions).values()],
+                         ["vim"])  # the agent process ended
+        # The unknown tool itself stays listed as its own agent.
+        agent_sessions = resolve(editor_in_front)
+        self.assertEqual(resolve(editor_in_front, agent_sessions, alive_process_ids={77})["session-1"]["is_in_background"], False)
 
     def test_a_stopped_agent_shows_paused_and_paused_ends_when_it_is_resumed(self):
         running = [make_window("w", [make_tab("1", "claude", status="working", job_pid=42)])]

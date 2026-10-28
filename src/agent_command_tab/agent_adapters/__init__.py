@@ -31,7 +31,8 @@ def find_agent_tool_adapter_for_tab(command_line, iterm2_status_value, specific_
 
     Args:
         command_line: iTerm2's `commandLine` for the tab's first session.
-        iterm2_status_value: iTerm2's `status` variable for that session, or None.
+        iterm2_status_value: The value iTerm2 set in that session's `status` variable after its
+            foreground job started, or None (find_status_set_in_iterm2_since_the_job_started).
         specific_adapters: Adapters tried in order (Claude Code, Codex, tools from settings).
         generic_adapter: Used when no specific adapter matches, the job is not a shell, and the
             status variable holds a recognized value.
