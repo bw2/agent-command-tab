@@ -1,11 +1,11 @@
 """The menu bar item: a colored "C" followed by the number of asking agent sessions (R1 to R3)."""
 
 import objc
-from AppKit import (NSApp, NSAttributedString, NSColor, NSEventMaskLeftMouseUp, NSEventMaskRightMouseUp,
-                    NSEventTypeRightMouseUp, NSFont, NSFontAttributeName, NSFontWeightBold,
-                    NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSMinYEdge, NSMutableAttributedString,
-                    NSStatusBar, NSVariableStatusItemLength, NSWorkspace)
-from Foundation import NSObject
+from AppKit import (NSApp, NSAttributedString, NSColor, NSEventMaskLeftMouseDown, NSEventMaskLeftMouseUp,
+                    NSEventMaskRightMouseUp, NSEventTypeLeftMouseDown, NSEventTypeRightMouseUp, NSFont,
+                    NSFontAttributeName, NSFontWeightBold, NSForegroundColorAttributeName, NSMenu, NSMenuItem,
+                    NSMinYEdge, NSMutableAttributedString, NSStatusBar, NSVariableStatusItemLength, NSWorkspace)
+from Foundation import NSObject, NSProcessInfo
 
 from agent_command_tab.session_status_computation import pick_most_urgent_state
 from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
@@ -30,12 +30,34 @@ def choose_icon_color_name(snapshot):
     return ICON_COLOR_NAME_BY_MOST_URGENT_STATE.get(pick_most_urgent_state(states), "green")
 
 
+def choose_what_a_click_on_the_icon_does_to_the_dropdown(dropdown_is_shown, dropdown_closed_at, button_pressed_at):
+    """Returns "close", "open" or "nothing" for a click on the menu bar icon, at its mouse-up.
+
+    The dropdown closes by itself as the mouse button goes down outside it, on the icon too,
+    before the click's mouse-up arrives. A dropdown that closed during this click stays closed,
+    rather than opening again, so every click toggles it (user request, 2026-10-28); before, a
+    slow click opened it again, and only a quick one, while it was still closing, closed it.
+
+    Args:
+        dropdown_is_shown: Whether the dropdown is open (or still closing).
+        dropdown_closed_at: When it last began to close, in seconds since the Mac started (an
+            event's timestamp), or 0.
+        button_pressed_at: The click's mouse-down timestamp, or 0 when that wasn't seen (the
+            click then opens it, as before).
+    """
+    if dropdown_is_shown:
+        return "close"
+    if button_pressed_at and dropdown_closed_at >= button_pressed_at:
+        return "nothing"
+    return "open"
+
+
 class MenuBarStatusItemController(NSObject):
     """Owns the NSStatusItem. A left click shows the list (the owner decides how: toggle_popover
     for the dropdown); a right click shows a small menu.
 
-    The owner (the app controller) has menu_bar_icon_clicked(), open_settings(), quit() and
-    note_application_in_front_before_dropdown(application).
+    The owner (the app controller) has menu_bar_icon_clicked(), show_the_list_as(show_as_choice),
+    open_settings(), quit() and note_application_in_front_before_dropdown(application).
     """
 
     def initWithPopover_owner_(self, popover, owner):
@@ -47,11 +69,15 @@ class MenuBarStatusItemController(NSObject):
         self.asking_count = 0
         self.icon_color_name = "green"
         self.has_connection_problem = False
+        # For choose_what_a_click_on_the_icon_does_to_the_dropdown: event timestamps, 0 until seen.
+        self.dropdown_closed_at = 0
+        self.left_button_pressed_at = 0
         self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
         button = self.status_item.button()
         button.setTarget_(self)
         button.setAction_("statusItemClicked:")
-        button.sendActionOn_(NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)
+        # The mouse-down only notes when the click began; the mouse-up acts.
+        button.sendActionOn_(NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)
         self.redraw()
         return self
 
@@ -87,10 +113,22 @@ class MenuBarStatusItemController(NSObject):
         self.status_item.button().setAttributedTitle_(title)
 
     def statusItemClicked_(self, sender):
-        if NSApp.currentEvent().type() == NSEventTypeRightMouseUp:
+        event = NSApp.currentEvent()
+        if event.type() == NSEventTypeLeftMouseDown:
+            self.left_button_pressed_at = event.timestamp()
+        elif event.type() == NSEventTypeRightMouseUp:
             self.show_right_click_menu()
         else:
             self.owner.menu_bar_icon_clicked()
+
+    @objc.python_method
+    def note_dropdown_closing(self):
+        """The dropdown began to close (the app controller is its delegate): noted as the time of
+        the event that closed it, often the mouse-down of a click on the icon, so it is in the
+        same clock as the click; without an event (a timer), as the time since the Mac started,
+        which event timestamps count too."""
+        event = NSApp.currentEvent()
+        self.dropdown_closed_at = event.timestamp() if event is not None else NSProcessInfo.processInfo().systemUptime()
 
     @objc.python_method
     def find_icon_frame_on_screen(self):
@@ -105,10 +143,12 @@ class MenuBarStatusItemController(NSObject):
 
     @objc.python_method
     def toggle_popover(self):
-        """Opens the dropdown, or closes it when it is open."""
-        if self.popover.isShown():
+        """Opens the dropdown, or closes it when it is open or closed during this click."""
+        what_to_do = choose_what_a_click_on_the_icon_does_to_the_dropdown(
+            self.popover.isShown(), self.dropdown_closed_at, self.left_button_pressed_at)
+        if what_to_do == "close":
             self.popover.performClose_(None)
-        else:
+        elif what_to_do == "open":
             self.show_popover()
 
     @objc.python_method
@@ -124,8 +164,11 @@ class MenuBarStatusItemController(NSObject):
     @objc.python_method
     def show_right_click_menu(self):
         menu = NSMenu.alloc().initWithTitle_("")
-        # "Show the sidebar" was first until 2026-10-28 (user request).
-        for title, action_name in (("Settings…", "settingsClicked:"), (None, None), ("Quit AgentCommandTab", "quitClicked:")):
+        # Each way to show the list, whatever "Show as" is, without changing it (user request,
+        # 2026-10-28; "Show the sidebar" alone until then), in sentence case as the other menus are.
+        for title, action_name in (("Show popup", "showPopupClicked:"), ("Show sidebar", "showSidebarClicked:"),
+                                   ("Show window", "showWindowClicked:"), (None, None), ("Settings…", "settingsClicked:"),
+                                   (None, None), ("Quit AgentCommandTab", "quitClicked:")):
             if title is None:
                 menu.addItem_(NSMenuItem.separatorItem())
                 continue
@@ -133,6 +176,15 @@ class MenuBarStatusItemController(NSObject):
             menu_item.setTarget_(self)
             menu.addItem_(menu_item)
         self.status_item.popUpStatusItemMenu_(menu)
+
+    def showPopupClicked_(self, sender):
+        self.owner.show_the_list_as("popup")
+
+    def showSidebarClicked_(self, sender):
+        self.owner.show_the_list_as("sidebar")
+
+    def showWindowClicked_(self, sender):
+        self.owner.show_the_list_as("window")
 
     def settingsClicked_(self, sender):
         self.owner.open_settings()

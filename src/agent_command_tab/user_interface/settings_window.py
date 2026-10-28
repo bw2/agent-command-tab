@@ -146,23 +146,21 @@ class SettingsWindowController(WindowFrameSavingController):
         # A pop-up, as the keyboard shortcut's is (radio buttons until 2026-10-26, user request).
         self.show_as_popup = self.make_popup(SHOW_AS_TITLES, self.settings["show_as"])
         self.global_shortcut_popup = self.make_popup(GLOBAL_SHORTCUT_TITLES, self.settings["global_shortcut"])
-        self.global_shortcut_popup.setToolTip_("Shows the list from any app, and hides it when pressed again (a sidebar set to "
-                                               "stay visible stays). While the app switcher is open (Command still held "
-                                               "after Command-Tab), the keys go to the app switcher")
+        self.global_shortcut_popup.setToolTip_("Shows AgentCommandTab, and hides it when pressed again.")  # the user's wording, 2026-10-28
         # Shown only while macOS refuses the shortcut's key filter; hidden, its row is the gap below the shortcut.
         self.accessibility_settings_button = NSButton.buttonWithTitle_target_action_(
             "Needs Accessibility: Open System Settings…", self, "openAccessibilitySettingsClicked:")
         self.accessibility_settings_button.setControlSize_(NSControlSizeSmall)
         self.accessibility_settings_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.accessibility_settings_button.sizeToFit()
-        self.accessibility_settings_button.setToolTip_(
-            "The shortcut sees key presses before the app switcher does, which needs the Accessibility permission. "
+        self.accessibility_settings_button.setToolTip_(  # the user's wording, 2026-10-28
+            "The shortcut sees key presses before the app switcher does, which needs Accessibility permissions. "
             "Turn it on for the app that starts AgentCommandTab (iTerm2, when you start it from iTerm2), then click "
             "the menu bar icon")
         self.update_accessibility_settings_button()
         self.appearance_popup = self.make_popup(APPEARANCE_TITLES, self.settings["appearance"])
-        self.appearance_popup.setToolTip_("Auto follows the Light or Dark setting in System Settings > Appearance. "
-                                          "The menu bar icon keeps the menu bar's own look")
+        # "The menu bar icon keeps the menu bar's own look" after it until 2026-10-28 (user request).
+        self.appearance_popup.setToolTip_("Auto follows the Light or Dark setting in System Settings > Appearance")
         self.sidebar_mode_popup = self.make_popup(SIDEBAR_MODE_TITLES, self.settings["sidebar_mode"])
         self.edge_popup = self.make_popup(SIDEBAR_EDGE_TITLES, self.settings["sidebar_edge"])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
@@ -201,8 +199,9 @@ class SettingsWindowController(WindowFrameSavingController):
             rows += [("Use" if index == 0 else None, include_checkbox, None),  # "Include" until 2026-10-25 (user request)
                      (None, self.make_labeled_field_row(command_label, launch_command_field, command_field_x), None)]
         # The Window section shows only while "Show as" is Window, and the Sidebar section only while
-        # it is Sidebar (user request, 2026-10-27). Each group of rows: (the "Show as" choice it
-        # shows for, or None for every choice, its rows).
+        # it is Sidebar (user request, 2026-10-27); the sidebar shown for a few seconds from the menu
+        # bar icon's menu's "Show sidebar" still uses the Sidebar section's edge and width. Each group
+        # of rows: (the "Show as" choice it shows for, or None for every choice, its rows).
         self.row_groups = [(None, general_rows), ("window", window_rows), ("sidebar", sidebar_rows), (None, rows)]
 
         # Resizable, with the rows in a scroll view, so a window made shorter than its rows scrolls

@@ -197,7 +197,8 @@ class AppController(NSObject):
         The `iterm2` package can't reconnect within one process (PLAN.md section 4).
         """
         print(f"agent-command-tab: {message}; exiting so the supervisor reconnects", flush=True)
-        explanation = f"{message}. Retrying soon. Is iTerm2 running, with Settings > General > Magic > Enable Python API on?"
+        # The user's wording, 2026-10-28.
+        explanation = f"{message}. Retrying soon. Make sure iTerm2 is running, with Settings > General > Magic > Enable Python API on."
         for list_panel_controller in self.list_all_list_panel_controllers():
             list_panel_controller.show_message(explanation)
         self.status_item_controller.show_connection_problem()
@@ -223,16 +224,34 @@ class AppController(NSObject):
     @objc.python_method
     def menu_bar_icon_clicked(self):
         """A left click on the menu bar icon shows the list the way the settings ask: the dropdown
-        opens or closes, the sidebar slides in for a few seconds, or the window comes to the front.
-        It also retries a global shortcut that lacked the permission, since the sidebar slides in
-        without making the app active (the other retry)."""
+        opens or closes, an auto-hiding sidebar slides in for a few seconds or, while it is in, out
+        (user request, 2026-10-28; a sidebar set to stay visible stays, as for the global
+        shortcut), or the window comes to the front. It also retries a global shortcut that lacked
+        the permission, since the sidebar slides in without making the app active (the other retry)."""
         self.retry_the_global_shortcut_if_it_lacks_permission()
         if self.settings["show_as"] == "sidebar":
-            self.sidebar_controller.show_for_a_few_seconds()
+            if self.settings["sidebar_mode"] == "auto_hide" and self.sidebar_controller.is_shown:
+                self.sidebar_controller.hide_now()
+            else:
+                self.sidebar_controller.show_for_a_few_seconds()
         elif self.settings["show_as"] == "window":
             self.show_the_list_window()
         else:
             self.status_item_controller.toggle_popover()
+
+    @objc.python_method
+    def show_the_list_as(self, show_as_choice):
+        """The menu bar icon's menu's "Show popup", "Show sidebar" and "Show window" (user request,
+        2026-10-28): shows the list as that "Show as" choice would, whatever "Show as" is, without
+        changing it. A sidebar shown while "Show as" is another slides out again after a few
+        seconds, as an auto-hiding one does; one that is always shown stays as it is."""
+        if show_as_choice == "popup":
+            if not self.popover.isShown():
+                self.status_item_controller.show_popover()
+        elif show_as_choice == "sidebar":
+            self.sidebar_controller.show_for_a_few_seconds()
+        else:
+            self.show_the_list_window()
 
     @objc.python_method
     def global_shortcut_pressed(self):
@@ -332,13 +351,23 @@ class AppController(NSObject):
                 convert_rect_to_frame_list(self.sidebar_controller.window.frame()), start_point_on_screen,
                 (content_size.width, content_size.height))
             window_frame = convert_rect_to_frame_list(list_window.frameRectForContentRect_(NSMakeRect(*content_rect)))
-            self.sidebar_controller.hide_now(animate=False)  # at once, without sliding: the window takes its place
+            # At once, without sliding: the window takes its place. Even one shown from the menu,
+            # which "Show as: Window" would leave in for a few seconds.
+            self.sidebar_controller.hide_now(animate=False)
         else:
             return
         pointer_offset = (start_point_on_screen[0] - window_frame[0], start_point_on_screen[1] - window_frame[1])
-        # The dropdown and the sidebar show only for their own "Show as", so this changes it, and
-        # settings_changed shows the window.
+        show_as_before = self.settings["show_as"]
         self.settings_changed(dict(self.settings, show_as="window", list_window_frame=window_frame))
+        if show_as_before == "window":
+            # The dropdown or the sidebar shown from the menu bar icon's menu while the list shows
+            # as a window, which may be closed or behind other windows: settings_changed closes
+            # the dropdown and shows the window only when "Show as" changes.
+            self.close_dropdown()
+            self.list_window_controller.show(window_frame, takes_keyboard_focus=not self.settings_window_controller.is_open())
+            if self.settings_window_controller.is_open():  # it stays in front, as when settings_changed shows the window
+                self.place_the_settings_window_above_the_lists(self.popover.isShown())
+                self.settings_window_controller.window.orderFront_(None)
         self.list_window_controller.follow_the_pointer_until_the_button_comes_up(pointer_offset)
 
     @objc.python_method
@@ -389,6 +418,7 @@ class AppController(NSObject):
         self.place_the_settings_window_above_the_lists(dropdown_is_open=True)  # an open settings window stays above it
 
     def popoverWillClose_(self, notification):
+        self.status_item_controller.note_dropdown_closing()  # so a click on the icon that closed it doesn't open it again
         self.dropdown_list_controller.cancel_rename()  # an open rename would keep the list from updating
         self.place_the_settings_window_above_the_lists(dropdown_is_open=False)
 
@@ -506,7 +536,8 @@ class AppController(NSObject):
         alert.addButtonWithTitle_("Yes")
         alert.setShowsSuppressionButton_(True)  # AppKit's "Do not show this message again" checkbox
         alert.suppressionButton().setTitle_("Remember my choice")
-        alert.suppressionButton().setToolTip_("With Yes, this action runs without asking from now on. A No isn't remembered.")
+        alert.suppressionButton().setToolTip_(  # the user's wording, 2026-10-28
+            "With Yes, this action will be applied without asking from now on. A No isn't remembered.")
         answer_is_yes = self.run_alert_in_front(alert) == NSAlertSecondButtonReturn
         if answer_is_yes and alert.suppressionButton().state():
             self.settings_changed(dict(self.settings, actions_that_run_without_asking=[

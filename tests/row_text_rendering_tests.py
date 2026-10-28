@@ -86,7 +86,7 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual(parts.name_text, "reviews")
         self.assertEqual((parts.agent_tool_name, parts.details_text, parts.state_text, parts.elapsed_time_text),
                          ("Claude Code", "", "thinking", "3m"))  # "working" until 2026-10-28 (user request)
-        self.assertEqual(parts.dot_tool_tip, "Thinking: the agent is thinking")
+        self.assertEqual(parts.dot_tool_tip, "Thinking: the agent is thinking or briefly running tools")
         self.assertEqual(parts.context_text, "")  # the context's size isn't known yet
         filled_entry = make_entry("working", status_since=100.0)._replace(context_tokens=84_000)
         self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_text, "84k")  # nor the window's
@@ -136,7 +136,7 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertTrue(build_agent_session_row_text_parts(make_entry("no such state"), [False], 1.0).dot_tool_tip
                         .startswith("Unknown: "))  # the gray "unknown" dot
         self.assertEqual(build_window_row_text_parts(make_window(["idle", "asking"]), [], True).dot_tool_tip,
-                         "Asking: the agent is waiting for your answer: a question, or permission to use a tool")
+                         "Asking: the agent is waiting for your answer to a question, or for permission to use a tool")
         self.assertEqual(build_monitor_row_text_parts(MonitorEntry("m", "Built-in", (0, 0, 1, 1), (0, 0, 1, 1), ())).dot_tool_tip, "")
 
     def test_window_row_expanded_and_collapsed(self):

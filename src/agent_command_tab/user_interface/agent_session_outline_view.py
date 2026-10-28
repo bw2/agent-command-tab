@@ -1714,7 +1714,9 @@ class AgentSessionListController(NSObject):
                     command_item.setToolTip_(f"The dashboard can't type commands into {item.entry.agent_tool_name or 'this agent'}")
                 elif item.entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
                     command_item.setEnabled_(False)
-                    command_item.setToolTip_(f"Only while the agent waits at its prompt (it is {item.entry.status})")
+                    # The user's wording, 2026-10-28, with the state as the row names it ("thinking", not "working").
+                    shown_state = build_agent_session_row_text_parts(item.entry, [], time.time()).state_text
+                    command_item.setToolTip_(f"Only available when the agent waits at its prompt (it is currently {shown_state})")
             kill_item = self.add_menu_item(menu, "Kill session", "menuKillSession:")
             if item.entry.status == "exited":
                 kill_item.setEnabled_(False)
@@ -1766,16 +1768,17 @@ class AgentSessionListController(NSObject):
             if not agent_sessions_that_take_it:
                 agent_tool_names = sorted({entry.agent_tool_name or "these agents" for entry in agent_session_entries})
                 command_item.setEnabled_(False)
-                command_item.setToolTip_("Only after the paused sessions are resumed"
+                command_item.setToolTip_("Only available after the paused sessions are resumed"  # the user's wording, 2026-10-28
                                          if any(command in entry.slash_commands for entry in agent_session_entries)
-                                         else f"The dashboard can't type commands into {' or '.join(agent_tool_names)}")
+                                         else f"AgentCommandTab can't type commands into {' or '.join(agent_tool_names)}")
                 continue
             tool_tip_lines = []
             if len(agent_sessions_that_take_it) < len(agent_session_entries):
+                # The user's wording, 2026-10-28 (paused sessions, left out too, are counted as not supported).
                 tool_tip_lines.append(f"Typed only into the {len(agent_sessions_that_take_it)} of "
-                                      f"{len(agent_session_entries)} whose agent takes it and isn't paused")
+                                      f"{len(agent_session_entries)} where this command is supported.")
             if any(entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT for entry in agent_sessions_that_take_it):
-                tool_tip_lines.append("A session in the middle of a turn gets it when the turn ends")
+                tool_tip_lines.append("A session in the middle of a turn will get this command when the turn ends")  # the user's wording, 2026-10-28
             command_item.setToolTip_("\n".join(tool_tip_lines) or None)
         self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}" if a_window_row_is_selected
                            else "Kill sessions", "menuKillSelectedSessions:")
@@ -1785,7 +1788,8 @@ class AgentSessionListController(NSObject):
         talk_item = self.add_menu_item(menu, "Talk to each other…", "menuTalkToEachOther:")
         if len(self.list_agent_sessions_that_can_talk_to_each_other(agent_session_entries)) < 2:
             talk_item.setEnabled_(False)
-            talk_item.setToolTip_(f"Needs two or more {' or '.join(sorted(AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER))} sessions")
+            talk_item.setToolTip_(f"Select two or more {' or '.join(sorted(AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER))} "
+                                  f"sessions to send a 'Talk to each other...' message.")  # the user's wording, 2026-10-28
 
     @objc.python_method
     def list_agent_sessions_that_can_talk_to_each_other(self, agent_session_entries):

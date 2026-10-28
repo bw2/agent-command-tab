@@ -81,7 +81,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
   1. asking (permission prompt or question);
   2. error;
   3. stuck (working, but no visible progress for longer than 10 minutes, a fixed time since 2026-10-26, user request);
-  4. working;
+  4. working (a tab row says "thinking", or "running" while the agent waits on a command or on another tool for 5 seconds or more; window rows' counts say "working" for both; user requests, 2026-10-28);
   5. done (finished a turn, and its tab hasn't been in front since);
   6. idle;
   7. paused (its process is stopped by Pause or by Ctrl+Z, R15.3);

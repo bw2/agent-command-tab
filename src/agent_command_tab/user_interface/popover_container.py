@@ -48,18 +48,17 @@ EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: (ROWS_OPEN_SYMBOL_NAMES[False], "Expand a
 # The bottom bar's pause or resume button, at the right (user requests, 2026-10-20 and
 # 2026-10-21): (SF Symbol, text fallback, tooltip), by what a click does: pause the agent
 # sessions that run, or, once all are paused, resume them.
-PAUSE_OR_RESUME_ALL_LOOKS = {"pause": ("pause.circle", "Pause all", "Pause all agent sessions"),
-                             "resume": ("play.circle", "Resume all", "Resume all paused agent sessions")}
+# The tooltips say how (user request, 2026-10-28; agent_session_pausing).
+PAUSE_OR_RESUME_ALL_LOOKS = {"pause": ("pause.circle", "Pause all", "Pause all agent processes by suspending them (Ctrl+Z, or a STOP signal)"),
+                             "resume": ("play.circle", "Resume all", "Resume all paused agent processes (fg, then a CONT signal)")}
 # The top bar's Hide Idle / Show Idle button, left of the expand or collapse button (user
 # requests, 2026-10-21): (title, tooltip), by whether idle tabs are hidden; the title says what a click does.
-IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide the tabs whose agent is idle"),
-                          True: ("Show Idle", "Show the tabs whose agent is idle again")}
+IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle"),  # the user's wording, 2026-10-28
+                          True: ("Show Idle", "Show tabs whose agent is idle")}
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
-HOOKS_NOTE_TOOL_TIP = ("With these hooks, the list can tell when an agent crashes: its row stays for 5 minutes, grayed "
-                       "out and marked \"exited\", instead of disappearing. They also show Claude Code's background "
-                       "shells and agents as yellow dots after the tab's name. Only sessions you start after "
-                       "installing them are covered.")
+HOOKS_NOTE_TOOL_TIP = ("These hooks provide AgentCommandTab with more details about agent status, including whether it "
+                       "launched background processes, etc.")  # the user's wording, 2026-10-28
 
 
 def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):

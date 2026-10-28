@@ -41,9 +41,8 @@ MOST_BACKGROUND_TASK_LIGHTS = 4
 # and a gray middle dot otherwise, the same width, so the commands line up.
 CHILD_PROCESS_DOT_GLYPHS_AND_COLORS = {True: (BACKGROUND_TASK_LIGHT, BACKGROUND_TASK_LIGHTS_COLOR_NAME), False: ("·", "gray")}
 CHILD_PROCESS_DOT_TOOL_TIPS = {
-    True: "Running in the background: the agent left this command running and went on",
-    False: "Not a background task: a command from the agent's current turn, or a helper the agent runs for "
-           "itself, such as a language server",
+    True: "Running in the background: the agent launched this command in the background and went on",  # the user's wording, 2026-10-28
+    False: "Not a background task: a command from the agent's current turn, or a helper the agent runs for itself",  # the user's wording, 2026-10-28
 }
 
 # Each state's dot and its color, also the menu bar icon's color for the most urgent state.
@@ -77,23 +76,24 @@ STATE_TEXT_COLOR_NAME_BY_STATE = {
 
 # What each state means, the dot's hover text (user request, 2026-10-27). The 10 and 5 minutes are
 # iterm2_connection_thread's STUCK_THRESHOLD_SECONDS and EXITED_ROW_SECONDS.
-MEANING_BY_STATE = {
-    "asking": "the agent is waiting for your answer: a question, or permission to use a tool",
+MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2026-10-28
+    "asking": "the agent is waiting for your answer to a question, or for permission to use a tool",
     "error": "the agent reported an error",
     "stuck": "the agent has been thinking for 10 minutes with nothing new on screen and no command running",
     "working": "the agent is thinking or running a command",
     "done": "the agent is done and you haven't looked at its last message yet",  # the user's wording, 2026-10-27
-    "idle": "the agent is waiting at its prompt, with nothing new since you last looked at the tab",
-    "paused": "the agent is stopped until it is resumed",
+    "idle": "nothing new here since you last looked at this tab",
+    # A plain CONT signal would leave it a background job (agent_session_pausing), so Resume types fg.
+    "paused": "the agent process has been suspended (Ctrl+Z, or a STOP signal); Resume types fg to continue it",
     "unknown": "the app can't tell what the agent is doing",
-    "exited": "the agent ended without a normal session end (a crash, or killed); the row goes away 5 minutes later",
+    "exited": "this status appears for 5 minutes after an agent exits abnormally (a crash, or killed)",
 }
 # A tab row names a working agent's state for what it does: "running" while it waits on a tool,
 # a command at once and any other tool after 5 seconds, otherwise "thinking" (user requests,
 # 2026-10-28; iterm2_snapshot_builder.choose_tool_the_agent_is_waiting_on). Window rows, whose
 # counts sum up their tabs, still say "working" for both.
 MEANING_BY_WORKING_STATE_NAME = {
-    "thinking": "the agent is thinking",  # ", or using a tool for less than 5 seconds" until 2026-10-28 (user request)
+    "thinking": "the agent is thinking or briefly running tools",  # the user's wording, 2026-10-28
     "running": "the agent is waiting on a tool it started, such as a command, a subagent or a web fetch",
 }
 

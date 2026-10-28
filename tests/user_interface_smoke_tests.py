@@ -40,7 +40,8 @@ from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
                                                             frame_is_on_a_screen, grow_frame_to_smallest_size)
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
-from agent_command_tab.user_interface.menu_bar_status_item import choose_icon_color_name
+from agent_command_tab.user_interface.menu_bar_status_item import (choose_icon_color_name,
+                                                                   choose_what_a_click_on_the_icon_does_to_the_dropdown)
 from agent_command_tab.user_interface.settings_window import LAUNCH_COMMAND_FIELD_WIDTH, ROW_SPACING, SettingsWindowController
 from agent_command_tab.user_interface.sidebar_panel import (SidebarController,
                                                             allow_pointer_changes_while_another_app_is_in_front)
@@ -584,7 +585,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
                          ["w1", "1", "2", "3", "new_window"])
         self.assertEqual((panel.idle_tabs_button.title(), panel.idle_tabs_button.toolTip()),
-                         ("Show Idle", "Show the tabs whose agent is idle again"))
+                         ("Show Idle", "Show tabs whose agent is idle"))
         snapshot = make_sample_snapshot()  # a new snapshot is filtered too: planning becomes idle
         window_one, window_two = snapshot.monitors[0].windows
         window_one = window_one._replace(agent_sessions=(window_one.agent_sessions[0]._replace(status="idle"),)
@@ -688,7 +689,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ("resume_agent_sessions", {"session_ids": ["s1"]}))
         panel = self.dropdown_panel_controller
         button = panel.pause_or_resume_all_button
-        self.assertEqual((button.isHidden(), button.toolTip()), (False, "Pause all agent sessions"))
+        self.assertEqual((button.isHidden(), button.toolTip()),
+                         (False, "Pause all agent processes by suspending them (Ctrl+Z, or a STOP signal)"))
         panel.pauseOrResumeAllClicked_(button)  # pauses the sessions that run
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("pause_agent_sessions", {"session_ids": ["s2", "s3", "s10", "s11"]}))
@@ -697,7 +699,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                                                  for entry in window.agent_sessions))
             for window in snapshot.monitors[0].windows)),))
         self.list_controller.apply_snapshot(all_paused)
-        self.assertEqual(button.toolTip(), "Resume all paused agent sessions")
+        self.assertEqual(button.toolTip(), "Resume all paused agent processes (fg, then a CONT signal)")
         panel.pauseOrResumeAllClicked_(button)
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("resume_agent_sessions", {"session_ids": ["s1", "s2", "s3", "s10", "s11"]}))
@@ -732,6 +734,10 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)  # idle, but its tool takes no commands
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
         self.assertIn("Aider", menu_items_by_title["/compact"].toolTip())
+        menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # working: its row says "thinking"
+        self.assertFalse(menu_items_by_title["/compact"].isEnabled())
+        self.assertEqual(menu_items_by_title["/compact"].toolTip(),
+                         "Only available when the agent waits at its prompt (it is currently thinking)")
 
     def select_rows(self, *rows):
         self.list_controller.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(rows), False)
@@ -778,7 +784,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         menu_items_by_title = self.build_right_click_menu_items_by_title(1)
         self.assertIn("Kill sessions", menu_items_by_title)  # tab rows alone: the selection shows how many
         self.assertTrue(menu_items_by_title["/compact 2 sessions"].isEnabled())
-        self.assertEqual(menu_items_by_title["/compact 2 sessions"].toolTip(), "A session in the middle of a turn gets it when the turn ends")
+        self.assertEqual(menu_items_by_title["/compact 2 sessions"].toolTip(),
+                         "A session in the middle of a turn will get this command when the turn ends")
         self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # an unselected row keeps its own menu
         self.select_rows(5)
         self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # so does a single selected row
@@ -792,11 +799,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             windows=(window_one, window_two)),)))
         self.select_rows(3, 5)  # codex-review (Codex) and analysis-0 (Aider)
         self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 session"].toolTip(),
-                         "Typed only into the 1 of 2 whose agent takes it and isn't paused")
+                         "Typed only into the 1 of 2 where this command is supported.")
         self.select_rows(5, 6)  # two Aider tabs
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
-        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "The dashboard can't type commands into Aider")
+        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "AgentCommandTab can't type commands into Aider")
 
     def test_the_menu_of_several_rows_leaves_out_paused_sessions(self):
         # The core can't type into a suspended agent, so a paused session isn't counted.
@@ -807,11 +814,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             windows=(window_one, window_two)),)))
         self.select_rows(3, 5)  # codex-review (done) and analysis-0 (paused)
         self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 session"].toolTip(),
-                         "Typed only into the 1 of 2 whose agent takes it and isn't paused")
+                         "Typed only into the 1 of 2 where this command is supported.")
         self.select_rows(5, 6)  # both paused
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
-        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "Only after the paused sessions are resumed")
+        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "Only available after the paused sessions are resumed")
         self.assertIn("Resume 2 sessions", menu_items_by_title)
 
     def test_slash_commands_and_kill_for_several_sessions_ask_first_where_one_session_would(self):
@@ -1447,7 +1454,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(row_view.name_text_field.stringValue(), "planning")
         self.assertEqual(row_view.column_views["state"].stringValue(), "thinking")
         self.assertIsNone(row_view.toolTip())  # no hover popups on rows (user request, 2026-10-19)
-        self.assertEqual(row_view.dot_text_field.toolTip(), "Thinking: the agent is thinking")  # only on the dot (2026-10-27)
+        self.assertEqual(row_view.dot_text_field.toolTip(),
+                         "Thinking: the agent is thinking or briefly running tools")  # only on the dot (2026-10-27)
         self.assertIsNone(row_view.details_text_field.toolTip())  # no background tasks
         self.assertTrue(row_view.prefix_text_field.stringValue().startswith("├─ "))
         image_path = os.environ.get("AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE")
@@ -1640,6 +1648,35 @@ class AutomaticIconColorTests(unittest.TestCase):
                 ([], "green")):
             self.assertEqual(choose_icon_color_name(self.snapshot_with_states(states)), expected_color_name)
 
+    def test_every_click_toggles_the_dropdown_even_one_that_closed_it_on_the_way_down(self):  # user request, 2026-10-28
+        for dropdown_is_shown, dropdown_closed_at, button_pressed_at, expected in (
+                (True, 0, 100.0, "close"),  # a quick click: still closing at the mouse-up
+                (False, 100.02, 100.0, "nothing"),  # a slow one: it closed at this click's mouse-down
+                (False, 90.0, 100.0, "open"),  # closed earlier, by a click elsewhere
+                (False, 0, 100.0, "open"),  # never open yet
+                (False, 100.02, 0, "open")):  # the mouse-down wasn't seen: as before
+            self.assertEqual(choose_what_a_click_on_the_icon_does_to_the_dropdown(
+                dropdown_is_shown, dropdown_closed_at, button_pressed_at), expected,
+                (dropdown_is_shown, dropdown_closed_at, button_pressed_at))
+
+    def test_a_click_slides_an_auto_hiding_sidebar_in_or_out_and_leaves_one_that_stays_visible(self):
+        calls = []
+
+        class StandInAppController:
+            sidebar_controller = unittest.mock.Mock(show_for_a_few_seconds=lambda: calls.append("show"),
+                                                    hide_now=lambda: calls.append("hide"))
+
+            def retry_the_global_shortcut_if_it_lacks_permission(self):
+                pass
+        stand_in_app_controller = StandInAppController()
+        for sidebar_mode, sidebar_is_shown, expected_call in (("auto_hide", False, "show"), ("auto_hide", True, "hide"),
+                                                              ("floating", True, "show")):  # show_for_a_few_seconds leaves it
+            stand_in_app_controller.settings = {"show_as": "sidebar", "sidebar_mode": sidebar_mode}
+            stand_in_app_controller.sidebar_controller.is_shown = sidebar_is_shown
+            calls.clear()
+            AppController.menu_bar_icon_clicked(stand_in_app_controller)
+            self.assertEqual(calls, [expected_call], sidebar_mode)
+
 
 class AgentToolIconTests(unittest.TestCase):
     def test_codex_shows_the_openai_logo_in_the_names_color(self):
@@ -1707,6 +1744,7 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.addCleanup(self.controller.watch_for_clicks_in_other_apps, False)
         self.addCleanup(self.controller.window.orderOut_, None)
         for settings_change, hides_by_itself in (({"show_as": "sidebar", "sidebar_mode": "auto_hide"}, True),
+                                                 ({"show_as": "popup", "sidebar_mode": "floating"}, True),  # "Show sidebar"
                                                  ({"show_as": "sidebar", "sidebar_mode": "floating"}, False),
                                                  ({"show_as": "sidebar", "sidebar_mode": "docked"}, False)):
             self.controller.settings = dict(self.controller.settings, **settings_change)
@@ -1717,12 +1755,16 @@ class SidebarWidthDragTests(unittest.TestCase):
             self.assertFalse(self.controller.window.isVisible())  # gone at once, without sliding
 
     def test_its_top_bar_dragged_turns_it_into_the_list_window_at_the_windows_last_size(self):
-        # Show as changes from Sidebar to Window, and settings_changed shows the window.
+        # With Show as: Sidebar, settings_changed shows the window. With Show as: Window already
+        # ("Show sidebar" from the menu while the window was closed), top_bar_dragged has to.
         self.controller.screens = [{"name": "Far away", "frame": (-4000, -4000, 1500, 1000),
                                     "visible_frame": (-4000, -4000, 1500, 970)}]
         self.addCleanup(self.controller.watch_for_clicks_in_other_apps, False)
         list_window_controller = ListWindowController.alloc().initWithOwner_(self.owner)
         list_window_controller.list_controller.refresh_timer.invalidate()
+        # Recorded rather than shown: macOS would pull the titled window from the far-away monitor onto a real one.
+        shown_frames = []
+        list_window_controller.show = lambda saved_frame, takes_keyboard_focus=True: shown_frames.append(saved_frame)
         followed_pointer_offsets = []
         list_window_controller.follow_the_pointer_until_the_button_comes_up = followed_pointer_offsets.append
 
@@ -1730,31 +1772,42 @@ class SidebarWidthDragTests(unittest.TestCase):
             sidebar_controller = self.controller
             dropdown_panel_controller = None
             popover = unittest.mock.Mock(isShown=lambda: False)
+            # Open, so the test app isn't made active, and kept in front of the window shown.
+            settings_window_controller = unittest.mock.Mock(is_open=lambda: True)
 
             def settings_changed(self, new_settings):
-                # Shows no window, unlike the real one: macOS would pull the titled window from the
-                # far-away monitor onto a real one.
-                self.settings = new_settings
+                self.settings = new_settings  # shows no window, unlike the real one when "Show as" changes
+
+            def close_dropdown(self):
+                pass
+
+            def place_the_settings_window_above_the_lists(self, dropdown_is_open):
+                self.settings_window_placements += 1
         stand_in_app_controller = StandInAppController()
         stand_in_app_controller.list_window_controller = list_window_controller
         # Never shown, the window takes the size it was built with (480 by 560 inside the frame); then its saved size.
         saved_frame_rect = list_window_controller.window.frameRectForContentRect_(NSMakeRect(0, 0, 300, 400))
         saved_frame = (saved_frame_rect.origin.x, saved_frame_rect.origin.y, saved_frame_rect.size.width,
                        saved_frame_rect.size.height)
-        for list_window_frame, (content_width, content_height) in ((None, (480, 560)), (saved_frame, (300, 400))):
+        for show_as_before, show_call_count, list_window_frame, (content_width, content_height) in (
+                ("sidebar", 0, None, (480, 560)), ("sidebar", 0, saved_frame, (300, 400)), ("window", 1, saved_frame, (300, 400))):
             stand_in_app_controller.settings = self.controller.settings = dict(
-                self.controller.settings, show_as="sidebar", list_window_frame=list_window_frame)
+                self.controller.settings, show_as=show_as_before, list_window_frame=list_window_frame)
+            stand_in_app_controller.settings_window_placements = 0
             self.controller.set_shown(True, animate=False)  # 400 wide at x -2900, its top at y -3030
+            shown_frames.clear()
             AppController.top_bar_dragged(stand_in_app_controller, self.controller.list_panel_controller, (-2700, -3040))
-            self.assertFalse(self.controller.is_shown or self.controller.window.isVisible(), list_window_frame)
+            self.assertFalse(self.controller.is_shown or self.controller.window.isVisible(), show_as_before)
             self.assertEqual(stand_in_app_controller.settings["show_as"], "window")
-            content_rect = list_window_controller.window.contentRectForFrameRect_(
-                NSMakeRect(*stand_in_app_controller.settings["list_window_frame"]))
+            window_frame = stand_in_app_controller.settings["list_window_frame"]
+            self.assertEqual(shown_frames, [window_frame] * show_call_count, show_as_before)
+            self.assertEqual(stand_in_app_controller.settings_window_placements, show_call_count, show_as_before)
+            content_rect = list_window_controller.window.contentRectForFrameRect_(NSMakeRect(*window_frame))
             # The pointer halfway across it and 10 below its top.
             self.assertEqual((content_rect.origin.x, content_rect.origin.y + content_rect.size.height,
                               content_rect.size.width, content_rect.size.height),
-                             (-2700 - content_width / 2, -3030, content_width, content_height), list_window_frame)
-        self.assertEqual(len(followed_pointer_offsets), 2)
+                             (-2700 - content_width / 2, -3030, content_width, content_height), show_as_before)
+        self.assertEqual(len(followed_pointer_offsets), 3)
 
     def test_shown_by_a_click_or_the_shortcut_it_stays_for_the_whole_five_seconds(self):
         self.controller.keep_shown_until = time.time() + 4
@@ -1764,7 +1817,8 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.controller.cancel_hide_timer()
 
     def test_a_sidebar_not_chosen_in_show_as_is_parked_just_past_its_edge(self):
-        # Out of sight, ready to slide in from that edge once Show as is Sidebar.
+        # So the menu's "Show sidebar" slides it in from that edge. (The shown case isn't tested
+        # here: it would put a real window on the screen.)
         self.owner.reserve_screen_area = lambda area: None
         self.controller.settings = dict(self.controller.settings, show_as="popup")
         self.controller.is_shown = False
@@ -2208,6 +2262,28 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         controller = SettingsWindowController.alloc().initWithOwner_(self.owner)
         controller.reflect_settings(dict(self.owner.settings, sidebar_width=700))
         self.assertIsNone(controller.window)
+
+
+class ShowTheListAsTests(unittest.TestCase):
+    def test_the_menus_show_items_show_the_list_that_way_without_changing_show_as(self):  # user request, 2026-10-28
+        shown_ways = []
+
+        class StandInAppController:
+            settings = {"show_as": "window"}
+            popover = unittest.mock.Mock(isShown=lambda: False)
+            status_item_controller = unittest.mock.Mock(show_popover=lambda: shown_ways.append("popup"))
+            sidebar_controller = unittest.mock.Mock(show_for_a_few_seconds=lambda: shown_ways.append("sidebar"))
+
+            def show_the_list_window(self):
+                shown_ways.append("window")
+        stand_in_app_controller = StandInAppController()
+        for show_as_choice in ("popup", "sidebar", "window"):
+            AppController.show_the_list_as(stand_in_app_controller, show_as_choice)
+        self.assertEqual(shown_ways, ["popup", "sidebar", "window"])
+        self.assertEqual(stand_in_app_controller.settings, {"show_as": "window"})
+        stand_in_app_controller.popover = unittest.mock.Mock(isShown=lambda: True)
+        AppController.show_the_list_as(stand_in_app_controller, "popup")  # an open dropdown stays open
+        self.assertEqual(shown_ways, ["popup", "sidebar", "window"])
 
 
 if __name__ == "__main__":
