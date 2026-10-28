@@ -33,6 +33,15 @@ COLOR_MAKERS_BY_NAME = {
     # The Tokens column's share of the context window from 50% (user request, 2026-10-27). The system
     # yellow is hard to read as text on white (contrast 1.5 to 1), so light mode has a darker amber (4 to 1).
     "amber": make_light_and_dark_mode_color_maker(make_srgb_color_maker(168, 118, 0), NSColor.systemYellowColor),
+    # The status text (user requests, 2026-10-28). The system green, cyan and orange are hard to
+    # read as text on white too (about 2.2 to 1), so light mode has them about two thirds as
+    # bright (4.5 to 1). Done is gray in light mode only. Unknown is pure black, or pure white in
+    # dark mode, a step past the names' 85% (user request, 2026-10-28).
+    "green_text": make_light_and_dark_mode_color_maker(make_srgb_color_maker(35, 135, 61), NSColor.systemGreenColor),
+    "light_blue_text": make_light_and_dark_mode_color_maker(make_srgb_color_maker(0, 129, 155), NSColor.systemCyanColor),
+    "orange_text": make_light_and_dark_mode_color_maker(make_srgb_color_maker(176, 97, 28), NSColor.systemOrangeColor),
+    "gray_in_light_mode_only": make_light_and_dark_mode_color_maker(NSColor.secondaryLabelColor, NSColor.labelColor),
+    "pure_black_or_white": NSColor.textColor,
 }
 
 

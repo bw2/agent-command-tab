@@ -38,7 +38,7 @@ from agent_command_tab.user_interface.sidebar_placement import (choose_sidebar_e
                                                                 compute_sidebar_frame, pointer_is_at_edge)
 
 SECONDS_BEFORE_HIDING = 0.5
-SECONDS_SHOWN_FROM_THE_MENU = 5
+SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT = 5  # slid in by the menu bar icon or the global shortcut
 SLIDE_ANIMATION_SECONDS = 0.15
 SMALLEST_WIDTH = 200
 LARGEST_WIDTH = 1200
@@ -144,8 +144,7 @@ class SidebarController(NSObject):
         self.screens = []
         self.is_shown = False
         self.hide_timer = None
-        self.keep_shown_until = 0  # set by "Show the sidebar" in the menu bar item's menu
-        self.shown_from_the_menu = False  # out because of that menu item (until it next hides)
+        self.keep_shown_until = 0  # set by show_for_a_few_seconds
         self.mouse_monitors = []
         self.click_monitor = None  # while a sidebar that hides by itself is in (watch_for_clicks_in_other_apps)
         self.width_drag_start = None  # (pointer x, width) while the inner edge is dragged
@@ -232,12 +231,11 @@ class SidebarController(NSObject):
         visible_frame = self.screens[self.placement.screen_index]["visible_frame"]
         self.move_width_drag_strip_to_inner_edge(self.placement.edge)
         if self.settings["show_as"] != "sidebar":
-            # The list shows as a popup or a window: the sidebar is parked just past its edge, so
-            # "Show the sidebar" slides it in from there.
-            # While that keeps it out, a settings change (a width dragged meanwhile) leaves it out.
+            # The list shows as a popup or a window: the sidebar is parked just past its edge, out
+            # of sight (the menu bar icon's "Show the sidebar" slid it in from there until 2026-10-28).
             self.stop_tracking_the_pointer()
             self.owner.reserve_screen_area(None)
-            self.set_shown(self.is_shown and self.shown_from_the_menu, animate=False)
+            self.set_shown(False, animate=False)
             return
         if self.settings["sidebar_mode"] == "auto_hide":
             self.start_tracking_the_pointer()
@@ -271,8 +269,6 @@ class SidebarController(NSObject):
                                       self.settings["sidebar_width"], is_shown)
         was_on_screen = self.window.isVisible()
         self.is_shown = is_shown
-        if not is_shown:
-            self.shown_from_the_menu = False
         self.watch_for_clicks_in_other_apps(is_shown and self.hides_by_itself())
         if is_shown:
             self.window.orderFrontRegardless()
@@ -294,22 +290,21 @@ class SidebarController(NSObject):
 
     @objc.python_method
     def show_for_a_few_seconds(self):
-        """The menu bar item's "Show the sidebar" (user request, milestone 2), and a click on the
-        menu bar icon while the list shows as a sidebar: shows the sidebar, also while the list
-        shows as a popup or a window, for SECONDS_SHOWN_FROM_THE_MENU, then hides it once the
+        """A click on the menu bar icon or the global shortcut while the list shows as a sidebar:
+        shows the sidebar for SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT, then hides it once the
         pointer isn't on it. A sidebar that is always shown stays as it is."""
         if self.settings is None or self.placement is None or not self.hides_by_itself():
             return
-        self.keep_shown_until = time.time() + SECONDS_SHOWN_FROM_THE_MENU
+        self.keep_shown_until = time.time() + SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT
         self.set_shown(True)
-        self.shown_from_the_menu = True
-        self.check_whether_to_hide_in(SECONDS_SHOWN_FROM_THE_MENU)
+        self.check_whether_to_hide_in(SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT)
 
     @objc.python_method
     def hides_by_itself(self):
-        """Whether the sidebar slides out again after it slid in: it auto-hides, or the list shows
-        as a popup or a window (it slid in from "Show the sidebar"), rather than always shown."""
-        return self.settings["show_as"] != "sidebar" or self.settings["sidebar_mode"] == "auto_hide"
+        """Whether the sidebar slides out again after it slid in: it auto-hides, rather than
+        always shown. (It shows only while the list shows as a sidebar, since the menu bar icon's
+        "Show the sidebar", which slid it in for a popup or a window too, went away on 2026-10-28.)"""
+        return self.settings["sidebar_mode"] == "auto_hide"
 
     @objc.python_method
     def hide_now(self, animate=True):
@@ -326,7 +321,7 @@ class SidebarController(NSObject):
     def watch_for_clicks_in_other_apps(self, is_watching):
         """Adds or removes a global monitor (it only watches, needing no Accessibility permission)
         of mouse button presses in other apps' windows, which slide out a sidebar that hides by
-        itself at once (user request, 2026-10-22), rather than after SECONDS_SHOWN_FROM_THE_MENU or
+        itself at once (user request, 2026-10-22), rather than after SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT or
         once the pointer leaves. Clicks on the sidebar and the menu bar icon go to the dashboard,
         so the monitor never sees them."""
         if is_watching and self.click_monitor is None:
@@ -359,7 +354,7 @@ class SidebarController(NSObject):
 
     @objc.python_method
     def stop_tracking_the_pointer(self):
-        """Removes the mouse monitors; a pending hide check stays (it hides a sidebar shown from the menu)."""
+        """Removes the mouse monitors; a pending hide check stays."""
         for mouse_monitor in self.mouse_monitors:
             NSEvent.removeMonitor_(mouse_monitor)
         self.mouse_monitors = []
@@ -400,13 +395,13 @@ class SidebarController(NSObject):
             seconds, self, "hideTimerFired:", None, False)
 
     def hideTimerFired_(self, timer):
-        """Hides the sidebar unless it was shown from the menu less than SECONDS_SHOWN_FROM_THE_MENU
-        ago, the pointer is on it, or anything of it is open; otherwise checks again later
-        (without pointer tracking, a sidebar shown from the menu while turned off relies on this)."""
+        """Hides the sidebar unless a click or the shortcut showed it less than
+        SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT ago, the pointer is on it, or anything of it is
+        open; otherwise checks again later."""
         self.hide_timer = None
-        seconds_still_shown_from_the_menu = self.keep_shown_until - time.time()
-        if seconds_still_shown_from_the_menu > 0:
-            self.check_whether_to_hide_in(seconds_still_shown_from_the_menu)
+        seconds_still_kept_shown = self.keep_shown_until - time.time()
+        if seconds_still_kept_shown > 0:
+            self.check_whether_to_hide_in(seconds_still_kept_shown)
         elif self.something_belonging_to_the_sidebar_is_open() or self.pointer_is_over_sidebar():
             self.check_whether_to_hide_in(SECONDS_BEFORE_HIDING)
         else:

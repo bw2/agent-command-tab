@@ -332,20 +332,13 @@ class AppController(NSObject):
                 convert_rect_to_frame_list(self.sidebar_controller.window.frame()), start_point_on_screen,
                 (content_size.width, content_size.height))
             window_frame = convert_rect_to_frame_list(list_window.frameRectForContentRect_(NSMakeRect(*content_rect)))
-            # Even a sidebar shown from the menu, which "Show as: Window" would leave in for a few seconds.
-            self.sidebar_controller.hide_now(animate=False)
+            self.sidebar_controller.hide_now(animate=False)  # at once, without sliding: the window takes its place
         else:
             return
         pointer_offset = (start_point_on_screen[0] - window_frame[0], start_point_on_screen[1] - window_frame[1])
-        show_as_before = self.settings["show_as"]
+        # The dropdown and the sidebar show only for their own "Show as", so this changes it, and
+        # settings_changed shows the window.
         self.settings_changed(dict(self.settings, show_as="window", list_window_frame=window_frame))
-        if show_as_before == "window":
-            # A sidebar shown from the menu while the list shows as a window, which may be closed
-            # or behind other windows: settings_changed shows it only when "Show as" changes.
-            self.list_window_controller.show(window_frame, takes_keyboard_focus=not self.settings_window_controller.is_open())
-            if self.settings_window_controller.is_open():  # it stays in front, as when settings_changed shows the window
-                self.place_the_settings_window_above_the_lists(self.popover.isShown())
-                self.settings_window_controller.window.orderFront_(None)
         self.list_window_controller.follow_the_pointer_until_the_button_comes_up(pointer_offset)
 
     @objc.python_method
@@ -731,11 +724,6 @@ class AppController(NSObject):
             list_panel_controller.show_list_sort_order(settings["list_sort_order"], settings["list_sort_order_is_reversed"])
             list_panel_controller.show_idle_tabs_are_hidden(settings["idle_tabs_are_hidden"])
             list_panel_controller.list_controller.set_shown_columns(settings["shown_columns"])
-
-    @objc.python_method
-    def show_sidebar_for_a_few_seconds(self):
-        """"Show the sidebar" in the menu bar item's menu: 5 seconds, then it hides unless the pointer is on it."""
-        self.sidebar_controller.show_for_a_few_seconds()
 
     @objc.python_method
     def reserve_screen_area(self, frame):

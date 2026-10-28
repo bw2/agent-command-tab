@@ -59,7 +59,7 @@ class SortAgentSessionEntriesTests(unittest.TestCase):
 
     def test_status_change_goes_by_a_running_commands_start_as_the_row_shows(self):
         # Reviews has worked since 50 and runs pytest since 120, so its row shows the shortest time.
-        entries = [ENTRIES[0], ENTRIES[1]._replace(running_command_name="pytest", running_command_started_at=120.0), *ENTRIES[2:]]
+        entries = [ENTRIES[0], ENTRIES[1]._replace(running_tool_name="pytest", running_tool_started_at=120.0), *ENTRIES[2:]]
         self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "state_duration")], ["2", "1", "4", "3"])
         # Activity too: among the two working, Reviews's shown change (120) is now later than docs's (80).
         self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "activity")], ["3", "2", "4", "1"])

@@ -201,9 +201,8 @@ class SettingsWindowController(WindowFrameSavingController):
             rows += [("Use" if index == 0 else None, include_checkbox, None),  # "Include" until 2026-10-25 (user request)
                      (None, self.make_labeled_field_row(command_label, launch_command_field, command_field_x), None)]
         # The Window section shows only while "Show as" is Window, and the Sidebar section only while
-        # it is Sidebar (user request, 2026-10-27); the sidebar shown for a few seconds from the menu
-        # bar icon's "Show the sidebar" still uses the Sidebar section's edge and width. Each group of
-        # rows: (the "Show as" choice it shows for, or None for every choice, its rows).
+        # it is Sidebar (user request, 2026-10-27). Each group of rows: (the "Show as" choice it
+        # shows for, or None for every choice, its rows).
         self.row_groups = [(None, general_rows), ("window", window_rows), ("sidebar", sidebar_rows), (None, rows)]
 
         # Resizable, with the rows in a scroll view, so a window made shorter than its rows scrolls

@@ -27,10 +27,30 @@ from agent_command_tab.snapshot_data_classes import (AgentSessionEntry, Computer
                                                      WindowEntry)
 
 PLACEHOLDER_MONITOR = {"monitor_id": "unknown", "name": "", "frame": (0, 0, 0, 0), "visible_frame": (0, 0, 0, 0)}
+# A tool call open this long in the conversation file makes a working agent "running" (user
+# request, 2026-10-28). The file is read every 5 seconds, so quick calls (reading or editing a
+# file) would otherwise make the state flicker between thinking and running.
+SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING = 5
 
 DisplayedState = collections.namedtuple("DisplayedState", ["state", "since", "status_change_time"])
 DisplayedState.__doc__ = ("What a session's row showed in a snapshot: its state, since when, and when iTerm2's status "
                           "value had last changed then (compute_displayed_state_since).")
+
+
+def choose_tool_the_agent_is_waiting_on(state, screen_reading, now):
+    """Returns (name, started at) of the tool a working agent waits on, or None: the command it
+    started, found from its processes at once ("running_command"), else the newest tool call of
+    any kind (a subagent, a web fetch, an MCP tool) that its conversation file has shown open for
+    SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING or more ("conversation_preview")."""
+    if state != "working":
+        return None
+    if screen_reading.get("running_command"):
+        return screen_reading["running_command"]
+    preview_fields = screen_reading.get("conversation_preview") or {}
+    open_tool_started_at = preview_fields.get("open_tool_started_at")
+    if open_tool_started_at is not None and now - open_tool_started_at >= SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING:
+        return preview_fields["open_tool_name"], open_tool_started_at
+    return None
 
 
 def build_folder_display_name(folder_path):
@@ -199,7 +219,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         )
         status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
                                                      previous_displayed_state, now)
-    running_command = (screen_reading or {}).get("running_command") if state == "working" else None
+    running_tool = choose_tool_the_agent_is_waiting_on(state, screen_reading or {}, now)
     return AgentSessionEntry(
         tab_id=gathered_tab["tab_id"],
         session_id=session_id,
@@ -214,8 +234,8 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         is_paused_with_the_processes_below_it=state == "paused" and is_paused_with_the_processes_below_it,
         is_in_front=session_id == highlighted_session_id,
         last_time_tab_was_seen=session_tracking.get("last_time_tab_was_seen"),
-        running_command_name=running_command[0] if running_command else "",
-        running_command_started_at=running_command[1] if running_command else None,
+        running_tool_name=running_tool[0] if running_tool else "",
+        running_tool_started_at=running_tool[1] if running_tool else None,
         preview_line=choose_preview_text(state, (screen_reading or {}).get("conversation_preview")),
         context_tokens=(screen_reading or {}).get("context_tokens"),
         context_fill_percent=compute_context_fill_percent((screen_reading or {}).get("context_tokens"),
@@ -247,8 +267,8 @@ def build_exited_agent_session_entry(last_agent_session_entry, ended_at, highlig
     return last_agent_session_entry._replace(
         status="exited", status_reason="the agent ended without a normal session end (a crash, or killed)",
         status_since=ended_at, ended_abnormally_at=ended_at,
-        is_in_front=last_agent_session_entry.session_id == highlighted_session_id, running_command_name="",
-        running_command_started_at=None, context_tokens=None, context_fill_percent=None, memory_bytes=None,
+        is_in_front=last_agent_session_entry.session_id == highlighted_session_id, running_tool_name="",
+        running_tool_started_at=None, context_tokens=None, context_fill_percent=None, memory_bytes=None,
         cpu_percent=None, slash_commands=(), is_paused_with_the_processes_below_it=False, background_task_count=0,
         child_processes=())
 

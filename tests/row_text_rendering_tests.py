@@ -5,6 +5,7 @@ from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProc
 from agent_command_tab.session_status_computation import STATES_IN_URGENCY_ORDER
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
                                                                  LONGEST_TEXT_BY_COLUMN_FIELD_NAME, MEANING_BY_STATE,
+                                                                 STATE_TEXT_COLOR_NAME_BY_STATE,
                                                                  build_agent_session_row_text_parts,
                                                                  build_background_task_lights_text,
                                                                  build_child_process_row_text_parts,
@@ -59,7 +60,7 @@ class LongestColumnTextTests(unittest.TestCase):
         self.assertLessEqual(max(len(format_clock_time(day_start + minutes * 60, day_start + 12 * 3600))
                                  for minutes in range(0, 365 * 1440, 13)),
                              longest_length["created_time_text"])
-        self.assertLessEqual(max(len(state) for state in list(DOT_GLYPH_AND_COLOR_BY_STATE) + ["running"]),
+        self.assertLessEqual(max(len(state) for state in list(DOT_GLYPH_AND_COLOR_BY_STATE) + ["thinking", "running"]),
                              longest_length["state_text"])
 
 
@@ -84,7 +85,8 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "green", True))
         self.assertEqual(parts.name_text, "reviews")
         self.assertEqual((parts.agent_tool_name, parts.details_text, parts.state_text, parts.elapsed_time_text),
-                         ("Claude Code", "", "working", "3m"))
+                         ("Claude Code", "", "thinking", "3m"))  # "working" until 2026-10-28 (user request)
+        self.assertEqual(parts.dot_tool_tip, "Thinking: the agent is thinking")
         self.assertEqual(parts.context_text, "")  # the context's size isn't known yet
         filled_entry = make_entry("working", status_since=100.0)._replace(context_tokens=84_000)
         self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_text, "84k")  # nor the window's
@@ -100,10 +102,17 @@ class RowTextPartsTests(unittest.TestCase):
                          ["", "", "", "amber", "amber", "red", "red", "red"])
 
     def test_a_session_waiting_on_its_command_shows_running_and_the_commands_time(self):
-        entry = make_entry("working", status_since=100.0)._replace(running_command_name="python3",
-                                                                    running_command_started_at=220.0)
+        entry = make_entry("working", status_since=100.0)._replace(running_tool_name="python3", running_tool_started_at=220.0)
         parts = build_agent_session_row_text_parts(entry, [True], 280.0)
-        self.assertEqual((parts.state_text, parts.elapsed_time_text), ("running", "1m"))
+        self.assertEqual((parts.state_text, parts.elapsed_time_text, parts.state_color_name), ("running", "1m", "green_text"))
+        self.assertEqual(parts.dot_tool_tip,
+                         "Running: the agent is waiting on a tool it started, such as a command, a subagent or a web fetch")
+
+    def test_the_status_text_has_its_dots_color_but_done_is_gray(self):  # user requests, 2026-10-28
+        self.assertEqual(set(STATE_TEXT_COLOR_NAME_BY_STATE), set(DOT_GLYPH_AND_COLOR_BY_STATE))
+        self.assertEqual([build_agent_session_row_text_parts(make_entry(status), [True], 1.0).state_color_name
+                          for status in ("asking", "error", "done", "no such state")],
+                         ["light_blue_text", "red", "gray_in_light_mode_only", "pure_black_or_white"])
 
     def test_created_time_and_existence_duration(self):
         now = time.mktime((2026, 10, 19, 15, 30, 0, 0, 0, -1))  # local time
@@ -136,6 +145,10 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual((expanded_parts.dot_color_name, expanded_parts.details_text), ("light_blue", ""))
         collapsed_parts = build_window_row_text_parts(window, [], False)
         self.assertEqual(collapsed_parts.details_text, "1 asking, 2 idle")
+        # A window sums up its tabs' thinking and running as working (user request, 2026-10-28).
+        working_window_parts = build_window_row_text_parts(make_window(["working", "working", "idle"]), [], False)
+        self.assertEqual((working_window_parts.details_text, working_window_parts.dot_tool_tip),
+                         ("2 working, 1 idle", "Working: the agent is thinking or running a command"))
 
     def test_window_dot_blinks_while_its_most_urgent_tab_is_working(self):
         self.assertTrue(build_window_row_text_parts(make_window(["idle", "working"]), [], True).dot_blinks)

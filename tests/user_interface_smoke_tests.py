@@ -13,7 +13,7 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSEventModifierFlagCommand, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSMakePoint, NSMakeRect,
-                    NSFloatingWindowLevel, NSForegroundColorAttributeName, NSImageScaleNone, NSImageView, NSMenu,
+                    NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone, NSImageView, NSMenu,
                     NSNormalWindowLevel, NSPopover,
                     NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
@@ -33,6 +33,8 @@ from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_
                                                                          RowViewWithSelectionOutline, build_index_set,
                                                                          compute_selection_outline_rect)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons
+from agent_command_tab.user_interface.named_colors import COLOR_MAKERS_BY_NAME
+from agent_command_tab.user_interface.row_text_rendering import STATE_TEXT_COLOR_NAME_BY_STATE
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
@@ -111,6 +113,16 @@ class RecordingOwner:
 
     def install_hooks(self, agent_tool_names):
         self.hooks_install_requests.append(list(agent_tool_names))
+
+
+def resolve_color(color, appearance_name):
+    """Returns the color's red, green, blue and alpha (0 to 255) as drawn in this appearance."""
+    resolved_colors = []
+    NSAppearance.appearanceNamed_(appearance_name).performAsCurrentDrawingAppearance_(
+        lambda: resolved_colors.append(color.colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())))
+    return tuple(round(component * 255) for component in (
+        resolved_colors[0].redComponent(), resolved_colors[0].greenComponent(), resolved_colors[0].blueComponent(),
+        resolved_colors[0].alphaComponent()))
 
 
 def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False, slash_commands=("/compact", "/clear")):
@@ -347,27 +359,41 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
             windows=(window_one, snapshot.monitors[0].windows[1])),)))
         self.window.contentView().layoutSubtreeIfNeeded()
-
-        def resolve(color, appearance_name):
-            """Returns the color's red, green and blue (0 to 255) as drawn in this appearance."""
-            resolved_colors = []
-            NSAppearance.appearanceNamed_(appearance_name).performAsCurrentDrawingAppearance_(
-                lambda: resolved_colors.append(color.colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())))
-            return tuple(round(component * 255) for component in (
-                resolved_colors[0].redComponent(), resolved_colors[0].greenComponent(), resolved_colors[0].blueComponent()))
         # The rows of planning, phase0-tests and codex-review: light mode has a darker amber than the system yellow.
-        for row, expected_share_colors in ((1, ((168, 118, 0), resolve(NSColor.systemYellowColor(), NSAppearanceNameDarkAqua))),
-                                           (2, (resolve(NSColor.labelColor(), NSAppearanceNameAqua),
-                                                resolve(NSColor.labelColor(), NSAppearanceNameDarkAqua))),
-                                           (3, (resolve(NSColor.systemRedColor(), NSAppearanceNameAqua),
-                                                resolve(NSColor.systemRedColor(), NSAppearanceNameDarkAqua)))):
+        for row, expected_share_colors in ((1, ((168, 118, 0, 255), resolve_color(NSColor.systemYellowColor(), NSAppearanceNameDarkAqua))),
+                                           (2, (resolve_color(NSColor.labelColor(), NSAppearanceNameAqua),
+                                                resolve_color(NSColor.labelColor(), NSAppearanceNameDarkAqua))),
+                                           (3, (resolve_color(NSColor.systemRedColor(), NSAppearanceNameAqua),
+                                                resolve_color(NSColor.systemRedColor(), NSAppearanceNameDarkAqua)))):
             column_text = self.lay_out_row_view(row).column_views["context_tokens"].attributedStringValue()
             share_start = column_text.string().index("(")
             size_color, share_color = (column_text.attribute_atIndex_effectiveRange_(NSForegroundColorAttributeName, index, None)[0]
                                        for index in (0, share_start))
             self.assertEqual(size_color, NSColor.labelColor())
-            self.assertEqual((resolve(share_color, NSAppearanceNameAqua), resolve(share_color, NSAppearanceNameDarkAqua)),
+            self.assertEqual((resolve_color(share_color, NSAppearanceNameAqua), resolve_color(share_color, NSAppearanceNameDarkAqua)),
                              expected_share_colors)
+
+    def test_the_status_text_is_in_its_states_color(self):  # user requests, 2026-10-28
+        self.assertLessEqual(set(STATE_TEXT_COLOR_NAME_BY_STATE.values()), set(COLOR_MAKERS_BY_NAME))
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        gray, names_color = NSColor.secondaryLabelColor(), NSColor.labelColor()
+        # Light mode has a darker green and blue than the system's; done is gray in light mode only.
+        for row, expected_state_text, expected_light_and_dark_mode_colors in (
+                (1, "thinking", ((35, 135, 61, 255), resolve_color(NSColor.systemGreenColor(), NSAppearanceNameDarkAqua))),
+                (2, "asking", ((0, 129, 155, 255), resolve_color(NSColor.systemCyanColor(), NSAppearanceNameDarkAqua))),
+                (3, "done", (resolve_color(gray, NSAppearanceNameAqua), resolve_color(names_color, NSAppearanceNameDarkAqua))),
+                (5, "idle", (resolve_color(gray, NSAppearanceNameAqua), resolve_color(gray, NSAppearanceNameDarkAqua)))):
+            row_view = self.lay_out_row_view(row)
+            state_text = row_view.column_views["state"].attributedStringValue()
+            self.assertEqual(state_text.string(), expected_state_text)
+            self.assertEqual(state_text.attribute_atIndex_effectiveRange_(NSFontAttributeName, 0, None)[0],
+                             self.list_controller.semibold_font)  # easier to read (user request, 2026-10-28)
+            state_color = state_text.attribute_atIndex_effectiveRange_(NSForegroundColorAttributeName, 0, None)[0]
+            self.assertEqual((resolve_color(state_color, NSAppearanceNameAqua), resolve_color(state_color, NSAppearanceNameDarkAqua)),
+                             expected_light_and_dark_mode_colors)
+            self.assertEqual(row_view.column_views["state_duration"].attributedStringValue().attribute_atIndex_effectiveRange_(
+                NSForegroundColorAttributeName, 0, None)[0], names_color)  # only the status is colored
 
     def test_column_titles_sit_over_their_columns_between_the_top_bar_and_the_list(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())  # no context sizes known: no token columns
@@ -1419,9 +1445,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
         self.assertGreater(row_view.frame().size.width, POPOVER_WIDTH - 60)  # the column fills the dropdown
         self.assertEqual(row_view.name_text_field.stringValue(), "planning")
-        self.assertEqual(row_view.column_views["state"].stringValue(), "working")
+        self.assertEqual(row_view.column_views["state"].stringValue(), "thinking")
         self.assertIsNone(row_view.toolTip())  # no hover popups on rows (user request, 2026-10-19)
-        self.assertEqual(row_view.dot_text_field.toolTip(), "Working: the agent is thinking or running a command")  # only on the dot (2026-10-27)
+        self.assertEqual(row_view.dot_text_field.toolTip(), "Thinking: the agent is thinking")  # only on the dot (2026-10-27)
         self.assertIsNone(row_view.details_text_field.toolTip())  # no background tasks
         self.assertTrue(row_view.prefix_text_field.stringValue().startswith("├─ "))
         image_path = os.environ.get("AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE")
@@ -1681,7 +1707,6 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.addCleanup(self.controller.watch_for_clicks_in_other_apps, False)
         self.addCleanup(self.controller.window.orderOut_, None)
         for settings_change, hides_by_itself in (({"show_as": "sidebar", "sidebar_mode": "auto_hide"}, True),
-                                                 ({"show_as": "popup", "sidebar_mode": "floating"}, True),  # "Show the sidebar"
                                                  ({"show_as": "sidebar", "sidebar_mode": "floating"}, False),
                                                  ({"show_as": "sidebar", "sidebar_mode": "docked"}, False)):
             self.controller.settings = dict(self.controller.settings, **settings_change)
@@ -1692,16 +1717,12 @@ class SidebarWidthDragTests(unittest.TestCase):
             self.assertFalse(self.controller.window.isVisible())  # gone at once, without sliding
 
     def test_its_top_bar_dragged_turns_it_into_the_list_window_at_the_windows_last_size(self):
-        # With Show as: Sidebar, settings_changed shows the window. With Show as: Window already
-        # ("Show the sidebar" while the window was closed), top_bar_dragged has to.
+        # Show as changes from Sidebar to Window, and settings_changed shows the window.
         self.controller.screens = [{"name": "Far away", "frame": (-4000, -4000, 1500, 1000),
                                     "visible_frame": (-4000, -4000, 1500, 970)}]
         self.addCleanup(self.controller.watch_for_clicks_in_other_apps, False)
         list_window_controller = ListWindowController.alloc().initWithOwner_(self.owner)
         list_window_controller.list_controller.refresh_timer.invalidate()
-        # Recorded rather than shown: macOS would pull the titled window from the far-away monitor onto a real one.
-        shown_frames = []
-        list_window_controller.show = lambda saved_frame, takes_keyboard_focus=True: shown_frames.append(saved_frame)
         followed_pointer_offsets = []
         list_window_controller.follow_the_pointer_until_the_button_comes_up = followed_pointer_offsets.append
 
@@ -1709,40 +1730,33 @@ class SidebarWidthDragTests(unittest.TestCase):
             sidebar_controller = self.controller
             dropdown_panel_controller = None
             popover = unittest.mock.Mock(isShown=lambda: False)
-            # Open, so the test app isn't made active, and kept in front of the window shown.
-            settings_window_controller = unittest.mock.Mock(is_open=lambda: True)
 
             def settings_changed(self, new_settings):
-                self.settings = new_settings  # shows no window, unlike the real one when "Show as" changes
-
-            def place_the_settings_window_above_the_lists(self, dropdown_is_open):
-                self.settings_window_placements += 1
+                # Shows no window, unlike the real one: macOS would pull the titled window from the
+                # far-away monitor onto a real one.
+                self.settings = new_settings
         stand_in_app_controller = StandInAppController()
         stand_in_app_controller.list_window_controller = list_window_controller
         # Never shown, the window takes the size it was built with (480 by 560 inside the frame); then its saved size.
         saved_frame_rect = list_window_controller.window.frameRectForContentRect_(NSMakeRect(0, 0, 300, 400))
         saved_frame = (saved_frame_rect.origin.x, saved_frame_rect.origin.y, saved_frame_rect.size.width,
                        saved_frame_rect.size.height)
-        for show_as_before, show_call_count, list_window_frame, (content_width, content_height) in (
-                ("sidebar", 0, None, (480, 560)), ("window", 1, saved_frame, (300, 400))):
+        for list_window_frame, (content_width, content_height) in ((None, (480, 560)), (saved_frame, (300, 400))):
             stand_in_app_controller.settings = self.controller.settings = dict(
-                self.controller.settings, show_as=show_as_before, list_window_frame=list_window_frame)
-            stand_in_app_controller.settings_window_placements = 0
+                self.controller.settings, show_as="sidebar", list_window_frame=list_window_frame)
             self.controller.set_shown(True, animate=False)  # 400 wide at x -2900, its top at y -3030
-            shown_frames.clear()
             AppController.top_bar_dragged(stand_in_app_controller, self.controller.list_panel_controller, (-2700, -3040))
-            self.assertFalse(self.controller.is_shown or self.controller.window.isVisible(), show_as_before)
-            window_frame = stand_in_app_controller.settings["list_window_frame"]
-            self.assertEqual(shown_frames, [window_frame] * show_call_count, show_as_before)
-            self.assertEqual(stand_in_app_controller.settings_window_placements, show_call_count, show_as_before)
-            content_rect = list_window_controller.window.contentRectForFrameRect_(NSMakeRect(*window_frame))
+            self.assertFalse(self.controller.is_shown or self.controller.window.isVisible(), list_window_frame)
+            self.assertEqual(stand_in_app_controller.settings["show_as"], "window")
+            content_rect = list_window_controller.window.contentRectForFrameRect_(
+                NSMakeRect(*stand_in_app_controller.settings["list_window_frame"]))
             # The pointer halfway across it and 10 below its top.
             self.assertEqual((content_rect.origin.x, content_rect.origin.y + content_rect.size.height,
                               content_rect.size.width, content_rect.size.height),
-                             (-2700 - content_width / 2, -3030, content_width, content_height), show_as_before)
+                             (-2700 - content_width / 2, -3030, content_width, content_height), list_window_frame)
         self.assertEqual(len(followed_pointer_offsets), 2)
 
-    def test_shown_from_the_menu_it_stays_for_the_whole_five_seconds(self):
+    def test_shown_by_a_click_or_the_shortcut_it_stays_for_the_whole_five_seconds(self):
         self.controller.keep_shown_until = time.time() + 4
         self.controller.hideTimerFired_(None)
         self.assertTrue(self.controller.is_shown)
@@ -1750,8 +1764,7 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.controller.cancel_hide_timer()
 
     def test_a_sidebar_not_chosen_in_show_as_is_parked_just_past_its_edge(self):
-        # So "Show the sidebar" slides it in from that edge. (The shown case isn't tested here:
-        # it would put a real window on the screen.)
+        # Out of sight, ready to slide in from that edge once Show as is Sidebar.
         self.owner.reserve_screen_area = lambda area: None
         self.controller.settings = dict(self.controller.settings, show_as="popup")
         self.controller.is_shown = False

@@ -66,10 +66,12 @@ class ReadClaudeCodePreviewTests(unittest.TestCase):
         fields = self.read([
             claude_user_record("Fix the failing test"),
             claude_assistant_record({"type": "text", "text": "[10/19/2026 09:19:52 AM]\nLooking at the test now."}),
-            claude_assistant_record({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pytest"}}),
+            dict(claude_assistant_record({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pytest"}}),
+                 timestamp="2026-10-28T11:12:04.500Z"),
         ])
         self.assertEqual(fields, {"last_prompt": "Fix the failing test", "message_since_prompt": "Looking at the test now.",
-                                  "open_tool_call": "Bash: pytest"})
+                                  "open_tool_call": "Bash: pytest", "open_tool_name": "Bash",
+                                  "open_tool_started_at": 1793185924.5})  # when the call's record was written
 
     def test_an_answered_tool_call_or_one_followed_by_text_is_not_open(self):
         fields = self.read([
@@ -96,7 +98,8 @@ class ReadClaudeCodePreviewTests(unittest.TestCase):
             claude_assistant_record({"type": "text", "text": "Done with the first."}),
             claude_user_record("Second request"),
         ])
-        self.assertEqual(fields, {"last_prompt": "Second request", "message_since_prompt": "", "open_tool_call": ""})
+        self.assertEqual(fields, {"last_prompt": "Second request", "message_since_prompt": "", "open_tool_call": "",
+                                  "open_tool_name": "", "open_tool_started_at": None})
 
     def test_records_claude_code_writes_itself_are_not_prompts(self):
         fields = self.read([
@@ -125,7 +128,7 @@ class ReadClaudeCodePreviewTests(unittest.TestCase):
             claude_assistant_record({"type": "thinking", "thinking": "..."}),
         ])
         self.assertEqual(fields, {"last_prompt": "/code-review-local run_all_steps.py", "message_since_prompt": "",
-                                  "open_tool_call": ""})
+                                  "open_tool_call": "", "open_tool_name": "", "open_tool_started_at": None})
         fields = self.read([
             claude_user_record("run the tests in the background"),
             claude_assistant_record({"type": "text", "text": "Started them."}),
@@ -154,12 +157,14 @@ class ReadCodexPreviewTests(unittest.TestCase):
             codex_response_item({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md"}]}),
             codex_event({"type": "item_completed", "item": {"type": "UserMessage", "content": [{"type": "text", "text": "Run the tests"}]}}),
             codex_event({"type": "item_completed", "item": {"type": "AgentMessage", "content": [{"type": "Text", "text": "Running them."}]}}),
-            codex_response_item({"type": "custom_tool_call", "name": "exec", "call_id": "c1",
-                                 "input": 'text(await tools.exec_command({cmd:"python3 -m unittest \\"a b\\"",yield_time_ms:1000}))'}),
+            dict(codex_response_item({"type": "custom_tool_call", "name": "exec", "call_id": "c1",
+                                      "input": 'text(await tools.exec_command({cmd:"python3 -m unittest \\"a b\\"",yield_time_ms:1000}))'}),
+                 timestamp="2026-10-28T11:10:52.000Z"),
         ])
         # Text said before the call doesn't hide it: the call is the newest record.
         self.assertEqual(fields, {"last_prompt": "Run the tests", "message_since_prompt": "Running them.",
-                                  "open_tool_call": 'exec: python3 -m unittest "a b"'})
+                                  "open_tool_call": 'exec: python3 -m unittest "a b"', "open_tool_name": "exec",
+                                  "open_tool_started_at": 1793185852.0})
 
     def test_polling_calls_without_a_command_and_answered_calls_are_not_shown(self):
         fields = self.read([
@@ -168,7 +173,9 @@ class ReadCodexPreviewTests(unittest.TestCase):
             codex_response_item({"type": "custom_tool_call_output", "call_id": "c1", "output": "still running"}),
             codex_response_item({"type": "function_call", "name": "wait", "call_id": "c2", "arguments": '{"cell_id":"3"}'}),
         ])
-        self.assertEqual(fields, {"last_prompt": "Sleep for a while", "message_since_prompt": "", "open_tool_call": ""})
+        # Not in the preview, but the open wait still counts as a tool the agent waits on (user request, 2026-10-28).
+        self.assertEqual(fields, {"last_prompt": "Sleep for a while", "message_since_prompt": "", "open_tool_call": "",
+                                  "open_tool_name": "wait", "open_tool_started_at": None})  # no timestamp in this record
 
     def test_earlier_codex_versions_events(self):
         fields = self.read([
@@ -179,7 +186,7 @@ class ReadCodexPreviewTests(unittest.TestCase):
             codex_response_item({"type": "function_call_output", "call_id": "c1", "output": "..."}),
         ])
         self.assertEqual(fields, {"last_prompt": "Explain the error", "message_since_prompt": "The error comes from a missing file.",
-                                  "open_tool_call": ""})
+                                  "open_tool_call": "", "open_tool_name": "", "open_tool_started_at": None})
 
 
 class ChoosePreviewTextTests(unittest.TestCase):

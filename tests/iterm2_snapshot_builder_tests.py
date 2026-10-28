@@ -147,6 +147,20 @@ class BuildComputerSnapshotTests(unittest.TestCase):
                                       screen_readings={"session-1": {"conversation_preview": preview}})
             self.assertEqual(snapshot.monitors[0].windows[0].agent_sessions[0].preview_line, expected_preview_line)
 
+    def test_a_tool_call_open_for_5_seconds_or_more_shows_as_running(self):  # user request, 2026-10-28
+        def build_entry(screen_reading, status="working"):
+            return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
+                                  screen_readings={"session-1": screen_reading}, now=1000.0).monitors[0].windows[0].agent_sessions[0]
+        subagent_call = {"open_tool_call": "Agent: review the diff", "open_tool_name": "Agent", "open_tool_started_at": 995.0}
+        entry = build_entry({"conversation_preview": subagent_call})
+        self.assertEqual((entry.running_tool_name, entry.running_tool_started_at), ("Agent", 995.0))
+        quick_call = dict(subagent_call, open_tool_started_at=996.0)  # open 4 seconds: likely a file read, still thinking
+        self.assertEqual(build_entry({"conversation_preview": quick_call}).running_tool_name, "")
+        # A command found from the agent's processes counts at once, and from its own start.
+        entry = build_entry({"conversation_preview": quick_call, "running_command": ("pytest", 990.0)})
+        self.assertEqual((entry.running_tool_name, entry.running_tool_started_at), ("pytest", 990.0))
+        self.assertEqual(build_entry({"conversation_preview": subagent_call}, status="idle").running_tool_name, "")
+
     def test_snapshot_converts_to_json(self):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="waiting")])])
         json_ready = convert_snapshot_to_json_ready_dict(snapshot)

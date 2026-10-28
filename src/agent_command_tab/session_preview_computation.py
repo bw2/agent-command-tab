@@ -9,6 +9,7 @@ the last prompt, and the last prompt itself ("You: ...").
 
 import json
 import re
+from datetime import datetime
 
 from agent_command_tab.claude_code_transcript_records import (classify_user_record, describe_typed_command,
                                                               join_text_blocks, list_message_blocks)
@@ -88,9 +89,19 @@ def join_codex_item_texts(item):
                      and str(part.get("type")).lower() == "text") if isinstance(content, list) else ""
 
 
-def build_preview_fields(last_prompt, message_since_prompt, open_tool_call):
+def build_preview_fields(last_prompt, message_since_prompt, open_tool_call, open_tool_name, open_tool_started_at):
     """Returns the preview fields dict that the readers below return."""
-    return {"last_prompt": last_prompt, "message_since_prompt": message_since_prompt, "open_tool_call": open_tool_call}
+    return {"last_prompt": last_prompt, "message_since_prompt": message_since_prompt, "open_tool_call": open_tool_call,
+            "open_tool_name": open_tool_name, "open_tool_started_at": open_tool_started_at}
+
+
+def read_record_time(record):
+    """Returns a conversation file record's "timestamp", which Claude Code and Codex both write in
+    ISO 8601 ("2026-10-28T11:12:04.784Z"), as seconds since 1970, or None without a readable one."""
+    try:
+        return datetime.fromisoformat(str(record.get("timestamp"))).timestamp()
+    except ValueError:
+        return None
 
 
 def read_preview_fields_from_claude_code_transcript(file_path):
@@ -106,13 +117,18 @@ def read_preview_fields_from_claude_code_transcript(file_path):
     the end supplies it.
 
     Returns:
-        {"last_prompt": str, "message_since_prompt": str, "open_tool_call": str}, each "" when
-        not found; texts are one line: prompts and messages without Markdown markers
+        {"last_prompt": str, "message_since_prompt": str, "open_tool_call": str, "open_tool_name":
+        str, "open_tool_started_at": float or None}, the texts "" and the time None when not
+        found; texts are one line: prompts and messages without Markdown markers
         (make_one_line_without_markdown), tool calls as the agent asks to run them (make_one_line).
+        open_tool_name and open_tool_started_at are the open call's tool and when its record was
+        written (read_record_time).
     """
     answered_tool_use_ids = set()
     message_since_prompt = ""
     open_tool_call = ""
+    open_tool_name = ""
+    open_tool_started_at = None
     saved_last_prompt = ""
     turn_started_with_a_notification = False  # then only the prompt is still looked for
     for record in read_last_records(file_path):
@@ -129,9 +145,10 @@ def read_preview_fields_from_claude_code_transcript(file_path):
             answered_tool_use_ids |= {block.get("tool_use_id") for block in blocks if block.get("type") == "tool_result"}
         elif user_record_kind == "command":
             return build_preview_fields(make_one_line(describe_typed_command(join_text_blocks(blocks))), message_since_prompt,
-                                        open_tool_call)
+                                        open_tool_call, open_tool_name, open_tool_started_at)
         elif user_record_kind == "prompt":
-            return build_preview_fields(make_one_line_without_markdown(join_text_blocks(blocks)), message_since_prompt, open_tool_call)
+            return build_preview_fields(make_one_line_without_markdown(join_text_blocks(blocks)), message_since_prompt,
+                                        open_tool_call, open_tool_name, open_tool_started_at)
         elif user_record_kind == "notification":
             turn_started_with_a_notification = True
             if saved_last_prompt:
@@ -142,8 +159,9 @@ def read_preview_fields_from_claude_code_transcript(file_path):
                     message_since_prompt = make_one_line_without_markdown(block["text"])
                 elif (block.get("type") == "tool_use" and not open_tool_call and not message_since_prompt
                       and block.get("id") not in answered_tool_use_ids):
-                    open_tool_call = describe_claude_code_tool_call(block.get("name") or "tool", block.get("input"))
-    return build_preview_fields(saved_last_prompt, message_since_prompt, open_tool_call)
+                    open_tool_name, open_tool_started_at = block.get("name") or "tool", read_record_time(record)
+                    open_tool_call = describe_claude_code_tool_call(open_tool_name, block.get("input"))
+    return build_preview_fields(saved_last_prompt, message_since_prompt, open_tool_call, open_tool_name, open_tool_started_at)
 
 
 def read_preview_fields_from_codex_conversation_file(file_path):
@@ -156,13 +174,15 @@ def read_preview_fields_from_codex_conversation_file(file_path):
     the agent has said nothing since.
 
     Returns:
-        {"last_prompt": str, "message_since_prompt": str, "open_tool_call": str}, each "" when
-        not found; texts are one line: prompts and messages without Markdown markers
-        (make_one_line_without_markdown), tool calls as the agent asks to run them (make_one_line).
+        The fields read_preview_fields_from_claude_code_transcript returns. open_tool_call is the
+        newest open call with a command; open_tool_name and open_tool_started_at the newest open
+        call of any kind (also a call without a command, such as a wait on a command that runs).
     """
     answered_call_ids = set()
     message_since_prompt = ""
     open_tool_call = ""
+    open_tool_name = ""
+    open_tool_started_at = None
     for record in read_last_records(file_path):
         payload = record.get("payload")
         if not isinstance(payload, dict):
@@ -173,7 +193,8 @@ def read_preview_fields_from_codex_conversation_file(file_path):
             prompt_text = (str(payload.get("message") or "") if payload_type == "user_message"
                            else join_codex_item_texts(item) if item.get("type") == "UserMessage" else "")
             if prompt_text.strip():
-                return build_preview_fields(make_one_line_without_markdown(prompt_text), message_since_prompt, open_tool_call)
+                return build_preview_fields(make_one_line_without_markdown(prompt_text), message_since_prompt, open_tool_call,
+                                            open_tool_name, open_tool_started_at)
             agent_text = (str(payload.get("message") or "") if payload_type == "agent_message"
                           else join_codex_item_texts(item) if item.get("type") == "AgentMessage" else "")
             if agent_text.strip() and not message_since_prompt:
@@ -181,10 +202,13 @@ def read_preview_fields_from_codex_conversation_file(file_path):
         elif record.get("type") == "response_item":
             if payload_type in ("function_call_output", "custom_tool_call_output"):
                 answered_call_ids.add(payload.get("call_id"))
-            elif (payload_type in ("function_call", "custom_tool_call") and not open_tool_call and not message_since_prompt
+            elif (payload_type in ("function_call", "custom_tool_call") and not message_since_prompt
                   and payload.get("call_id") not in answered_call_ids):
-                open_tool_call = describe_codex_tool_call(payload)  # "" for a call without a command: look further
-    return build_preview_fields("", message_since_prompt, open_tool_call)
+                if not open_tool_name:
+                    open_tool_name, open_tool_started_at = payload.get("name") or "tool", read_record_time(record)
+                if not open_tool_call:
+                    open_tool_call = describe_codex_tool_call(payload)  # "" for a call without a command: look further
+    return build_preview_fields("", message_since_prompt, open_tool_call, open_tool_name, open_tool_started_at)
 
 
 def choose_preview_text(state, preview_fields):

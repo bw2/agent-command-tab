@@ -15,16 +15,17 @@ RowTextParts = collections.namedtuple(
                      "agent_tool_name", "state_text", "elapsed_time_text", "context_text",
                      "created_time_text", "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text",
                      "preview_text", "details_color_name", "dot_tool_tip", "details_tool_tip",
-                     "context_fill_percent_color_name"],
-    defaults=["", "", "", "", "", "", "", "", "", "", "gray", "", "", ""])
+                     "context_fill_percent_color_name", "state_color_name"],
+    defaults=["", "", "", "", "", "", "", "", "", "", "gray", "", "", "", ""])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
                         "context_text (the context's size and its share of the context window, "
                         "\"425k (42%)\", the share in parentheses in context_fill_percent_color_name, or in the "
                         "column's color for \"\"), created_time_text (when the agent session "
                         "started) and existence_duration_text (how long ago), memory_text and cpu_text (what the "
-                        "agent and the processes it started use), the icon for agent_tool_name, state_text and "
-                        "elapsed_time_text (the state's duration). Under it, a tab row has a gray preview line "
+                        "agent and the processes it started use), the icon for agent_tool_name, state_text "
+                        "(in state_color_name) and elapsed_time_text (the state's duration). Under it, a tab "
+                        "row has a gray preview line "
                         "(R23): preview_connector_text continues the tree's lines, and preview_text starts under "
                         "the name. A tab row's details are its background task lights, in details_color_name. "
                         "dot_tool_tip and details_tool_tip are what the dot and the details mean, shown when the "
@@ -58,6 +59,22 @@ DOT_GLYPH_AND_COLOR_BY_STATE = {
     "exited": ("⊘", "gray"),
 }
 
+# The color of each state's text in the Status column: its dot's, but done is gray, in the names'
+# color in dark mode, and unknown is pure black, or pure white in dark mode, so it stands out from
+# done (user requests, 2026-10-28). named_colors' "_text" colors are darker in light mode, so they
+# read on white.
+STATE_TEXT_COLOR_NAME_BY_STATE = {
+    "asking": "light_blue_text",
+    "error": "red",
+    "stuck": "orange_text",
+    "working": "green_text",  # a tab row's "thinking" and "running"
+    "done": "gray_in_light_mode_only",
+    "idle": "gray",
+    "paused": "purple",
+    "unknown": "pure_black_or_white",
+    "exited": "gray",
+}
+
 # What each state means, the dot's hover text (user request, 2026-10-27). The 10 and 5 minutes are
 # iterm2_connection_thread's STUCK_THRESHOLD_SECONDS and EXITED_ROW_SECONDS.
 MEANING_BY_STATE = {
@@ -70,6 +87,14 @@ MEANING_BY_STATE = {
     "paused": "the agent is stopped until it is resumed",
     "unknown": "the app can't tell what the agent is doing",
     "exited": "the agent ended without a normal session end (a crash, or killed); the row goes away 5 minutes later",
+}
+# A tab row names a working agent's state for what it does: "running" while it waits on a tool,
+# a command at once and any other tool after 5 seconds, otherwise "thinking" (user requests,
+# 2026-10-28; iterm2_snapshot_builder.choose_tool_the_agent_is_waiting_on). Window rows, whose
+# counts sum up their tabs, still say "working" for both.
+MEANING_BY_WORKING_STATE_NAME = {
+    "thinking": "the agent is thinking",  # ", or using a tool for less than 5 seconds" until 2026-10-28 (user request)
+    "running": "the agent is waiting on a tool it started, such as a command, a subagent or a web fetch",
 }
 
 # The longest text each column at a tab row's right edge can get, by RowTextParts field (the font
@@ -84,7 +109,7 @@ LONGEST_TEXT_BY_COLUMN_FIELD_NAME = {
     "existence_duration_text": "23h 59m",  # format_elapsed_time
     "memory_text": "1024M",  # format_memory_size: "1024M" just under a gigabyte, then "1.4G" up to "99.9G"
     "cpu_text": "100%",  # an agent using ten cores or more gets a wider column
-    "state_text": "working",  # the longest states: working, running, unknown
+    "state_text": "thinking",  # the longest state, then running and unknown
     "elapsed_time_text": "23h 59m",  # format_elapsed_time
 }
 
@@ -181,6 +206,17 @@ def describe_state(state):
     return f"{state.capitalize()}: {MEANING_BY_STATE[state]}"
 
 
+def name_and_describe_tab_rows_state(agent_session_entry, state):
+    """Returns a tab row's state text and its dot's hover text, such as ("running", "Running: the
+    agent is waiting on a command it started"): a working agent's state is "thinking" or
+    "running" (MEANING_BY_WORKING_STATE_NAME). A state the app doesn't know shows as it came, with
+    the hover text of state, "unknown"."""
+    if state != "working":
+        return agent_session_entry.status, describe_state(state)
+    working_state_name = "running" if agent_session_entry.running_tool_name else "thinking"
+    return working_state_name, f"{working_state_name.capitalize()}: {MEANING_BY_WORKING_STATE_NAME[working_state_name]}"
+
+
 def build_resource_usage_texts(memory_bytes, cpu_percent):
     """Returns (memory_text, cpu_text) for the Memory and CPU columns, "" while not read."""
     return (format_memory_size(memory_bytes) if memory_bytes is not None else "",
@@ -197,6 +233,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
     """
     state = agent_session_entry.status if agent_session_entry.status in DOT_GLYPH_AND_COLOR_BY_STATE else "unknown"
     dot_glyph, dot_color_name = DOT_GLYPH_AND_COLOR_BY_STATE[state]
+    state_text, dot_tool_tip = name_and_describe_tab_rows_state(agent_session_entry, state)
     started_at = agent_session_entry.started_at
     memory_text, cpu_text = build_resource_usage_texts(agent_session_entry.memory_bytes, agent_session_entry.cpu_percent)
     return RowTextParts(
@@ -207,13 +244,14 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         name_text=agent_session_entry.tab_title,
         details_text=build_background_task_lights_text(agent_session_entry.background_task_count),  # the preview has its own line
         details_color_name=BACKGROUND_TASK_LIGHTS_COLOR_NAME,
-        dot_tool_tip=describe_state(state),
+        dot_tool_tip=dot_tool_tip,
         details_tool_tip=describe_background_task_lights(agent_session_entry.background_task_count),
         agent_tool_name=agent_session_entry.agent_tool_name,
-        # While it waits on a command it started, a working agent shows "running" and the command's time.
-        state_text="running" if agent_session_entry.running_command_name else agent_session_entry.status,
-        elapsed_time_text=format_elapsed_time(now - (agent_session_entry.running_command_started_at
-                                                     if agent_session_entry.running_command_name
+        # While it waits on a tool, a working agent shows "running" and the tool's time.
+        state_text=state_text,
+        state_color_name=STATE_TEXT_COLOR_NAME_BY_STATE[state],
+        elapsed_time_text=format_elapsed_time(now - (agent_session_entry.running_tool_started_at
+                                                     if agent_session_entry.running_tool_name
                                                      else agent_session_entry.status_since)),
         context_text=format_context_text(agent_session_entry.context_tokens, agent_session_entry.context_fill_percent),
         context_fill_percent_color_name=choose_context_fill_percent_color_name(agent_session_entry.context_fill_percent),

@@ -34,8 +34,8 @@ class MenuBarStatusItemController(NSObject):
     """Owns the NSStatusItem. A left click shows the list (the owner decides how: toggle_popover
     for the dropdown); a right click shows a small menu.
 
-    The owner (the app controller) has menu_bar_icon_clicked(), open_settings(),
-    show_sidebar_for_a_few_seconds(), quit() and note_application_in_front_before_dropdown(application).
+    The owner (the app controller) has menu_bar_icon_clicked(), open_settings(), quit() and
+    note_application_in_front_before_dropdown(application).
     """
 
     def initWithPopover_owner_(self, popover, owner):
@@ -124,8 +124,8 @@ class MenuBarStatusItemController(NSObject):
     @objc.python_method
     def show_right_click_menu(self):
         menu = NSMenu.alloc().initWithTitle_("")
-        for title, action_name in (("Show the sidebar", "showSidebarClicked:"), ("Settings…", "settingsClicked:"),
-                                   (None, None), ("Quit AgentCommandTab", "quitClicked:")):
+        # "Show the sidebar" was first until 2026-10-28 (user request).
+        for title, action_name in (("Settings…", "settingsClicked:"), (None, None), ("Quit AgentCommandTab", "quitClicked:")):
             if title is None:
                 menu.addItem_(NSMenuItem.separatorItem())
                 continue
@@ -133,9 +133,6 @@ class MenuBarStatusItemController(NSObject):
             menu_item.setTarget_(self)
             menu.addItem_(menu_item)
         self.status_item.popUpStatusItemMenu_(menu)
-
-    def showSidebarClicked_(self, sender):
-        self.owner.show_sidebar_for_a_few_seconds()
 
     def settingsClicked_(self, sender):
         self.owner.open_settings()

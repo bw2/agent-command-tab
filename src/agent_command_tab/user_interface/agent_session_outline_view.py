@@ -18,7 +18,7 @@ import time
 import objc
 from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundStyleNormal, NSBezierPath, NSColor, NSCursor,
                     NSDragOperationMove, NSDragOperationNone, NSEventModifierFlagControl, NSFont, NSFontAttributeName,
-                    NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSForegroundColorAttributeName,
+                    NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName,
                     NSGraphicsContext,
                     NSImageOnly, NSImageScaleNone,
                     NSImageView, NSInsetRect, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
@@ -76,7 +76,9 @@ ROW_LEFT_MARGIN = 8
 GAP_AFTER_PREFIX = 2
 NAME_FIELD_PADDING = 4
 GAP_BEFORE_DETAILS = 8
-GAP_BETWEEN_COLUMNS = 6  # between the columns at a tab row's right edge
+# Between the columns at a tab row's right edge: 16 since 2026-10-28, 6 before, which left about 11
+# points between a column's text and a next column its text fills (user request).
+GAP_BETWEEN_COLUMNS = 16
 ROW_RIGHT_MARGIN = 8
 TEXT_FIELD_INSETS = 5  # a label's text sits a few points inside its field
 # A collapsed window's state counts can grow ("9 idle" becomes "10 idle") without widening the dropdown.
@@ -639,6 +641,9 @@ class AgentSessionListController(NSObject):
         self.title_before_rename = ""
         self.regular_font = NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, NSFontWeightRegular)
         self.bold_font = NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, NSFontWeightBold)
+        # The status text, easier to read and still lighter than the front tab's bold name (user
+        # request, 2026-10-28). Every weight of the font is as wide, so columns are measured in the regular one.
+        self.semibold_font = NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, NSFontWeightSemibold)
         self.preview_font = NSFont.monospacedSystemFontOfSize_weight_(PREVIEW_FONT_SIZE, NSFontWeightRegular)
         self.column_title_font = NSFont.monospacedSystemFontOfSize_weight_(COLUMN_TITLE_FONT_SIZE, NSFontWeightMedium)
         # The longer line of each column's title with a sort arrow after it: a shown column is at
@@ -1197,6 +1202,9 @@ class AgentSessionListController(NSObject):
                     column_text.addAttribute_value_range_(NSForegroundColorAttributeName,
                                                           build_color_from_name(parts.context_fill_percent_color_name),
                                                           (share_start, len(parts.context_text) - share_start))
+                if parts_field_name == "state_text" and parts.state_color_name:  # user requests, 2026-10-28
+                    column_text.addAttributes_range_({NSForegroundColorAttributeName: build_color_from_name(parts.state_color_name),
+                                                      NSFontAttributeName: self.semibold_font}, (0, len(parts.state_text)))
                 column_view.setAttributedStringValue_(column_text)
         row_view.column_widths = dict(self.column_widths)
         row_view.room_for_the_previews_button = self.room_for_the_previews_button

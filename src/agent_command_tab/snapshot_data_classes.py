@@ -17,7 +17,7 @@ import collections
 AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD = {
     "status_reason": "", "status_since": 0.0, "preview_line": "", "context_fill_percent": None,
     "background_task_count": 0, "ended_abnormally_at": None, "is_in_front": False, "last_time_tab_was_seen": None,
-    "running_command_name": "", "running_command_started_at": None, "context_tokens": None, "started_at": None,
+    "running_tool_name": "", "running_tool_started_at": None, "context_tokens": None, "started_at": None,
     "memory_bytes": None, "cpu_percent": None, "slash_commands": (), "is_paused_with_the_processes_below_it": False,
     "child_processes": (),
 }
@@ -29,8 +29,11 @@ AgentSessionEntry = collections.namedtuple(
 )
 AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent session. last_time_tab_was_seen is when "
                              "the tab was last selected in the key iTerm2 window while iTerm2 was active, or None. "
-                             "running_command_name is the command a working agent started in this turn and waits "
-                             "on (for example \"python3\"), or \"\" while it thinks. context_tokens is how many "
+                             "running_tool_name is the tool a working agent waits on, and running_tool_started_at "
+                             "when it started (iterm2_snapshot_builder.choose_tool_the_agent_is_waiting_on): a "
+                             "command it started in this turn (for example \"python3\"), or another tool open for "
+                             "5 seconds or more (for example \"Agent\"), or \"\" while it thinks (\"running_command_"
+                             "name\" until 2026-10-28, when other tools began to count). context_tokens is how many "
                              "tokens its context holds, from its conversation file, or None if unknown, and "
                              "context_fill_percent that as a whole percent of its context window, or None. "
                              "started_at is when the agent's process started (the Created Time column), or None. "

@@ -15,9 +15,9 @@ from agent_command_tab.session_status_computation import STATES_IN_URGENCY_ORDER
 
 def find_when_the_shown_state_started(agent_session_entry):
     """Returns when the state an agent session's row shows started, which its time counts from:
-    while it runs a command ("running"), when the command started; otherwise its last state change."""
-    if agent_session_entry.running_command_name:
-        return agent_session_entry.running_command_started_at
+    while it waits on a tool ("running"), when the tool started; otherwise its last state change."""
+    if agent_session_entry.running_tool_name:
+        return agent_session_entry.running_tool_started_at
     return agent_session_entry.status_since
 
 
