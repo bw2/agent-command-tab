@@ -21,7 +21,9 @@ class InstallHooksFromTheListTests(unittest.TestCase):
         NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
     def setUp(self):
-        self.settings_path = os.path.join(tempfile.mkdtemp(), "settings.json")
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.settings_path = os.path.join(folder.name, "settings.json")
         with open(self.settings_path, "w") as settings_file:
             json.dump({"model": "opus"}, settings_file)
         list_settings_file_paths = lambda agent_tool_name: [self.settings_path] if agent_tool_name == "Claude Code" else []

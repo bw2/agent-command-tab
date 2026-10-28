@@ -139,6 +139,18 @@ class ReadClaudeCodePreviewTests(unittest.TestCase):
         self.assertEqual((fields["last_prompt"], fields["message_since_prompt"]),
                          ("run the tests in the background", "All 40 tests pass."))
 
+    def test_a_message_from_another_claude_code_session_starts_a_turn(self):  # code review, 2026-10-28
+        fields = self.read([
+            claude_user_record("fix the bug"),
+            claude_assistant_record({"type": "text", "text": "Fixed it and committed."}),
+            # As Claude Code wrote one on this Mac (SendMessage from another session).
+            claude_user_record("Another Claude session sent a message:\n<cross-session-message from-name=\"a7\">I renamed the "
+                               "column.</cross-session-message>", isMeta=True, turnOrigin="peer", promptSource="system",
+                               origin={"kind": "peer", "name": "a7"}),
+            claude_assistant_record({"type": "thinking", "thinking": "..."}),
+        ])
+        self.assertEqual((fields["last_prompt"], fields["message_since_prompt"]), ("fix the bug", ""))
+
     def test_the_saved_last_prompt_stands_in_for_a_prompt_older_than_the_part_read(self):
         fields = self.read([
             claude_assistant_record({"type": "text", "text": "Still working on it."}),

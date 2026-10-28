@@ -18,7 +18,8 @@ CODEX_DOCS = AgentSessionForMessages("Codex", MESSAGES_THROUGH_CODEX_QUEUE, "01a
 
 class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
     def test_a_claude_code_session_learns_how_to_reach_claude_code_and_codex_sessions(self):
-        message = build_message_asking_agent_session_to_talk_to_the_others("  Please sync up.\n", PLANNING, [REVIEWS, CODEX_TESTS])
+        message = build_message_asking_agent_session_to_talk_to_the_others("  Please sync up.\n", PLANNING, [REVIEWS, CODEX_TESTS],
+                                                                           [PLANNING, REVIEWS, CODEX_TESTS])
         self.assertEqual(message.split("\n"), [
             "Please sync up.",
             "",
@@ -33,7 +34,8 @@ class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
         ])
 
     def test_a_codex_session_can_message_codex_sessions_but_not_claude_code_sessions(self):
-        message = build_message_asking_agent_session_to_talk_to_the_others("Please sync up.", CODEX_TESTS, [PLANNING, CODEX_DOCS])
+        message = build_message_asking_agent_session_to_talk_to_the_others("Please sync up.", CODEX_TESTS, [PLANNING, CODEX_DOCS],
+                                                                           [CODEX_TESTS, PLANNING, CODEX_DOCS])
         lines = message.split("\n")
         self.assertEqual(lines[2], "You are the Codex session 01a15e4e-de92-7f31-af6e-877571d0444b (process ID 103, "
                                    'folder /Users/me/project/tests, iTerm2 tab "codex tests").')
@@ -41,8 +43,14 @@ class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
         self.assertIn("but it can message you", lines[5])
         self.assertTrue(lines[6].endswith('run: codex queue --thread 01a15e4e-facd-7073-85e7-90d8392b1d54 --message="<your message>"'))
 
+    def test_a_codex_session_sent_the_only_message_isnt_promised_messages_from_claude_code(self):  # code review, 2026-10-28
+        message = build_message_asking_agent_session_to_talk_to_the_others("Please sync up.", CODEX_TESTS, [PLANNING], [CODEX_TESTS])
+        self.assertTrue(message.endswith("A Codex session has no way to send a Claude Code session a message, so it can't hear "
+                                         "from you, and it wasn't told how to message you."))
+
     def test_an_unknown_folder_says_so(self):
-        message = build_message_asking_agent_session_to_talk_to_the_others("Hi.", PLANNING, [REVIEWS._replace(working_folder="")])
+        message = build_message_asking_agent_session_to_talk_to_the_others("Hi.", PLANNING, [REVIEWS._replace(working_folder="")],
+                                                                           [PLANNING])
         self.assertIn("folder unknown", message)
 
 

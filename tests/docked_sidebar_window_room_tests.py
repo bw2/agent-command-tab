@@ -55,6 +55,7 @@ class DockedSidebarWindowRoomTests(unittest.TestCase):
         cached_frames = cached_frames or {}
         core.gathered_windows = [{"window_id": window.window_id, "frame": cached_frames.get(window.window_id, window.frame),
                                   "tabs": []} for window in windows]
+        core.windows_were_gathered = True  # as after the first gather
         return core
 
     def test_docking_narrows_a_window_and_undocking_restores_it(self):
@@ -108,6 +109,23 @@ class DockedSidebarWindowRoomTests(unittest.TestCase):
             asyncio.run(core_after_restart.change_reserved_screen_area(None))
             self.assertEqual(restored_window.frame, (100, 50, 1800, 1000))
             self.assertEqual(load_docked_window_frames(file_path), {})
+
+    def test_an_area_message_before_the_first_gather_keeps_the_saved_frames(self):  # code review, 2026-10-28
+        with tempfile.TemporaryDirectory() as folder:
+            file_path = os.path.join(folder, "docked_window_frames.json")
+            window = StandInWindow("w1", (100, 50, 1800, 1000))
+            asyncio.run(self.make_core([window], docked_window_frames_file_path=file_path)
+                        .change_reserved_screen_area(RESERVED_AREA))
+            # iTerm2 restarted too, and the app says docking is off before the windows are gathered.
+            restored_window = StandInWindow("w1-after-restart", window.frame)
+            core_after_restart = self.make_core([restored_window], docked_window_frames_file_path=file_path)
+            core_after_restart.gathered_windows, core_after_restart.windows_were_gathered = [], False
+            asyncio.run(core_after_restart.change_reserved_screen_area(None))
+            self.assertEqual(len(load_docked_window_frames(file_path)), 1)  # kept for the restored window
+            core_after_restart.gathered_windows = [{"window_id": "w1-after-restart", "frame": restored_window.frame, "tabs": []}]
+            core_after_restart.windows_were_gathered = True
+            asyncio.run(core_after_restart.make_room_for_reserved_area())  # as after the first gather
+            self.assertEqual(restored_window.frame, (100, 50, 1800, 1000))
 
     def test_after_a_restart_with_docking_off_owed_room_is_given_back_once_the_app_says_so(self):
         with tempfile.TemporaryDirectory() as folder:

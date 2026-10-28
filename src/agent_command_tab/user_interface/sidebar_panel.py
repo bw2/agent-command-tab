@@ -147,6 +147,7 @@ class SidebarController(NSObject):
         self.hide_timer = None
         self.keep_shown_until = 0  # set by show_for_a_few_seconds
         self.shown_from_the_menu = False  # out because of show_for_a_few_seconds (until it next hides)
+        self.is_kept_hidden = False  # hidden by the menu's Show popup or Show window (hide_until_shown_again)
         self.mouse_monitors = []
         self.click_monitor = None  # while a sidebar that hides by itself is in (watch_for_clicks_in_other_apps)
         self.width_drag_start = None  # (pointer x, width) while the inner edge is dragged
@@ -207,8 +208,28 @@ class SidebarController(NSObject):
 
     @objc.python_method
     def apply_settings(self, settings):
-        """Shows, hides or moves the sidebar to match the settings (called on every settings change)."""
+        """Shows, hides or moves the sidebar to match the settings (called on every settings
+        change). One kept hidden stays hidden unless Show as or the sidebar's mode changed."""
+        if self.settings is not None and (settings["show_as"], settings["sidebar_mode"]) != (
+                self.settings["show_as"], self.settings["sidebar_mode"]):
+            self.is_kept_hidden = False
         self.settings = settings
+        self.update_placement()
+
+    @objc.python_method
+    def hide_until_shown_again(self):
+        """The menu bar icon's menu's Show popup or Show window: slides the sidebar out at once,
+        and keeps one set to stay visible out, a docked one giving its room back, through settings
+        changes (a sort order chosen in the window) until show_again, or until Show as or the
+        sidebar's mode changes (code review, 2026-10-28)."""
+        self.is_kept_hidden = True
+        self.hide_now()
+        self.owner.reserve_screen_area(None)
+
+    @objc.python_method
+    def show_again(self):
+        """Ends hide_until_shown_again: a sidebar set to stay visible slides in for good, a docked one taking its room again."""
+        self.is_kept_hidden = False
         self.update_placement()
 
     @objc.python_method
@@ -245,10 +266,17 @@ class SidebarController(NSObject):
             # Keep the current visibility: a settings change (for example a width just dragged
             # with the pointer still on the sidebar) mustn't make it vanish; the pointer decides.
             self.set_shown(self.is_shown, animate=False)
+        elif self.is_kept_hidden:  # hidden by the menu's Show popup or Show window: no room kept for it either
+            self.stop_tracking_the_pointer()
+            self.set_shown(False, animate=False)
+            self.owner.reserve_screen_area(None)
+            return
         else:
             self.stop_tracking_the_pointer()
             self.cancel_hide_timer()
             self.set_shown(True, animate=False)
+            # Shown for good now, so a later change of Show as hides it (code review, 2026-10-28).
+            self.shown_from_the_menu = False
         # Docked: iTerm2 windows on this monitor are kept out of the sidebar's area.
         if self.settings["sidebar_mode"] == "docked":
             screen = self.screens[self.placement.screen_index]

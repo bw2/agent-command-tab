@@ -12,7 +12,8 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSButton, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
-                    NSEventModifierFlagCommand, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSMakePoint, NSMakeRect,
+                    NSEventModifierFlagCommand, NSEventTypeKeyDown, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp,
+                    NSLeftArrowFunctionKey, NSMakePoint, NSMakeRect, NSRightArrowFunctionKey,
                     NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone,
                     NSImageScaleProportionallyUpOrDown, NSImageView, NSMenu,
                     NSNormalWindowLevel, NSPopover,
@@ -21,6 +22,7 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
 from Foundation import NSIndexSet
 
 from agent_command_tab.app_controller import AppController
+from agent_command_tab.command_line import RECONNECT_EXIT_STATUS
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
@@ -121,6 +123,9 @@ class RecordingOwner:
 
     def install_hooks(self, agent_tool_names):
         self.hooks_install_requests.append(list(agent_tool_names))
+
+    def window_frame_changed(self, setting_name, frame):
+        pass  # the list window's frame is saved by the app controller, not looked at here
 
 
 def resolve_color(color, appearance_name):
@@ -889,7 +894,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         accessory_subviews = alert.accessoryView().subviews()
         labels = [subview.stringValue() for subview in accessory_subviews if isinstance(subview, NSTextField)]
         self.assertIn("Send the message to:", labels)
-        self.assertIn("The message will include the other agents' names, process IDs and working directories.", labels)
+        self.assertIn("The message will also include the other agents' names, and process ids", labels)
         radio_buttons = [subview for subview in accessory_subviews if isinstance(subview, NSButton)]
         radio_buttons.sort(key=lambda radio_button: -radio_button.frame().origin.y)  # top first
         self.assertEqual([radio_button.title() for radio_button in radio_buttons], ["planning", "reviews", "each of the 2 agents"])
@@ -1588,6 +1593,21 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.click_row_arrow(1)
         self.assertEqual(outline_view.numberOfRows(), 8)
 
+    def test_the_right_and_left_arrow_keys_open_and_close_a_selected_tab_row(self):  # code review, 2026-10-28
+        outline_view = self.apply_snapshot_with_child_processes()
+        tab_item = outline_view.itemAtRow_(1)
+        outline_view.selectRowIndexes_byExtendingSelection_(build_index_set([1]), False)
+
+        def press(function_key, key_code):
+            outline_view.keyDown_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+                NSEventTypeKeyDown, NSMakePoint(0, 0), 0, 0, outline_view.window().windowNumber(), None, function_key,
+                function_key, False, key_code))
+        for function_key, key_code, row_count in ((NSRightArrowFunctionKey, 124, 10), (NSLeftArrowFunctionKey, 123, 8),
+                                                  (NSRightArrowFunctionKey, 124, 10)):
+            press(function_key, key_code)
+            self.assertEqual(outline_view.numberOfRows(), row_count, function_key)
+            self.assertEqual(self.list_controller.list_selected_items(), [tab_item])  # still selected
+
     def test_process_rows_come_once_the_arrows_button_is_up(self):
         outline_view = self.apply_snapshot_with_child_processes()
         self.list_controller.row_press_in_progress = True  # as RowButton.mouseDown_ sets it around the click's action
@@ -1733,7 +1753,7 @@ class AutomaticIconColorTests(unittest.TestCase):
         class StandInAppController:
             sidebar_controller = unittest.mock.Mock(show_for_a_few_seconds=lambda: calls.append("show"),
                                                     hide_now=lambda: calls.append("hide"),
-                                                    update_placement=lambda: calls.append("show for good"))
+                                                    show_again=lambda: calls.append("show for good"))
             # Closed first, so a dropdown it kept open closes too (user request, 2026-10-28).
             settings_window_controller = unittest.mock.Mock(close_if_open=lambda: calls.append("close settings"))
 
@@ -1898,6 +1918,9 @@ class SidebarWidthDragTests(unittest.TestCase):
             self.assertFalse(self.controller.is_shown or self.controller.window.isVisible(), show_as_before)
             self.assertEqual(stand_in_app_controller.settings["show_as"], "window")
             window_frame = stand_in_app_controller.settings["list_window_frame"]
+            # The window itself is there too, also when it was open already (code review, 2026-10-28).
+            frame = list_window_controller.window.frame()
+            self.assertEqual([frame.origin.x, frame.origin.y, frame.size.width, frame.size.height], window_frame, show_as_before)
             self.assertEqual(shown_frames, [window_frame] * show_call_count, show_as_before)
             self.assertEqual(stand_in_app_controller.settings_window_placements, show_call_count, show_as_before)
             content_rect = list_window_controller.window.contentRectForFrameRect_(NSMakeRect(*window_frame))
@@ -1913,6 +1936,46 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.assertTrue(self.controller.is_shown)
         self.assertIsNotNone(self.controller.hide_timer)  # checks again when the 5 seconds are up
         self.controller.cancel_hide_timer()
+
+    def test_a_sidebar_the_menu_hid_stays_hidden_through_settings_changes_until_its_mode_changes(self):  # code review, 2026-10-28
+        reserved_areas = []
+        self.owner.reserve_screen_area = reserved_areas.append
+        self.controller.settings = dict(self.controller.settings, show_as="sidebar", sidebar_mode="docked")
+        self.controller.hide_until_shown_again()  # the menu's Show window
+        self.assertEqual(reserved_areas, [None])  # the docked sidebar's room is given back at once
+        self.controller.apply_settings(dict(self.controller.settings, list_sort_order="activity"))  # a sort order chosen in the window
+        self.assertFalse(self.controller.is_shown or self.controller.window.isVisible())
+        self.assertEqual(set(reserved_areas), {None})  # no room kept for it
+        self.assertTrue(self.controller.is_kept_hidden)
+        # Show sidebar (or a click on the icon) brings it back for good, taking its room again; on
+        # a screen far outside every monitor, so it stays out of sight.
+        self.addCleanup(self.controller.window.orderOut_, None)
+        far_away_screens = [{"name": "Far away", "frame": (-4000, -4000, 1500, 1000), "visible_frame": (-4000, -4000, 1500, 970)}]
+        with unittest.mock.patch("agent_command_tab.user_interface.sidebar_panel.read_monitors_from_screens", lambda: far_away_screens):
+            self.controller.show_again()
+        self.assertFalse(self.controller.is_kept_hidden)
+        self.assertTrue(self.controller.is_shown)
+        self.assertIsInstance(reserved_areas[-1], dict)
+
+    def test_a_sidebar_the_menu_showed_then_shown_for_good_hides_when_show_as_changes_away(self):  # code review, 2026-10-28
+        self.owner.reserve_screen_area = lambda area: None
+        # On a screen far outside every monitor, so it stays out of sight.
+        self.addCleanup(self.controller.window.orderOut_, None)
+        self.addCleanup(self.controller.watch_for_clicks_in_other_apps, False)
+        self.addCleanup(self.controller.cancel_hide_timer)
+        far_away_screens = [{"name": "Far away", "frame": (-4000, -4000, 1500, 1000), "visible_frame": (-4000, -4000, 1500, 970)}]
+        with unittest.mock.patch("agent_command_tab.user_interface.sidebar_panel.read_monitors_from_screens", lambda: far_away_screens):
+            self.controller.apply_settings(dict(self.controller.settings, show_as="popup", sidebar_mode="floating"))
+            self.controller.show_for_a_few_seconds()  # the menu's Show sidebar
+            self.assertTrue(self.controller.is_shown)
+            self.controller.apply_settings(dict(self.controller.settings, show_as="sidebar"))  # chosen in Settings
+            self.assertTrue(self.controller.is_shown)
+            self.controller.apply_settings(dict(self.controller.settings, show_as="popup"))  # and then changed back
+        self.assertFalse(self.controller.is_shown)
+        self.controller.hide_until_shown_again()
+        self.controller.apply_settings(dict(self.controller.settings, sidebar_mode="auto_hide"))  # another mode: not kept hidden
+        self.assertFalse(self.controller.is_kept_hidden)
+        self.controller.stop_tracking_the_pointer()
 
     def test_a_sidebar_not_chosen_in_show_as_is_parked_just_past_its_edge(self):
         # So the menu's "Show sidebar" slides it in from that edge. (The shown case isn't tested
@@ -2207,6 +2270,20 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertEqual(self.owner.settings["sidebar_width"], 500)
         self.assertEqual(steps, ["save a moved window's frame", "give room back", "exit 0"])
 
+    def test_exiting_to_reconnect_saves_a_width_being_typed_first(self):  # code review, 2026-10-28
+        self.show_the_sidebar_section()
+        width_field = self.controller.sidebar_width_field
+        self.assertTrue(self.controller.window.makeFirstResponder_(width_field))
+        width_field.currentEditor().setString_("500")  # typed, without Return or Tab
+        steps = []
+        stand_in_app_controller = unittest.mock.Mock(settings_window_controller=self.controller,
+                                                     save_settings_if_scheduled=lambda: steps.append("save a moved window's frame"))
+        stand_in_app_controller.save_settings_before_exiting = lambda: AppController.save_settings_before_exiting(stand_in_app_controller)
+        with unittest.mock.patch("os._exit", lambda status: steps.append(f"exit {status}")):
+            AppController.exit_now_with_reconnect_status(stand_in_app_controller)
+        self.assertEqual(self.owner.settings["sidebar_width"], 500)
+        self.assertEqual(steps, ["save a moved window's frame", f"exit {RECONNECT_EXIT_STATUS}"])
+
     def test_the_show_as_popup_offers_the_three_ways_and_saves_the_choice(self):
         self.assertEqual(self.controller.show_as_popup.itemTitles(), ["Popup", "Sidebar", "Window"])  # user request, 2026-10-27
         self.assertEqual(self.controller.show_as_popup.titleOfSelectedItem(), "Popup")  # the default
@@ -2383,15 +2460,19 @@ class ShowTheListAsTests(unittest.TestCase):
                 self.status_item_controller = unittest.mock.Mock(show_popover=lambda: calls.append("show popup"))
                 self.sidebar_controller = unittest.mock.Mock(
                     is_shown="sidebar" in shown_list_formats, show_for_a_few_seconds=lambda: calls.append("show sidebar briefly"),
-                    update_placement=lambda: calls.append("show sidebar for good"), hide_now=lambda: calls.append("hide sidebar"))
-                self.list_window_controller = unittest.mock.Mock(hide=lambda: calls.append("hide window"))
-                self.list_window_controller.window.isVisible.return_value = "window" in shown_list_formats
+                    show_again=lambda: calls.append("show sidebar for good"),
+                    hide_until_shown_again=lambda: calls.append("hide sidebar until shown again"))
+                # "window behind" is open but behind other windows: not in front, as the global
+                # shortcut asks too, but hidden when another view is chosen (code review, 2026-10-28).
+                self.list_window_controller = unittest.mock.Mock(hide=lambda: calls.append("hide window"),
+                                                                 is_in_front=lambda: "window" in shown_list_formats)
+                self.list_window_controller.window.isVisible.return_value = bool({"window", "window behind"} & shown_list_formats)
 
             def close_dropdown(self):
                 calls.append("hide popup")
 
-            def reserve_screen_area(self, frame):
-                calls.append(f"reserve {frame}")
+            def list_window_closed(self):
+                calls.append("settings window level updated")
 
             def show_the_list_window(self):
                 calls.append("show window")
@@ -2401,21 +2482,47 @@ class ShowTheListAsTests(unittest.TestCase):
 
             def show_the_sidebar(self):
                 AppController.show_the_sidebar(self)
-
-            def hide_the_sidebar(self):
-                AppController.hide_the_sidebar(self)
         for show_as, sidebar_mode, shown_list_formats, show_as_choice, expected_calls in (
                 ("window", "auto_hide", {"window"}, "window", []),  # already showing that way: nothing
-                ("window", "auto_hide", {"window"}, "popup", ["hide window", "show popup"]),
+                ("window", "auto_hide", {"window behind"}, "window", ["show window"]),  # brought forward
+                ("window", "auto_hide", {"window"}, "popup", ["hide window", "settings window level updated", "show popup"]),
+                ("window", "auto_hide", {"window behind"}, "sidebar",
+                 ["hide window", "settings window level updated", "show sidebar briefly"]),
                 ("popup", "floating", {"popup"}, "sidebar", ["hide popup", "show sidebar briefly"]),
-                ("sidebar", "docked", {"sidebar"}, "window", ["hide sidebar", "reserve None", "show window"]),  # room given back
+                ("sidebar", "docked", {"sidebar"}, "window", ["hide sidebar until shown again", "show window"]),
                 ("sidebar", "docked", set(), "sidebar", ["show sidebar for good"]),  # back after Show window hid it
-                ("popup", "auto_hide", {"popup", "window"}, "sidebar", ["hide popup", "hide window", "show sidebar briefly"])):
+                ("popup", "auto_hide", {"popup", "window"}, "sidebar",
+                 ["hide popup", "hide window", "settings window level updated", "show sidebar briefly"])):
             calls.clear()
             stand_in_app_controller = StandInAppController(show_as, sidebar_mode, shown_list_formats)
             AppController.show_the_list_as(stand_in_app_controller, show_as_choice)
             self.assertEqual(calls, expected_calls, (show_as, shown_list_formats, show_as_choice))
             self.assertEqual(stand_in_app_controller.settings["show_as"], show_as)  # never changed
+
+    def test_the_window_dropped_on_the_menu_bar_icon_turns_into_the_dropdown(self):  # code review, 2026-10-28
+        calls = []
+
+        class StandInAppController:
+            def __init__(self, show_as):
+                self.settings = {"show_as": show_as}
+                self.status_item_controller = unittest.mock.Mock(show_popover=lambda: calls.append("show popup"))
+                self.list_window_controller = unittest.mock.Mock(hide=lambda: calls.append("hide window"))
+
+            def pointer_is_on_the_menu_bar_icon(self):
+                return True
+
+            def settings_changed(self, new_settings):
+                calls.append(f"show as {new_settings['show_as']}")
+
+            def list_window_closed(self):
+                calls.append("settings window level updated")
+        for show_as, expected_calls in (("window", ["show as popup", "show popup"]),
+                                        # Opened by the menu's Show window: it just hides, and Show as stays.
+                                        ("sidebar", ["hide window", "settings window level updated", "show popup"]),
+                                        ("popup", ["hide window", "settings window level updated", "show popup"])):
+            calls.clear()
+            AppController.list_window_drag_ended(StandInAppController(show_as))
+            self.assertEqual(calls, expected_calls, show_as)
 
 
 if __name__ == "__main__":

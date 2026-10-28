@@ -26,7 +26,10 @@ Not published yet. Once it is:
 ```bash
 pipx install agent-command-tab        # or: pip install agent-command-tab
 brew install bw2/tap/agent-command-tab
+brew install --cask bw2/tap/agent-command-tab-app   # the app (AgentCommandTab.app), signed and notarized
 ```
+
+The app can also be downloaded from the [releases page](https://github.com/bw2/agent-command-tab/releases): open the disk image and drag AgentCommandTab into Applications. Its commands run from its own folder, for example `/Applications/AgentCommandTab.app/Contents/MacOS/AgentCommandTab remove-hooks`.
 
 From a clone of this repository:
 
@@ -58,4 +61,4 @@ The shortcut needs the Accessibility permission (System Settings > Privacy & Sec
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The app uses iTerm2's `iterm2` Python package, which is licensed GPL-2.0-or-later and is installed alongside it as a separate package.
+MIT; see [LICENSE](LICENSE). The app uses iTerm2's `iterm2` Python package, which is licensed GPL-2.0-or-later. pip and the Homebrew formula install it alongside as a separate package. The app download bundles it, so the download as a whole is distributed under the GPL, and each release offers the bundled `iterm2` version's source.

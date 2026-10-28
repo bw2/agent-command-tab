@@ -21,9 +21,9 @@ from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundS
                     NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName,
                     NSGraphicsContext,
                     NSImageOnly, NSImageScaleNone,
-                    NSImageView, NSInsetRect, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
+                    NSImageView, NSInsetRect, NSLeftArrowFunctionKey, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
                     NSMakeRect, NSMenu, NSMenuItem, NSMutableAttributedString, NSMutableParagraphStyle, NSOutlineView,
-                    NSParagraphStyleAttributeName, NSPasteboardItem,
+                    NSParagraphStyleAttributeName, NSPasteboardItem, NSRightArrowFunctionKey,
                     NSTableCellView, NSTableColumn, NSTableColumnAutoresizingMask, NSTableRowView,
                     NSTableViewLastColumnOnlyAutoresizingStyle, NSTableViewSelectionHighlightStyleRegular,
                     NSTableViewStylePlain, NSTextAlignmentCenter, NSTextAlignmentLeft, NSTextAlignmentRight, NSTextField,
@@ -169,11 +169,16 @@ class OutlineListItem(NSObject):
 
 class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
     """An NSOutlineView that draws no disclosure triangles of its own (each row has its own arrow
-    button), and that tells its delegate when the button goes down on a row and comes back up,
-    so holding a tab row can show that tab for a moment."""
+    button), that tells its delegate when the button goes down on a row and comes back up, so
+    holding a tab row can show that tab for a moment, and that has its delegate open and close
+    selected tab rows with the Right and Left arrow keys."""
 
     def frameOfOutlineCellAtRow_(self, row):
         return NSZeroRect
+
+    def keyDown_(self, event):
+        if not self.delegate().open_or_close_selected_tab_rows_for_arrow_key(event.charactersIgnoringModifiers()):
+            objc.super(OutlineViewWithoutDisclosureTriangles, self).keyDown_(event)
 
     def mouseDown_(self, event):
         is_plain_press = event.clickCount() == 1 and not event.modifierFlags() & NSEventModifierFlagControl
@@ -1118,6 +1123,26 @@ class AgentSessionListController(NSObject):
             self.set_previews_open([item], not self.tab_row_is_open(item))
         else:
             self.toggle_expansion(item)
+
+    @objc.python_method
+    def open_or_close_selected_tab_rows_for_arrow_key(self, characters):
+        """The Right arrow key opens the selected tab rows and the Left arrow key closes them, as
+        their arrow buttons do, when every selected row is a tab row that can open and one of
+        them would change: a closed tab row has no process rows below it, so the outline view's
+        own handling finds nothing to open (code review, 2026-10-28). Returns whether it did;
+        otherwise the outline view handles the key (a window row's rows, say).
+
+        Args:
+            characters: The key event's charactersIgnoringModifiers.
+        """
+        is_open = {NSRightArrowFunctionKey: True, NSLeftArrowFunctionKey: False}.get(characters)
+        selected_items = self.list_selected_items()
+        if (is_open is None or not selected_items
+                or not all(item.kind == "tab" and self.row_can_open(item) for item in selected_items)
+                or all(self.tab_row_is_open(item) == is_open for item in selected_items)):
+            return False
+        self.set_previews_open(selected_items, is_open)
+        return True
 
     def disclosureButtonClicked_(self, sender):
         row = self.outline_view.rowForView_(sender)

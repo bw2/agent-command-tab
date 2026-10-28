@@ -42,11 +42,17 @@ def classify_user_record(record, blocks):
     Returns:
         "tool_result" for a tool's result; "prompt" for text the user typed; "command" for a
         slash command or skill the user typed (describe_typed_command); "notification" for a
-        background task's notification; or None for anything else: not a user record, a
-        subagent's record, a meta record (such as a skill's text, written in the middle of a
-        turn), the summary after /compact, Claude Code's own texts, or an empty record.
+        background task's notification or a message from another Claude Code session (its
+        SendMessage tool's, a meta record with turnOrigin "peer"; code review, 2026-10-28); or
+        None for anything else: not a user record, a subagent's record, another meta record
+        (such as a skill's text, written in the middle of a turn), the summary after /compact,
+        Claude Code's own texts, or an empty record.
     """
-    if record.get("type") != "user" or record.get("isSidechain") or record.get("isMeta") or record.get("isCompactSummary"):
+    if record.get("type") != "user" or record.get("isSidechain") or record.get("isCompactSummary"):
+        return None
+    if record.get("turnOrigin") == "peer":
+        return "notification"
+    if record.get("isMeta"):
         return None
     if any(block.get("type") == "tool_result" for block in blocks):
         return "tool_result"

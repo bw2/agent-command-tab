@@ -38,12 +38,15 @@ def describe_agent_session_for_messages(agent_session):
             f'folder {agent_session.working_folder or "unknown"}, iTerm2 tab "{agent_session.tab_title}")')
 
 
-def explain_how_to_send_a_message(sender, recipient):
+def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_too):
     """Returns the sentence telling the sender how to send the recipient a message, or why it can't.
 
     Args:
         sender: The AgentSessionForMessages that gets this explanation.
         recipient: The AgentSessionForMessages it would send a message to.
+        recipient_gets_the_message_too: Whether the recipient gets a Talk to Each Other message
+            too, so it learns how to message the sender (only the one chosen in the Talk to Each
+            Other window may get it; code review, 2026-10-28).
     """
     if recipient.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
         # The message attached to its option, so one starting with "-" isn't read as an option.
@@ -51,19 +54,25 @@ def explain_how_to_send_a_message(sender, recipient):
                 f'--message="<your message>"')
     if sender.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL:
         return f'To message it, use your SendMessage tool with to: "{recipient.address}".'
-    return ("A Codex session has no way to send a Claude Code session a message, so it can't hear from you directly, "
-            "but it can message you.")
+    if recipient_gets_the_message_too:
+        return ("A Codex session has no way to send a Claude Code session a message, so it can't hear from you directly, "
+                "but it can message you.")
+    return ("A Codex session has no way to send a Claude Code session a message, so it can't hear from you, "
+            "and it wasn't told how to message you.")
 
 
-def build_message_asking_agent_session_to_talk_to_the_others(note, recipient, other_agent_sessions):
+def build_message_asking_agent_session_to_talk_to_the_others(note, recipient, other_agent_sessions, agent_sessions_that_get_the_message):
     """Returns the message one agent session gets from "Talk to Each Other".
 
     Args:
         note: The user's note, from the Talk to Each Other window.
         recipient: The AgentSessionForMessages that gets this message.
         other_agent_sessions: The AgentSessionForMessages of the other sessions, in list order.
+        agent_sessions_that_get_the_message: The AgentSessionForMessages of every session that
+            gets a Talk to Each Other message this time.
     """
     lines = [note.strip(), "", f"You are {describe_agent_session_for_messages(recipient)}.", "", "The other sessions:"]
-    lines += [f"- {describe_agent_session_for_messages(other)}. {explain_how_to_send_a_message(recipient, other)}"
+    lines += [f"- {describe_agent_session_for_messages(other)}. "
+              f"{explain_how_to_send_a_message(recipient, other, other in agent_sessions_that_get_the_message)}"
               for other in other_agent_sessions]
     return "\n".join(lines)

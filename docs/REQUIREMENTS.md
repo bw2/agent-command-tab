@@ -232,9 +232,10 @@ All answered or approved on 2026-10-18.
 - Q6. The default stuck time limit is 10 minutes (R20).
 - Q7. The installer may add hook entries to Claude Code's and Codex's settings files, through an explicit `install-hooks` command that shows the change first, makes a backup, adds entries alongside existing hooks, and can remove them again. Without hooks, Claude Code still gets status from iTerm2, but there are no previews, and Codex gets only working or idle from screen activity.
 - Q8. Version 1 includes global keyboard shortcuts (open the dropdown; jump to the next agent session that's asking) and type-to-filter with keyboard navigation in the list. Allow and Deny buttons for permission prompts, and a user-defined command list in the right-click menu, are left for later.
+- Q9. License (answered 2026-10-28). Our own code is MIT. The `iterm2` package is GPL-2.0-or-later, so the app download, which bundles it, is distributed under the GPL: the app carries the GPL's text and a notice, and each release offers the source of the bundled `iterm2` version next to the download. pip and the Homebrew formula install `iterm2` as a separate package. This is not legal advice.
 - Q10. Work importance (R26) is judged by local activity rules, not by AI, in version 1.
 - Q11. Status dot shapes and colors are as in R26.1.
 
 ## Open questions
 
-- Q9. License. The `iterm2` package is GPL-2.0-or-later. Our own files could be MIT (compatible with the GPL), but a bundled download that includes the `iterm2` package must be distributed under GPL terms. GPL-2.0-or-later for the whole project avoids that split. This is not legal advice.
+None.

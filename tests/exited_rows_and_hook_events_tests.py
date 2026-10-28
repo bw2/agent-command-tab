@@ -117,8 +117,19 @@ class HookEventTests(unittest.IsolatedAsyncioTestCase):
             [700, "sh"], [650, "2.1.311"], [640, "bash"], [101, "2.1.311"]]))
         self.assertEqual(set(self.core.hook_state_by_agent_process_id), {650})
 
+    def test_a_clear_typed_in_the_terminal_asks_for_the_next_conversations_id_at_once(self):  # code review, 2026-10-28
+        self.core.process_ids_asked_about_in_claude_agents = {101, 102}
+        self.core.note_hook_event(make_event("SessionStart", 101, source="compact"))  # the same conversation goes on
+        self.assertFalse(self.core.regather_needed.is_set())
+        self.core.note_hook_event(make_event("SessionEnd", 101, reason="clear"))
+        self.core.note_hook_event(make_event("SessionStart", 101, source="clear"))
+        self.assertEqual(self.core.process_ids_asked_about_in_claude_agents, {102})  # the next gather runs `claude agents --json`
+        self.assertTrue(self.core.regather_needed.is_set())
+
     async def test_events_arrive_through_the_socket_from_the_forwarder(self):
-        self.core.hook_events_socket_path = os.path.join(tempfile.mkdtemp(), "hook_events.sock")
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.core.hook_events_socket_path = os.path.join(folder.name, "hook_events.sock")
         listening_task = asyncio.ensure_future(self.core.listen_for_hook_events())
         try:
             while not os.path.exists(self.core.hook_events_socket_path):
@@ -140,7 +151,9 @@ class HookEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.core.snapshot_needed.is_set())
 
     async def test_a_second_copy_leaves_the_socket_to_the_copy_that_listens(self):
-        socket_path = os.path.join(tempfile.mkdtemp(), "hook_events.sock")
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        socket_path = os.path.join(folder.name, "hook_events.sock")
         self.core.hook_events_socket_path = socket_path
         second_core = DashboardCore(lambda snapshot: None, lambda message: None, hook_events_socket_path=socket_path)
         first_listening_task = asyncio.ensure_future(self.core.listen_for_hook_events())

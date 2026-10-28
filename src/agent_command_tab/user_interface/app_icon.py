@@ -3,7 +3,8 @@
 The Command key's ⌘, for the Command-Tab that the app's name plays on, white on a dark rounded
 square, with a status dot in each of its loops in the list's colors: background's amber at the
 top left, asking's blue at the top right, idle's gray at the bottom left and done's green at the
-bottom right. The app's dialogs show it (NSApp's icon) in place of Python's rocket.
+bottom right. The app's dialogs show it in place of Python's rocket: app_controller's
+run_alert_in_front gives each one it, since NSAlert takes Python.app's own icon whatever NSApp's is.
 """
 
 import math

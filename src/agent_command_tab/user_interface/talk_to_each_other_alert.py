@@ -15,7 +15,7 @@ GAP = 6
 GAP_BETWEEN_SECTIONS = 12
 RADIO_BUTTON_INDENT = 8
 LARGEST_TEXT_VIEW_SIZE = 1e7
-EXPLANATION = "The message will include the other agents' names, process IDs and working directories."  # the user's wording, 2026-10-28
+EXPLANATION = "The message will also include the other agents' names, and process ids"  # the user's wording, 2026-10-28
 
 
 class RecipientChoices(NSObject):

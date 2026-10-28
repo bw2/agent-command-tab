@@ -164,6 +164,15 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(read_turn_started_at_from_codex_conversation_file(codex_path),
                          datetime.datetime(2026, 10, 19, 2, 43, 17, 92000, datetime.timezone.utc).timestamp())
 
+    def test_a_message_from_another_claude_code_session_starts_a_turn(self):  # code review, 2026-10-28
+        claude_path = self.write_lines("claude_peer.jsonl", [
+            {"type": "user", "timestamp": "2026-10-19T14:00:00.000Z", "message": {"content": "fix the bug"}},
+            {"type": "user", "timestamp": "2026-10-19T14:28:36.000Z", "isMeta": True, "turnOrigin": "peer",
+             "message": {"content": "Another Claude session sent a message: I renamed the column."}},
+        ])
+        self.assertEqual(read_turn_started_at_from_claude_code_transcript(claude_path),
+                         datetime.datetime(2026, 10, 19, 14, 28, 36, tzinfo=datetime.timezone.utc).timestamp())
+
     def test_token_counts(self):
         self.assertEqual([format_token_count(count) for count in (425_300, 999, 999_499, 999_500, 1_234_567)],
                          ["425k", "1k", "999k", "1.0M", "1.2M"])

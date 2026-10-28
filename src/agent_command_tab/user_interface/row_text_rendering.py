@@ -1,7 +1,9 @@
 """The text of each list row, in pyinstrument's style (R36 to R41). Pure functions, no AppKit.
 
-A row reads left to right: gray tree connectors, a status dot, the name (brighter and bolder
-when important), then gray details. Colors are names that the view maps to system colors.
+A row reads left to right: gray tree connectors, a status dot, the name (in the label color,
+bold for window and monitor rows and the tab in front), then the details: a tab row's yellow
+background task lights, a collapsed window row's gray state counts. Colors are names that the
+view maps to system colors.
 """
 
 import collections
@@ -216,7 +218,7 @@ def describe_state(state):
 
 def name_and_describe_tab_rows_state(agent_session_entry, state):
     """Returns a tab row's state text and its dot's hover text, such as ("running", "Running: the
-    agent is waiting on a command it started"): a working agent's state is "thinking" or
+    agent is waiting on a tool it started, such as a command, a subagent or a web fetch"): a working agent's state is "thinking" or
     "running" (MEANING_BY_WORKING_STATE_NAME), and "background" is "running" too, in yellow (user
     request, 2026-10-28). A state the app doesn't know shows as it came, with the hover text of
     state, "unknown"."""

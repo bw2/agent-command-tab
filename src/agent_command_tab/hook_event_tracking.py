@@ -13,6 +13,9 @@ from agent_command_tab.agent_process_tree import NAMES_OF_AGENT_PROGRAMS, SHELL_
 # of the reasons Claude Code 2.1.311's program lists). A SessionStart after any session end also
 # means the process goes on.
 SESSION_END_REASONS_OF_A_PROCESS_THAT_GOES_ON = frozenset({"clear", "resume"})
+# The SessionStart sources that follow those ends: the process goes on in another conversation
+# ("compact" keeps the same one, "startup" is a new process).
+SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS = frozenset({"clear", "resume"})
 # The tools whose hook events carry their list of background tasks and their prompts (hooks_installer
 # registers UserPromptSubmit for them). Codex's carry neither, so its rows count the background
 # shells below it and go by the status it sets itself.

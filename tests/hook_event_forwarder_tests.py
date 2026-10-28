@@ -67,8 +67,9 @@ class ListAncestorProcessesTests(unittest.TestCase):
 
 class SendingTests(unittest.TestCase):
     def test_one_line_reaches_the_apps_socket(self):
-        folder = tempfile.mkdtemp()
-        socket_path = os.path.join(folder, "hook_events.sock")
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        socket_path = os.path.join(folder.name, "hook_events.sock")
         received_lines = []
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
             server.bind(socket_path)
@@ -91,9 +92,11 @@ class SendingTests(unittest.TestCase):
 
     def test_without_the_app_it_prints_nothing_and_succeeds(self):
         # As the installed hooks run it: isolated, without site packages.
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
         completed = subprocess.run([sys.executable, "-I", "-S", hook_event_forwarder.__file__, "Claude Code"],
                                    input=json.dumps(TURN_ENDED), capture_output=True, text=True, timeout=30,
-                                   env=dict(os.environ, HOME=tempfile.mkdtemp()))
+                                   env=dict(os.environ, HOME=home.name))
         self.assertEqual((completed.returncode, completed.stdout, completed.stderr), (0, "", ""))
         completed = subprocess.run([sys.executable, "-I", "-S", hook_event_forwarder.__file__], input="not json",
                                    capture_output=True, text=True, timeout=30)

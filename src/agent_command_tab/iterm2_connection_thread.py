@@ -28,9 +28,11 @@ from agent_command_tab.agent_process_tree import (an_agent_program_runs_through_
                                                   compute_cpu_percent, list_descendant_processes, list_detached_processes,
                                                   process_has_its_terminal, process_is_alive,
                                                   process_is_stopped, read_child_processes,
-                                                  read_name_the_process_was_started_as, read_process_current_folder,
-                                                  read_process_info, read_process_tree_resource_usage)
-from agent_command_tab.hook_event_tracking import (apply_hook_event, find_agent_process_id_of_hook_event,
+                                                  read_name_the_process_was_started_as, read_process_arguments_and_environment,
+                                                  read_process_current_folder, read_process_info,
+                                                  read_process_tree_resource_usage)
+from agent_command_tab.hook_event_tracking import (SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS,
+                                                   apply_hook_event, find_agent_process_id_of_hook_event,
                                                    find_when_the_hooks_ended_the_turn)
 from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, check_hooks
 from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
@@ -322,6 +324,7 @@ class DashboardCore:
         self.codex_command_path = shutil.which("codex")  # for `codex queue`; the app's settings then name it (set_core_settings)
         self.message_typing_lock_by_session_id = {}  # two held messages are never pasted into one tab at once
         self.gathered_windows = []
+        self.windows_were_gathered = False  # till the first gather, saved frames can't be matched to windows
         self.gather_is_in_progress = False
         self.monitors = []
         self.window_order = []
@@ -714,8 +717,10 @@ class DashboardCore:
         return await self.pause_or_resume_each_agent_session(action_request.target["session_ids"], resume_one)
 
     async def pause_or_resume_each_agent_session(self, session_ids, pause_or_resume_one):
-        """Runs pause_or_resume_one(session_id, agent_session, session) for every session at once;
-        returns one ActionResult whose message names each tab that failed and why."""
+        """Runs pause_or_resume_one(session_id, agent_session, session) for every session at once,
+        each holding its tab's typing lock, as every typing into a tab does: its Ctrl+Z or fg can't
+        come between a held message's paste and its Enter (code review, 2026-10-28). Returns one
+        ActionResult whose message names each tab that failed and why."""
 
         async def run_for(session_id):
             agent_session = self.agent_sessions.get(session_id)
@@ -727,7 +732,8 @@ class DashboardCore:
                 return ActionResult(True)
             self.session_ids_being_paused_or_resumed.add(session_id)
             try:
-                return await pause_or_resume_one(session_id, agent_session, session)
+                async with self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock()):
+                    return await pause_or_resume_one(session_id, agent_session, session)
             except iterm2.RPCException:
                 return ActionResult(False, "the tab closed meanwhile")
             finally:
@@ -764,13 +770,15 @@ class DashboardCore:
         else:
             delivered_session_ids = [session_id for session_id in agent_session_for_messages_by_session_id
                                      if session_id in recipient_session_ids]
+            agent_sessions_that_get_the_message = [agent_session_for_messages_by_session_id[session_id]
+                                                   for session_id in delivered_session_ids]
             delivery_results = await asyncio.gather(*(
                 self.deliver_message_to_agent_session(
                     session_id, agent_session_for_messages_by_session_id[session_id],
                     build_message_asking_agent_session_to_talk_to_the_others(
                         action_request.arguments["note"], agent_session_for_messages_by_session_id[session_id],
                         [other for other_session_id, other in agent_session_for_messages_by_session_id.items()
-                         if other_session_id != session_id]))
+                         if other_session_id != session_id], agent_sessions_that_get_the_message))
                 for session_id in delivered_session_ids), return_exceptions=True)
             for session_id, delivery_result in zip(delivered_session_ids, delivery_results):
                 action_result_by_session_id[session_id] = convert_exception_to_action_result(delivery_result)
@@ -849,17 +857,20 @@ class DashboardCore:
 
     async def change_reserved_screen_area(self, new_reserved_area):
         """Gives the room back for the old area, then makes room for the new one, holding the
-        lock so a regather can't resize windows in between."""
+        lock so a regather can't resize windows in between. Before the first gather it only
+        keeps the area, which make_room_for_reserved_area then applies: the saved frames of
+        windows iTerm2 restored after a restart can be matched to them only once they are
+        gathered, and giving room back earlier would drop those records (code review, 2026-10-28)."""
         async with self.window_room_lock:
             self.reserved_area_was_received = True
             if new_reserved_area == self.reserved_screen_area:
-                if new_reserved_area is None and self.app is not None and self.frames_before_making_room_by_window_id:
+                if new_reserved_area is None and self.windows_were_gathered and self.frames_before_making_room_by_window_id:
                     await self.give_room_back_while_holding_the_lock()  # restores still pending from before
                 return
-            if self.app is not None:
+            if self.windows_were_gathered:
                 await self.give_room_back_while_holding_the_lock()  # both handle each window's errors themselves
             self.reserved_screen_area = new_reserved_area
-            if self.app is not None:
+            if self.windows_were_gathered:
                 await self.make_room_while_holding_the_lock()
 
     async def make_room_for_reserved_area(self):
@@ -1287,6 +1298,7 @@ class DashboardCore:
         self.gather_is_in_progress = True
         try:
             self.gathered_windows = await self.gather_iterm2_windows()
+            self.windows_were_gathered = True
         finally:
             self.gather_is_in_progress = False
         await self.make_room_for_reserved_area()  # a new or moved window may reach under a docked sidebar
@@ -1564,6 +1576,14 @@ class DashboardCore:
             for session_id, exited_agent_session in list(self.exited_agent_sessions_by_session_id.items()):
                 if exited_agent_session["process_id"] == process_id:
                     del self.exited_agent_sessions_by_session_id[session_id]
+        if (event.get("hook_event_name") == "SessionStart"
+                and event.get("source") in SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS):
+            # /clear or /resume typed in the terminal: the process goes on in another conversation,
+            # whose ID the gather asked for now gets from `claude agents --json`, as after the list's
+            # own /clear (forget_the_cleared_conversation), so Duplicate doesn't fork the old one
+            # (code review, 2026-10-28).
+            self.process_ids_asked_about_in_claude_agents.discard(process_id)
+            self.regather_needed.set()
         self.snapshot_needed.set()
 
     async def check_hooks_periodically(self):
@@ -1917,7 +1937,8 @@ class DashboardCore:
             turn_started_at = await self.find_turn_start(session_id, agent_session, now)
             command = choose_command_the_agent_is_waiting_on(
                 list_descendant_processes(agent_session["process_id"]), turn_started_at,
-                agent_session["adapter"].helper_process_names, now, reading.get("helper_process_ids", frozenset()))
+                agent_session["adapter"].helper_process_names, now, reading.get("helper_process_ids", frozenset()),
+                lambda process_id: read_process_arguments_and_environment(process_id)[0])
             if command is not None:
                 command_process, command_started_at = command
                 running_command = (read_name_the_process_was_started_as(command_process.process_id) or command_process.name,

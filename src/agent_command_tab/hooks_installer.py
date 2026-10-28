@@ -52,10 +52,23 @@ HOOKS_ARE_MISSING = "missing"
 HOOKS_AWAIT_APPROVAL = "needs approval"  # Codex: in hooks.json, not yet approved in its /hooks screen
 
 
-def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FORWARDER_FILE_PATH):
+def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FORWARDER_FILE_PATH, python_home=None):
     """Returns the hook command: this Python (python_path, or the one running), isolated (-I) and
-    without site packages (-S), running the forwarder."""
-    return " ".join(shlex.quote(part) for part in (python_path or sys.executable, "-I", "-S", forwarder_path, agent_tool_name))
+    without site packages (-S), running the forwarder.
+
+    A Python that finds its library through PYTHONHOME (python_home, or this process's), as the
+    one inside AgentCommandTab.app does (py2app's launcher sets it), would ignore it under -I and
+    look for the Python it was built from instead, which other Macs don't have. Its command sets
+    PYTHONHOME with /usr/bin/env and clears PYTHONPATH, and -P keeps the forwarder's own folder
+    off the module path, the rest of what -I does.
+    """
+    python_home = python_home or os.environ.get("PYTHONHOME")
+    if python_home:
+        parts = ("/usr/bin/env", "-u", "PYTHONPATH", f"PYTHONHOME={python_home}", python_path or sys.executable, "-P", "-S",
+                 forwarder_path, agent_tool_name)
+    else:
+        parts = (python_path or sys.executable, "-I", "-S", forwarder_path, agent_tool_name)
+    return " ".join(shlex.quote(part) for part in parts)
 
 
 def hook_group_is_the_apps(hook_group):

@@ -14,11 +14,11 @@ class ChooseWhatTheGlobalShortcutDoesTests(unittest.TestCase):
         self.assertEqual(choose_what_the_global_shortcut_does("sidebar", "auto_hide", False, False, False), "show_sidebar")
         self.assertEqual(choose_what_the_global_shortcut_does("sidebar", "auto_hide", True, False, False), "hide_sidebar")
 
-    def test_a_sidebar_set_to_stay_visible_stays(self):
+    def test_a_sidebar_set_to_stay_visible_stays_or_comes_back_if_the_menu_hid_it(self):
         for sidebar_mode in ("floating", "docked"):
-            for sidebar_is_shown in (False, True):
-                self.assertEqual(choose_what_the_global_shortcut_does("sidebar", sidebar_mode, sidebar_is_shown, False, False),
-                                 "nothing")
+            self.assertEqual(choose_what_the_global_shortcut_does("sidebar", sidebar_mode, True, False, False), "nothing")
+            # Hidden by the menu bar icon's menu's Show popup or Show window (code review, 2026-10-28).
+            self.assertEqual(choose_what_the_global_shortcut_does("sidebar", sidebar_mode, False, False, False), "show_sidebar")
 
     def test_the_window_hides_only_while_it_is_in_front(self):
         self.assertEqual(choose_what_the_global_shortcut_does("window", "auto_hide", False, False, False), "show_window")

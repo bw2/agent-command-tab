@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The exceptions to the hardened runtime (which notarization requires) that AgentCommandTab.app
+     needs; sign_and_notarize.sh signs the app's two programs with them. Not the App Sandbox.
+     Python callbacks (PyObjC methods, ctypes) ran without com.apple.security.cs.allow-unsigned-executable-memory
+     on Apple silicon (checked 2026-10-28); a build for Intel Macs may need it. -->
+<plist version="1.0">
+<dict>
+    <!-- Asking iTerm2 for its Python API access key (an AppleScript request, through osascript). -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

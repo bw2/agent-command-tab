@@ -38,8 +38,9 @@ SECONDS_OF_SLACK_AT_TURN_START = 2
 # tool call) and status line commands, which end within a second, never show as "running".
 SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS = 2
 # Claude Code's shell tool runs each command as `bash -c "source <its shell snapshot> ... && eval
-# '<the command>' < /dev/null && pwd -P >| <a file>"`, a ' in the command written as '"'"'.
-CLAUDE_CODE_SHELL_TOOL_COMMAND = re.compile(r"""&& eval '((?:[^']|'"'"')*)' < /dev/null && pwd -P >\| \S+\Z""", re.DOTALL)
+# '<the command>' < /dev/null && pwd -P >| <a file>"`, a ' in the command written as '"'"', and
+# without the `< /dev/null` for a command with a heredoc (code review, 2026-10-28).
+CLAUDE_CODE_SHELL_TOOL_COMMAND = re.compile(r"""&& eval '((?:[^']|'"'"')*)'(?: < /dev/null)? && pwd -P >\| \S+\Z""", re.DOTALL)
 # A Claude Code session's scratchpad folder, /private/tmp/claude-<user ID>/<project>/<session ID>/scratchpad,
 # which a process row calls just "scratchpad" (user request, 2026-10-28), so the end of the command shows.
 CLAUDE_CODE_SCRATCHPAD_PATH = re.compile(r"(?:/private)?/tmp/claude-\d+/[^/\s'\"]+/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/scratchpad")
@@ -359,18 +360,21 @@ def list_child_processes_of_the_agent(agent_process_id, descendant_processes, no
             for child in children]
 
 
-def child_process_is_a_background_shell(child, shown_process, turn_is_under_way, turn_started_at):
+def child_process_is_a_background_shell(child, shown_process, command_started_at, turn_is_under_way, turn_started_at):
     """Whether one of list_child_processes_of_the_agent's children is a command the agent's shell
     tool left running in the background: a shell or wrapper with a process running in it (not
     Codex's terminal kept open between commands, nor a helper such as an MCP server, which the
     agent starts itself), between turns, or during a turn when the command in it started before
-    the turn did (the command's start, not the shell's: Codex runs a later turn's commands in a
-    shell kept from an earlier turn). A command started in the turn under way may be the one the
-    agent waits on (the order the agent started them in doesn't tell), so it counts only once the
-    turn ends (code review, 2026-10-27).
+    the turn did. A command started in the turn under way may be the one the agent waits on (the
+    order the agent started them in doesn't tell), so it counts only once the turn ends (code
+    review, 2026-10-27).
 
     Args:
         child, shown_process: One of list_child_processes_of_the_agent's pairs.
+        command_started_at: When the command in the shell started: the shell's own start for a
+            Claude Code shell (a wait loop from an earlier turn starts a new sleep in this one),
+            else the shown process's (Codex runs a later turn's commands in a shell kept from an
+            earlier turn) (code review, 2026-10-28).
         turn_is_under_way: Whether the agent is in a turn (working or asking).
         turn_started_at: When that turn began, or None while not known (then no command counts).
     """
@@ -378,7 +382,7 @@ def child_process_is_a_background_shell(child, shown_process, turn_is_under_way,
         return False
     if not turn_is_under_way:
         return True
-    return turn_started_at is not None and shown_process.started_at < turn_started_at - SECONDS_OF_SLACK_AT_TURN_START
+    return turn_started_at is not None and command_started_at < turn_started_at - SECONDS_OF_SLACK_AT_TURN_START
 
 
 def build_command_text(arguments, executable_name):
@@ -449,13 +453,15 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
     child_processes = []
     for child, shown_process in list_child_processes_of_the_agent(agent_process_id, list_descendant_processes(agent_process_id), now):
         claude_code_shell_command = find_the_command_a_claude_code_shell_runs(read_process_arguments_and_environment(child.process_id)[0])
+        command_started_at = child.started_at if claude_code_shell_command else shown_process.started_at
         child_processes.append({
             "child": child,
             "command_text": (shorten_scratchpad_paths(" ".join(claude_code_shell_command.split())) if claude_code_shell_command
                              else build_command_text(read_process_arguments_and_environment(shown_process.process_id)[0],
                                                      shown_process.name)),
-            "command_started_at": child.started_at if claude_code_shell_command else shown_process.started_at,
-            "is_background_shell": child_process_is_a_background_shell(child, shown_process, turn_is_under_way, turn_started_at),
+            "command_started_at": command_started_at,
+            "is_background_shell": child_process_is_a_background_shell(child, shown_process, command_started_at,
+                                                                       turn_is_under_way, turn_started_at),
             "is_detached": False,
             "resource_usage": read_process_tree_resource_usage(child.process_id) if reads_resource_usage else None})
     for process, arguments in detached_processes_of_the_conversation:
@@ -503,14 +509,17 @@ def an_agent_program_runs_through_a_shell_below(descendant_processes, read_start
 
 
 def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at, helper_process_names, now,
-                                           helper_process_ids=frozenset()):
+                                           helper_process_ids=frozenset(), read_process_arguments=lambda process_id: []):
     """Returns (the command's process, started at) for the command an agent started in this turn
     and is still running, or None when it runs none (it is thinking or writing).
 
     Not commands, and nor is anything below them: the tool's own helpers (Claude Code's
     caffeinate, Codex's code mode host), processes that were already running while the session
-    was idle (MCP servers, from the second turn on), and processes older than the turn. A shell
-    with nothing running in it doesn't count either (Codex keeps a terminal open between commands),
+    was idle (MCP servers, from the second turn on), processes older than the turn, and Claude
+    Code shells older than the turn: each runs one command, so one from an earlier turn is a
+    command left in the background, and what it starts now (a wait loop's next `sleep 30`) isn't
+    this turn's (code review, 2026-10-28; Codex runs new commands in a terminal it keeps, so its
+    shells aren't told apart this way). A shell with nothing running in it doesn't count either,
     nor does a command younger than SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS.
 
     Args:
@@ -519,9 +528,15 @@ def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at
         helper_process_names: Executable names of the agent tool's own helper processes.
         now: The current time.
         helper_process_ids: IDs of processes seen running while the session was idle.
+        read_process_arguments: Returns a process's arguments (read_process_arguments_and_environment's
+            first part); asked only about shells older than the turn.
     """
     excluded_process_ids = set(helper_process_ids) | {process.process_id for process in descendant_processes
                                                       if process.name in helper_process_names}
+    excluded_process_ids |= {process.process_id for process in descendant_processes
+                             if process.name in SHELL_AND_WRAPPER_PROCESS_NAMES
+                             and process.started_at < turn_started_at - SECONDS_OF_SLACK_AT_TURN_START
+                             and find_the_command_a_claude_code_shell_runs(read_process_arguments(process.process_id))}
     found_more = True
     while found_more:  # everything below an excluded process is excluded too
         below_excluded = {process.process_id for process in descendant_processes

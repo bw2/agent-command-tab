@@ -84,7 +84,7 @@ def build_main_menu_with_the_edit_shortcuts():
 def choose_what_the_global_shortcut_does(show_as, sidebar_mode, sidebar_is_shown, list_window_is_in_front, dropdown_is_open):
     """Returns what a press of the global shortcut does: it shows the list the way the settings
     ask, or hides it when it shows (user request, 2026-10-21), except that a sidebar set to stay
-    visible stays.
+    visible stays, or comes back if the menu bar icon's menu hid it (code review, 2026-10-28).
 
     Returns:
         "show_sidebar", "hide_sidebar", "nothing", "show_window", "hide_window",
@@ -92,7 +92,7 @@ def choose_what_the_global_shortcut_does(show_as, sidebar_mode, sidebar_is_shown
     """
     if show_as == "sidebar":
         if sidebar_mode != "auto_hide":
-            return "nothing"
+            return "nothing" if sidebar_is_shown else "show_sidebar"
         return "hide_sidebar" if sidebar_is_shown else "show_sidebar"
     if show_as == "window":
         return "hide_window" if list_window_is_in_front else "show_window"
@@ -207,6 +207,7 @@ class AppController(NSObject):
 
     @objc.python_method
     def exit_now_with_reconnect_status(self):
+        self.save_settings_before_exiting()  # as quit does (code review, 2026-10-28)
         sys.stdout.flush()
         os._exit(RECONNECT_EXIT_STATUS)
 
@@ -249,17 +250,17 @@ class AppController(NSObject):
         2026-10-28): shows the list as that "Show as" choice would, whatever "Show as" is, without
         changing it. Nothing happens while the list already shows that way; otherwise the other
         ways it shows are hidden first, a sidebar set to stay visible too (until it is shown
-        again). A sidebar shown while "Show as" is another slides out again after a few seconds,
-        as an auto-hiding one does."""
-        shown_list_formats = self.list_the_ways_the_list_shows()
-        if show_as_choice in shown_list_formats:
+        again), and a window behind other windows too (code review, 2026-10-28). A sidebar shown
+        while "Show as" is another slides out again after a few seconds, as an auto-hiding one does."""
+        if show_as_choice in self.list_the_ways_the_list_shows():
             return
-        if "popup" in shown_list_formats:
+        if show_as_choice != "popup" and self.popover.isShown():
             self.close_dropdown()
-        if "sidebar" in shown_list_formats:
-            self.hide_the_sidebar()
-        if "window" in shown_list_formats:
+        if show_as_choice != "sidebar" and self.sidebar_controller.is_shown:
+            self.sidebar_controller.hide_until_shown_again()
+        if show_as_choice != "window" and self.list_window_controller.window.isVisible():
             self.list_window_controller.hide()
+            self.list_window_closed()  # the settings window no longer stays level with it, as for the global shortcut
         if show_as_choice == "popup":
             self.status_item_controller.show_popover()
         elif show_as_choice == "sidebar":
@@ -269,25 +270,22 @@ class AppController(NSObject):
 
     @objc.python_method
     def list_the_ways_the_list_shows(self):
-        """Returns which of "popup", "sidebar" and "window" show the list right now."""
+        """Returns which of "popup", "sidebar" and "window" show the list right now: the window
+        only while it is in front (as for the global shortcut), so Show window brings forward one
+        that other windows cover or that is on another desktop (code review, 2026-10-28)."""
         return [show_as_choice for show_as_choice, is_shown in (
             ("popup", self.popover.isShown()), ("sidebar", self.sidebar_controller.is_shown),
-            ("window", bool(self.list_window_controller.window.isVisible()))) if is_shown]
+            ("window", self.list_window_controller.is_in_front())) if is_shown]
 
     @objc.python_method
     def show_the_sidebar(self):
         """Slides the sidebar in: one set to stay visible (Show as: Sidebar, an Always mode) for
-        good, a docked one taking its room again, as after hide_the_sidebar; any other for a few seconds."""
+        good, a docked one taking its room again, also after the menu hid it
+        (SidebarController.hide_until_shown_again); any other for a few seconds."""
         if self.settings["show_as"] == "sidebar" and self.settings["sidebar_mode"] != "auto_hide":
-            self.sidebar_controller.update_placement()
+            self.sidebar_controller.show_again()
         else:
             self.sidebar_controller.show_for_a_few_seconds()
-
-    @objc.python_method
-    def hide_the_sidebar(self):
-        """Slides the sidebar out at once; a docked one gives the iTerm2 windows its room back until it shows again."""
-        self.sidebar_controller.hide_now()
-        self.reserve_screen_area(None)
 
     @objc.python_method
     def global_shortcut_pressed(self):
@@ -298,7 +296,7 @@ class AppController(NSObject):
             self.settings["show_as"], self.settings["sidebar_mode"], self.sidebar_controller.is_shown,
             self.list_window_controller.is_in_front(), self.popover.isShown())
         if what_to_do == "show_sidebar":
-            self.sidebar_controller.show_for_a_few_seconds()
+            self.show_the_sidebar()  # for a few seconds, or for good if it stays visible
         elif what_to_do == "hide_sidebar":
             self.sidebar_controller.hide_now()
         elif what_to_do == "show_window":
@@ -404,6 +402,9 @@ class AppController(NSObject):
             if self.settings_window_controller.is_open():  # it stays in front, as when settings_changed shows the window
                 self.place_the_settings_window_above_the_lists(self.popover.isShown())
                 self.settings_window_controller.window.orderFront_(None)
+        # A window that was open already (behind other windows, say) keeps its frame in show, so
+        # it takes the dragged one here, or pointer_offset wouldn't put its top bar under the pointer (code review, 2026-10-28).
+        list_window.setFrame_display_(NSMakeRect(*window_frame), True)
         self.list_window_controller.follow_the_pointer_until_the_button_comes_up(pointer_offset)
 
     @objc.python_method
@@ -429,11 +430,18 @@ class AppController(NSObject):
 
     @objc.python_method
     def list_window_drag_ended(self):
-        """Dropped on the menu bar icon, the list window turns back into the dropdown."""
+        """Dropped on the menu bar icon, the list window turns back into the dropdown: with Show
+        as: Window, Show as becomes Popup; a window the menu's Show window opened for another Show
+        as just hides, leaving the settings as they are (code review, 2026-10-28)."""
         self.status_item_controller.highlight(False)
-        if self.pointer_is_on_the_menu_bar_icon() and self.settings["show_as"] == "window":
+        if not self.pointer_is_on_the_menu_bar_icon():
+            return
+        if self.settings["show_as"] == "window":
             self.settings_changed(dict(self.settings, show_as="popup"))
-            self.status_item_controller.show_popover()
+        else:
+            self.list_window_controller.hide()
+            self.list_window_closed()
+        self.status_item_controller.show_popover()
 
     @objc.python_method
     def pointer_is_on_the_menu_bar_icon(self):
@@ -875,7 +883,8 @@ def run_menu_bar_app(verbose):
     """Runs the menu bar app until it quits; returns the exit status."""
     application = NSApplication.sharedApplication()
     application.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, no Info.plist needed
-    application.setApplicationIconImage_(build_app_icon())  # the dialogs show it, not Python's rocket (user request, 2026-10-28)
+    # For anything else that shows NSApp's icon; the dialogs get it from run_alert_in_front (user request, 2026-10-28).
+    application.setApplicationIconImage_(build_app_icon())
     application.setMainMenu_(build_main_menu_with_the_edit_shortcuts())
     app_controller = AppController.alloc().initWithVerbose_(verbose)
     app_controller.start()

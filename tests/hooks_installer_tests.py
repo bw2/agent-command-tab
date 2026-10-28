@@ -45,6 +45,16 @@ class BuildForwarderCommandTests(unittest.TestCase):
         self.assertEqual(build_forwarder_command("Claude Code", "/My Apps/python", "/code/hook_event_forwarder.py"),
                          "'/My Apps/python' -I -S /code/hook_event_forwarder.py 'Claude Code'")
 
+    def test_a_python_that_finds_its_library_through_pythonhome_gets_it_in_the_command(self):
+        # As inside AgentCommandTab.app, where -I would make Python ignore PYTHONHOME.
+        resources_folder = "/Applications/AgentCommandTab.app/Contents/Resources"
+        self.assertEqual(
+            build_forwarder_command("Codex", "/Applications/AgentCommandTab.app/Contents/MacOS/python",
+                                    f"{resources_folder}/lib/python3.13/agent_command_tab/hook_event_forwarder.py",
+                                    python_home=resources_folder),
+            f"/usr/bin/env -u PYTHONPATH PYTHONHOME={resources_folder} /Applications/AgentCommandTab.app/Contents/MacOS/python "
+            f"-P -S {resources_folder}/lib/python3.13/agent_command_tab/hook_event_forwarder.py Codex")
+
 
 class SettingsTests(unittest.TestCase):
     def test_the_apps_hooks_come_after_the_users_own_and_replace_older_ones(self):

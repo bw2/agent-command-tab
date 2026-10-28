@@ -9,11 +9,10 @@ the last prompt, and the last prompt itself ("You: ...").
 
 import json
 import re
-from datetime import datetime
 
 from agent_command_tab.claude_code_transcript_records import (classify_user_record, describe_typed_command,
                                                               join_text_blocks, list_message_blocks)
-from agent_command_tab.context_window_usage import read_last_records
+from agent_command_tab.context_window_usage import parse_iso_time, read_last_records
 
 LONGEST_PREVIEW_TEXT = 300  # the row cuts it to its width anyway
 TOOL_INPUT_KEYS_IN_PREFERENCE_ORDER = ("command", "file_path", "notebook_path", "path", "pattern", "url", "query",
@@ -97,11 +96,10 @@ def build_preview_fields(last_prompt, message_since_prompt, open_tool_call, open
 
 def read_record_time(record):
     """Returns a conversation file record's "timestamp", which Claude Code and Codex both write in
-    ISO 8601 ("2026-10-28T11:12:04.784Z"), as seconds since 1970, or None without a readable one."""
-    try:
-        return datetime.fromisoformat(str(record.get("timestamp"))).timestamp()
-    except ValueError:
-        return None
+    ISO 8601 ("2026-10-28T11:12:04.784Z"), as seconds since 1970, or None without a readable one.
+    parse_iso_time reads the trailing "Z", which datetime.fromisoformat does only from Python 3.11
+    (code review, 2026-10-28)."""
+    return parse_iso_time(record.get("timestamp")) or None
 
 
 def read_preview_fields_from_claude_code_transcript(file_path):

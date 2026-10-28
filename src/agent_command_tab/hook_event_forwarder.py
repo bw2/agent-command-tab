@@ -2,7 +2,8 @@
 reads the event from standard input, keeps the few fields the app uses, adds the processes above
 it (whose nearest agent sent the event), and sends one line to the app's socket.
 
-The installer (hooks_installer) registers it as `<python> -I -S <this file> <agent tool name>`:
+The installer (hooks_installer) registers it as `<python> -I -S <this file> <agent tool name>`
+(from AgentCommandTab.app, with PYTHONHOME set in place of -I; build_forwarder_command):
 it imports only the standard library, so Python starts without its site packages (30 to 40 ms
 in all, measured on 2026-10-27), and it runs in the background (the hooks are registered as
 async), so agents never wait for it. It never prints, since Claude Code can feed a hook's output into the conversation,
