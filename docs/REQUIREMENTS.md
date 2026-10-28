@@ -132,7 +132,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
 
 ### Settings
 
-- R34. A settings button in the top bar of the dropdown, the sidebar and the list window (at the bottom until 2026-10-26, user request).
+- R34. A settings button at the bottom left of the dropdown, the sidebar and the list window (user request, 2026-10-28; in the top bar from 2026-10-26, user request, and at the bottom before).
 - R35. Settings include:
   - how the list is shown, "Show as: Window, Sidebar, Popup" (a regular window, the sidebar at the screen's edge, or the dropdown under the menu bar icon; user request, 2026-10-19), and for the window "Always on top";
   - the appearance: Auto (macOS's Light or Dark setting), Dark or Light (user request, 2026-10-27);

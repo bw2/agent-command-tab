@@ -44,7 +44,7 @@ GAP_BEFORE_UNITS = 6  # between a control and its units ("points")
 BOX_CORNER_RADIUS = 8
 MINI_SWITCH_SIZE = (26, 15)  # what a mini NSSwitch draws (checked on macOS 27)
 NOTE_HEIGHT = 30  # the sidebar's placement note under its box: two lines of small text
-LAUNCH_COMMAND_FIELD_WIDTH = 200  # a longer command scrolls inside the field (user request, 2026-10-25)
+LAUNCH_COMMAND_FIELD_WIDTH = 360  # a longer command scrolls inside the field (user requests, 2026-10-25; 200 until 2026-10-28)
 # A box's fill and border: a little darker than the window in light mode, a little lighter in dark mode.
 make_section_box_fill_color = make_light_and_dark_mode_color_maker(
     lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(0, 0, 0, 0.03), lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(1, 1, 1, 0.04))

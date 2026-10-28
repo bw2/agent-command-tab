@@ -563,20 +563,19 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # Two windows with running agents: the expand or collapse and the pause or resume buttons show.
         self.list_controller.apply_snapshot(make_sample_snapshot())
         # The widths where each step happens follow from the controls' measured widths, which differ
-        # between macOS versions and Python builds: on macOS 27 the label drops below 346 points and
-        # the pop-up hides below 251, while GitHub's macOS 26 runners measure the controls a few
+        # between macOS versions and Python builds: on macOS 27 the label drops below 267 points and
+        # the pop-up would hide below 171, while GitHub's macOS 26 runners measure the controls a few
         # points wider or narrower (2026-10-28).
         label_frame = panel.sort_label.frame()
         full_popup_width = panel.sort_popup_width_for_its_widest_title
-        settings_button_width = panel.settings_button.frame().size.width
-        # From the Settings button's left edge to the panel's right edge, with Settings beside Hide Idle.
-        width_from_settings_to_the_right_edge = (
-            settings_button_width + GAP_BETWEEN_TOP_BAR_BUTTONS + panel.idle_tabs_button.frame().size.width
+        # From the gap before Hide Idle to the panel's right edge.
+        width_from_the_buttons_to_the_right_edge = (
+            GAP_BETWEEN_TOP_BAR_BUTTONS + panel.idle_tabs_button.frame().size.width
             + GAP_BETWEEN_TOP_BAR_BUTTONS + panel.expand_or_collapse_all_button.frame().size.width + PANEL_SIDE_MARGIN)
-        sort_control_right_end_x = label_frame.origin.x + label_frame.size.width + 2 + full_popup_width
-        narrowest_width_with_the_label = sort_control_right_end_x + 2 + width_from_settings_to_the_right_edge
-        narrowest_width_with_the_full_popup = label_frame.origin.x + full_popup_width + 2 + width_from_settings_to_the_right_edge
-        narrowest_width_with_the_popup = label_frame.origin.x + SMALLEST_SORT_POPUP_WIDTH + 2 + width_from_settings_to_the_right_edge
+        narrowest_width_with_the_label = (label_frame.origin.x + label_frame.size.width + 2 + full_popup_width
+                                          + width_from_the_buttons_to_the_right_edge)
+        narrowest_width_with_the_full_popup = label_frame.origin.x + full_popup_width + width_from_the_buttons_to_the_right_edge
+        narrowest_width_with_the_popup = label_frame.origin.x + SMALLEST_SORT_POPUP_WIDTH + width_from_the_buttons_to_the_right_edge
         # The label drops first, then the pop-up narrows, then it hides, which never happens in the
         # dropdown (only in a sidebar or a list window, where the column titles still sort the list).
         self.assertGreater(narrowest_width_with_the_label, narrowest_width_with_the_full_popup)
@@ -593,38 +592,33 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                               panel.list_sort_order_popup.frame().size.width),
                              (width >= narrowest_width_with_the_label, width >= narrowest_width_with_the_popup,
                               max(full_popup_width - max(narrowest_width_with_the_full_popup - width, 0), 0)), width)
-            # Hide Idle right before the expand button; Settings in the middle of the bar, though never
-            # over the whole sort control on its left nor past Hide Idle.
+            # Hide Idle right before the expand button, and the pop-up before Hide Idle.
             idle_tabs_button_frame = panel.idle_tabs_button.frame()
             self.assertFalse(panel.idle_tabs_button.isHidden())
             self.assertEqual(idle_tabs_button_frame.origin.x + idle_tabs_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
                              panel.expand_or_collapse_all_button.frame().origin.x)
-            settings_button_frame = panel.settings_button.frame()
-            self.assertEqual(settings_button_frame.origin.x,
-                             min(max((width - settings_button_width) / 2, sort_control_right_end_x + 2),
-                                 width - width_from_settings_to_the_right_edge), width)
-            if width == POPOVER_WIDTH:  # wide enough on any Mac for Settings to sit in the middle
-                self.assertEqual(settings_button_frame.origin.x, (width - settings_button_width) / 2)
-            self.assertLessEqual(settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
-                                 idle_tabs_button_frame.origin.x)
             if not panel.list_sort_order_popup.isHidden():
                 popup_frame = panel.list_sort_order_popup.frame()
-                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width, settings_button_frame.origin.x)
+                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                                     idle_tabs_button_frame.origin.x)
             message_frame = panel.message_text_field.frame()
             self.assertTrue(message_frame.size.width == 0
-                            or message_frame.origin.x + message_frame.size.width <= settings_button_frame.origin.x,
+                            or message_frame.origin.x + message_frame.size.width <= idle_tabs_button_frame.origin.x,
                             width)  # never covers the buttons
-            pause_button_frame = panel.pause_or_resume_all_button.frame()  # at the bottom bar's right end
+            # Settings at the bottom bar's left end, and pause or resume all at its right end.
+            settings_button_frame = panel.settings_button.frame()
+            self.assertEqual(settings_button_frame.origin.x, PANEL_SIDE_MARGIN)
+            self.assertLessEqual(settings_button_frame.origin.y + settings_button_frame.size.height, BOTTOM_BAR_HEIGHT)
+            pause_button_frame = panel.pause_or_resume_all_button.frame()
             self.assertEqual(pause_button_frame.origin.x + pause_button_frame.size.width, width - PANEL_SIDE_MARGIN)
             self.assertLessEqual(pause_button_frame.origin.y + pause_button_frame.size.height, BOTTOM_BAR_HEIGHT)
         self.window.setContentSize_((320, 260))
         panel.show_message("iTerm2 can't be reached; retrying")  # the sort control and Hide Idle step aside for it
         self.assertTrue(panel.list_sort_order_popup.isHidden())
         self.assertTrue(panel.idle_tabs_button.isHidden())
-        settings_button_frame = panel.settings_button.frame()  # moved to the right end, before the expand button
-        self.assertEqual(settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
-                         panel.expand_or_collapse_all_button.frame().origin.x)
-        self.assertGreater(panel.message_text_field.frame().size.width, 150)
+        message_frame = panel.message_text_field.frame()  # up to the expand button
+        self.assertEqual(message_frame.origin.x + message_frame.size.width + 8, panel.expand_or_collapse_all_button.frame().origin.x)
+        self.assertGreater(message_frame.size.width, 150)
         panel.show_message("")
         self.assertFalse(panel.list_sort_order_popup.isHidden())
         self.assertFalse(panel.idle_tabs_button.isHidden())
@@ -1389,9 +1383,6 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         button = panel.expand_or_collapse_all_button
         panel_width = panel.view().bounds().size.width
         self.assertEqual(button.frame().origin.x + button.frame().size.width, panel_width - PANEL_SIDE_MARGIN)  # the top right corner
-        settings_frame = panel.settings_button.frame()  # a button with its name, in the top bar
-        self.assertEqual(panel.settings_button.title(), "Settings")
-        self.assertGreater(settings_frame.origin.y, panel.view().bounds().size.height - TOP_BAR_HEIGHT)
         self.assertEqual(button.toolTip(), "Collapse all")  # fully expanded: a click collapses
         panel.expandOrCollapseAllClicked_(button)
         self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (3, "Expand all"))
@@ -1456,31 +1447,22 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(one_window_snapshot)
         self.assertTrue(button.isHidden())
         self.window.setContentSize_((320, 260))
-        # Without the expand button, Hide Idle is at the right end; the 320-point dropdown has no
-        # room to center Settings, so it follows the whole sort control.
+        # Without the expand button, Hide Idle is at the right end, and the pop-up before it.
         idle_tabs_button_frame = panel.idle_tabs_button.frame()
         self.assertEqual(idle_tabs_button_frame.origin.x + idle_tabs_button_frame.size.width, 320 - PANEL_SIDE_MARGIN)
         popup_frame = panel.list_sort_order_popup.frame()
-        settings_button_frame = panel.settings_button.frame()
-        self.assertGreater(settings_button_frame.origin.x, popup_frame.origin.x + popup_frame.size.width)
-        self.assertNotAlmostEqual(settings_button_frame.origin.x + settings_button_frame.size.width / 2, 160)
-        # A message (iTerm2 can't be reached) takes the room up to the Settings button, at the right
-        # end, with the Hide Idle button hidden.
+        self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS, idle_tabs_button_frame.origin.x)
+        # A message (iTerm2 can't be reached) takes the room up to the right end, with the Hide Idle button hidden.
         panel.show_message("iTerm2 can't be reached")
         message_frame = panel.message_text_field.frame()
-        settings_button_frame = panel.settings_button.frame()
-        self.assertEqual(settings_button_frame.origin.x + settings_button_frame.size.width, 320 - PANEL_SIDE_MARGIN)
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, settings_button_frame.origin.x - 8)
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, 320 - PANEL_SIDE_MARGIN - 8)
         panel.show_message("")
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertFalse(button.isHidden())
         self.assertEqual(button.frame().origin.x + button.frame().size.width, panel.view().bounds().size.width - PANEL_SIDE_MARGIN)
-        panel.show_message("iTerm2 can't be reached")  # then Settings sits right before the expand button
+        panel.show_message("iTerm2 can't be reached")  # then up to the expand button
         message_frame = panel.message_text_field.frame()
-        settings_button_frame = panel.settings_button.frame()
-        self.assertEqual(settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
-                         button.frame().origin.x)
-        self.assertEqual(message_frame.origin.x + message_frame.size.width, settings_button_frame.origin.x - 8)
+        self.assertEqual(message_frame.origin.x + message_frame.size.width, button.frame().origin.x - 8)
         panel.show_message("")
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # one window per monitor
         self.assertFalse(button.isHidden())
@@ -1726,7 +1708,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                               panel.install_hooks_button.isHidden()), (expected_note, not expected_note, not shows_button))
         self.list_controller.apply_snapshot(snapshot._replace(hooks_status_per_agent_tool=(("Claude Code", "missing"),)))
         note_frame, button_frame = panel.hooks_note_text_field.frame(), panel.install_hooks_button.frame()
-        self.assertEqual(note_frame.origin.x, PANEL_SIDE_MARGIN)  # at the bottom left, then the button
+        settings_button_frame = panel.settings_button.frame()  # at the bottom left, then the note, then its button
+        self.assertEqual(settings_button_frame.origin.x, PANEL_SIDE_MARGIN)
+        self.assertEqual(note_frame.origin.x, settings_button_frame.origin.x + settings_button_frame.size.width + 8)
         self.assertLess(note_frame.origin.x + note_frame.size.width, button_frame.origin.x)
         self.assertLessEqual(button_frame.origin.x + button_frame.size.width, panel.pause_or_resume_all_button.frame().origin.x)
         self.assertLess(button_frame.origin.y + button_frame.size.height, BOTTOM_BAR_HEIGHT)

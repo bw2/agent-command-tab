@@ -1,4 +1,4 @@
-"""The panel around the list: the sort order, Settings, Hide Idle and expand or collapse all at the top, then the column titles; pause or resume all at the bottom right, and a note while the app's hooks are missing at the bottom left.
+"""The panel around the list: the sort order, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a note while the app's hooks are missing, and pause or resume all at the bottom right.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
 sidebar and in the list window, each with its own list controller.
@@ -10,7 +10,7 @@ import objc
 from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont, NSFontWeightRegular,
                     NSImage, NSImageLeading, NSImageSymbolConfiguration,
                     NSLineBreakByTruncatingTail, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSRectFill, NSScreen,
-                    NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxYMargin,
+                    NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
 from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL
@@ -162,9 +162,9 @@ class ListPanelController(NSViewController):
         root_view.addSubview_(column_titles_row_view)
         self.list_controller.on_column_titles_row_height_changed = self.fit_list_under_column_titles
 
-        # Top bar (user requests, milestone 2, 2026-10-19 to 2026-10-26): the sort order on the
-        # left; Settings in the middle; at the right, Hide Idle and one button that expands or
-        # collapses all (R8.1); a message line after the sort order.
+        # Top bar (user requests, milestone 2, 2026-10-19 to 2026-10-28): the sort order on the
+        # left; at the right, Hide Idle and one button that expands or collapses all (R8.1); a
+        # message line after the sort order. Settings was in its middle from 2026-10-26 to 2026-10-28.
         self.sort_label = NSTextField.labelWithString_("Sort:")
         self.sort_label.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.sort_label.sizeToFit()
@@ -218,8 +218,11 @@ class ListPanelController(NSViewController):
         self.message_text_field.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.message_text_field)
 
-        # A Settings button with its name, easier to see than an icon (R34), in the middle of the top
-        # bar, a gray pill like the controls beside it (user request, 2026-10-26; at the bottom left before).
+        # Bottom bar: a Settings button with its name, easier to see than an icon (R34), at the left, a
+        # gray pill like the top bar's controls (user request, 2026-10-28; in the middle of the top bar
+        # from 2026-10-26, at the bottom left before), and one button that pauses or resumes all, at the
+        # right; a new window with an agent session (R13.1) is the "+" row at the end of the list (user
+        # requests, 2026-10-19 to 2026-10-21).
         self.settings_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
         self.settings_button.setTitle_("Settings")
         self.settings_button.setBezelStyle_(NSBezelStyleRecessed)
@@ -235,13 +238,9 @@ class ListPanelController(NSViewController):
         self.settings_button.setTarget_(self)
         self.settings_button.setAction_("settingsClicked:")
         self.settings_button.sizeToFit()
-        self.settings_button.setFrame_(NSMakeRect(  # fit_top_bar_to_width sets x
-            0, height - TOP_BAR_HEIGHT + 3, self.settings_button.frame().size.width, self.list_sort_order_popup.frame().size.height))
-        self.settings_button.setAutoresizingMask_(NSViewMinYMargin)
+        self.settings_button.setFrameOrigin_((PANEL_SIDE_MARGIN, (BOTTOM_BAR_HEIGHT - self.settings_button.frame().size.height) / 2))
+        self.settings_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMaxXMargin)  # stays at the bottom left
         root_view.addSubview_(self.settings_button)
-
-        # Bottom bar: one button that pauses or resumes all, at the right; a new window with an agent
-        # session (R13.1) is the "+" row at the end of the list (user requests, 2026-10-19 to 2026-10-21).
         self.pause_or_resume_all_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(
             width - PANEL_SIDE_MARGIN - button_width, (BOTTOM_BAR_HEIGHT - button_height) / 2, button_width, button_height))
         self.pause_or_resume_all_button.setBordered_(False)
@@ -249,7 +248,7 @@ class ListPanelController(NSViewController):
         self.pause_or_resume_all_button.setAction_("pauseOrResumeAllClicked:")
         self.pause_or_resume_all_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)  # stays at the bottom right
         root_view.addSubview_(self.pause_or_resume_all_button)
-        # At the bottom left, while the app's hooks are missing for an agent tool with a session
+        # After the Settings button, while the app's hooks are missing for an agent tool with a session
         # in the list, a note and a button that installs them (user request, 2026-10-27).
         self.hooks_note_text_field = NSTextField.labelWithString_("")
         self.hooks_note_text_field.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
@@ -290,40 +289,29 @@ class ListPanelController(NSViewController):
 
     @objc.python_method
     def fit_top_bar_to_width(self):
-        """Puts the expand or collapse all button at the right end, the Hide Idle button just left
-        of it (user request, 2026-10-26; in the middle of the bar before) and the Settings button
-        in the middle of the bar (user request, 2026-10-26), though never over the whole sort
-        control on its left nor past the Hide Idle button on its right: in a narrow dropdown it
-        sits just after the sort control, and in a narrow sidebar beside Hide Idle. The sort
-        control fits between the panel's left edge and the Settings button: with its "Sort:" label
-        when there is room, without it in a narrower one, and then with the pop-up narrowed,
-        cutting its title short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar
-        or a list window, where the column titles still sort the list). Where each step happens
-        depends on how wide macOS draws the controls: on macOS 27 the label goes below 346 points,
-        the pop-up narrows below 315 and hides below 251. The message
-        line takes the room left before the buttons, so it never covers them; while it shows a
-        message (iTerm2 can't be reached, so there are no rows to sort or hide) the sort control
-        and the Hide Idle button step aside for it, and the Settings button moves to the right end."""
+        """Puts the expand or collapse all button at the right end and the Hide Idle button just
+        left of it (user request, 2026-10-26; in the middle of the bar before). The sort control
+        fits between the panel's left edge and those buttons: with its "Sort:" label when there is
+        room, without it in a narrower one, and then with the pop-up narrowed, cutting its title
+        short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar or a list window,
+        where the column titles still sort the list). Where each step happens depends on how wide
+        macOS draws the controls: on macOS 27 the label goes below 267 points and the pop-up
+        narrows below 235; it would hide below 171, narrower than the sidebar's smallest width
+        (200). The message line takes the room left before the buttons, so it never covers them;
+        while it shows a message (iTerm2 can't be reached, so there are no rows to sort or hide)
+        the sort control and the Hide Idle button step aside for it."""
         label_x, label_width = self.sort_label.frame().origin.x, self.sort_label.frame().size.width
         popup_frame = self.list_sort_order_popup.frame()
         is_showing_a_message = bool(self.message_text_field.stringValue())
         self.idle_tabs_button.setHidden_(is_showing_a_message)
-        bar_width = self.view().bounds().size.width
-        right_end_x = bar_width - PANEL_SIDE_MARGIN  # then the left end of the leftmost button placed
+        right_end_x = self.view().bounds().size.width - PANEL_SIDE_MARGIN  # then the left end of the leftmost button placed
         gap_before_the_buttons_placed = 0
         for button in (self.expand_or_collapse_all_button, self.idle_tabs_button):  # side by side from the right end
             if not button.isHidden():
                 right_end_x -= gap_before_the_buttons_placed + button.frame().size.width
                 button.setFrameOrigin_((right_end_x, button.frame().origin.y))
                 gap_before_the_buttons_placed = GAP_BETWEEN_TOP_BAR_BUTTONS
-        settings_button_width = self.settings_button.frame().size.width
-        settings_button_x_at_the_right = right_end_x - gap_before_the_buttons_placed - settings_button_width
-        whole_sort_control_right_end_x = label_x + label_width + 2 + self.sort_popup_width_for_its_widest_title
-        right_end_x = (settings_button_x_at_the_right if is_showing_a_message
-                       else min(max((bar_width - settings_button_width) / 2, whole_sort_control_right_end_x + 2),
-                                settings_button_x_at_the_right))
-        self.settings_button.setFrameOrigin_((right_end_x, self.settings_button.frame().origin.y))
-        room_right_edge = right_end_x - 2
+        room_right_edge = right_end_x - gap_before_the_buttons_placed
         popup_x_after_label = label_x + label_width + 2
         label_fits = not is_showing_a_message and popup_x_after_label + self.sort_popup_width_for_its_widest_title <= room_right_edge
         popup_x = popup_x_after_label if label_fits else label_x
@@ -381,8 +369,9 @@ class ListPanelController(NSViewController):
 
     @objc.python_method
     def fit_bottom_bar_to_width(self):
-        """Puts the hooks note at the bottom left, then its Install Hooks button (when there is
-        something to install), the note cut short before the button and the pause or resume button."""
+        """Puts the hooks note after the Settings button at the bottom left, then its Install Hooks
+        button (when there is something to install), the note cut short before the button and the
+        pause or resume button."""
         note = self.hooks_note_text_field.stringValue()
         shows_install_button = bool(note and self.agent_tool_names_to_install_hooks_for)
         self.hooks_note_text_field.setHidden_(not note)
@@ -395,10 +384,12 @@ class ListPanelController(NSViewController):
         if shows_install_button:
             right_end_x -= button_width + GAP_BETWEEN_TOP_BAR_BUTTONS
         note_size = self.hooks_note_text_field.fittingSize()
-        note_width = max(min(note_size.width, right_end_x - PANEL_SIDE_MARGIN), 0)
-        self.hooks_note_text_field.setFrame_(NSMakeRect(PANEL_SIDE_MARGIN, (BOTTOM_BAR_HEIGHT - note_size.height) / 2,
+        settings_button_frame = self.settings_button.frame()
+        note_x = settings_button_frame.origin.x + settings_button_frame.size.width + 8
+        note_width = max(min(note_size.width, right_end_x - note_x), 0)
+        self.hooks_note_text_field.setFrame_(NSMakeRect(note_x, (BOTTOM_BAR_HEIGHT - note_size.height) / 2,
                                                         note_width, note_size.height))
-        self.install_hooks_button.setFrameOrigin_((PANEL_SIDE_MARGIN + note_width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+        self.install_hooks_button.setFrameOrigin_((note_x + note_width + GAP_BETWEEN_TOP_BAR_BUTTONS,
                                                    (BOTTOM_BAR_HEIGHT - button_height) / 2))
 
     def installHooksClicked_(self, sender):
