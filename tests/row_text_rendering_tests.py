@@ -60,7 +60,9 @@ class LongestColumnTextTests(unittest.TestCase):
         self.assertLessEqual(max(len(format_clock_time(day_start + minutes * 60, day_start + 12 * 3600))
                                  for minutes in range(0, 365 * 1440, 13)),
                              longest_length["created_time_text"])
-        self.assertLessEqual(max(len(state) for state in list(DOT_GLYPH_AND_COLOR_BY_STATE) + ["thinking", "running"]),
+        # A tab row says "thinking" or "running" for working, and "running" for background.
+        self.assertLessEqual(max(len(state) for state in [*set(DOT_GLYPH_AND_COLOR_BY_STATE) - {"working", "background"},
+                                                          "thinking", "running"]),
                              longest_length["state_text"])
 
 
@@ -107,6 +109,15 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual((parts.state_text, parts.elapsed_time_text, parts.state_color_name), ("running", "1m", "green_text"))
         self.assertEqual(parts.dot_tool_tip,
                          "Running: the agent is waiting on a tool it started, such as a command, a subagent or a web fetch")
+
+    def test_a_background_session_says_running_in_yellow(self):  # user request, 2026-10-28
+        parts = build_agent_session_row_text_parts(make_entry("background", status_since=100.0), [True], 280.0)
+        self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "yellow", False))
+        self.assertEqual((parts.state_text, parts.state_color_name, parts.elapsed_time_text), ("running", "amber", "3m"))
+        self.assertEqual(parts.dot_tool_tip, "Running in the background: the agent is at its prompt, and processes it "
+                                             "started keep running in the background")
+        window_parts = build_window_row_text_parts(make_window(["background", "idle"]), [], False)
+        self.assertEqual((window_parts.dot_color_name, window_parts.details_text), ("yellow", "1 background, 1 idle"))
 
     def test_the_status_text_has_its_dots_color_but_done_is_gray(self):  # user requests, 2026-10-28
         self.assertEqual(set(STATE_TEXT_COLOR_NAME_BY_STATE), set(DOT_GLYPH_AND_COLOR_BY_STATE))

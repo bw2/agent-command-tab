@@ -6,9 +6,11 @@ the agent runs (agent_process_tree). Hook events are added as a further source i
 """
 
 # "paused": the agent process is stopped (Pause from the list, or Ctrl+Z) until it is resumed.
-STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "done", "idle", "paused", "unknown", "exited"]
+# "background": idle, but with background processes it started still running (user request,
+# 2026-10-28; iterm2_snapshot_builder.session_has_background_work), so it isn't taken for idle.
+STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "background", "done", "idle", "paused", "unknown", "exited"]
 # Between turns: the agent waits at its prompt, so /compact and /clear can be typed into it.
-STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done"})
+STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done", "background"})
 # During a turn, as iTerm2's status shows it: a permission prompt in between doesn't end the turn.
 STATES_OF_A_TURN_UNDER_WAY = frozenset({"working", "asking"})
 

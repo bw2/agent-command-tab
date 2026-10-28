@@ -1404,14 +1404,17 @@ class DashboardCore:
 
     def note_background_task_counts(self):
         """Sets each agent session's background task count (R26.2): Claude Code's own list of its
-        background shells and agents while its hooks have reported it (hook_event_tracking),
-        otherwise the background shells seen below the agent (read_child_processes_periodically)."""
+        background shells and agents while its hooks have reported it (hook_event_tracking), plus
+        the detached jobs it started, which that list doesn't hold (user request, 2026-10-28),
+        otherwise the background shells seen below the agent and its detached jobs
+        (read_child_processes_periodically)."""
         for session_id, agent_session in self.agent_sessions.items():
             reading = self.screen_readings_by_session_id.setdefault(session_id, {})
             hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
             reported_background_task_ids = hook_state["background_task_ids"] if hook_state is not None else None
-            reading["background_task_count"] = (len(reported_background_task_ids) if reported_background_task_ids is not None
-                                                else reading.get("background_shell_count", 0))
+            reading["background_task_count"] = (
+                len(reported_background_task_ids) + reading.get("detached_process_count", 0)
+                if reported_background_task_ids is not None else reading.get("background_shell_count", 0))
 
     def publish_snapshot_if_changed(self):
         """Builds the snapshot from the cached state and publishes it unless only its time changed."""
@@ -1876,6 +1879,8 @@ class DashboardCore:
             self.note_reading_value(session_id, "child_processes", tuple(child_process_entries))
             self.note_reading_value(session_id, "background_shell_count",
                                     sum(child_process["is_background_shell"] for child_process in child_processes))
+            self.note_reading_value(session_id, "detached_process_count",
+                                    sum(child_process["is_detached"] for child_process in child_processes))
         return new_cpu_time_readings_by_child
 
     async def note_command_the_agent_is_waiting_on(self, session_id, agent_session, reading, state, is_effectively_working, now):

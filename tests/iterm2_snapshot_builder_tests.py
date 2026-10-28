@@ -147,6 +147,18 @@ class BuildComputerSnapshotTests(unittest.TestCase):
                                       screen_readings={"session-1": {"conversation_preview": preview}})
             self.assertEqual(snapshot.monitors[0].windows[0].agent_sessions[0].preview_line, expected_preview_line)
 
+    def test_an_idle_session_with_background_processes_is_background(self):  # user request, 2026-10-28
+        def build_entry(status, screen_reading):
+            return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
+                                  screen_readings={"session-1": screen_reading}).monitors[0].windows[0].agent_sessions[0]
+        helper = ChildProcessEntry(65, "clangd --background-index", 900.0, False, None, None)
+        detached_job = ChildProcessEntry(77, "bash scratchpad/run.sh", 950.0, True, None, None)
+        self.assertEqual(build_entry("idle", {"background_task_count": 1}).status, "background")
+        entry = build_entry("idle", {"child_processes": (helper, detached_job)})
+        self.assertEqual((entry.status, entry.status_reason), ("background", "at its prompt, with background processes running"))
+        self.assertEqual(build_entry("idle", {"child_processes": (helper,)}).status, "idle")  # a helper isn't background work
+        self.assertEqual(build_entry("working", {"background_task_count": 1}).status, "working")  # the turn goes first
+
     def test_a_tool_call_open_for_5_seconds_or_more_shows_as_running(self):  # user request, 2026-10-28
         def build_entry(screen_reading, status="working"):
             return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],

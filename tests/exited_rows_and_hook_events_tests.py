@@ -220,7 +220,7 @@ class ChildProcessReadingTests(unittest.TestCase):
         def read_once(cpu_seconds, now, cpu_time_readings_by_child):
             return core.note_child_processes({"s1": [
                 {"child": child, "command_text": "python3 -m unittest", "command_started_at": 50.0, "is_background_shell": True,
-                 "resource_usage": (300 * 1024 ** 2 + 12345, cpu_seconds)}],
+                 "is_detached": False, "resource_usage": (300 * 1024 ** 2 + 12345, cpu_seconds)}],
                 "s-closed": []}, cpu_time_readings_by_child, now)
         cpu_time_readings_by_child = read_once(10.0, 100.0, {})
         self.assertEqual(core.screen_readings_by_session_id["s1"]["child_processes"],
@@ -229,6 +229,21 @@ class ChildProcessReadingTests(unittest.TestCase):
         self.assertEqual(core.screen_readings_by_session_id["s1"]["child_processes"][0].cpu_percent, 50)
         self.assertEqual(core.screen_readings_by_session_id["s1"]["background_shell_count"], 1)
         self.assertNotIn("s-closed", core.screen_readings_by_session_id)
+
+    def test_detached_jobs_add_to_claude_codes_own_count_of_background_tasks(self):  # user request, 2026-10-28
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.agent_sessions = {"s1": make_agent_session(101)}
+        background_shell, detached_job = ProcessInfo(201, 101, "bash", 5.0), ProcessInfo(202, 1, "bash", 6.0)
+        core.note_child_processes({"s1": [
+            {"child": child, "command_text": "sleep 30", "command_started_at": 5.0, "is_background_shell": True,
+             "is_detached": is_detached, "resource_usage": None}
+            for child, is_detached in ((background_shell, False), (detached_job, True))]}, {}, 100.0)
+        core.note_background_task_counts()  # no hooks: the background shells seen, detached jobs included
+        self.assertEqual(core.screen_readings_by_session_id["s1"]["background_task_count"], 2)
+        # Claude Code's hooks list only the shell it started, not the job that shell left behind.
+        core.hook_state_by_agent_process_id = {101: {"background_task_ids": {"shell-1"}}}
+        core.note_background_task_counts()
+        self.assertEqual(core.screen_readings_by_session_id["s1"]["background_task_count"], 2)
 
 
 if __name__ == "__main__":

@@ -82,11 +82,12 @@ Make sure to carefully assess the relative complexity and difficulty of features
   2. error;
   3. stuck (working, but no visible progress for longer than 10 minutes, a fixed time since 2026-10-26, user request);
   4. working (a tab row says "thinking", or "running" while the agent waits on a command or on another tool for 5 seconds or more; window rows' counts say "working" for both; user requests, 2026-10-28);
-  5. done (finished a turn, and its tab hasn't been in front since);
-  6. idle;
-  7. paused (its process is stopped by Pause or by Ctrl+Z, R15.3);
-  8. unknown (no report yet);
-  9. exited (only after an abnormal end, R14.1).
+  5. background (idle, but background processes it started keep running: background shells, background agents or detached jobs, not helpers such as a language server; a tab row says "running" in yellow, a window row's count "background"; user request, 2026-10-28);
+  6. done (finished a turn, and its tab hasn't been in front since);
+  7. idle;
+  8. paused (its process is stopped by Pause or by Ctrl+Z, R15.3);
+  9. unknown (no report yet);
+  10. exited (only after an abnormal end, R14.1).
 - R21. Each state has a distinct status dot: its own shape and color, so it works for color-blind users (R26.1). A window row's dot is the state of its most urgent agent session.
 - R22. Status works for Claude Code and Codex. Other agent tools work if they report status through the terminal status signal (OSC 7501) or have an adapter. Otherwise they are listed with a basic working or idle status based on screen activity.
 - R22.1. Rows keep a status after iTerm2 restarts (user request, 2026-10-21). iTerm2's tab bar then still shows each tab's status, but the status value its API returns stays empty until the agent's next hook event. While it is empty, a row takes the status iTerm2's tab bar shows; where that is empty too, a Claude Code row takes Claude Code's own report from `claude agents --json` (idle, working or asking, up to a minute old, never "done"). Because that report can be a minute old, nothing is typed into a Claude Code session while Claude Code's own session file, read just before typing, says it is anything but idle.
@@ -105,6 +106,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
   |---|---|
   | asking | light blue ● |
   | working | blinking green ● |
+  | background | steady yellow ● (user request, 2026-10-28) |
   | error | red ✕ |
   | stuck | amber ◆, slow pulse |
   | done | steady green ✔ (not blinking, so it differs from routine work) |
@@ -113,7 +115,7 @@ Make sure to carefully assess the relative complexity and difficulty of features
   | unknown | gray dotted ◌ |
   | exited after a crash | dim gray ⊘ |
 
-- R26.2. Each background process an agent session reports (for example a background shell command or a subagent) adds a small indicator light after its dot. Beyond a few lights, a number replaces them. **Built (user request, 2026-10-27)** with the lights after the name rather than the dot, so the names stay lined up: up to 4 yellow lights, then one light and the number ("•×6"). They count Claude Code's own list of its background shells and agents while its hooks (R14.2) report it, and otherwise the commands its shell tool left running in the background.
+- R26.2. Each background process an agent session reports (for example a background shell command or a subagent) adds a small indicator light after its dot. Beyond a few lights, a number replaces them. **Built (user request, 2026-10-27)** with the lights after the name rather than the dot, so the names stay lined up: up to 4 yellow lights, then one light and the number ("•×6"). They count Claude Code's own list of its background shells and agents while its hooks (R14.2) report it, and otherwise the commands its shell tool left running in the background; either way, the detached jobs the session started too, which Claude Code's list doesn't hold (user request, 2026-10-28).
 
 ### Preview
 

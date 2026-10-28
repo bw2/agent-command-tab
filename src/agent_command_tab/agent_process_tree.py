@@ -433,9 +433,9 @@ def choose_detached_processes_of_the_conversation(detached_processes, conversati
 def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, now,
                          detached_processes_of_the_conversation=()):
     """Returns [{"child": ProcessInfo, "command_text", "command_started_at", "is_background_shell",
-    "resource_usage": (memory in bytes, CPU seconds) of the child and the processes below it, or
-    None}] for each process the agent started (list_child_processes_of_the_agent), then for each
-    detached one (choose_detached_processes_of_the_conversation), which runs in the background.
+    "is_detached", "resource_usage": (memory in bytes, CPU seconds) of the child and the processes
+    below it, or None}] for each process the agent started (list_child_processes_of_the_agent),
+    then for each detached one (choose_detached_processes_of_the_conversation), which runs in the background.
     A Claude Code shell is named by its command and dated by its own start; another child by the
     command shown and that command's start (a shell Codex keeps between turns is older).
 
@@ -456,11 +456,12 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
                                                      shown_process.name)),
             "command_started_at": child.started_at if claude_code_shell_command else shown_process.started_at,
             "is_background_shell": child_process_is_a_background_shell(child, shown_process, turn_is_under_way, turn_started_at),
+            "is_detached": False,
             "resource_usage": read_process_tree_resource_usage(child.process_id) if reads_resource_usage else None})
     for process, arguments in detached_processes_of_the_conversation:
         child_processes.append({
             "child": process, "command_text": build_command_text(arguments, process.name), "command_started_at": process.started_at,
-            "is_background_shell": True,
+            "is_background_shell": True, "is_detached": True,
             "resource_usage": read_process_tree_resource_usage(process.process_id) if reads_resource_usage else None})
     return sorted(child_processes, key=lambda child_process: child_process["child"].started_at)  # oldest first, detached ones too
 

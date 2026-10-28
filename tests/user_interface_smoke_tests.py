@@ -31,6 +31,7 @@ from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_
                                                                          TAB_ROW_HEIGHT_WITH_PREVIEW, TEXT_FIELD_INSETS,
                                                                          AgentSessionListController, RowButton,
                                                                          RowViewWithSelectionOutline, build_index_set,
+                                                                         choose_room_for_a_columns_texts,
                                                                          compute_selection_outline_rect)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons
 from agent_command_tab.user_interface.named_colors import COLOR_MAKERS_BY_NAME
@@ -361,7 +362,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             windows=(window_one, snapshot.monitors[0].windows[1])),)))
         self.window.contentView().layoutSubtreeIfNeeded()
         # The rows of planning, phase0-tests and codex-review: light mode has a darker amber than the system yellow.
-        for row, expected_share_colors in ((1, ((168, 118, 0, 255), resolve_color(NSColor.systemYellowColor(), NSAppearanceNameDarkAqua))),
+        for row, expected_share_colors in ((1, ((205, 145, 0, 255), resolve_color(NSColor.systemYellowColor(), NSAppearanceNameDarkAqua))),
                                            (2, (resolve_color(NSColor.labelColor(), NSAppearanceNameAqua),
                                                 resolve_color(NSColor.labelColor(), NSAppearanceNameDarkAqua))),
                                            (3, (resolve_color(NSColor.systemRedColor(), NSAppearanceNameAqua),
@@ -1015,6 +1016,33 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.window.contentView().layoutSubtreeIfNeeded()
         self.list_controller.measure_right_columns()
         self.assertGreater(self.list_controller.column_widths["state_duration"], 0)  # kept while there is room for it
+
+    def test_a_column_keeps_spare_room_so_a_digit_more_or_less_doesnt_move_it(self):  # user request, 2026-10-28
+        character = 7.0
+        for widest_text_width, room_before, expected_room in (
+                (70, 0, 77),  # 10 characters: one spare
+                (77, 77, 77),  # a digit more fills the spare room
+                (70, 77, 77), (56, 77, 77),  # and two fewer than when it was set keep it
+                (49, 77, 56),  # three fewer: it shrinks, keeping one spare again
+                (84, 77, 91),  # wider than the room: it grows at once
+                (0, 77, 0)):  # no text: the column goes
+            self.assertEqual(choose_room_for_a_columns_texts(widest_text_width, room_before, character), expected_room,
+                             (widest_text_width, room_before))
+        snapshot = make_sample_snapshot()
+
+        def show_context_sizes(context_tokens, context_fill_percent=42):
+            window_one = snapshot.monitors[0].windows[0]
+            self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(
+                window_one._replace(agent_sessions=tuple(entry._replace(context_tokens=context_tokens,
+                                                                        context_fill_percent=context_fill_percent)
+                                                         for entry in window_one.agent_sessions)),
+                snapshot.monitors[0].windows[1])),)))
+            return self.list_controller.column_widths["context_tokens"]
+        self.list_controller.width_is_set_by_the_user = True  # a sidebar or the list window
+        self.window.setContentSize_((700, 260))
+        width = show_context_sizes(84_000)  # "84k (42%)"
+        self.assertEqual([show_context_sizes(context_tokens) for context_tokens in (184_000, 84_000)], [width, width])
+        self.assertGreater(show_context_sizes(1_200_000, 120), width)  # "1.2M (120%)", two characters more: wider at once
 
     def test_duplicate_is_greyed_out_for_a_tool_without_a_launch_command(self):
         snapshot = make_sample_snapshot()

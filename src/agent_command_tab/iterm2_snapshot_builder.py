@@ -37,6 +37,15 @@ DisplayedState.__doc__ = ("What a session's row showed in a snapshot: its state,
                           "value had last changed then (compute_displayed_state_since).")
 
 
+def session_has_background_work(screen_reading):
+    """Returns whether processes an agent started keep running in the background, which makes an
+    idle session "background" (user request, 2026-10-28): a background task the lights count, or
+    a process row in the background (a background shell or a detached job). Helpers such as a
+    language server or caffeinate don't count."""
+    return (screen_reading.get("background_task_count", 0) > 0
+            or any(child_process.is_background_shell for child_process in screen_reading.get("child_processes", ())))
+
+
 def choose_tool_the_agent_is_waiting_on(state, screen_reading, now):
     """Returns (name, started at) of the tool a working agent waits on, or None: the command it
     started, found from its processes at once ("running_command"), else the newest tool call of
@@ -217,6 +226,10 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
             stuck_threshold_seconds,
             now,
         )
+        status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
+                                                     previous_displayed_state, now)
+    if state == "idle" and session_has_background_work(screen_reading or {}):
+        state, reason = "background", "at its prompt, with background processes running"
         status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
                                                      previous_displayed_state, now)
     running_tool = choose_tool_the_agent_is_waiting_on(state, screen_reading or {}, now)

@@ -51,6 +51,7 @@ DOT_GLYPH_AND_COLOR_BY_STATE = {
     "error": ("✕", "red"),
     "stuck": ("◆", "orange"),
     "working": ("●", "green"),
+    "background": ("●", "yellow"),  # steady, the color of the background task lights (user request, 2026-10-28)
     "done": ("✔", "green"),
     "idle": ("○", "gray"),
     "paused": ("‖", "purple"),
@@ -67,6 +68,7 @@ STATE_TEXT_COLOR_NAME_BY_STATE = {
     "error": "red",
     "stuck": "orange_text",
     "working": "green_text",  # a tab row's "thinking" and "running"
+    "background": "amber",  # its "running" in yellow (user request, 2026-10-28), darker in light mode to read on white
     "done": "gray_in_light_mode_only",
     "idle": "gray",
     "paused": "purple",
@@ -81,6 +83,7 @@ MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2
     "error": "the agent reported an error",
     "stuck": "the agent has been thinking for 10 minutes with nothing new on screen and no command running",
     "working": "the agent is thinking or running a command",
+    "background": "the agent is at its prompt, and processes it started keep running in the background",
     "done": "the agent is done and you haven't looked at its last message yet",  # the user's wording, 2026-10-27
     "idle": "nothing new here since you last looked at this tab",
     # A plain CONT signal would leave it a background job (agent_session_pausing), so Resume types fg.
@@ -209,8 +212,11 @@ def describe_state(state):
 def name_and_describe_tab_rows_state(agent_session_entry, state):
     """Returns a tab row's state text and its dot's hover text, such as ("running", "Running: the
     agent is waiting on a command it started"): a working agent's state is "thinking" or
-    "running" (MEANING_BY_WORKING_STATE_NAME). A state the app doesn't know shows as it came, with
-    the hover text of state, "unknown"."""
+    "running" (MEANING_BY_WORKING_STATE_NAME), and "background" is "running" too, in yellow (user
+    request, 2026-10-28). A state the app doesn't know shows as it came, with the hover text of
+    state, "unknown"."""
+    if state == "background":
+        return "running", f"Running in the background: {MEANING_BY_STATE['background']}"
     if state != "working":
         return agent_session_entry.status, describe_state(state)
     working_state_name = "running" if agent_session_entry.running_tool_name else "thinking"

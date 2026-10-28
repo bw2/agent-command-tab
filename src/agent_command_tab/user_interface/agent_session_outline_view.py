@@ -85,6 +85,10 @@ TEXT_FIELD_INSETS = 5  # a label's text sits a few points inside its field
 ROOM_FOR_GROWING_DETAILS = "0000"
 SECONDS_TO_HOLD_BEFORE_PEEKING = 0.15
 SMALLEST_TAB_NAME_WIDTH = 80  # a narrower sidebar or window drops columns (COLUMN_NAMES_IN_DROP_ORDER)
+# The spare room a sidebar's or list window's column keeps beyond its widest text, and how much
+# narrower that text may get before the column shrinks (choose_room_for_a_columns_texts).
+SPARE_CHARACTERS_IN_A_COLUMN = 1
+CHARACTERS_A_COLUMN_MAY_LOSE = 2
 # A tab row's columns at its right edge, left to right: settings_store.LIST_COLUMNS, which the
 # settings can show or hide, and the agent tool's icon, which shows by itself when two or more
 # agent tools run. Each comes with the RowTextParts field it shows (the icon column shows the
@@ -333,6 +337,27 @@ def make_row_icon_button():
     button.setImagePosition_(NSImageOnly)
     button.setContentTintColor_(NSColor.secondaryLabelColor())
     return button
+
+
+def choose_room_for_a_columns_texts(widest_text_width, room_before, character_width):
+    """Returns the room a column keeps for its texts in the sidebar and the list window, whose width
+    the user sets (user request, 2026-10-28): the widest text and SPARE_CHARACTERS_IN_A_COLUMN more,
+    kept as it was while the widest text still fits and is at most CHARACTERS_A_COLUMN_MAY_LOSE
+    narrower than when it was set, so a number gaining or losing a digit (9 to 10, and back)
+    doesn't move the columns, while a wider text widens its column at once.
+
+    Args:
+        widest_text_width: The widest of the column's texts now, in points (0 for none).
+        room_before: What this returned last time, or 0.
+        character_width: One character's width in the rows' monospaced font.
+    """
+    if not widest_text_width:
+        return 0
+    rounding_slack = 0.5  # text widths are sums of character widths, give or take a fraction of a point
+    if widest_text_width - rounding_slack <= room_before <= (
+            widest_text_width + (SPARE_CHARACTERS_IN_A_COLUMN + CHARACTERS_A_COLUMN_MAY_LOSE) * character_width + rounding_slack):
+        return room_before
+    return widest_text_width + SPARE_CHARACTERS_IN_A_COLUMN * character_width
 
 
 def place_columns_from_the_right(right_edge, column_widths):
@@ -668,6 +693,9 @@ class AgentSessionListController(NSObject):
         self.agent_tool_icons_by_name = build_agent_tool_icons()
         # Each TAB_ROW_COLUMNS column's width, 0 while it is hidden or no row has text for it (measure_right_columns).
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}
+        # In the sidebar and the list window, the room each column keeps for its texts (choose_room_for_a_columns_texts).
+        self.room_for_texts_by_column_name = {}
+        self.character_width = self.measure_text_width("0", self.regular_font)
         # The room the window rows' previews button takes at the right edge, in a column of its
         # own, while a tab has a preview (measure_right_columns; user request, 2026-10-26).
         self.room_for_the_previews_button = 0
@@ -1260,7 +1288,9 @@ class AgentSessionListController(NSObject):
         the settings hide it or no row has text for it (no context size known yet). In the dropdown, a shown
         column is at least as wide as LONGEST_TEXT_BY_COLUMN_FIELD_NAME's text, so the dropdown's
         width doesn't follow the numbers and states; the sidebar and the list window, whose width
-        the user sets, leave that room to the names. The icon column's width fits the widest tool
+        the user sets, leave that room to the names, but keep a little spare room in each column
+        and shrink one only when its texts get clearly narrower (choose_room_for_a_columns_texts),
+        so the columns don't move as numbers change by a digit. The icon column's width fits the widest tool
         icon, or is 0 when all agent sessions use the same tool. A narrow sidebar or window then
         drops columns in COLUMN_NAMES_IN_DROP_ORDER to keep room for names."""
         agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)
@@ -1284,6 +1314,10 @@ class AgentSessionListController(NSObject):
             if any(texts) and not self.width_is_set_by_the_user:  # the dropdown keeps its width as the texts change
                 texts.add(LONGEST_TEXT_BY_COLUMN_FIELD_NAME[parts_field_name])
             widest_text_width = max((self.measure_text_width(text, self.regular_font) for text in texts if text), default=0)
+            if self.width_is_set_by_the_user:  # spare room, so small changes to the numbers don't move the columns
+                widest_text_width = choose_room_for_a_columns_texts(
+                    widest_text_width, self.room_for_texts_by_column_name.get(column_name, 0), self.character_width)
+                self.room_for_texts_by_column_name[column_name] = widest_text_width
             self.column_widths[column_name] = (TEXT_FIELD_INSETS + max(widest_text_width, self.column_title_widths[column_name])
                                                if widest_text_width else 0)
         if self.width_is_set_by_the_user:
