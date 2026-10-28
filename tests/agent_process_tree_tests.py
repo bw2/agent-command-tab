@@ -12,15 +12,18 @@ from agent_command_tab.agent_adapters.codex import CONVERSATION_FILE_PATTERN, Co
 from agent_command_tab.agent_adapters.generic import GenericAdapter
 from agent_command_tab.agent_process_tree import (ProcessInfo, an_agent_program_runs_through_a_shell_below,
                                                   build_command_text, child_process_is_a_background_shell,
-                                                  choose_command_the_agent_is_waiting_on, choose_helper_process_ids,
-                                                  compute_cpu_percent, list_child_processes_of_the_agent,
-                                                  list_descendant_processes, read_child_processes,
+                                                  choose_command_the_agent_is_waiting_on,
+                                                  choose_detached_processes_of_the_conversation, choose_helper_process_ids,
+                                                  compute_cpu_percent, find_the_command_a_claude_code_shell_runs,
+                                                  list_child_processes_of_the_agent, list_descendant_processes,
+                                                  list_detached_processes, read_child_processes,
                                                   read_name_the_process_was_started_as,
                                                   read_process_info, read_process_resource_usage,
                                                   read_process_tree_resource_usage)
 
 TURN_STARTED_AT = 1000.0
 NOW = 1100.0
+CONVERSATION_ID = "7c1b97ad-260c-4aa2-a4bd-546d7e9dfe1c"  # a Claude Code session's ID
 
 
 def make_process(process_id, parent_process_id, name, started_at):
@@ -113,6 +116,55 @@ class ChildProcessTests(unittest.TestCase):
         self.assertEqual(build_command_text(["/opt/homebrew/bin/python3", "-m", "unittest"], "Python"), "python3 -m unittest")
         self.assertEqual(build_command_text(["bash", "-c", "echo a\necho b"], "bash"), "bash -c echo a echo b")
         self.assertEqual(build_command_text([], "caffeinate"), "caffeinate")
+        # A Claude Code scratchpad folder is just "scratchpad", so the end of the command shows (user request, 2026-10-28).
+        self.assertEqual(build_command_text(
+            ["bash", f"/private/tmp/claude-502/-Users-someone-code-x/{CONVERSATION_ID}/scratchpad/step5/run.sh"], "bash"),
+            "bash scratchpad/step5/run.sh")
+
+    def test_claude_codes_shell_is_named_by_the_command_it_was_given(self):  # user request, 2026-10-28
+        # As Claude Code 2.1 runs a background wait loop (seen on 2026-10-28); a ' in the command is '"'"'.
+        wrapper = ("source /Users/someone/.claude/shell-snapshots/snapshot-bash-1-x.sh 2>/dev/null || true && shopt -u "
+                   "extglob 2>/dev/null || true && eval 'until ! kill -0 31762; do sleep 30; done; grep -hE '\"'\"'DONE|KILL'\"'\"' "
+                   "a.log' < /dev/null && pwd -P >| /tmp/claude-73e9-cwd")
+        self.assertEqual(find_the_command_a_claude_code_shell_runs(["/bin/bash", "-c", wrapper]),
+                         "until ! kill -0 31762; do sleep 30; done; grep -hE 'DONE|KILL' a.log")
+        self.assertIsNone(find_the_command_a_claude_code_shell_runs(["bash", "-c", "sleep 30"]))  # Codex's, or anyone's
+        self.assertIsNone(find_the_command_a_claude_code_shell_runs(["python3", "train.py"]))
+
+    def test_detached_processes_go_to_the_conversation_whose_id_their_arguments_or_folder_name(self):
+        scratchpad = f"/private/tmp/claude-502/-Users-someone-code-x/{CONVERSATION_ID}/scratchpad"
+        script_run = make_process(40, 1, "bash", 1020.0)
+        run_in_scratchpad = make_process(41, 1, "python3", 1010.0)
+        other = make_process(42, 1, "Safari", 1030.0)
+        from_before_the_agent = make_process(43, 1, "bash", 900.0)  # a process ID reused, or an earlier conversation's
+        detached_processes = [(script_run, ["bash", f"{scratchpad}/run.sh"], "/Users/someone/code/x"),
+                              (run_in_scratchpad, ["python3", "train.py"], scratchpad + "/step4"),
+                              (other, ["/Applications/Safari.app/Contents/MacOS/Safari"], "/"),
+                              (from_before_the_agent, ["bash", f"{scratchpad}/old.sh"], "/")]
+        self.assertEqual(choose_detached_processes_of_the_conversation(detached_processes, CONVERSATION_ID, 1000.0),
+                         [(run_in_scratchpad, ["python3", "train.py"]), (script_run, ["bash", f"{scratchpad}/run.sh"])])
+        self.assertEqual(choose_detached_processes_of_the_conversation(detached_processes, None, 1000.0), [])  # Codex: no ID
+
+    def test_a_real_detached_process_is_found_and_listed_in_the_background(self):
+        # A shell starts python3 in the background and ends, so launchd adopts python3.
+        started_at = time.time() - 1
+        shell = subprocess.run(["/bin/sh", "-c", f'"$0" -c "import time; time.sleep(30)" {CONVERSATION_ID} >/dev/null 2>&1 & echo $!',
+                                sys.executable], capture_output=True, text=True, check=True)
+        detached_process_id = int(shell.stdout.strip())
+        try:
+            until = time.time() + 10
+            found = []
+            while time.time() < until and not found:
+                found = choose_detached_processes_of_the_conversation(list_detached_processes(started_at), CONVERSATION_ID, started_at)
+            self.assertEqual([process.process_id for process, _ in found], [detached_process_id])
+            self.assertEqual(found[0][0].parent_process_id, 1)
+            (entry,) = [entry for entry in read_child_processes(os.getpid(), False, None, True, time.time(), found)
+                        if entry["child"].process_id == detached_process_id]
+            self.assertTrue(entry["is_background_shell"])  # it runs in the background, on its own
+            self.assertIn(f"import time; time.sleep(30) {CONVERSATION_ID}", entry["command_text"])
+            self.assertGreater(entry["resource_usage"][0], 0)
+        finally:
+            os.kill(detached_process_id, signal.SIGKILL)
 
     def test_a_real_child_of_this_process(self):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])

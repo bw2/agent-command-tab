@@ -23,9 +23,10 @@ from iterm2.notifications import async_subscribe_to_variable_change_notification
 
 from agent_command_tab import iterm2_actions
 from agent_command_tab.agent_process_tree import (an_agent_program_runs_through_a_shell_below,
-                                                  choose_command_the_agent_is_waiting_on, choose_helper_process_ids,
-                                                  compute_cpu_percent,
-                                                  list_descendant_processes, process_has_its_terminal, process_is_alive,
+                                                  choose_command_the_agent_is_waiting_on,
+                                                  choose_detached_processes_of_the_conversation, choose_helper_process_ids,
+                                                  compute_cpu_percent, list_descendant_processes, list_detached_processes,
+                                                  process_has_its_terminal, process_is_alive,
                                                   process_is_stopped, read_child_processes,
                                                   read_name_the_process_was_started_as, read_process_current_folder,
                                                   read_process_info, read_process_tree_resource_usage)
@@ -1820,15 +1821,27 @@ class DashboardCore:
             status_value_by_session_id = {gathered_tab["first_session"]["session_id"]: gathered_tab["first_session"]["status"]
                                           for gathered_window in self.gathered_windows for gathered_tab in gathered_window["tabs"]
                                           if gathered_tab["first_session"]}
+            # Also the Claude Code conversation's ID and the agent's start, for its detached processes.
             agent_process_and_turn_by_session_id = {
                 session_id: (agent_session["process_id"],
                              map_iterm2_status_value_to_state(status_value_by_session_id.get(session_id)) in STATES_OF_A_TURN_UNDER_WAY,
-                             self.session_tracking_by_session_id.get(session_id, {}).get("turn_started_at"))
+                             self.session_tracking_by_session_id.get(session_id, {}).get("turn_started_at"),
+                             (self.claude_agents_by_process_id.get(agent_session["process_id"]) or {}).get("sessionId"),
+                             agent_session.get("started_at"))
                 for session_id, agent_session in self.agent_sessions.items() if agent_session["process_id"]}
-            child_processes_by_session_id = await asyncio.to_thread(lambda: {
-                session_id: read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, time.time())
-                for session_id, (agent_process_id, turn_is_under_way, turn_started_at)
-                in agent_process_and_turn_by_session_id.items()})
+
+            def read_every_agents_child_processes():
+                # launchd's children are read once for all the agents, only when a conversation's ID is known.
+                agent_starts = [agent_started_at for _, _, _, conversation_id, agent_started_at
+                                in agent_process_and_turn_by_session_id.values() if conversation_id and agent_started_at is not None]
+                detached_processes = list_detached_processes(min(agent_starts)) if agent_starts else []
+                return {session_id: read_child_processes(
+                            agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, time.time(),
+                            choose_detached_processes_of_the_conversation(detached_processes, conversation_id, agent_started_at)
+                            if agent_started_at is not None else ())
+                        for session_id, (agent_process_id, turn_is_under_way, turn_started_at, conversation_id, agent_started_at)
+                        in agent_process_and_turn_by_session_id.items()}
+            child_processes_by_session_id = await asyncio.to_thread(read_every_agents_child_processes)
             cpu_time_readings_by_child = self.note_child_processes(child_processes_by_session_id, cpu_time_readings_by_child,
                                                                    time.time())
             await asyncio.sleep(CHILD_PROCESS_CHECK_INTERVAL_SECONDS)

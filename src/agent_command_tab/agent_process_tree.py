@@ -12,6 +12,7 @@
 import collections
 import ctypes
 import os
+import re
 
 LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
 LIBC = ctypes.CDLL("/usr/lib/libc.dylib")
@@ -36,6 +37,13 @@ SECONDS_OF_SLACK_AT_TURN_START = 2
 # A command counts only once it has run this long, so hooks (iTerm2's cc-status runs on every
 # tool call) and status line commands, which end within a second, never show as "running".
 SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS = 2
+# Claude Code's shell tool runs each command as `bash -c "source <its shell snapshot> ... && eval
+# '<the command>' < /dev/null && pwd -P >| <a file>"`, a ' in the command written as '"'"'.
+CLAUDE_CODE_SHELL_TOOL_COMMAND = re.compile(r"""&& eval '((?:[^']|'"'"')*)' < /dev/null && pwd -P >\| \S+\Z""", re.DOTALL)
+# A Claude Code session's scratchpad folder, /private/tmp/claude-<user ID>/<project>/<session ID>/scratchpad,
+# which a process row calls just "scratchpad" (user request, 2026-10-28), so the end of the command shows.
+CLAUDE_CODE_SCRATCHPAD_PATH = re.compile(r"(?:/private)?/tmp/claude-\d+/[^/\s'\"]+/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/scratchpad")
+LAUNCHD_PROCESS_ID = 1  # adopts a process whose parent ended
 
 RUSAGE_INFO_V2 = 2  # proc_pid_rusage flavor that returns struct rusage_info_v2
 
@@ -375,33 +383,86 @@ def child_process_is_a_background_shell(child, shown_process, turn_is_under_way,
 
 def build_command_text(arguments, executable_name):
     """Returns how a sub row names a process: its program's base name and its arguments, on one
-    line ("python3 -m unittest"), or its executable's name when its arguments can't be read."""
+    line ("python3 -m unittest"), or its executable's name when its arguments can't be read. A
+    Claude Code scratchpad folder in them is just "scratchpad" (CLAUDE_CODE_SCRATCHPAD_PATH)."""
     if not arguments:
         return executable_name
-    return " ".join([os.path.basename(arguments[0])] + arguments[1:]).replace("\n", " ")
+    return shorten_scratchpad_paths(" ".join([os.path.basename(arguments[0])] + arguments[1:]).replace("\n", " "))
 
 
-def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, now):
+def shorten_scratchpad_paths(text):
+    return CLAUDE_CODE_SCRATCHPAD_PATH.sub("scratchpad", text)
+
+
+def find_the_command_a_claude_code_shell_runs(arguments):
+    """Returns the command Claude Code's shell tool gave a `bash -c` (CLAUDE_CODE_SHELL_TOOL_COMMAND),
+    as the agent wrote it, or None for another process. A sub row names such a shell by it (user
+    request, 2026-10-28): a background wait loop then reads as the loop, not as the `sleep 30` it
+    runs at that moment."""
+    if len(arguments) != 3 or arguments[1] != "-c":
+        return None
+    match = CLAUDE_CODE_SHELL_TOOL_COMMAND.search(arguments[2])
+    return match.group(1).replace("'\"'\"'", "'") if match else None
+
+
+def list_detached_processes(earliest_started_at):
+    """Returns [(ProcessInfo, arguments, current folder or None)] for this user's processes that
+    launchd adopted (their parent ended) and that started at or after earliest_started_at. A job an
+    agent started with `nohup ... &` or `setsid`, whose shell then ended, is one of them: no longer
+    below the agent, so list_descendant_processes misses it."""
+    detached_processes = []
+    for process_id in list_child_process_ids(LAUNCHD_PROCESS_ID):
+        process = read_process_info(process_id)  # None for another user's process
+        if process is not None and process.started_at >= earliest_started_at:
+            detached_processes.append((process, read_process_arguments_and_environment(process_id)[0],
+                                       read_process_current_folder(process_id)))
+    return detached_processes
+
+
+def choose_detached_processes_of_the_conversation(detached_processes, conversation_id, agent_started_at):
+    """Returns [(ProcessInfo, arguments)] for the detached processes (list_detached_processes) that
+    an agent's conversation started, oldest first (user request, 2026-10-28): started after the
+    agent, with the conversation's ID in their arguments or current folder, as every path in a
+    Claude Code session's scratchpad folder has it. A job run from elsewhere isn't found."""
+    return sorted(((process, arguments) for process, arguments, current_folder in detached_processes
+                   if conversation_id and process.started_at >= agent_started_at
+                   and (conversation_id in " ".join(arguments) or conversation_id in (current_folder or ""))),
+                  key=lambda process_and_arguments: process_and_arguments[0].started_at)
+
+
+def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, now,
+                         detached_processes_of_the_conversation=()):
     """Returns [{"child": ProcessInfo, "command_text", "command_started_at", "is_background_shell",
     "resource_usage": (memory in bytes, CPU seconds) of the child and the processes below it, or
-    None}] for each process the agent started (list_child_processes_of_the_agent), named by the
-    command shown and dated by its start (a shell Codex keeps between turns is older).
+    None}] for each process the agent started (list_child_processes_of_the_agent), then for each
+    detached one (choose_detached_processes_of_the_conversation), which runs in the background.
+    A Claude Code shell is named by its command and dated by its own start; another child by the
+    command shown and that command's start (a shell Codex keeps between turns is older).
 
     Args:
         agent_process_id: The agent process.
         turn_is_under_way, turn_started_at: See child_process_is_a_background_shell.
         reads_resource_usage: Whether to read each child's memory and CPU time (else None).
         now: The current time.
+        detached_processes_of_the_conversation: choose_detached_processes_of_the_conversation's list.
     """
-    descendant_processes = list_descendant_processes(agent_process_id)
-    return [{"child": child,
-             "command_text": build_command_text(read_process_arguments_and_environment(shown_process.process_id)[0],
-                                                shown_process.name),
-             "command_started_at": shown_process.started_at,
-             "is_background_shell": child_process_is_a_background_shell(child, shown_process, turn_is_under_way,
-                                                                        turn_started_at),
-             "resource_usage": read_process_tree_resource_usage(child.process_id) if reads_resource_usage else None}
-            for child, shown_process in list_child_processes_of_the_agent(agent_process_id, descendant_processes, now)]
+    child_processes = []
+    for child, shown_process in list_child_processes_of_the_agent(agent_process_id, list_descendant_processes(agent_process_id), now):
+        claude_code_shell_command = find_the_command_a_claude_code_shell_runs(read_process_arguments_and_environment(child.process_id)[0])
+        child_processes.append({
+            "child": child,
+            "command_text": (shorten_scratchpad_paths(" ".join(claude_code_shell_command.split())) if claude_code_shell_command
+                             else build_command_text(read_process_arguments_and_environment(shown_process.process_id)[0],
+                                                     shown_process.name)),
+            "command_started_at": child.started_at if claude_code_shell_command else shown_process.started_at,
+            "is_background_shell": child_process_is_a_background_shell(child, shown_process, turn_is_under_way, turn_started_at),
+            "resource_usage": read_process_tree_resource_usage(child.process_id) if reads_resource_usage else None})
+    for process, arguments in detached_processes_of_the_conversation:
+        child_processes.append({
+            "child": process, "command_text": build_command_text(arguments, process.name), "command_started_at": process.started_at,
+            "is_background_shell": True,
+            "resource_usage": read_process_tree_resource_usage(process.process_id) if reads_resource_usage else None})
+    return sorted(child_processes, key=lambda child_process: child_process["child"].started_at)  # oldest first, detached ones too
 
 
 def choose_helper_process_ids(descendant_processes):
