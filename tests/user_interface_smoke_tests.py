@@ -1513,7 +1513,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertGreater(row_view.details_text_field.frame().origin.x, row_view.name_text_field.frame().origin.x)
         self.assertEqual(self.lay_out_row_view(2).name_text_field.frame().origin.x, row_view.name_text_field.frame().origin.x)
         # Their hover text shows over the lights only, not over the empty room up to the columns.
-        self.assertEqual(row_view.details_text_field.toolTip(), "3 background tasks: commands or subagents the agent left running")
+        self.assertEqual(row_view.details_text_field.toolTip(), "3 background tasks")
         self.assertEqual(row_view.details_text_field.frame().size.width, row_view.details_text_field.fittingSize().width)
 
     def test_an_exited_row_is_gray_and_its_menu_has_nothing_to_send_or_kill(self):

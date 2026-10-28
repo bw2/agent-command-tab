@@ -170,12 +170,10 @@ def build_background_task_lights_text(background_task_count):
 
 
 def describe_background_task_lights(background_task_count):
-    """Returns the background task lights' hover text, such as "2 background tasks: ...", or "" for none."""
+    """Returns the background task lights' hover text, such as "2 background tasks", or "" for none."""
     if not background_task_count:
         return ""
-    if background_task_count == 1:
-        return "1 background task: a command or subagent the agent left running"
-    return f"{background_task_count} background tasks: commands or subagents the agent left running"
+    return "1 background task" if background_task_count == 1 else f"{background_task_count} background tasks"
 
 
 def describe_state(state):

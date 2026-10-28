@@ -150,7 +150,9 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual([build_background_task_lights_text(count) for count in (0, 1, 4, 6)], ["", "•", "••••", "•×6"])
         parts = build_agent_session_row_text_parts(make_entry("idle")._replace(background_task_count=2), [True], 1.0)
         self.assertEqual((parts.details_text, parts.details_color_name), ("••", "yellow"))
-        self.assertEqual(parts.details_tool_tip, "2 background tasks: commands or subagents the agent left running")
+        self.assertEqual(parts.details_tool_tip, "2 background tasks")
+        self.assertEqual(build_agent_session_row_text_parts(make_entry("idle")._replace(background_task_count=1), [True],
+                                                            1.0).details_tool_tip, "1 background task")
         self.assertEqual(build_agent_session_row_text_parts(make_entry("idle"), [True], 1.0).details_tool_tip, "")
 
     def test_an_exited_row_is_gray(self):
