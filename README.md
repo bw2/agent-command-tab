@@ -4,8 +4,6 @@
 
 A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agents run (Claude Code, OpenAI Codex CLI, and others), shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents. The list shows as a dropdown under the menu bar icon, a sidebar at the edge of the screen, or a regular window.
 
-**Status: alpha.** It works day to day on the author's Mac; expect rough edges.
-
 ## What it does
 
 - **One tree of your agents:** every iTerm2 window with at least one agent tab, with its tabs below it, grouped by monitor when you have several. Tabs without an agent are left out.

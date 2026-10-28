@@ -150,6 +150,15 @@ class ReadClaudeCodePreviewTests(unittest.TestCase):
             claude_assistant_record({"type": "thinking", "thinking": "..."}),
         ])
         self.assertEqual((fields["last_prompt"], fields["message_since_prompt"]), ("fix the bug", ""))
+        # So does a notice that a session it asked about went idle.
+        fields = self.read([
+            claude_user_record("fix the bug"),
+            claude_assistant_record({"type": "text", "text": "Fixed it and committed."}),
+            claude_user_record('[Cross-session idle notice] "a7", which you asked to be notified about, is idle.', isMeta=True,
+                               turnOrigin="system", promptSource="system"),
+            claude_assistant_record({"type": "thinking", "thinking": "..."}),
+        ])
+        self.assertEqual((fields["last_prompt"], fields["message_since_prompt"]), ("fix the bug", ""))
 
     def test_the_saved_last_prompt_stands_in_for_a_prompt_older_than_the_part_read(self):
         fields = self.read([

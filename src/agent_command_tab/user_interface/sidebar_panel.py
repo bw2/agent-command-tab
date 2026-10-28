@@ -260,6 +260,10 @@ class SidebarController(NSObject):
             self.stop_tracking_the_pointer()
             self.owner.reserve_screen_area(None)
             self.set_shown(self.is_shown and self.shown_from_the_menu, animate=False)
+            if self.is_shown and self.hide_timer is None:
+                # Shown by a click or the shortcut while it auto-hid, its timer stopped while the pointer
+                # was on it: without pointer tracking, only a hide check slides it out (code review, 2026-10-28).
+                self.check_whether_to_hide_in(SECONDS_BEFORE_HIDING)
             return
         if self.settings["sidebar_mode"] == "auto_hide":
             self.start_tracking_the_pointer()

@@ -12,7 +12,7 @@ import unittest.mock
 from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, NSAppearance, NSAppearanceNameAqua,
                     NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
-                    NSBitmapImageFileTypePNG, NSButton, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
+                    NSBitmapImageFileTypePNG, NSBox, NSBoxCustom, NSButton, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSEventModifierFlagCommand, NSEventTypeKeyDown, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp,
                     NSLeftArrowFunctionKey, NSMakePoint, NSMakeRect, NSRightArrowFunctionKey,
                     NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone,
@@ -44,11 +44,16 @@ from agent_command_tab.user_interface.row_text_rendering import STATE_TEXT_COLOR
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
-                                                            frame_is_on_a_screen, grow_frame_to_smallest_size)
+                                                            convert_rect_to_frame_list, frame_is_on_a_screen,
+                                                            grow_frame_to_smallest_size, list_screen_frames,
+                                                            place_window_at_saved_frame_or_center)
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 from agent_command_tab.user_interface.menu_bar_status_item import (choose_icon_color_name,
                                                                    choose_what_a_click_on_the_icon_does_to_the_dropdown)
-from agent_command_tab.user_interface.settings_window import LAUNCH_COMMAND_FIELD_WIDTH, ROW_SPACING, SettingsWindowController
+from agent_command_tab.user_interface.settings_window import (GAP_BELOW_SECTION_TITLE, GAP_BETWEEN_SECTIONS,
+                                                              LAUNCH_COMMAND_FIELD_WIDTH, SECTION_TITLE_HEIGHT,
+                                                              SettingsWindowController)
+from agent_command_tab.user_interface.settings_window import ROW_HEIGHT as SETTINGS_ROW_HEIGHT  # the list has its own
 from agent_command_tab.user_interface.sidebar_panel import (SidebarController,
                                                             allow_pointer_changes_while_another_app_is_in_front)
 from agent_command_tab.user_interface.sidebar_placement import SidebarPlacement
@@ -1129,7 +1134,12 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # A new name typed, so a rename submitted instead of cancelled would show.
         self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False).name_text_field.currentEditor() \
             .setString_("typed but cancelled")
-        self.list_controller.cancel_rename()
+        # The dropdown closes (code review, 2026-10-28: through the app controller's own handler).
+        app_controller = AppController.alloc().init()
+        app_controller.dropdown_list_controller = self.list_controller
+        app_controller.status_item_controller = unittest.mock.Mock()
+        app_controller.place_the_settings_window_above_the_lists = lambda dropdown_is_open: None
+        app_controller.popoverWillClose_(None)
         self.assertFalse(self.list_controller.rename_in_progress)
         self.assertEqual(self.submitted_actions, [])  # nothing was renamed
 
@@ -2000,6 +2010,22 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.assertFalse(self.controller.is_kept_hidden)
         self.controller.stop_tracking_the_pointer()
 
+    def test_a_sidebar_shown_for_a_few_seconds_keeps_a_hide_check_when_show_as_changes_away(self):  # code review, 2026-10-28
+        self.owner.reserve_screen_area = lambda area: None
+        # On a screen far outside every monitor, so it stays out of sight.
+        self.addCleanup(self.controller.window.orderOut_, None)
+        self.addCleanup(self.controller.watch_for_clicks_in_other_apps, False)
+        self.addCleanup(self.controller.stop_tracking_the_pointer)
+        self.addCleanup(self.controller.cancel_hide_timer)
+        far_away_screens = [{"name": "Far away", "frame": (-4000, -4000, 1500, 1000), "visible_frame": (-4000, -4000, 1500, 970)}]
+        with unittest.mock.patch("agent_command_tab.user_interface.sidebar_panel.read_monitors_from_screens", lambda: far_away_screens):
+            self.controller.apply_settings(dict(self.controller.settings, show_as="sidebar", sidebar_mode="auto_hide"))
+            self.controller.show_for_a_few_seconds()  # a click on the menu bar icon or the shortcut
+            self.controller.cancel_hide_timer()  # as the pointer moving onto it does
+            self.controller.apply_settings(dict(self.controller.settings, show_as="popup"))  # chosen in Settings with the keyboard
+        self.assertTrue(self.controller.is_shown)
+        self.assertIsNotNone(self.controller.hide_timer)  # it still slides out once the pointer is off it
+
     def test_a_sidebar_not_chosen_in_show_as_is_parked_just_past_its_edge(self):
         # So the menu's "Show sidebar" slides it in from that edge. (The shown case isn't tested
         # here: it would put a real window on the screen.)
@@ -2143,8 +2169,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
 
     def test_changing_one_control_keeps_changes_made_elsewhere(self):
         self.owner.settings = dict(self.owner.settings, sidebar_width=555)  # dragged at the sidebar's edge meanwhile
-        self.controller.list_window_always_on_top_checkbox.setState_(1)
-        self.controller.controlChanged_(self.controller.list_window_always_on_top_checkbox)
+        self.controller.list_window_always_on_top_switch.setState_(1)
+        self.controller.controlChanged_(self.controller.list_window_always_on_top_switch)
         self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
         self.assertEqual(self.owner.settings["sidebar_width"], 555)
 
@@ -2224,16 +2250,26 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.windowWillClose_(unittest.mock.Mock(object=lambda: window))
         self.assertEqual(self.owner.settings["sidebar_width"], 555)
 
-    def test_column_checkboxes_choose_the_shown_columns_in_their_left_to_right_order(self):
-        checkboxes = self.controller.column_checkboxes
-        self.assertEqual([title for title in (checkbox.title() for checkbox in checkboxes.values())],
-                         ["Status", "Time Since Last Status Change", "Tokens Used", "Created Time", "Time Since Created",
-                          "Memory Usage", "CPU Usage"])
-        self.assertEqual([checkbox.state() for checkbox in checkboxes.values()], [1, 1, 1, 0, 0, 0, 0])  # the defaults
-        checkboxes["state"].setState_(0)
-        self.controller.controlChanged_(checkboxes["state"])
-        checkboxes["created_time"].setState_(1)
-        self.controller.controlChanged_(checkboxes["created_time"])
+    def find_label_of_control(self, control):
+        """Returns the text of the label at the left of control's row."""
+        def find_middle(view):
+            return view.frame().origin.y + view.frame().size.height / 2
+        (label_text,) = [subview.stringValue() for subview in self.controller.rows_view.subviews()
+                         if isinstance(subview, NSTextField) and not subview.isEditable()
+                         and subview.frame().origin.x < control.frame().origin.x
+                         and abs(find_middle(subview) - find_middle(control)) < SETTINGS_ROW_HEIGHT / 2]
+        return label_text
+
+    def test_column_switches_choose_the_shown_columns_in_their_left_to_right_order(self):
+        switches = self.controller.column_switches
+        self.assertEqual([self.find_label_of_control(column_switch) for column_switch in switches.values()],
+                         ["Status", "Time since last status change", "Tokens used", "Created time", "Time since created",
+                          "Memory usage", "CPU usage"])  # in sentence case since 2026-10-28 (user request)
+        self.assertEqual([column_switch.state() for column_switch in switches.values()], [1, 1, 1, 0, 0, 0, 0])  # the defaults
+        switches["state"].setState_(0)
+        self.controller.controlChanged_(switches["state"])
+        switches["created_time"].setState_(1)
+        self.controller.controlChanged_(switches["created_time"])
         self.assertEqual(self.owner.settings["shown_columns"], ["state_duration", "context_tokens", "created_time"])
 
     def test_text_fields_save_when_they_lose_focus_too(self):
@@ -2250,8 +2286,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.reflect_settings(self.owner.settings)
         self.assertEqual(self.controller.show_as_popup.titleOfSelectedItem(), "Sidebar")
         self.assertEqual(self.controller.sidebar_width_field.stringValue(), "650")
-        self.controller.list_window_always_on_top_checkbox.setState_(1)
-        self.controller.controlChanged_(self.controller.list_window_always_on_top_checkbox)
+        self.controller.list_window_always_on_top_switch.setState_(1)
+        self.controller.controlChanged_(self.controller.list_window_always_on_top_switch)
         self.assertEqual((self.owner.settings["show_as"], self.owner.settings["sidebar_width"]), ("sidebar", 650))
         self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
 
@@ -2260,8 +2296,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         width_field = self.controller.sidebar_width_field
         self.assertTrue(self.controller.window.makeFirstResponder_(width_field))
         width_field.currentEditor().setString_("500")  # typed, without Return or Tab
-        self.controller.column_checkboxes["created_time"].setState_(1)
-        self.controller.controlChanged_(self.controller.column_checkboxes["created_time"])
+        self.controller.column_switches["created_time"].setState_(1)
+        self.controller.controlChanged_(self.controller.column_switches["created_time"])
         self.controller.reflect_settings(self.owner.settings)  # as the app controller does after every change
         self.assertEqual(width_field.currentEditor().string(), "500")
         self.controller.window.makeFirstResponder_(None)  # editing ends, as a click elsewhere does
@@ -2315,10 +2351,12 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertEqual(self.owner.settings["show_as"], "window")
 
     def test_always_on_top_keeps_the_list_window_above_other_windows(self):
-        checkbox = self.controller.list_window_always_on_top_checkbox
-        self.assertEqual((checkbox.title(), checkbox.state()), ("Always on top", 0))
-        checkbox.setState_(1)
-        self.controller.controlChanged_(checkbox)
+        self.owner.settings = dict(self.owner.settings, show_as="window")  # the Window section shows only then
+        self.controller.reflect_settings(self.owner.settings)
+        always_on_top_switch = self.controller.list_window_always_on_top_switch
+        self.assertEqual((self.find_label_of_control(always_on_top_switch), always_on_top_switch.state()), ("Always on top", 0))
+        always_on_top_switch.setState_(1)
+        self.controller.controlChanged_(always_on_top_switch)
         self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
         list_window_controller = ListWindowController.alloc().initWithOwner_(RecordingOwner())
         list_window_controller.list_controller.refresh_timer.invalidate()
@@ -2327,14 +2365,14 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         list_window_controller.apply_settings(dict(self.owner.settings, list_window_is_always_on_top=False))
         self.assertEqual(list_window_controller.window.level(), NSNormalWindowLevel)
 
-    def test_settings_are_grouped_under_section_titles_in_a_resizable_scrolling_window(self):
+    def test_settings_are_grouped_in_boxes_under_section_titles_in_a_resizable_scrolling_window(self):
         rows_view = self.controller.rows_view  # flipped: y grows downward
-        titles_and_labels = ["General", "Show as:", "Keyboard shortcut:", "Appearance:", "Window", "Sidebar", "Show:", "Window Edge:",
-                             "Width:", "Display Columns", "Harnesses", "Use:"]
+        titles_and_labels = ["General", "Show as", "Keyboard shortcut", "Appearance", "Window", "Always on top", "Sidebar", "Show",
+                             "Window edge", "Width", "Columns", "Harnesses"]
         # The Window section only for "Show as: Window", the Sidebar section only for Sidebar (user request, 2026-10-27).
-        for show_as, titles_and_labels_left_out in (("popup", ["Window", "Sidebar", "Show:", "Window Edge:", "Width:"]),
-                                                    ("window", ["Sidebar", "Show:", "Window Edge:", "Width:"]),
-                                                    ("sidebar", ["Window"])):
+        for show_as, titles_and_labels_left_out in (("popup", ["Window", "Always on top", "Sidebar", "Show", "Window edge", "Width"]),
+                                                    ("window", ["Sidebar", "Show", "Window edge", "Width"]),
+                                                    ("sidebar", ["Window", "Always on top"])):
             self.owner.settings = dict(self.owner.settings, show_as=show_as)
             self.controller.reflect_settings(self.owner.settings)
             texts_top_to_bottom = [subview.stringValue() for subview in sorted(
@@ -2342,17 +2380,24 @@ class SettingsWindowSmokeTests(unittest.TestCase):
                 key=lambda subview: subview.frame().origin.y)]
             self.assertEqual([text for text in texts_top_to_bottom if text in titles_and_labels],
                              [text for text in titles_and_labels if text not in titles_and_labels_left_out], show_as)
+            # A rounded box per section: General, the Window or Sidebar one, Columns and Harnesses.
+            boxes = [subview for subview in rows_view.subviews() if isinstance(subview, NSBox) and subview.boxType() == NSBoxCustom]
+            self.assertEqual(len(boxes), 3 if show_as == "popup" else 4, show_as)
         self.assertTrue(self.controller.window.styleMask() & NSWindowStyleMaskResizable)
         self.assertIs(self.controller.window.contentView().documentView(), rows_view)
         width_before = rows_view.frame().size.width
         self.controller.window.setContentSize_((self.controller.window.contentView().frame().size.width + 160, 300))
         self.assertEqual(rows_view.frame().size.width, width_before + 160)  # the rows follow the window's width
 
-    def test_the_rows_end_24_points_below_the_last_control(self):  # 12 until 2026-10-27 (user request: twice that)
+    def test_the_rows_end_20_points_below_the_last_box(self):
+        # 24 below the last control until 2026-10-28 (12 until 2026-10-27, user request: twice that); 27 now.
         rows_view = self.controller.rows_view
+        last_box_bottom = max(subview.frame().origin.y + subview.frame().size.height for subview in rows_view.subviews()
+                              if isinstance(subview, NSBox) and subview.boxType() == NSBoxCustom)
+        self.assertEqual(rows_view.frame().size.height - last_box_bottom, 20)
         last_command_field = self.controller.launch_command_fields[-1]
-        last_control_bottom = rows_view.convertRect_fromView_(last_command_field.bounds(), last_command_field)
-        self.assertEqual(rows_view.frame().size.height - (last_control_bottom.origin.y + last_control_bottom.size.height), 24)
+        self.assertEqual(rows_view.frame().size.height - (last_command_field.frame().origin.y + last_command_field.frame().size.height),
+                         27)
 
     def test_the_command_fields_start_together_keep_their_width_and_scroll_a_longer_command(self):
         command_fields = self.controller.launch_command_fields
@@ -2361,23 +2406,42 @@ class SettingsWindowSmokeTests(unittest.TestCase):
                          {(command_fields[0].frame().origin.x, LAUNCH_COMMAND_FIELD_WIDTH)})
         self.assertTrue(all(command_field.cell().isScrollable() for command_field in command_fields))
 
-    def test_every_section_starts_one_blank_row_below_the_last_thing_shown_above_it(self):
-        for show_as, shown_section_titles in (("popup", ["Display Columns", "Harnesses"]),
-                                              ("window", ["Window", "Display Columns", "Harnesses"]),
-                                              ("sidebar", ["Sidebar", "Display Columns", "Harnesses"])):
+    def check_every_section_title_starts_20_points_below_what_is_shown_above_it(self, shown_section_titles, message):
+        subviews = list(self.controller.rows_view.subviews())  # flipped: y grows downward
+        section_titles = [subview for subview in subviews if isinstance(subview, NSTextField)
+                          and subview.stringValue() in ("General", "Window", "Sidebar", "Columns", "Harnesses")]
+        self.assertEqual([section_title.stringValue() for section_title in section_titles], shown_section_titles, message)
+        for section_title in section_titles[1:]:
+            bottoms_above = [subview.frame().origin.y + subview.frame().size.height for subview in subviews
+                             if subview.frame().origin.y < section_title.frame().origin.y]
+            self.assertEqual(section_title.frame().origin.y - max(bottoms_above), 20, (message, section_title.stringValue()))
+
+    def test_every_section_title_starts_20_points_below_what_is_shown_above_it(self):
+        for show_as, shown_section_titles in (("popup", ["General", "Columns", "Harnesses"]),
+                                              ("window", ["General", "Window", "Columns", "Harnesses"]),
+                                              ("sidebar", ["General", "Sidebar", "Columns", "Harnesses"])):
             self.owner.settings = dict(self.owner.settings, show_as=show_as)
             self.controller.reflect_settings(self.owner.settings)
-            subviews = list(self.controller.rows_view.subviews())  # flipped: y grows downward
-            section_titles = [subview for subview in subviews if isinstance(subview, NSTextField)
-                              and subview.stringValue() in ("Window", "Sidebar", "Display Columns", "Harnesses")]
-            self.assertEqual([section_title.stringValue() for section_title in section_titles], shown_section_titles)
-            for section_title in section_titles:
-                # The hidden accessibility button and the empty placement note show nothing.
-                shown_above = [subview.frame().origin.y for subview in subviews if subview.frame().origin.y < section_title.frame().origin.y
-                               and not subview.isHidden() and not (isinstance(subview, NSTextField) and not subview.stringValue())]
-                # Two rows: the last thing's own row, then the blank one (a label's text sits 1 point lower than a control).
-                self.assertAlmostEqual(section_title.frame().origin.y - max(shown_above), 2 * ROW_SPACING, delta=1,
-                                       msg=(show_as, section_title.stringValue()))
+            self.check_every_section_title_starts_20_points_below_what_is_shown_above_it(shown_section_titles, show_as)
+
+    def test_the_sidebar_note_shows_under_its_box_and_takes_room_only_while_it_says_something(self):
+        self.show_the_sidebar_section()
+        height_without_note = self.controller.rows_view.frame().size.height
+        self.assertIsNone(self.controller.edge_note.superview())
+        # A monitor right of the menu bar's: the saved right edge borders it, so the note says where the sidebar is.
+        two_monitors = [{"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)},
+                        {"name": "Studio", "frame": (1500, 0, 2500, 1400), "visible_frame": (1500, 0, 2500, 1400)}]
+        with unittest.mock.patch("agent_command_tab.user_interface.settings_window.read_monitors_from_screens",
+                                 return_value=two_monitors):
+            self.controller.screen_layout_changed()
+        self.assertTrue(self.controller.edge_note.stringValue())
+        self.assertIs(self.controller.edge_note.superview(), self.controller.rows_view)
+        self.assertGreater(self.controller.rows_view.frame().size.height, height_without_note)
+        self.check_every_section_title_starts_20_points_below_what_is_shown_above_it(
+            ["General", "Sidebar", "Columns", "Harnesses"], "with the note")
+        self.controller.screen_layout_changed()  # the one monitor again
+        self.assertIsNone(self.controller.edge_note.superview())
+        self.assertEqual(self.controller.rows_view.frame().size.height, height_without_note)
 
     def test_tab_goes_through_the_fields_of_a_section_shown_after_the_window_opened(self):  # code review, 2026-10-27
         self.controller.window.recalculateKeyViewLoop()  # as showing the window does, here as Popup
@@ -2400,9 +2464,10 @@ class SettingsWindowSmokeTests(unittest.TestCase):
                 NSMakeRect(0, 0, 600, self.controller.rows_view.frame().size.height)).size.height
             self.assertEqual(frame.size.height, min(rows_frame_height, top - visible_frame.origin.y), show_as)
             content_heights[show_as] = self.controller.rows_view.frame().size.height
-        # The Sidebar section's 5 rows, the Window section's 3.
+        # The Sidebar section's 3 rows, the Window section's 1, each with its title and the gap after it.
+        section_height_without_rows = SECTION_TITLE_HEIGHT + GAP_BELOW_SECTION_TITLE + GAP_BETWEEN_SECTIONS
         self.assertEqual((content_heights["sidebar"] - content_heights["popup"], content_heights["window"] - content_heights["popup"]),
-                         (5 * ROW_SPACING, 3 * ROW_SPACING))
+                         (section_height_without_rows + 3 * SETTINGS_ROW_HEIGHT, section_height_without_rows + SETTINGS_ROW_HEIGHT))
 
     def test_the_settings_window_reports_its_frame_and_uses_a_saved_one(self):
         reported_frames = []
@@ -2411,13 +2476,21 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.report_frame()
         self.assertEqual(reported_frames[-1], ("settings_window_frame", [-4000, -4000, 500, 400]))
         self.assertFalse(self.controller.is_open())  # built but never shown
+        # Opened again, it takes the saved frame while that is on a connected screen (here one far
+        # outside every real monitor), else the middle of the main screen (code review, 2026-10-28).
+        with unittest.mock.patch("agent_command_tab.user_interface.screen_layout.list_screen_frames",
+                                 lambda: [(-4000, -4000, 1500, 1000)]):
+            place_window_at_saved_frame_or_center(self.controller.window, [-3900, -3900, 600, 450])
+            self.assertEqual(convert_rect_to_frame_list(self.controller.window.frame()), [-3900, -3900, 600, 450])
+            place_window_at_saved_frame_or_center(self.controller.window, [9000, 9000, 600, 450])  # a monitor that is gone
+        self.assertTrue(frame_is_on_a_screen(convert_rect_to_frame_list(self.controller.window.frame()), list_screen_frames()))
 
     def test_harnesses_can_be_left_out_and_keep_their_commands(self):
-        self.assertEqual([checkbox.title() for checkbox in self.controller.include_checkboxes], ["Claude Code", "Codex"])
-        command_field = self.controller.launch_command_fields[1]
-        self.assertEqual(command_field.superview().subviews()[0].stringValue(), "Codex command:")  # indented under its checkbox
-        self.controller.include_checkboxes[1].setState_(0)
-        self.controller.controlChanged_(self.controller.include_checkboxes[1])
+        self.assertEqual([self.find_label_of_control(include_switch) for include_switch in self.controller.include_switches],
+                         ["Claude Code", "Codex"])
+        self.assertEqual(self.find_label_of_control(self.controller.launch_command_fields[1]), "Command")  # under "Codex"
+        self.controller.include_switches[1].setState_(0)
+        self.controller.controlChanged_(self.controller.include_switches[1])
         self.assertEqual([agent_tool["is_included"] for agent_tool in self.owner.settings["agent_tools"]], [True, False])
         self.assertEqual(self.owner.settings["agent_tools"][1]["launch_command"], "codex")
 
@@ -2432,8 +2505,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         popup = self.controller.appearance_popup
         self.assertEqual(popup.itemTitles(), ["Auto", "Dark", "Light"])
         self.assertEqual(popup.titleOfSelectedItem(), "Auto")  # the default
-        # Below the accessibility button's row, which stays right under the shortcut.
-        self.assertEqual(popup.frame().origin.y - self.controller.global_shortcut_popup.frame().origin.y, 2 * ROW_SPACING)
+        # In the row under the shortcut's while the accessibility button is hidden.
+        self.assertEqual(popup.frame().origin.y - self.controller.global_shortcut_popup.frame().origin.y, SETTINGS_ROW_HEIGHT)
         popup.selectItemWithTitle_("Dark")
         self.controller.controlChanged_(popup)
         self.assertEqual(self.owner.settings["appearance"], "dark")
@@ -2455,14 +2528,21 @@ class SettingsWindowSmokeTests(unittest.TestCase):
 
     def test_the_accessibility_button_shows_under_the_shortcut_only_while_it_lacks_the_permission(self):
         button = self.controller.accessibility_settings_button
+        shortcut_popup, appearance_popup = self.controller.global_shortcut_popup, self.controller.appearance_popup
         self.assertTrue(button.isHidden())
-        self.assertEqual(button.frame().origin.y - self.controller.global_shortcut_popup.frame().origin.y, ROW_SPACING)
+        self.assertIsNone(button.superview())  # its row takes no room
         self.owner.shortcut_lacks_permission = True
         self.controller.reflect_settings(self.owner.settings)
         self.assertFalse(button.isHidden())
+        # In a row of its own right under the shortcut's; Appearance moves a row down.
+        self.assertAlmostEqual(button.frame().origin.y + button.frame().size.height / 2
+                               - (shortcut_popup.frame().origin.y + shortcut_popup.frame().size.height / 2), SETTINGS_ROW_HEIGHT,
+                               delta=2)
+        self.assertEqual(appearance_popup.frame().origin.y - shortcut_popup.frame().origin.y, 2 * SETTINGS_ROW_HEIGHT)
         self.owner.shortcut_lacks_permission = False
         self.controller.reflect_settings(self.owner.settings)
         self.assertTrue(button.isHidden())
+        self.assertEqual(appearance_popup.frame().origin.y - shortcut_popup.frame().origin.y, SETTINGS_ROW_HEIGHT)
 
     def test_reflecting_settings_before_the_window_was_opened_does_nothing(self):
         controller = SettingsWindowController.alloc().initWithOwner_(self.owner)

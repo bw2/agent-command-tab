@@ -16,6 +16,9 @@ GENERATED_USER_TEXT_PATTERN = re.compile(
 COMMAND_NAME_PATTERN = re.compile(r"<command-name>(.*?)</command-name>", re.S)
 COMMAND_ARGUMENTS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 TURN_STARTING_NOTIFICATION_START = "<task-notification>"  # a background task's notification starts a turn too
+# So do another Claude Code session's message ("peer") and its "[Cross-session idle notice]"
+# ("system"), meta records that Claude Code 2.1 writes with these turnOrigin values.
+TURN_ORIGINS_OF_ANOTHER_SESSIONS_MESSAGE = frozenset({"peer", "system"})
 RECORD_KINDS_THAT_START_A_TURN = frozenset({"prompt", "command", "notification"})
 
 
@@ -42,15 +45,15 @@ def classify_user_record(record, blocks):
     Returns:
         "tool_result" for a tool's result; "prompt" for text the user typed; "command" for a
         slash command or skill the user typed (describe_typed_command); "notification" for a
-        background task's notification or a message from another Claude Code session (its
-        SendMessage tool's, a meta record with turnOrigin "peer"; code review, 2026-10-28); or
-        None for anything else: not a user record, a subagent's record, another meta record
-        (such as a skill's text, written in the middle of a turn), the summary after /compact,
-        Claude Code's own texts, or an empty record.
+        background task's notification, a message from another Claude Code session (its
+        SendMessage tool's) or a notice that one went idle (meta records with turnOrigin "peer"
+        and "system"; code review, 2026-10-28); or None for anything else: not a user record, a
+        subagent's record, another meta record (such as a skill's text, written in the middle
+        of a turn), the summary after /compact, Claude Code's own texts, or an empty record.
     """
     if record.get("type") != "user" or record.get("isSidechain") or record.get("isCompactSummary"):
         return None
-    if record.get("turnOrigin") == "peer":
+    if record.get("turnOrigin") in TURN_ORIGINS_OF_ANOTHER_SESSIONS_MESSAGE:
         return "notification"
     if record.get("isMeta"):
         return None

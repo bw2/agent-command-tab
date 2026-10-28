@@ -1358,8 +1358,14 @@ class DashboardCore:
                 (session_id, agent_session["process_id"]) in self.pause_record_by_tab_and_agent)
 
     def save_pause_records(self):
-        if self.pause_records_file_path:
+        """Writes the pause records to their file. A write that fails (a full disk) is reported,
+        not raised: it would end the core, which then restarts and fails the same way (code review, 2026-10-28)."""
+        if not self.pause_records_file_path:
+            return
+        try:
             save_pause_records(self.pause_records_file_path, self.pause_record_by_tab_and_agent)
+        except OSError as error:
+            print(f"could not save the pause records: {error!r}")
 
     def list_again_the_paused_agents_that_lost_their_row(self):
         """Adds resolve_agent_sessions entries for the agents a pause stopped that are still

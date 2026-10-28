@@ -353,6 +353,17 @@ class ResumeTests(unittest.TestCase):
             self.assertEqual([agent_session["is_paused_with_the_processes_below_it"]
                               for agent_session in core.agent_sessions.values()], [True, False])
 
+    def test_a_pause_records_file_that_cant_be_written_is_reported_rather_than_ending_the_core(self):  # code review, 2026-10-28
+        with tempfile.TemporaryDirectory() as folder:
+            not_a_folder = os.path.join(folder, "a file")
+            open(not_a_folder, "w").close()
+            core = DashboardCore(lambda snapshot: None, lambda message: None,
+                                 pause_records_file_path=os.path.join(not_a_folder, "paused_agent_sessions.json"))
+            core.pause_record_by_tab_and_agent = {("s1", AGENT_PROCESS_ID): make_pause_record()}
+            with unittest.mock.patch("sys.stdout") as printed:
+                core.save_pause_records()
+        self.assertIn("could not save the pause records", "".join(call.args[0] for call in printed.write.call_args_list))
+
     def test_what_ended_pauses_stopped_is_continued_before_connecting_to_iterm2(self):
         # iTerm2 quit: its paused agents are gone, and no connection can be made.
         core = DashboardCore(lambda snapshot: None, lambda message: None,
