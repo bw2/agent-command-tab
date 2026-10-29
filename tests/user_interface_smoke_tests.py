@@ -13,8 +13,9 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSBox, NSBoxCustom, NSButton, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
-                    NSEventModifierFlagCommand, NSEventTypeKeyDown, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp,
-                    NSLeftArrowFunctionKey, NSMakePoint, NSMakeRect, NSRightArrowFunctionKey,
+                    NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventTypeKeyDown, NSEventTypeLeftMouseDown,
+                    NSEventTypeLeftMouseUp, NSLeftArrowFunctionKey, NSMakePoint, NSMakeRect, NSMidX, NSMidY, NSPointInRect,
+                    NSRightArrowFunctionKey,
                     NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone,
                     NSImageScaleProportionallyUpOrDown, NSImageView, NSMenu,
                     NSNormalWindowLevel, NSPopover,
@@ -156,6 +157,16 @@ def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False, sla
     return AgentSessionEntry(tab_id=tab_id, session_id=f"s{tab_id}", tab_title=title, tab_title_set_by_user=False,
                              agent_session_name=title, agent_tool_name=tool, working_folder="/x", status=status,
                              status_since=0.0, is_in_front=is_in_front, slash_commands=slash_commands)
+
+
+class MenuThatRecordsWhereItWouldOpen(NSMenu):
+    """A menu that records where it is asked to open, with the row its delegate builds it for,
+    and stays closed: a menu that opens leaves AppKit's current event set for the tests after it."""
+
+    def popUpMenuPositioningItem_atLocation_inView_(self, item, location, view):
+        self.delegate().menuNeedsUpdate_(self)
+        self.openings = getattr(self, "openings", []) + [(tuple(location), self.delegate().menu_target_item)]
+        return False
 
 
 def make_sample_snapshot(second_window_tabs=2):
@@ -1713,6 +1724,36 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(len(self.submitted_actions), action_count)
         self.press_key("\x1b", 53)
         self.assertEqual(self.owner.lists_closed_after_escape, [self.list_controller])
+
+    def test_control_return_opens_the_selected_rows_menu_at_its_tokens_column(self):  # user request, 2026-10-29
+        snapshot = make_sample_snapshot()
+        window_one = snapshot.monitors[0].windows[0]
+        window_one = window_one._replace(agent_sessions=tuple(entry._replace(context_tokens=91_000, context_fill_percent=46)
+                                                              for entry in window_one.agent_sessions))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, snapshot.monitors[0].windows[1])),)))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        outline_view = self.list_controller.outline_view
+        tab_row_view = self.lay_out_row_view(1)
+        self.assertFalse(tab_row_view.column_views["context_tokens"].isHidden())
+        tokens_frame = outline_view.convertRect_fromView_(tab_row_view.column_views["context_tokens"].frame(), tab_row_view)
+        self.assertTrue(NSPointInRect(self.list_controller.find_where_the_keyboard_opens_a_rows_menu(1), tokens_frame))
+        # A window row, which shows no tokens: across from the tab rows' tokens.
+        self.assertEqual(self.list_controller.find_where_the_keyboard_opens_a_rows_menu(0),
+                         (NSMidX(tokens_frame), NSMidY(outline_view.rectOfRow_(0))))
+        # AppKit sends the context menu key to showContextMenuForSelection_, never to keyDown_.
+        menu = MenuThatRecordsWhereItWouldOpen.alloc().initWithTitle_("")
+        menu.setDelegate_(self.list_controller)
+        outline_view.setMenu_(menu)
+        self.select_rows(1)
+        outline_view.contextMenuKeyDown_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+            NSEventTypeKeyDown, NSMakePoint(0, 0), NSEventModifierFlagControl, 0, outline_view.window().windowNumber(), None, "\r",
+            "\r", False, 36))
+        self.assertEqual(menu.openings, [(self.list_controller.find_where_the_keyboard_opens_a_rows_menu(1), outline_view.itemAtRow_(1))])
+        self.assertEqual(self.list_controller.row_whose_menu_the_keyboard_opened, -1)  # a right-click's menu finds its own row again
+        self.list_controller.set_shown_columns([])  # Tokens hidden: the middle of the row
+        row_rect = outline_view.rectOfRow_(1)
+        self.assertEqual(self.list_controller.find_where_the_keyboard_opens_a_rows_menu(1), (NSMidX(row_rect), NSMidY(row_rect)))
 
     def test_delete_kills_what_the_selected_rows_show_always_asking_first(self):  # user request, 2026-10-29
         self.apply_snapshot_with_child_processes()

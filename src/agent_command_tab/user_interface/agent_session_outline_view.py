@@ -182,11 +182,17 @@ class OutlineListItem(NSObject):
 class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
     """An NSOutlineView that draws no disclosure triangles of its own (each row has its own arrow
     button), that tells its delegate when the button goes down on a row and comes back up, so
-    holding a tab row can show that tab for a moment, and that lets its delegate handle the
-    list's own keys first (handle_key_press)."""
+    holding a tab row can show that tab for a moment, that lets its delegate handle the
+    list's own keys first (handle_key_press), and whose menu Control-Return opens where the
+    delegate says (open_the_selected_rows_menu_from_the_keyboard)."""
 
     def frameOfOutlineCellAtRow_(self, row):
         return NSZeroRect
+
+    def showContextMenuForSelection_(self, sender):
+        # macOS's context menu key, Control-Return from macOS 15; AppKit's own opens the menu at the row's left edge.
+        if not self.delegate().open_the_selected_rows_menu_from_the_keyboard():
+            objc.super(OutlineViewWithoutDisclosureTriangles, self).showContextMenuForSelection_(sender)
 
     def keyDown_(self, event):
         if not self.delegate().handle_key_press(event.charactersIgnoringModifiers(), event.modifierFlags()):
@@ -687,6 +693,7 @@ class AgentSessionListController(NSObject):
         self.item_under_first_click = None  # the row a single click hit, for a double-click's second click
         self.item_under_press = None  # the row the button last went down on: a drag moves only that row
         self.menu_target_item = None
+        self.row_whose_menu_the_keyboard_opened = -1  # while Control-Return's menu is open, which has no clicked row
         self.menu_target_agent_session_entries = []  # the agent sessions of the selected rows, for their menu
         self.menu_target_processes = []  # (session ID, ChildProcessEntry) of each process a process row's menu acts on
         self.last_name_letter_typed_at = 0  # when a key last went to the outline view's selecting of a row by name
@@ -1192,7 +1199,8 @@ class AgentSessionListController(NSObject):
           and the next letters would replace its title (code review, 2026-10-29).
 
         The others are left to AppKit while Command, Option or Control is held: Control-Return
-        opens the selected row's menu (macOS's context menu key, from macOS 15).
+        opens the selected row's menu (macOS's context menu key, from macOS 15), which AppKit
+        sends to the outline view's showContextMenuForSelection_ without a keyDown_.
 
         Args:
             characters: The key event's charactersIgnoringModifiers.
@@ -1601,7 +1609,43 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def find_clicked_item(self):
         clicked_row = self.outline_view.clickedRow()
+        if clicked_row < 0:
+            clicked_row = self.row_whose_menu_the_keyboard_opened
         return self.outline_view.itemAtRow_(clicked_row) if clicked_row >= 0 else None
+
+    @objc.python_method
+    def open_the_selected_rows_menu_from_the_keyboard(self):
+        """Opens the selected row's menu, of several selected rows the last one selected's, as
+        a right-click at find_where_the_keyboard_opens_a_rows_menu would (user request,
+        2026-10-29). Returns whether a row was selected."""
+        selected_row = self.outline_view.selectedRow()
+        if selected_row < 0:
+            return False
+        self.outline_view.scrollRowToVisible_(selected_row)
+        self.row_whose_menu_the_keyboard_opened = selected_row
+        try:  # returns once the menu closes
+            self.outline_view.menu().popUpMenuPositioningItem_atLocation_inView_(
+                None, self.find_where_the_keyboard_opens_a_rows_menu(selected_row), self.outline_view)
+        finally:
+            self.row_whose_menu_the_keyboard_opened = -1
+        return True
+
+    @objc.python_method
+    def find_where_the_keyboard_opens_a_rows_menu(self, row):
+        """Returns the point in the outline view where Control-Return opens a row's menu: the middle
+        of the row's main line, across from the middle of the Tokens column, where a tab row shows
+        its tokens, or the middle of the row while the Tokens column is hidden (user request,
+        2026-10-29)."""
+        row_rect = self.outline_view.rectOfRow_(row)
+        main_line_height = row_rect.size.height - (PREVIEW_AREA_HEIGHT if self.preview_is_open(self.outline_view.itemAtRow_(row)) else 0)
+        placed_columns = place_columns_from_the_right(
+            self.outline_view.frame().size.width - ROW_RIGHT_MARGIN - self.room_for_the_previews_button, self.column_widths)
+        if "context_tokens" in placed_columns:
+            tokens_column_x, tokens_column_width = placed_columns["context_tokens"]
+            x = tokens_column_x + tokens_column_width / 2
+        else:
+            x = row_rect.origin.x + row_rect.size.width / 2
+        return (x, row_rect.origin.y + main_line_height / 2)  # the outline view is flipped: its main line is at the top
 
     def rowClicked_(self, sender):
         current_event = NSApp.currentEvent()
