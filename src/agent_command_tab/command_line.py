@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 
+from agent_command_tab import __version__
+
 RECONNECT_EXIT_STATUS = 75
 LONGEST_RESTART_DELAY_SECONDS = 30
 SECONDS_TO_WAIT_FOR_AGENT_NAMES = 2
@@ -138,6 +140,7 @@ def main(arguments=None):
                              "install-hooks, remove-hooks: add the app's hooks to Claude Code's and Codex's settings, "
                              "or take them out")
     parser.add_argument("--verbose", action="store_true", help="print diagnostics")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parsed_arguments = parser.parse_args(arguments)
     if parsed_arguments.command == "dump-snapshot":
         return dump_snapshot(parsed_arguments.verbose)

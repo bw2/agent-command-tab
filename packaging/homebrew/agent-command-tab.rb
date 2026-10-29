@@ -27,8 +27,8 @@ class AgentCommandTab < Formula
   end
 
   resource "websockets" do
-    url "https://files.pythonhosted.org/packages/01/89/3f825ab71c242fffb62ea8fe638741c290f62f8d7aadf8125ff897747af3/websockets-17.2.tar.gz"
-    sha256 "36c2fb94c990cc2545143b12690e2de6c16300f9dbe5b4f33fa300cf57dc8792"
+    url "https://files.pythonhosted.org/packages/30/4b/4692be6d5bf739ed049b3813901c42091f8c054df89d5c089343823dea0d/websockets-17.3.tar.gz"
+    sha256 "1c7dd93a1c9f89297471493674b1fc1d9467cafd45374f2172213046bdb3a329"
   end
 
   resource "pyobjc-core" do
@@ -54,6 +54,6 @@ class AgentCommandTab < Formula
   end
 
   test do
-    assert_match "dump-snapshot", shell_output("#{bin}/agent-command-tab --help")
+    assert_equal "agent-command-tab #{version}", shell_output("#{bin}/agent-command-tab --version").strip
   end
 end

@@ -21,8 +21,6 @@ A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agen
 
 ## Install
 
-Not published yet. Once it is:
-
 ```bash
 pipx install agent-command-tab        # or: pip install agent-command-tab
 brew install bw2/tap/agent-command-tab
@@ -43,6 +41,7 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 agent-command-tab                # the menu bar app; restarts itself if iTerm2's connection drops
 agent-command-tab dump-snapshot  # prints the current list as JSON
 agent-command-tab install-hooks  # adds the app's hooks to Claude Code's and Codex's settings (remove-hooks takes them out)
+agent-command-tab --version      # prints the installed version, for bug reports
 ```
 
 Click the "C" in the menu bar to see the list, right-click it for Settings. The first time, iTerm2 asks whether to allow the app to use its Python API.

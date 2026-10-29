@@ -1,12 +1,11 @@
 # Releasing
 
 How to publish a version to PyPI, to the Homebrew tap, and as a signed and notarized app
-download (with a Homebrew cask for it). Nothing has been published yet.
+download (with a Homebrew cask for it).
 
 ## Before the first release
 
-- Make the GitHub repository public (the Homebrew formula's homepage and the README's links point to it).
-- Create a PyPI account with two-factor authentication, and an API token for the project (or set up a trusted publisher from GitHub Actions). TestPyPI (step 5) is a separate site with its own account and token: add a `[testpypi]` section to `~/.pypirc`, or skip that upload.
+- PyPI: the account ConfigArgParse is published from, whose API token is in the `[pypi]` section of `~/.pypirc`. The first upload creates the project, which only a token scoped to the whole account can do: if that token is limited to ConfigArgParse, create one for the account at https://pypi.org/manage/account/token/ (a token limited to this project can replace it after the first upload). TestPyPI (step 5) is a separate site with its own account and token: add a `[testpypi]` section to `~/.pypirc`, or skip that upload.
 - Create the tap repository `bw2/homebrew-tap` on GitHub, with a `Formula/` and a `Casks/` folder.
 
 ### For the app download
@@ -20,14 +19,14 @@ download (with a Homebrew cask for it). Nothing has been published yet.
 
 ## Each release
 
-1. Set the version in `pyproject.toml` (for example `0.1.0`) and commit.
+1. Set the version in `src/agent_command_tab/__init__.py` (`__version__`, for example `0.1.0`; `pyproject.toml` reads it from there) and commit.
 2. Run the tests: `.venv/bin/python -m unittest discover -s tests -p '*_tests.py'`.
 3. Build the source archive and the wheel into a clean `dist/`:
    ```bash
    rm -rf dist && python3 -m build
    ```
    (`python3 -m pip install build twine` once, if needed.)
-4. Check them: `python3 -m twine check dist/*`. Optionally install the wheel into a fresh virtual environment and run `agent-command-tab --help`.
+4. Check them: `python3 -m twine check dist/*`. Optionally install the wheel into a fresh virtual environment and run `agent-command-tab --version`, which should print the new version.
 5. Upload to TestPyPI first, then to PyPI:
    ```bash
    python3 -m twine upload --repository testpypi dist/*

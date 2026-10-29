@@ -1,7 +1,19 @@
+import contextlib
+import io
 import subprocess
 import unittest
 
-from agent_command_tab.command_line import SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C, wait_for_app_process
+from agent_command_tab import __version__
+from agent_command_tab.command_line import SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C, main, wait_for_app_process
+
+
+class VersionOptionTests(unittest.TestCase):
+    def test_version_prints_the_package_version_and_exits(self):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), self.assertRaises(SystemExit) as raised:
+            main(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(printed.getvalue(), f"agent-command-tab {__version__}\n")
 
 
 class FakeAppProcess:
