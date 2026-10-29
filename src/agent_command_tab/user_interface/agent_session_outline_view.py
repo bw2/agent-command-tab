@@ -14,6 +14,7 @@ How snapshots are applied without breaking expansion, renames or drags:
 """
 
 import time
+import traceback
 
 import objc
 from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundStyleNormal, NSBezierPath, NSCarriageReturnCharacter,
@@ -239,28 +240,45 @@ class RowViewWithSelectionOutline(NSTableRowView):
     they aren't selected (user request, 2026-10-29)."""
 
     def drawSelectionInRect_(self, dirty_rect):
-        self.draw_selection_outline()
+        self.draw_selection_outline_if_inside_one()
 
     def drawBackgroundInRect_(self, dirty_rect):
         objc.super(RowViewWithSelectionOutline, self).drawBackgroundInRect_(dirty_rect)
-        if not self.isSelected() and self.is_inside_the_selection_outline(0):  # a process row of a selected tab row
-            self.draw_selection_outline()
+        if not self.isSelected():  # a process row of a selected tab row draws its part of the tab row's outline
+            self.draw_selection_outline_if_inside_one()
 
     @objc.python_method
-    def is_inside_the_selection_outline(self, row_offset):
-        """Whether this row (row_offset 0), the one above it (-1) or the one below it (1) is inside a selection outline."""
+    def find_selection_outline_rows(self):
+        """Returns whether this row, the row above it and the row below it are inside a selection
+        outline (AgentSessionListController.row_is_inside_the_selection_outline). A row view that
+        isn't one of the list's rows now (drawn while it is reused, say) goes by AppKit's
+        selection flags, as every row did before process rows joined the outline."""
         outline_view = self.superview()
+        while outline_view is not None and not isinstance(outline_view, NSOutlineView):
+            outline_view = outline_view.superview()  # AppKit puts some rows in a clip view of its own, NSTableRowsClipView
         row = outline_view.rowForView_(self) if outline_view is not None else -1
-        return row >= 0 and outline_view.delegate().row_is_inside_the_selection_outline(row + row_offset)
+        if row < 0:
+            return self.isSelected(), self.isPreviousRowSelected(), self.isNextRowSelected()
+        row_is_inside_the_selection_outline = outline_view.delegate().row_is_inside_the_selection_outline
+        return (row_is_inside_the_selection_outline(row), row_is_inside_the_selection_outline(row - 1),
+                row_is_inside_the_selection_outline(row + 1))
 
     @objc.python_method
-    def draw_selection_outline(self):
+    def draw_selection_outline_if_inside_one(self):
+        try:
+            is_inside, joins_the_row_above, joins_the_row_below = self.find_selection_outline_rows()
+        except Exception:
+            # AppKit ends the app on an exception raised while drawing (it did, 2026-10-29, when a
+            # row's parent was NSTableRowsClipView), so it is printed instead, and the row goes by AppKit's flags.
+            traceback.print_exc()
+            is_inside, joins_the_row_above, joins_the_row_below = self.isSelected(), self.isPreviousRowSelected(), self.isNextRowSelected()
+        if not is_inside:
+            return
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath.clipRect_(self.bounds())
         NSColor.controlAccentColor().setStroke()
         outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            compute_selection_outline_rect(self.bounds(), self.isFlipped(), self.is_inside_the_selection_outline(-1),
-                                           self.is_inside_the_selection_outline(1)),
+            compute_selection_outline_rect(self.bounds(), self.isFlipped(), joins_the_row_above, joins_the_row_below),
             SELECTION_OUTLINE_CORNER_RADIUS, SELECTION_OUTLINE_CORNER_RADIUS)
         outline.setLineWidth_(SELECTION_OUTLINE_WIDTH)
         outline.stroke()

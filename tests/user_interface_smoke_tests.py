@@ -3,6 +3,7 @@
 Set AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the list looks like.
 """
 
+import io
 import math
 import os
 import time
@@ -19,7 +20,7 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone,
                     NSImageScaleProportionallyUpOrDown, NSImageView, NSMenu,
                     NSNormalWindowLevel, NSPopover,
-                    NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSWindow, NSWindowOcclusionStateVisible,
+                    NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSView, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSIndexSet
 
@@ -849,8 +850,21 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             content_view.bounds(), content_view.bitmapImageRepForCachingDisplayInRect_(content_view.bounds()))
         last_process_row_view = outline_view.rowViewAtRow_makeIfNecessary_(3, False)
         self.assertFalse(last_process_row_view.isSelected())
-        self.assertEqual((last_process_row_view.is_inside_the_selection_outline(-1), last_process_row_view.is_inside_the_selection_outline(1)),
-                         (True, False))  # the outline's bottom edge
+        self.assertEqual(last_process_row_view.find_selection_outline_rows(), (True, True, False))  # the outline's bottom edge
+        # AppKit puts some rows in a clip view of its own, NSTableRowsClipView: a row there still finds the list.
+        clip_view = NSView.alloc().initWithFrame_(outline_view.bounds())
+        outline_view.addSubview_(clip_view)
+        clip_view.addSubview_(last_process_row_view)
+        self.assertEqual(last_process_row_view.find_selection_outline_rows(), (True, True, False))
+        outline_view.addSubview_(last_process_row_view)
+        clip_view.removeFromSuperview()
+        # An exception while a row draws its outline would end the app: it is printed, and the row goes by AppKit's flags.
+        self.list_controller.row_is_inside_the_selection_outline = lambda row: 1 / 0
+        with unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as printed_errors:
+            content_view.cacheDisplayInRect_toBitmapImageRep_(
+                content_view.bounds(), content_view.bitmapImageRepForCachingDisplayInRect_(content_view.bounds()))
+        self.assertIn("ZeroDivisionError", printed_errors.getvalue())
+        del self.list_controller.row_is_inside_the_selection_outline
         self.select_rows(2)  # a process row selected by itself has an outline of its own
         self.assertEqual([self.list_controller.row_is_inside_the_selection_outline(row) for row in range(1, 4)], [False, True, False])
         # AppKit redraws only the rows whose selection changed and their neighbors.
