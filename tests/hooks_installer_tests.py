@@ -45,6 +45,18 @@ class BuildForwarderCommandTests(unittest.TestCase):
         self.assertEqual(build_forwarder_command("Claude Code", "/My Apps/python", "/code/hook_event_forwarder.py"),
                          "'/My Apps/python' -I -S /code/hook_event_forwarder.py 'Claude Code'")
 
+    def test_a_homebrew_python_is_named_by_its_path_that_survives_an_upgrade(self):  # user request, 2026-10-28
+        with tempfile.TemporaryDirectory() as prefix:
+            version_folder = os.path.join(prefix, "Cellar", "agent-command-tab", "0.1.0")
+            os.makedirs(os.path.join(version_folder, "libexec", "bin"))
+            with open(os.path.join(version_folder, "libexec", "bin", "python"), "w"):
+                pass
+            os.makedirs(os.path.join(prefix, "opt"))
+            os.symlink(version_folder, os.path.join(prefix, "opt", "agent-command-tab"))
+            command = build_forwarder_command("Claude Code", os.path.join(version_folder, "libexec", "bin", "python"),
+                                              "/code/hook_event_forwarder.py")
+        self.assertEqual(command, f"{prefix}/opt/agent-command-tab/libexec/bin/python -I -S /code/hook_event_forwarder.py 'Claude Code'")
+
 
 class SettingsTests(unittest.TestCase):
     def test_the_apps_hooks_come_after_the_users_own_and_replace_older_ones(self):
@@ -159,7 +171,7 @@ class FilesTests(unittest.TestCase):
         write_codex_approvals(os.path.join(self.codex_home_folder, "config.toml"), self.codex_hooks_path, settings, positions)
         self.assertEqual(check_hooks("Codex"), HOOKS_ARE_INSTALLED)
         # Installing again, from another link to the same Python, leaves the approved file alone.
-        with unittest.mock.patch.object(hooks_installer.sys, "executable", os.path.realpath(sys.executable)):
+        with unittest.mock.patch.object(hooks_installer, "find_python_of_this_copy", lambda: os.path.realpath(sys.executable)):
             self.assertEqual(install_hooks("Codex"), [])
         self.assertEqual(check_hooks("Codex"), HOOKS_ARE_INSTALLED)
 

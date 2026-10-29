@@ -23,7 +23,7 @@ A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agen
 
 ```bash
 pipx install agent-command-tab        # or: pip install agent-command-tab
-brew install bw2/tap/agent-command-tab
+brew install bw2/tap/agent-command-tab   # Homebrew adds the bw2/tap repository by itself
 ```
 
 From a clone of this repository:
@@ -42,6 +42,8 @@ agent-command-tab --version      # prints the installed version, for bug reports
 ```
 
 Click the "C" in the menu bar to see the list, right-click it for Settings. The first time, iTerm2 asks whether to allow the app to use its Python API.
+
+From its first start on, iTerm2 starts the app whenever iTerm2 starts: the app adds `AgentCommandTab.scpt` to iTerm2's AutoLaunch folder (`~/Library/Application Support/iTerm2/Scripts/AutoLaunch`), which starts the copy you ran, however you installed it. Started that way, it has iTerm2's permissions, as when you start it from an iTerm2 tab. Settings > Start with iTerm2 turns that off and removes the script. Only one copy runs at a time; starting another prints that one is already running. Before uninstalling, turn Start with iTerm2 off and run `agent-command-tab remove-hooks`, since pip and Homebrew leave the script and the hooks behind.
 
 The app's hooks tell a crashed agent from one that ended normally (its row stays, gray and "exited", for 5 minutes), and count Claude Code's background shells and agents. The list offers to install them (Install Hooks, at its bottom left) while an agent tool in it lacks them. Each settings file is copied to `<file>.agent-command-tab-backup` first. Sessions started afterwards use them, and Codex asks you to approve them first: type `/hooks` in Codex.
 

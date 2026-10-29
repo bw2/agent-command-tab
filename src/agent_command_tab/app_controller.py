@@ -36,6 +36,8 @@ from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_
                                               load_settings_resolving_paths_at_first_run,
                                               move_the_settings_folder_of_the_old_name, save_settings)
 from agent_command_tab.snapshot_data_classes import choose_folder_for_new_agent_window
+from agent_command_tab.start_with_iterm2 import (AUTOLAUNCH_SCRIPT_FILE_NAME, build_command_that_starts_this_copy_of_the_app,
+                                                 find_iterm2_autolaunch_folder, update_autolaunch_script_to_match_setting)
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
 from agent_command_tab.user_interface.app_icon import build_app_icon
 from agent_command_tab.user_interface.list_window import ListWindowController
@@ -167,6 +169,7 @@ class AppController(NSObject):
         self.connection_thread.send_monitors(read_monitors_from_screens())
         self.apply_settings_to_the_core_and_every_list(self.settings)
         self.apply_appearance(self.settings["appearance"])
+        self.apply_start_with_iterm2_setting(self.settings["app_starts_with_iterm2"])
         self.global_shortcut_key_filter.use_global_shortcut(self.settings["global_shortcut"])
         if self.global_shortcut_key_filter.lacks_permission():
             print("agent-command-tab: the global shortcut needs the Accessibility permission (see Settings)", flush=True)
@@ -764,6 +767,8 @@ class AppController(NSObject):
             self.global_shortcut_key_filter.use_global_shortcut(new_settings["global_shortcut"])
         if new_settings["appearance"] != self.settings["appearance"]:
             self.apply_appearance(new_settings["appearance"])
+        if new_settings["app_starts_with_iterm2"] != self.settings["app_starts_with_iterm2"]:
+            self.apply_start_with_iterm2_setting(new_settings["app_starts_with_iterm2"])
         self.settings = new_settings
         save_settings(new_settings)
         self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
@@ -795,6 +800,25 @@ class AppController(NSObject):
         appearance = NSAppearance.appearanceNamed_(appearance_name) if appearance_name else None
         NSApp.setAppearance_(appearance)
         self.popover.setAppearance_(appearance)
+
+    @objc.python_method
+    def apply_start_with_iterm2_setting(self, app_starts_with_iterm2):
+        """Adds, keeps or removes the script in iTerm2's AutoLaunch folder that starts this copy of
+        the app whenever iTerm2 starts (start_with_iterm2), and says so in the output when it adds or
+        removes it."""
+        autolaunch_script_path = os.path.join(find_iterm2_autolaunch_folder(), AUTOLAUNCH_SCRIPT_FILE_NAME)
+        try:
+            what_was_done = update_autolaunch_script_to_match_setting(
+                app_starts_with_iterm2, build_command_that_starts_this_copy_of_the_app(), autolaunch_script_path)
+        except OSError as error:
+            print(f"agent-command-tab: couldn't {'add' if app_starts_with_iterm2 else 'remove'} {autolaunch_script_path} "
+                  f"({error})", flush=True)
+            return
+        if what_was_done == "added":
+            print(f"agent-command-tab: added {autolaunch_script_path}, so iTerm2 starts the app whenever iTerm2 starts "
+                  "(Settings > Start with iTerm2 turns it off)", flush=True)
+        elif what_was_done == "removed":
+            print(f"agent-command-tab: removed {autolaunch_script_path}; iTerm2 no longer starts the app", flush=True)
 
     @objc.python_method
     def apply_settings_to_the_core_and_every_list(self, settings):

@@ -2216,6 +2216,13 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertTrue(self.owner.settings["list_window_is_always_on_top"])
         self.assertEqual(self.owner.settings["sidebar_width"], 555)
 
+    def test_the_start_with_iterm2_switch_shows_and_saves_the_setting(self):  # user request, 2026-10-28
+        self.assertEqual(self.controller.start_with_iterm2_switch.state(), 1)  # on by default
+        self.assertIn(self.controller.start_with_iterm2_switch, self.controller.rows_view.subviews())  # in the General section
+        self.controller.start_with_iterm2_switch.setState_(0)
+        self.controller.controlChanged_(self.controller.start_with_iterm2_switch)
+        self.assertFalse(self.owner.settings["app_starts_with_iterm2"])
+
     def test_both_edges_stay_choosable_when_the_menu_bar_monitor_stands_between_two_others(self):
         three_monitors_in_a_row = [
             {"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)},
@@ -2285,6 +2292,14 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             with unittest.mock.patch("agent_command_tab.app_controller.save_settings"):
                 AppController.settings_changed(stand_in_app_controller, dict(stand_in_app_controller.settings, **changed_setting))
             self.assertEqual(stand_in_app_controller.move_the_settings_window_clear_of_the_sidebar.called, moves, changed_setting)
+
+    def test_the_autolaunch_script_follows_only_a_change_of_start_with_iterm2(self):  # user request, 2026-10-28
+        for changed_setting, applied_values in (({"app_starts_with_iterm2": False}, [False]), ({"shown_columns": ["state"]}, [])):
+            stand_in_app_controller = unittest.mock.Mock(settings=dict(DEFAULT_SETTINGS))
+            with unittest.mock.patch("agent_command_tab.app_controller.save_settings"):
+                AppController.settings_changed(stand_in_app_controller, dict(stand_in_app_controller.settings, **changed_setting))
+            self.assertEqual([call.args[0] for call in stand_in_app_controller.apply_start_with_iterm2_setting.call_args_list],
+                             applied_values, changed_setting)
 
     def show_the_sidebar_section(self):
         """Chooses "Show as: Sidebar" as the app controller does once the pop-up changed, so the

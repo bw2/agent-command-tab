@@ -1,6 +1,7 @@
 """Command line entry point: `agent-command-tab run | app | dump-snapshot | install-hooks | remove-hooks`."""
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -17,6 +18,8 @@ SECONDS_TO_WAIT_FOR_AGENT_NAMES = 2
 # (app_controller); after Ctrl+C the supervisor gives it that and more before killing it.
 SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING = 3
 SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C = SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING + 7
+# Held by the running supervisor (take_the_running_lock), in the settings folder (settings_store.SETTINGS_FOLDER).
+RUNNING_LOCK_FILE_PATH = os.path.expanduser("~/Library/Application Support/agent-command-tab/running.lock")
 
 
 def dump_snapshot(verbose):
@@ -109,13 +112,42 @@ def wait_for_app_process(process):
             return process.wait()
 
 
+def take_the_running_lock(lock_file_path=RUNNING_LOCK_FILE_PATH):
+    """Returns the lock file, open, once this process holds its lock, or None while another process
+    holds it. macOS releases the lock when the process holding it ends, however it ends. The file
+    holds the process ID of the one holding it."""
+    os.makedirs(os.path.dirname(lock_file_path), exist_ok=True)
+    lock_file = open(lock_file_path, "a+")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(f"{os.getpid()}\n")
+    lock_file.flush()
+    return lock_file
+
+
 def run_with_restarts(verbose):
     """Starts the app process and restarts it, with a growing delay, whenever it exits to reconnect.
 
     The `iterm2` package can't reconnect within one process, so the app
     exits with RECONNECT_EXIT_STATUS when iTerm2's connection drops, and this supervisor starts
     it again (1 s, doubling up to 30 s, reset after a run that lasted a minute).
+
+    Only one supervisor runs at a time (take_the_running_lock): another exits at once, so iTerm2
+    starting the app when it opens (start_with_iterm2) adds no second copy to one still waiting to
+    reconnect, and two copies never compete for the hook events (user request, 2026-10-28).
     """
+    running_lock_file = take_the_running_lock()  # held, open, until this supervisor returns
+    if running_lock_file is None:
+        with open(RUNNING_LOCK_FILE_PATH) as lock_file:
+            process_id_of_the_running_copy = lock_file.read().strip()
+        print(f"agent-command-tab: already running (process {process_id_of_the_running_copy or 'unknown'}); "
+              "to start it again, first choose Quit AgentCommandTab in its menu bar icon's menu")
+        return 0
     restart_delay_seconds = 1
     while True:
         started_at = time.time()

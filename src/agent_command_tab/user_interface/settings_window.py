@@ -174,6 +174,9 @@ class SettingsWindowController(WindowFrameSavingController):
         self.appearance_popup = self.make_popup(APPEARANCE_TITLES, self.settings["appearance"])
         # "The menu bar icon keeps the menu bar's own look" after it until 2026-10-28 (user request).
         self.appearance_popup.setToolTip_("Auto follows the Light or Dark setting in System Settings > Appearance")
+        self.start_with_iterm2_switch = self.make_switch(self.settings["app_starts_with_iterm2"])
+        self.start_with_iterm2_switch.setToolTip_("Starts AgentCommandTab whenever iTerm2 starts, through a script in "
+                                                  "iTerm2's AutoLaunch folder, so it has iTerm2's permissions")
         self.sidebar_mode_popup = self.make_popup(SIDEBAR_MODE_TITLES, self.settings["sidebar_mode"])
         self.edge_popup = self.make_popup(SIDEBAR_EDGE_TITLES, self.settings["sidebar_edge"])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
@@ -185,11 +188,11 @@ class SettingsWindowController(WindowFrameSavingController):
         self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
         # A General section first: "Show as", the keyboard shortcut with its accessibility button
         # under it, then Appearance (user requests, 2026-10-25 to 2026-10-27; Appearance last, the
-        # user's choice over after "Show as").
+        # user's choice over after "Show as"), then Start with iTerm2 (user request, 2026-10-28).
         general_section = SettingsSection("General", [
             SettingsRow("Show as", self.show_as_popup), SettingsRow("Keyboard shortcut", self.global_shortcut_popup),
             SettingsRow(None, self.accessibility_settings_button, continues_the_row_above=True),
-            SettingsRow("Appearance", self.appearance_popup)])
+            SettingsRow("Appearance", self.appearance_popup), SettingsRow("Start with iTerm2", self.start_with_iterm2_switch)])
         self.list_window_always_on_top_switch = self.make_switch(self.settings["list_window_is_always_on_top"])
         window_section = SettingsSection("Window", [SettingsRow("Always on top", self.list_window_always_on_top_switch)])
         sidebar_section = SettingsSection("Sidebar", [
@@ -438,6 +441,8 @@ class SettingsWindowController(WindowFrameSavingController):
             new_settings["global_shortcut"] = read_popup_choice(sender)
         elif sender is self.appearance_popup:
             new_settings["appearance"] = read_popup_choice(sender)
+        elif sender is self.start_with_iterm2_switch:
+            new_settings["app_starts_with_iterm2"] = bool(sender.state())
         elif sender is self.sidebar_mode_popup:
             new_settings["sidebar_mode"] = read_popup_choice(sender)
         elif sender is self.edge_popup:

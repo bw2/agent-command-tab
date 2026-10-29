@@ -23,13 +23,14 @@ import os
 import re
 import shlex
 import shutil
-import sys
 import tempfile
 
 from agent_command_tab.agent_adapters.claude_code import list_claude_config_folders
+from agent_command_tab.installed_copy_paths import find_python_of_this_copy, replace_homebrew_version_folder_with_its_stable_link
 
 FORWARDER_FILE_NAME = "hook_event_forwarder.py"
-FORWARDER_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), FORWARDER_FILE_NAME)
+FORWARDER_FILE_PATH = replace_homebrew_version_folder_with_its_stable_link(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), FORWARDER_FILE_NAME))
 SECONDS_A_HOOK_MAY_RUN = 10
 BACKUP_FILE_SUFFIX = ".agent-command-tab-backup"
 # The events each agent tool's hooks report, each with the tools a PreToolUse or PostToolUse
@@ -57,8 +58,12 @@ HOOKS_AWAIT_APPROVAL = "needs approval"  # Codex: in hooks.json, not yet approve
 
 def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FORWARDER_FILE_PATH):
     """Returns the hook command: this Python (python_path, or the one running), isolated (-I) and
-    without site packages (-S), running the forwarder."""
-    parts = (python_path or sys.executable, "-I", "-S", forwarder_path, agent_tool_name)
+    without site packages (-S), running the forwarder. The running Python is named by a path that
+    survives upgrades (installed_copy_paths.find_python_of_this_copy: a venv's bin/python), and a
+    Python in a Homebrew version folder by its stable opt/ path, as FORWARDER_FILE_PATH is, so the
+    hooks keep working after `brew upgrade` or a venv made again with a newer Python."""
+    python_path = replace_homebrew_version_folder_with_its_stable_link(python_path) if python_path else find_python_of_this_copy()
+    parts = (python_path, "-I", "-S", forwarder_path, agent_tool_name)
     return " ".join(shlex.quote(part) for part in parts)
 
 

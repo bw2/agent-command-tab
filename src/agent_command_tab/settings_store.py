@@ -60,6 +60,7 @@ DEFAULT_SETTINGS = {
     "show_as": "popup",
     "global_shortcut": "shift_command_tab",
     "appearance": "auto",
+    "app_starts_with_iterm2": True,  # through a script in iTerm2's AutoLaunch folder, added when the app starts (start_with_iterm2; user request, 2026-10-28)
     # Never shown in the settings window (the user's choice): to be asked again, take an action out of this list in the file.
     "actions_that_run_without_asking": [],
     "list_window_frame": None,  # [x, y, width, height] of the "Show as: Window" window, once it has been shown
