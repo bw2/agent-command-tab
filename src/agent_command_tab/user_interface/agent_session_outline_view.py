@@ -235,15 +235,32 @@ def compute_selection_outline_rect(row_bounds, is_flipped, joins_the_row_above, 
 class RowViewWithSelectionOutline(NSTableRowView):
     """A row that shows it is selected with an outline in the accent color rather than a filled
     background, so its text keeps its colors; adjacent selected rows share one outline (user
-    requests, 2026-10-21)."""
+    requests, 2026-10-21), which also takes in the process rows of a selected tab row, though
+    they aren't selected (user request, 2026-10-29)."""
 
     def drawSelectionInRect_(self, dirty_rect):
+        self.draw_selection_outline()
+
+    def drawBackgroundInRect_(self, dirty_rect):
+        objc.super(RowViewWithSelectionOutline, self).drawBackgroundInRect_(dirty_rect)
+        if not self.isSelected() and self.is_inside_the_selection_outline(0):  # a process row of a selected tab row
+            self.draw_selection_outline()
+
+    @objc.python_method
+    def is_inside_the_selection_outline(self, row_offset):
+        """Whether this row (row_offset 0), the one above it (-1) or the one below it (1) is inside a selection outline."""
+        outline_view = self.superview()
+        row = outline_view.rowForView_(self) if outline_view is not None else -1
+        return row >= 0 and outline_view.delegate().row_is_inside_the_selection_outline(row + row_offset)
+
+    @objc.python_method
+    def draw_selection_outline(self):
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath.clipRect_(self.bounds())
         NSColor.controlAccentColor().setStroke()
         outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            compute_selection_outline_rect(self.bounds(), self.isFlipped(), self.isPreviousRowSelected(),
-                                           self.isNextRowSelected()),
+            compute_selection_outline_rect(self.bounds(), self.isFlipped(), self.is_inside_the_selection_outline(-1),
+                                           self.is_inside_the_selection_outline(1)),
             SELECTION_OUTLINE_CORNER_RADIUS, SELECTION_OUTLINE_CORNER_RADIUS)
         outline.setLineWidth_(SELECTION_OUTLINE_WIDTH)
         outline.stroke()
@@ -1102,6 +1119,33 @@ class AgentSessionListController(NSObject):
     def outlineView_rowViewForItem_(self, outline_view, item):
         return RowViewWithSelectionOutline.alloc().initWithFrame_(NSZeroRect)
 
+    # A selected tab row's outline runs on over its process rows, which AppKit doesn't redraw
+    # when the selection changes or process rows come and go below it.
+
+    def outlineViewSelectionDidChange_(self, notification):
+        self.redraw_selection_outlines()
+
+    def outlineView_didAddRowView_forRow_(self, outline_view, row_view, row):
+        self.redraw_selection_outlines()
+
+    def outlineView_didRemoveRowView_forRow_(self, outline_view, row_view, row):
+        self.redraw_selection_outlines()
+
+    @objc.python_method
+    def redraw_selection_outlines(self):
+        self.outline_view.enumerateAvailableRowViewsUsingBlock_(lambda row_view, row: row_view.setNeedsDisplay_(True))
+
+    @objc.python_method
+    def row_is_inside_the_selection_outline(self, row):
+        """Whether a row is inside a selection outline: it is selected, or it is a process row of
+        a selected tab row (user request, 2026-10-29)."""
+        if not 0 <= row < self.outline_view.numberOfRows():
+            return False
+        if self.outline_view.isRowSelected_(row):
+            return True
+        item = self.outline_view.itemAtRow_(row)
+        return item.kind == "process" and self.outline_view.isRowSelected_(self.outline_view.rowForItem_(item.parent_item))
+
     # ----- selection (user request, 2026-10-21) -----
 
     def outlineView_selectionIndexesForProposedSelection_(self, outline_view, proposed_selection_indexes):
@@ -1193,6 +1237,7 @@ class AgentSessionListController(NSObject):
         - Delete or Forward Delete kills the selected rows' agent sessions, or the selected
           processes, asking first (user request, 2026-10-29).
         - Esc closes the list and gives the keyboard back to the app that had it (user request, 2026-10-29).
+          With several rows selected, it first keeps only the last one selected (user request, 2026-10-29).
         - R or Command-R renames the one selected tab or window row (user request, 2026-10-29).
           An R typed within SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME of another letter goes on
           selecting a row by name instead, or it would rename the row the first letters chose
@@ -1229,7 +1274,10 @@ class AgentSessionListController(NSObject):
                 return True
             return self.kill_the_agent_sessions_of_the_selected_rows()
         if characters == ESCAPE_CHARACTER:
-            self.owner.close_the_list_after_escape(self)
+            if len(selected_items) > 1:
+                self.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set([self.outline_view.selectedRow()]), False)
+            else:
+                self.owner.close_the_list_after_escape(self)
             return True
         if characters and characters.isprintable():  # the outline view takes it as a letter of a name typed to select a row
             self.last_name_letter_typed_at = time.time()

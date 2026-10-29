@@ -838,6 +838,29 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual([(row_view.isPreviousRowSelected(), row_view.isNextRowSelected()) for row_view in row_views],
                          [(False, True), (True, True), (True, False), (False, False)])
 
+    def test_a_selected_tab_rows_outline_takes_in_its_process_rows(self):  # user request, 2026-10-29
+        outline_view = self.apply_snapshot_with_child_processes()
+        self.click_row_arrow(1)  # rows: w1, planning, its 2 processes, phase0-tests, ...
+        self.select_rows(1)
+        self.assertEqual([self.list_controller.row_is_inside_the_selection_outline(row) for row in range(-1, 6)],
+                         [False, False, True, True, True, False, False])
+        content_view = self.window.contentView()  # draws the rows, which raises if an outline can't be built
+        content_view.cacheDisplayInRect_toBitmapImageRep_(
+            content_view.bounds(), content_view.bitmapImageRepForCachingDisplayInRect_(content_view.bounds()))
+        last_process_row_view = outline_view.rowViewAtRow_makeIfNecessary_(3, False)
+        self.assertFalse(last_process_row_view.isSelected())
+        self.assertEqual((last_process_row_view.is_inside_the_selection_outline(-1), last_process_row_view.is_inside_the_selection_outline(1)),
+                         (True, False))  # the outline's bottom edge
+        self.select_rows(2)  # a process row selected by itself has an outline of its own
+        self.assertEqual([self.list_controller.row_is_inside_the_selection_outline(row) for row in range(1, 4)], [False, True, False])
+        # AppKit redraws only the rows whose selection changed and their neighbors.
+        redraw_count = []
+        self.list_controller.redraw_selection_outlines = lambda: redraw_count.append(1)
+        self.select_rows(1)
+        self.assertEqual(len(redraw_count), 1)
+        self.click_row_arrow(1)  # its process rows go
+        self.assertGreater(len(redraw_count), 1)
+
     def test_several_selected_rows_share_one_menu_that_acts_on_their_sessions(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(3, 4)  # codex-review (done) and the second window (two idle tabs)
@@ -1722,6 +1745,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         action_count = len(self.submitted_actions)
         self.press_key("\r", 36, NSEventModifierFlagCommand)  # left to AppKit
         self.assertEqual(len(self.submitted_actions), action_count)
+        self.select_rows(1)  # with several selected, Esc would first keep only the last one
+        self.press_key("\x1b", 53)
+        self.assertEqual(self.owner.lists_closed_after_escape, [self.list_controller])
+
+    def test_esc_first_keeps_only_the_last_selected_row_then_closes_the_list(self):  # user request, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.select_rows(1, 2, 3)
+        self.press_key("\x1b", 53)
+        self.assertEqual(self.list_controller.list_selected_items(), [self.list_controller.outline_view.itemAtRow_(3)])
+        self.assertEqual(self.owner.lists_closed_after_escape, [])
         self.press_key("\x1b", 53)
         self.assertEqual(self.owner.lists_closed_after_escape, [self.list_controller])
 
