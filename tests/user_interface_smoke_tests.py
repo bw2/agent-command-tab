@@ -14,7 +14,8 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSBox, NSBoxCustom, NSButton, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
-                    NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventTypeKeyDown, NSEventTypeLeftMouseDown,
+                    NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagShift, NSEventTypeKeyDown,
+                    NSEventTypeLeftMouseDown,
                     NSEventTypeLeftMouseUp, NSLeftArrowFunctionKey, NSMakePoint, NSMakeRect, NSMidX, NSMidY, NSPointInRect,
                     NSRightArrowFunctionKey,
                     NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone,
@@ -420,11 +421,18 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual((resolve_color(share_color, NSAppearanceNameAqua), resolve_color(share_color, NSAppearanceNameDarkAqua)),
                              expected_share_colors)
 
-    def test_the_rows_are_on_a_very_light_gray_in_light_mode_only(self):  # user request, 2026-10-28
-        background = self.list_controller.outline_view.backgroundColor()
-        self.assertEqual(resolve_color(background, NSAppearanceNameAqua), (247, 247, 247, 255))
-        self.assertEqual(resolve_color(background, NSAppearanceNameDarkAqua),
-                         resolve_color(NSColor.controlBackgroundColor(), NSAppearanceNameDarkAqua))  # as before
+    def test_the_rows_are_on_a_very_light_gray_in_light_mode_only(self):  # user requests, 2026-10-28 and 2026-10-29
+        outline_view = self.list_controller.outline_view
+        for appearance_name in (NSAppearanceNameDarkAqua, NSAppearanceNameAqua):
+            self.window.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
+            self.window.contentView().layoutSubtreeIfNeeded()
+            if appearance_name == NSAppearanceNameDarkAqua:
+                # controlBackgroundColor itself, which AppKit doesn't fill solid: the dropdown's lighter
+                # gray shows through, unlike in the bars around the list.
+                self.assertEqual(outline_view.backgroundColor(), NSColor.controlBackgroundColor())
+                self.assertFalse(outline_view.isOpaque())
+            else:
+                self.assertEqual(resolve_color(outline_view.backgroundColor(), NSAppearanceNameAqua), (247, 247, 247, 255))
 
     def test_the_status_text_is_in_its_states_color(self):  # user requests, 2026-10-28
         self.assertLessEqual(set(STATE_TEXT_COLOR_NAME_BY_STATE.values()), set(COLOR_MAKERS_BY_NAME))
@@ -654,7 +662,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
                          ["w1", "1", "2", "3", "new_window"])
         self.assertEqual((panel.idle_tabs_button.title(), panel.idle_tabs_button.toolTip()),
-                         ("Show Idle", "Show tabs whose agent is idle"))
+                         ("Show Idle", "Show tabs whose agent is idle (⌘-i)"))
         snapshot = make_sample_snapshot()  # a new snapshot is filtered too: planning becomes idle
         window_one, window_two = snapshot.monitors[0].windows
         window_one = window_one._replace(agent_sessions=(window_one.agent_sessions[0]._replace(status="idle"),)
@@ -675,6 +683,18 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel.show_idle_tabs_are_hidden(False)
         self.assertEqual(outline_view.numberOfRows(), 8)
         self.assertEqual(panel.idle_tabs_button.title(), "Hide Idle")
+
+    def test_command_i_presses_hide_idle_or_show_idle(self):  # user request, 2026-10-29
+        panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        for characters, modifier_flags, idle_tabs_are_hidden, expected_choices in (
+                ("i", NSEventModifierFlagCommand, False, [True]),
+                ("i", NSEventModifierFlagCommand, True, [True, False]),
+                ("I", NSEventModifierFlagCommand | NSEventModifierFlagShift, False, [True, False])):  # Shift-Command-I is another key
+            panel.show_idle_tabs_are_hidden(idle_tabs_are_hidden)
+            self.window.performKeyEquivalent_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+                NSEventTypeKeyDown, NSMakePoint(0, 0), modifier_flags, 0, self.window.windowNumber(), None, characters, characters, False, 34))
+            self.assertEqual(self.owner.idle_tabs_are_hidden_choices, expected_choices)
 
     def test_a_hidden_list_rebuilds_its_rows_only_when_it_appears(self):  # code review, 2026-10-29
         outline_view = self.list_controller.outline_view

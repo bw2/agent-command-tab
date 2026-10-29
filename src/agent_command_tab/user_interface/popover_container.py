@@ -7,7 +7,8 @@ sidebar and in the list window, each with its own list controller.
 import math
 
 import objc
-from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSFont, NSFontWeightRegular,
+from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSEventModifierFlagCommand, NSFont,
+                    NSFontWeightRegular,
                     NSImage, NSImageLeading, NSImageSymbolConfiguration,
                     NSLineBreakByTruncatingTail, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSRectFill, NSScreen,
                     NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
@@ -53,8 +54,10 @@ PAUSE_OR_RESUME_ALL_LOOKS = {"pause": ("pause.circle", "Pause all", "Pause all a
                              "resume": ("play.circle", "Resume all", "Resume all paused agent processes (fg, then a CONT signal)")}
 # The top bar's Hide Idle / Show Idle button, left of the expand or collapse button (user
 # requests, 2026-10-21): (title, tooltip), by whether idle tabs are hidden; the title says what a click does.
-IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle"),  # the user's wording, 2026-10-28
-                          True: ("Show Idle", "Show tabs whose agent is idle")}
+# Command-I presses it in the list that has the keyboard, and the tooltips say so (user request, 2026-10-29).
+IDLE_TABS_BUTTON_KEY = "i"
+IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle (⌘-i)"),  # the user's wording, 2026-10-28
+                          True: ("Show Idle", "Show tabs whose agent is idle (⌘-i)")}
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
 HOOKS_NOTE_TOOL_TIP = ("These hooks provide AgentCommandTab more details about agent status, including whether it "
@@ -91,11 +94,13 @@ class ListPanelView(NSView):
         return True  # the sidebar's top bar drags from the first click, though the dashboard isn't the active app
 
     def drawRect_(self, rect):
-        # In dark mode, the top bar, the column titles and the bottom bar are on the list's own
-        # background (the outline view's default, controlBackgroundColor) rather than the lighter
-        # gray of the window, the popover or the sidebar around it; light mode keeps that gray
-        # around the list, whose rows are on a very light gray there (user requests, 2026-10-27 and
-        # 2026-10-28; named_colors' "list_background"). AppKit redraws views when the mode changes.
+        # In dark mode, the top bar, the column titles and the bottom bar are filled with the list's
+        # own background color (the outline view's default, controlBackgroundColor) rather than
+        # left on the lighter gray of the window, the popover or the sidebar around it. The list
+        # itself, which AppKit doesn't fill solid in that color, shows lighter than the bars (user
+        # requests, 2026-10-27 and 2026-10-29). Light mode keeps that gray around the list, whose
+        # rows are on a very light gray there (user request, 2026-10-28;
+        # named_colors.choose_list_background_color). AppKit redraws views when the mode changes.
         if appearance_is_dark(self.effectiveAppearance()):
             NSColor.controlBackgroundColor().set()
             NSRectFill(rect)
@@ -201,6 +206,8 @@ class ListPanelController(NSViewController):
             0, height - TOP_BAR_HEIGHT + 3, max(idle_tabs_button_widths), self.list_sort_order_popup.frame().size.height))
         self.idle_tabs_button.setTarget_(self)
         self.idle_tabs_button.setAction_("idleTabsButtonClicked:")
+        self.idle_tabs_button.setKeyEquivalent_(IDLE_TABS_BUTTON_KEY)
+        self.idle_tabs_button.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
         self.idle_tabs_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)
         root_view.addSubview_(self.idle_tabs_button)
         self.update_idle_tabs_button()

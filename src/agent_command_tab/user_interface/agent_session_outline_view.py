@@ -50,7 +50,7 @@ from agent_command_tab.settings_store import DEFAULT_SETTINGS
 from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries, replace_title_in_snapshot
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image, describe_agent_tool_icon
 from agent_command_tab.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
-from agent_command_tab.user_interface.named_colors import build_color_from_name
+from agent_command_tab.user_interface.named_colors import build_color_from_name, choose_list_background_color
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 from agent_command_tab.user_interface.process_info_alert import shorten_command_for_alert
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
@@ -190,11 +190,16 @@ class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
     """An NSOutlineView that draws no disclosure triangles of its own (each row has its own arrow
     button), that tells its delegate when the button goes down on a row and comes back up, so
     holding a tab row can show that tab for a moment, that lets its delegate handle the
-    list's own keys first (handle_key_press), and whose menu Control-Return opens where the
-    delegate says (open_the_selected_rows_menu_from_the_keyboard)."""
+    list's own keys first (handle_key_press), whose menu Control-Return opens where the
+    delegate says (open_the_selected_rows_menu_from_the_keyboard), and whose background follows
+    light and dark mode (choose_list_background_color)."""
 
     def frameOfOutlineCellAtRow_(self, row):
         return NSZeroRect
+
+    def viewDidChangeEffectiveAppearance(self):
+        objc.super(OutlineViewWithoutDisclosureTriangles, self).viewDidChangeEffectiveAppearance()
+        self.setBackgroundColor_(choose_list_background_color(self.effectiveAppearance()))
 
     def showContextMenuForSelection_(self, sender):
         # macOS's context menu key, Control-Return from macOS 15; AppKit's own opens the menu at the row's left edge.
@@ -845,7 +850,7 @@ class AgentSessionListController(NSObject):
         # their measured size and the dropdown can be fitted to them.
         outline_view.setStyle_(NSTableViewStylePlain)
         outline_view.setIntercellSpacing_((0, 0))
-        outline_view.setBackgroundColor_(build_color_from_name("list_background"))  # very light gray in light mode (user request, 2026-10-28)
+        outline_view.setBackgroundColor_(choose_list_background_color(outline_view.effectiveAppearance()))
         # A click selects a window or tab row, Command-click adds or removes one, Shift-click a
         # range (user request, 2026-10-21); RowViewWithSelectionOutline draws the selection.
         outline_view.setAllowsMultipleSelection_(True)
