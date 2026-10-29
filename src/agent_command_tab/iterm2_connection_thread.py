@@ -34,6 +34,7 @@ from agent_command_tab.hook_event_tracking import (SESSION_START_SOURCES_OF_ANOT
                                                    apply_hook_event, find_agent_process_id_of_hook_event,
                                                    find_when_the_hooks_ended_the_turn)
 from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, check_hooks
+from agent_command_tab.hook_states_store import load_hook_states, save_hook_states
 from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
                                                      pause_has_ended, resume_agent_session, send_signal_to_processes)
 from agent_command_tab.pause_records_store import load_pause_records, save_pause_records
@@ -297,19 +298,25 @@ class DashboardCore:
         hook_events_socket_path: The socket the app's hooks send their events to
             (hook_event_forwarder.HOOK_EVENTS_SOCKET_PATH), or None to listen to none
             (dump-snapshot, which must not take the app's socket away).
+        hook_states_file_path: Where what the agent processes' hooks reported is kept across
+            restarts (hook_states_store); None keeps it in memory only.
     """
 
     def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None,
-                 pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None, hook_events_socket_path=None):
+                 pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None, hook_events_socket_path=None,
+                 hook_states_file_path=None):
         self.publish_snapshot = publish_snapshot
         self.report_connection_lost = report_connection_lost
         self.verbose = verbose
         self.docked_window_frames_file_path = docked_window_frames_file_path
         self.pause_records_file_path = pause_records_file_path
         self.hook_events_socket_path = hook_events_socket_path
+        self.hook_states_file_path = hook_states_file_path
         # What each agent process's hooks reported (hook_event_tracking.apply_hook_event), by its
-        # process ID, kept while it runs or is a tab's agent, and while its row shows "exited".
-        self.hook_state_by_agent_process_id = {}
+        # process ID, kept while it runs or is a tab's agent, and while its row shows "exited";
+        # those of the processes still running come back after a restart.
+        self.hook_state_by_agent_process_id = (self.load_hook_states_of_the_processes_still_running()
+                                               if hook_states_file_path else {})
         # {session ID: (the AgentSessionEntry its row last showed, when its agent ended)} for the
         # tabs whose agent ended without a normal session end, shown as "exited" for EXITED_ROW_SECONDS (R14.1).
         self.exited_agent_sessions_by_session_id = {}
@@ -1430,6 +1437,31 @@ class DashboardCore:
         except OSError as error:
             print(f"could not save the pause records: {error!r}")
 
+    def load_hook_states_of_the_processes_still_running(self):
+        """Returns {agent process ID: hook state} from the hook states file, for the processes
+        that still run with the start time stored with their state."""
+        hook_state_by_agent_process_id = {}
+        for process_id, (started_at, hook_state) in load_hook_states(self.hook_states_file_path).items():
+            process = read_process_info(process_id)
+            if process is not None and process.started_at == started_at:
+                hook_state_by_agent_process_id[process_id] = hook_state
+        return hook_state_by_agent_process_id
+
+    def save_hook_states(self):
+        """Writes the hook states of the agent processes that still run to their file, each with its
+        process's start time. A write that fails is reported, not raised, as for the pause records."""
+        if not self.hook_states_file_path:
+            return
+        started_at_and_hook_state_by_process_id = {}
+        for process_id, hook_state in self.hook_state_by_agent_process_id.items():
+            process = read_process_info(process_id)
+            if process is not None:
+                started_at_and_hook_state_by_process_id[process_id] = (process.started_at, hook_state)
+        try:
+            save_hook_states(self.hook_states_file_path, started_at_and_hook_state_by_process_id)
+        except OSError as error:
+            print(f"could not save the hook states: {error!r}")
+
     def list_again_the_paused_agents_that_lost_their_row(self):
         """Adds resolve_agent_sessions entries for the agents a pause stopped that are still
         stopped but no longer listed, in gathered tabs with no other agent: after the dashboard
@@ -1490,9 +1522,12 @@ class DashboardCore:
         a tab still lists them as its agent (a gather that hasn't noticed yet) or shows their "exited" row."""
         kept_process_ids = ({agent_session["process_id"] for agent_session in self.agent_sessions.values()}
                             | {exited_agent_session["process_id"] for exited_agent_session in self.exited_agent_sessions_by_session_id.values()})
-        for process_id in list(self.hook_state_by_agent_process_id):
-            if process_id not in kept_process_ids and not process_is_alive(process_id):
-                del self.hook_state_by_agent_process_id[process_id]
+        process_ids_gone = [process_id for process_id in self.hook_state_by_agent_process_id
+                            if process_id not in kept_process_ids and not process_is_alive(process_id)]
+        for process_id in process_ids_gone:
+            del self.hook_state_by_agent_process_id[process_id]
+        if process_ids_gone:
+            self.save_hook_states()
         self.process_ids_ended_from_the_list = {process_id for process_id in self.process_ids_ended_from_the_list
                                                 if process_id in kept_process_ids or process_is_alive(process_id)}
 
@@ -1645,6 +1680,7 @@ class DashboardCore:
             print(f"hook event {event.get('hook_event_name')} from {event.get('agent_tool_name')} process {process_id}")
         hook_state = apply_hook_event(self.hook_state_by_agent_process_id.get(process_id), event)
         self.hook_state_by_agent_process_id[process_id] = hook_state
+        self.save_hook_states()
         if hook_state["session_ended_at"] is not None:
             for session_id, exited_agent_session in list(self.exited_agent_sessions_by_session_id.items()):
                 if exited_agent_session["process_id"] == process_id:
@@ -2195,7 +2231,8 @@ class Iterm2ConnectionThread(threading.Thread):
     """Runs DashboardCore on its own asyncio event loop, and offers thread-safe entry points."""
 
     def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None,
-                 pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None, hook_events_socket_path=None):
+                 pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None, hook_events_socket_path=None,
+                 hook_states_file_path=None):
         super().__init__(name="iterm2-connection", daemon=True)
         self.core_ready = threading.Event()
         self.core = None
@@ -2207,13 +2244,15 @@ class Iterm2ConnectionThread(threading.Thread):
         self.pause_records_file_path = pause_records_file_path
         self.pause_record_by_tab_and_agent_to_start_with = pause_record_by_tab_and_agent_to_start_with
         self.hook_events_socket_path = hook_events_socket_path
+        self.hook_states_file_path = hook_states_file_path
 
     def run(self):
         self.event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.event_loop)
         self.core = DashboardCore(self.publish_snapshot, self.report_connection_lost, self.verbose,
                                   self.docked_window_frames_file_path, self.pause_records_file_path,
-                                  self.pause_record_by_tab_and_agent_to_start_with, self.hook_events_socket_path)
+                                  self.pause_record_by_tab_and_agent_to_start_with, self.hook_events_socket_path,
+                                  self.hook_states_file_path)
         self.core_ready.set()
         self.event_loop.run_until_complete(self.core.run())
 

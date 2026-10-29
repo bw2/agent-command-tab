@@ -27,6 +27,7 @@ from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
 from agent_command_tab.global_shortcut_key_filter import GlobalShortcutKeyFilter
 from agent_command_tab.hook_event_forwarder import HOOK_EVENTS_SOCKET_PATH
+from agent_command_tab.hook_states_store import HOOK_STATES_FILE_PATH
 from agent_command_tab.hooks_installer import BACKUP_FILE_SUFFIX, install_hooks, list_settings_file_paths
 from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
 from agent_command_tab.monitor_assignment import compute_frame_clear_of_area
@@ -147,7 +148,8 @@ class AppController(NSObject):
         self.connection_thread = Iterm2ConnectionThread(self.receive_snapshot_on_background_thread,
                                                         self.receive_connection_lost_on_background_thread, verbose,
                                                         DOCKED_WINDOW_FRAMES_FILE_PATH, PAUSE_RECORDS_FILE_PATH,
-                                                        hook_events_socket_path=HOOK_EVENTS_SOCKET_PATH)
+                                                        hook_events_socket_path=HOOK_EVENTS_SOCKET_PATH,
+                                                        hook_states_file_path=HOOK_STATES_FILE_PATH)
         notification_center = NSNotificationCenter.defaultCenter()
         for notification_name, selector_name in (
                 (NSApplicationDidChangeScreenParametersNotification, "screenParametersChanged:"),
