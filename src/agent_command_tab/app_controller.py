@@ -1,6 +1,6 @@
 """Starts the AppKit main thread and the core's background thread, and routes snapshots and actions.
 
-PLAN.md section 4, "Threads". Snapshots arrive on the background thread and are handed to the
+Snapshots arrive on the background thread and are handed to the
 main thread with AppHelper.callAfter, coalesced so that only the newest is drawn. The app
 controller is also the owner that the list controllers, the panels, the sidebar, the menu bar
 item and the settings window report to.
@@ -207,7 +207,7 @@ class AppController(NSObject):
     def exit_to_reconnect(self, message):
         """Shows the problem for a while, then exits so the supervisor reconnects.
 
-        The `iterm2` package can't reconnect within one process (PLAN.md section 4).
+        The `iterm2` package can't reconnect within one process.
         """
         print(f"agent-command-tab: {message}; exiting so the supervisor reconnects", flush=True)
         # The user's wording, 2026-10-28.
@@ -696,7 +696,7 @@ class AppController(NSObject):
 
     @objc.python_method
     def start_agent_session_from_menu(self, window_id, folder, agent_tool_name):
-        """Starts an agent tool in a new tab of a window (R13), or in a new window (R13.1) in the
+        """Starts an agent tool in a new tab of a window, or in a new window in the
         folder of the tab in front, else of the tab used most recently within a day, else the
         home folder (no folder picker: user request, milestone 2)."""
         launch_command = self.find_launch_command(agent_tool_name)

@@ -1,4 +1,4 @@
-"""Agent session states, their urgency order, and how a session's state is worked out (PLAN.md section 6).
+"""Agent session states, their urgency order, and how a session's state is worked out.
 
 A state comes from iTerm2's `status` variable plus the core's readings of the session: whether
 the permission dialog is still on screen, a screen fingerprint (for "stuck"), and the command
@@ -50,7 +50,7 @@ def update_permission_dialog_reading(screen_reading, dialog_is_showing, interrup
     The dialog counts as answered once it was seen and then went away: approved, or denied when
     a new "Interrupted" line appeared ("No" or Esc). A dialog never seen since the session
     started asking (wording the adapter doesn't recognize, or not drawn yet) keeps the session
-    asking, unless a new "Interrupted" line shows that the turn ended (PLAN.md section 6: when
+    asking, unless a new "Interrupted" line shows that the turn ended (when
     the match is ambiguous, the request stays open).
 
     Args:

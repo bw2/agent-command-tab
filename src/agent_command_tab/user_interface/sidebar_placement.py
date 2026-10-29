@@ -1,4 +1,4 @@
-"""Where the sidebar goes (R5, PLAN.md section 8, "Auto-hide sidebar"). Pure functions, no AppKit.
+"""Where the sidebar goes. Pure functions, no AppKit.
 
 Screens are dicts {"name": str, "frame": (x, y, width, height), "visible_frame": (...)} in
 NSScreen's order, so the first one has the menu bar. Only outer edges are offered: an edge

@@ -1,10 +1,8 @@
-"""Settings, stored as JSON in ~/Library/Application Support/agent-command-tab/settings.json (R34, R35).
+"""Settings, stored as JSON in ~/Library/Application Support/agent-command-tab/settings.json.
 
-Settings are added here as the features that use them are built; PLAN.md section 8 lists the
-full set. Command paths are resolved once, at first run, and saved, because an app started at
-login gets a minimal PATH (PLAN.md section 8, "Settings"); so does one opened from Finder at
-its first run, so the folders programs are usually installed in are looked in too
-(USUAL_PROGRAM_FOLDERS).
+Settings are added here as the features that use them are built. Command paths are resolved
+once, at first run, and saved, because an app started at login gets a minimal PATH, so the
+folders programs are usually installed in are looked in too (USUAL_PROGRAM_FOLDERS).
 """
 
 import json
@@ -27,7 +25,7 @@ SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL = 20
 # other syntax, so they aren't asked (code review, 2026-10-28).
 LOGIN_SHELLS_THAT_CAN_BE_ASKED = frozenset({"bash", "zsh", "sh", "dash", "ksh"})
 # Where programs such as claude and codex are usually installed (Homebrew on Apple silicon and on
-# Intel, Claude Code's installer), which an app opened from Finder or at login has no PATH to: it
+# Intel, Claude Code's installer), which an app started at login has no PATH to: it
 # gets launchd's /usr/bin:/bin:/usr/sbin:/sbin (code review, 2026-10-28).
 USUAL_PROGRAM_FOLDERS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin")
 ENVIRONMENT_SETTING_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # "ANTHROPIC_MODEL=x claude"

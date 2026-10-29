@@ -138,7 +138,7 @@ class ResolveLaunchCommandPathsTests(unittest.TestCase):
         json.dumps(resolved)
 
     def test_a_program_off_the_apps_minimal_path_is_found_in_the_usual_folders(self):  # code review, 2026-10-28
-        # As for an app opened from Finder, whose PATH is launchd's.
+        # As for an app started at login, whose PATH is launchd's.
         with tempfile.TemporaryDirectory() as usual_folder, tempfile.TemporaryDirectory() as folder_on_path:
             def write_program(folder, name):
                 path = os.path.join(folder, name)

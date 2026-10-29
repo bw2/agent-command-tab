@@ -1,4 +1,4 @@
-"""The full iTerm2 tab order after a tab row is dragged (PLAN.md section 9).
+"""The full iTerm2 tab order after a tab row is dragged.
 
 The list hides tabs without an agent, but iTerm2 needs every tab of a window in its new order.
 Hidden tabs keep their place relative to their neighbors.

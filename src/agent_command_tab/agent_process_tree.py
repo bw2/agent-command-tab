@@ -1,9 +1,9 @@
 """Facts about an agent's processes, read from macOS's libproc and sysctl without starting a subprocess.
 
-- The agent's current folder (PLAN.md section 5: iTerm2's `path` variable can be empty or stale).
+- The agent's current folder (iTerm2's `path` variable can be empty or stale).
 - Whether a process still exists, and whether it is stopped (a paused agent session).
 - The agent's descendant processes, to tell an agent that is waiting on a command it started
-  (a pipeline, a test run) from one that is thinking (PLAN.md section 6, "stuck"), and the
+  (a pipeline, a test run) from one that is thinking (and turns "stuck" when that lasts), and the
   name that command was started as.
 - The memory and CPU time the agent and all its descendants use (the Memory and CPU columns,
   user request, 2026-10-19).

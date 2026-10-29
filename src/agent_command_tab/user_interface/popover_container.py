@@ -164,7 +164,7 @@ class ListPanelController(NSViewController):
         self.list_controller.on_column_titles_row_height_changed = self.fit_list_under_column_titles
 
         # Top bar (user requests, milestone 2, 2026-10-19 to 2026-10-28): the sort order on the
-        # left; at the right, Hide Idle and one button that expands or collapses all (R8.1); a
+        # left; at the right, Hide Idle and one button that expands or collapses all; a
         # message line after the sort order. Settings was in its middle from 2026-10-26 to 2026-10-28.
         self.sort_label = NSTextField.labelWithString_("Sort:")
         self.sort_label.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
@@ -219,10 +219,10 @@ class ListPanelController(NSViewController):
         self.message_text_field.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.message_text_field)
 
-        # Bottom bar: a Settings button with its name, easier to see than an icon (R34), at the left, a
+        # Bottom bar: a Settings button with its name, easier to see than an icon, at the left, a
         # gray pill like the top bar's controls (user request, 2026-10-28; in the middle of the top bar
         # from 2026-10-26, at the bottom left before), and one button that pauses or resumes all, at the
-        # right; a new window with an agent session (R13.1) is the "+" row at the end of the list (user
+        # right; a new window with an agent session is the "+" row at the end of the list (user
         # requests, 2026-10-19 to 2026-10-21).
         self.settings_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
         self.settings_button.setTitle_("Settings")

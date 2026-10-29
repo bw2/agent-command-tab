@@ -28,7 +28,7 @@ class CodexAdapter(AgentToolAdapter):
     """Codex runs as `codex ...` (0.163) or through its Node.js wrapper, `node .../codex ...` (0.154).
 
     Codex 0.163 reports "waiting" itself exactly while its approval menu shows, so it needs no
-    permission dialog check (PHASE0_RESULTS.md).
+    permission dialog check.
     """
 
     agent_tool_name = "Codex"

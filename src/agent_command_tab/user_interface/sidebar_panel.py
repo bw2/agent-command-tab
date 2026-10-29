@@ -1,4 +1,4 @@
-"""The sidebar at the screen edge (R4 to R6, PLAN.md section 8, "Auto-hide sidebar").
+"""The sidebar at the screen edge.
 
 A non-activating panel that floats above windows on every desktop, including full-screen
 ones, and takes keyboard focus only for typing (a rename). Three modes (settings_store.SIDEBAR_MODES):
@@ -169,7 +169,7 @@ class SidebarController(NSObject):
                                       | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle)
         window.setHidesOnDeactivate_(False)
         window.setAllowsToolTipsWhenApplicationIsInactive_(True)  # the sidebar never makes the app active
-        window.setBecomesKeyOnlyIfNeeded_(True)  # clicks on rows don't take keyboard focus (R6)
+        window.setBecomesKeyOnlyIfNeeded_(True)  # clicks on rows don't take keyboard focus
         window.setDelegate_(self)  # windowDidResignKey_
         window.setHasShadow_(True)
         background_view = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 600))
@@ -372,7 +372,7 @@ class SidebarController(NSObject):
 
     @objc.python_method
     def something_belonging_to_the_sidebar_is_open(self):
-        """A rename, drag or right-click menu keeps the sidebar in place (PLAN.md section 8)."""
+        """A rename, drag or right-click menu keeps the sidebar in place."""
         return (self.list_controller.rename_in_progress or self.list_controller.drag_in_progress
                 or self.list_controller.menu_is_open or self.width_drag_is_in_progress())
 

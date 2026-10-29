@@ -29,7 +29,7 @@ def make_light_and_dark_mode_color_maker(light_mode_color_maker, dark_mode_color
 COLOR_MAKERS_BY_NAME = {
     "purple": make_srgb_color_maker(150, 95, 255), "red": NSColor.systemRedColor, "orange": NSColor.systemOrangeColor,
     "green": NSColor.systemGreenColor, "light_blue": NSColor.systemCyanColor, "gray": NSColor.secondaryLabelColor,
-    "yellow": NSColor.systemYellowColor,  # the background task lights (R26.2)
+    "yellow": NSColor.systemYellowColor,  # the background task lights
     # The Tokens column's share of the context window from 50% (user request, 2026-10-27). The system
     # yellow is hard to read as text on white (contrast 1.5 to 1), so light mode has a darker amber,
     # 2.8 to 1 (brighter than the first one, 168, 118, 0 at 4 to 1, since 2026-10-28, user request).

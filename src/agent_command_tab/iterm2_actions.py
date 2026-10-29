@@ -1,5 +1,5 @@
 """Actions that change iTerm2: focus, rename, tab moves, new agent sessions, typed slash commands
-and pasted messages (PLAN.md sections 8 and 9).
+and pasted messages.
 
 Each function takes the connection's iterm2.App and returns an ActionResult. After any action
 the core re-reads iTerm2 and publishes a new snapshot; the views never guess the result.
@@ -128,10 +128,10 @@ async def move_tab_to_window_position(app, tab_id, target_window_id, drop_before
 
 
 async def move_window_to_monitor(app, window_id, monitors, target_monitor_id):
-    """Moves a window to another monitor, keeping its size if it fits and its relative position (R32).
+    """Moves a window to another monitor, keeping its size if it fits and its relative position.
 
     A full-screen window can't simply get a new frame, so it leaves full screen, moves, and
-    enters full screen again on the target monitor (PLAN.md section 10; not yet tried on a real
+    enters full screen again on the target monitor (not yet tried on a real
     second monitor).
 
     Args:
@@ -162,7 +162,7 @@ async def move_window_to_monitor(app, window_id, monitors, target_monitor_id):
 
 
 def build_new_agent_session_profile(folder, launch_command):
-    """Returns profile customizations that start launch_command in folder (PLAN.md section 8).
+    """Returns profile customizations that start launch_command in folder.
 
     iTerm2's "send text at start" profile setting ("Initial Text", Phase 0) types the command
     once the shell is ready, so the tab keeps a normal shell and stays open if the agent exits.
@@ -235,7 +235,7 @@ async def read_screen_lines_with_faint_flags(session):
 
 async def type_slash_command(app, session_id, command, adapter, agent_is_in_the_middle_of_a_turn=False):
     """Types a slash command into the agent's empty input box, then Enter after the adapter's
-    pause (R15.1; PLAN.md section 8, "Sending /compact and /clear"). Types nothing when the box
+    pause. Types nothing when the box
     holds unsent text or can't be found on screen, since the command would join the draft.
     Reports a failure, without retrying, when the command is still in the box a moment after Enter.
 

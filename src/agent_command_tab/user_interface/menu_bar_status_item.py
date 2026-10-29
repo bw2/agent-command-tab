@@ -1,4 +1,4 @@
-"""The menu bar item: a colored "C" followed by the number of asking agent sessions (R1 to R3)."""
+"""The menu bar item: a colored "C" followed by the number of asking agent sessions."""
 
 import objc
 from AppKit import (NSApp, NSAttributedString, NSColor, NSEventMaskLeftMouseDown, NSEventMaskLeftMouseUp,

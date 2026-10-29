@@ -1,4 +1,4 @@
-"""Which monitor each window is on (R31). Frames are (x, y, width, height) in one shared coordinate system."""
+"""Which monitor each window is on. Frames are (x, y, width, height) in one shared coordinate system."""
 
 
 def compute_overlap_area(first_frame, second_frame):
@@ -21,7 +21,7 @@ def compute_squared_distance_between_centers(first_frame, second_frame):
 
 
 def compute_window_frame_on_another_monitor(window_frame, source_visible_frame, target_visible_frame):
-    """Returns the frame for a window moved to another monitor (R32, PLAN.md section 10).
+    """Returns the frame for a window moved to another monitor.
 
     The window keeps its size if it fits in the target's usable area (otherwise it shrinks to
     fit), and keeps its position relative to that area (for example centered stays centered).

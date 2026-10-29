@@ -1,4 +1,4 @@
-"""The text of each list row, in pyinstrument's style (R36 to R41). Pure functions, no AppKit.
+"""The text of each list row, in pyinstrument's style. Pure functions, no AppKit.
 
 A row reads left to right: gray tree connectors, a status dot, the name (in the label color,
 bold for window and monitor rows and the tab in front), then the details: a tab row's yellow
@@ -19,7 +19,7 @@ RowTextParts = collections.namedtuple(
                      "preview_text", "details_color_name", "dot_tool_tip", "details_tool_tip",
                      "context_fill_percent_color_name", "state_color_name", "state_text_is_semibold"],
     defaults=["", "", "", "", "", "", "", "", "", "", "gray", "", "", "", "", False])
-RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot (R26.1). A tab row ends "
+RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot. A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
                         "context_text (the context's size and its share of the context window, "
                         "\"425k (42%)\", the share in parentheses in context_fill_percent_color_name, or in the "
@@ -28,15 +28,15 @@ RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working sessi
                         "agent and the processes it started use), the icon for agent_tool_name, state_text "
                         "(in state_color_name, semibold for state_text_is_semibold) and elapsed_time_text (the "
                         "state's duration). Under it, a tab "
-                        "row has a gray preview line "
-                        "(R23): preview_connector_text continues the tree's lines, and preview_text starts under "
+                        "row has a gray preview line: "
+                        "preview_connector_text continues the tree's lines, and preview_text starts under "
                         "the name. A tab row's details are its background task lights, in details_color_name. "
                         "dot_tool_tip and details_tool_tip are what the dot and the details mean, shown when the "
                         "pointer rests on them, or \"\" for none (user request, 2026-10-27).")
 
-# A light per background shell or background agent after a tab's name (R26.2); more than
+# A light per background shell or background agent after a tab's name; more than
 # MOST_BACKGROUND_TASK_LIGHTS show as one light and their number. After the name rather than the
-# dot (as R26.2 first had it), so the names stay lined up from row to row.
+# dot (as first built), so the names stay lined up from row to row.
 BACKGROUND_TASK_LIGHT = "•"
 BACKGROUND_TASK_LIGHTS_COLOR_NAME = "yellow"
 MOST_BACKGROUND_TASK_LIGHTS = 4
@@ -309,7 +309,7 @@ def build_window_row_text_parts(window_entry, is_last_child_at_each_level, is_ex
     """Returns the RowTextParts for a window row.
 
     The dot shows the window's most urgent session state. A collapsed window counts its hidden
-    sessions' states ("1 working, 2 idle", R40 without its "[3 tabs hidden]" prefix); an
+    sessions' states ("1 working, 2 idle"); an
     expanded one shows nothing there, since its tab rows show each state (user requests,
     milestone 2).
     """

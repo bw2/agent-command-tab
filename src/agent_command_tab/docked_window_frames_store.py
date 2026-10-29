@@ -1,4 +1,4 @@
-"""The frames iTerm2 windows had before a docked sidebar narrowed them (PLAN.md section 8, "Docked").
+"""The frames iTerm2 windows had before a docked sidebar narrowed them.
 
 They are kept in a file next to the settings, so windows can still get their room back after
 the dashboard restarts (a reconnect when iTerm2 quits, a crash, Ctrl+C). Pure functions apart

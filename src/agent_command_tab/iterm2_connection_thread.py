@@ -1,6 +1,6 @@
 """The core's background thread: the iTerm2 connection, its subscriptions, and snapshot publishing.
 
-PLAN.md section 4. Everything here runs on one asyncio event loop in a background thread; the
+Everything here runs on one asyncio event loop in a background thread; the
 AppKit main thread only receives snapshots (through publish_snapshot) and sends messages and
 action requests (through the thread-safe methods of Iterm2ConnectionThread).
 """
@@ -102,9 +102,9 @@ CODEX_QUEUE_TIMEOUT_SECONDS = 30
 # How often "Talk to Each Other" checks whether a held message can be pasted (user request, 2026-10-21).
 SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT = 3
 # How long the row of an agent that ended without a normal session end stays, gray and "exited"
-# (R14.1; a fixed time rather than a setting, as for "stuck").
+# (a fixed time rather than a setting, as for "stuck").
 EXITED_ROW_SECONDS = 300
-CHILD_PROCESS_CHECK_INTERVAL_SECONDS = 3  # an open tab row's sub rows and the background shells (R26.2)
+CHILD_PROCESS_CHECK_INTERVAL_SECONDS = 3  # an open tab row's sub rows and the background shells
 LONGEST_COMMAND_TEXT = 500  # characters of a sub row's command kept in the snapshot
 HOOKS_CHECK_INTERVAL_SECONDS = 10  # whether the agent tools' settings hold the app's hooks
 LONGEST_HOOK_EVENT_LINE = 1024 ** 2
@@ -318,7 +318,7 @@ class DashboardCore:
         self.hook_state_by_agent_process_id = (self.load_hook_states_of_the_processes_still_running()
                                                if hook_states_file_path else {})
         # {session ID: (the AgentSessionEntry its row last showed, when its agent ended)} for the
-        # tabs whose agent ended without a normal session end, shown as "exited" for EXITED_ROW_SECONDS (R14.1).
+        # tabs whose agent ended without a normal session end, shown as "exited" for EXITED_ROW_SECONDS.
         self.exited_agent_sessions_by_session_id = {}
         self.last_agent_session_entry_by_session_id = {}  # from the last snapshot, for an "exited" row
         self.process_ids_ended_from_the_list = set()  # "Kill Session": their end is no crash
@@ -390,7 +390,7 @@ class DashboardCore:
     # ----- actions -----
 
     def register_actions(self):
-        """Registers every action with its flags (PLAN.md section 4)."""
+        """Registers every action with its flags."""
         register = self.action_registry.register_action
         register("focus_agent_session", self.handle_focus_agent_session, True, False)
         register("focus_window", self.handle_focus_window, True, False)
@@ -456,7 +456,7 @@ class DashboardCore:
 
     async def handle_send_slash_command(self, action_request):
         """Types /compact or /clear into an agent session that waits at its prompt, idle or done
-        as its row shows it (R15.1; iterm2_actions.type_slash_command checks its input box)."""
+        as its row shows it (iterm2_actions.type_slash_command checks its input box)."""
         session_id = action_request.target["session_id"]
         # Checked and typed holding the tab's lock, as every typing into a tab is: a held message may be being pasted.
         async with self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock()):
@@ -1259,7 +1259,7 @@ class DashboardCore:
         program runs inside the tab's agent (a `claude -p` its shell tool started, waited on or left
         running in the background), and after it ends until iTerm2's value fits the tab's agent
         again. That agent fires the same user-level hooks, so it sets the tab's status too, and its
-        last value stays until the tab's agent sets another (Phase 0; PLAN.md section 6).
+        last value stays until the tab's agent sets another (Phase 0).
         Meanwhile the row goes by the tab's own agent (read_status_value_of_the_tabs_own_agent)
         and turns back to iTerm2's value once the two agree; for a tool without such a report, it
         keeps its value until iTerm2's changes after the inner agent ended. The agent's processes
@@ -1339,7 +1339,7 @@ class DashboardCore:
         return self.find_first_session_id_of_tab(self.find_front_tab_id())
 
     def find_highlighted_session_id(self):
-        """Returns the session shown as in front (R41): the front tab's while it is seen, and also
+        """Returns the session shown as in front: the front tab's while it is seen, and also
         while the dashboard itself is active (so the highlight doesn't vanish while you use the
         list); None while another app is active."""
         if self.dashboard_is_active or self.find_seen_session_id() is not None:
@@ -1487,7 +1487,7 @@ class DashboardCore:
                 "working_folder": read_process_current_folder(agent_process_id), "started_at": pause_record.agent_process[1]}
 
     def note_agents_that_ended_without_a_session_end(self, agent_sessions_before, now):
-        """Keeps an "exited" row (R14.1) for each tab, still open, whose agent process is gone
+        """Keeps an "exited" row for each tab, still open, whose agent process is gone
         since the last snapshot without a normal session end, though its hooks reported (so one
         would have come): it crashed or was killed. An agent whose hooks never reported (started
         before they were installed, or since the app started without an event yet) can't be told
@@ -1532,7 +1532,7 @@ class DashboardCore:
                                                 if process_id in kept_process_ids or process_is_alive(process_id)}
 
     def note_background_task_counts(self):
-        """Sets each agent session's background task count (R26.2): Claude Code's own list of its
+        """Sets each agent session's background task count: Claude Code's own list of its
         background shells and agents while its hooks have reported it (hook_event_tracking), plus
         the detached jobs it started, which that list doesn't hold (user request, 2026-10-28),
         otherwise the background shells seen below the agent and its detached jobs
@@ -1633,7 +1633,7 @@ class DashboardCore:
     async def listen_for_hook_events(self):
         """Receives the app's hook events (hook_event_forwarder), one line per connection, on the
         socket at hook_events_socket_path, taken over from an earlier run. While another copy of the
-        app (a live check's, or one still giving docked windows their room back as it exits)
+        app (one still giving docked windows their room back as it exits, say)
         receives them there, this one goes on without them, and takes the socket over once that
         copy has ended (code review, 2026-10-28). If the socket can't be made, it goes on without
         hook events (this task must not end: that ends the core)."""
@@ -1759,7 +1759,7 @@ class DashboardCore:
             self.key_terminal_window_id = None
 
     async def read_agent_screens_periodically(self):
-        """Reads the screens the status rules need (PLAN.md section 6): the permission dialog of an
+        """Reads the screens the status rules need: the permission dialog of an
         asking session whose tool needs the check (every SCREEN_CHECK_INTERVAL_SECONDS), and a
         fingerprint of each working session (every FINGERPRINT_INTERVAL_SECONDS) for "stuck".
         One screen read serves both. A session that starts asking is read at once, so the count of
@@ -1983,8 +1983,8 @@ class DashboardCore:
 
     async def read_child_processes_periodically(self):
         """Keeps each agent session's child processes ("child_processes", the sub rows of its open
-        tab row; user request, 2026-10-27) and its background shells ("background_shell_count",
-        R26.2) current, every CHILD_PROCESS_CHECK_INTERVAL_SECONDS, in a worker thread (a few
+        tab row; user request, 2026-10-27) and its background shells ("background_shell_count")
+        current, every CHILD_PROCESS_CHECK_INTERVAL_SECONDS, in a worker thread (a few
         system calls per process, no subprocess). While the Memory or CPU column shows, each
         child's use is read too, rounded as the agent's is (read_resource_usage_periodically)."""
         cpu_time_readings_by_child = {}  # {(process ID, started at): (CPU seconds, read at)} from the last reading
@@ -2095,7 +2095,7 @@ class DashboardCore:
         self.regather_needed.set()
 
     async def poll_window_frames_when_they_matter(self):
-        """Notices windows moved by hand, which iTerm2 sends no notification for (PLAN.md section 4):
+        """Notices windows moved by hand, which iTerm2 sends no notification for:
         with several monitors, to regroup them; while a sidebar is docked, to keep them out of its
         area (a regather makes room). With one monitor and no docked sidebar, frames don't matter."""
         while True:
@@ -2120,7 +2120,7 @@ class DashboardCore:
     async def refresh_claude_agents_periodically(self):
         """Keeps names and folders from `claude agents --json` current (started only when `claude` exists).
 
-        PLAN.md section 7: the program is large, so this runs only while Claude Code tabs exist
+        The program is large, so this runs only while Claude Code tabs exist
         (in phase 2: only those without hooks); new sessions trigger a run of their own.
         """
         while True:
@@ -2191,7 +2191,7 @@ class DashboardCore:
         # stopped below them (in sessions of their own, which closing the tabs doesn't reach) is
         # continued even while no connection can be made.
         self.continue_the_processes_of_agents_no_longer_paused()
-        iterm2.auth.gAppKitAvailable = False  # fetch the token with osascript, never NSAppleScript (PLAN.md section 4)
+        iterm2.auth.gAppKitAvailable = False  # fetch the token with osascript, never NSAppleScript
         try:
             self.connection = await iterm2.Connection.async_create()
         except Exception as error:

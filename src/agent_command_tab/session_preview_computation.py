@@ -1,4 +1,4 @@
-"""The one-line preview under each tab row (R23; user request, 2026-10-19), read from the end of
+"""The one-line preview under each tab row (user request, 2026-10-19), read from the end of
 the agent session's own conversation file, the same file the context size comes from
 (context_window_usage).
 
@@ -210,7 +210,7 @@ def read_preview_fields_from_codex_conversation_file(file_path):
 
 
 def choose_preview_text(state, preview_fields):
-    """Returns the preview line for an agent session in this state (R23): the open tool call
+    """Returns the preview line for an agent session in this state: the open tool call
     while it works or asks (the tool asking permission, or the question), else what it said
     since the last prompt, else the last prompt ("You: ..."), else "".
 

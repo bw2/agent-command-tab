@@ -1,6 +1,6 @@
 """The core's side of the app's hooks (DashboardCore): hook events received on its socket, the
-"exited" row of an agent that ended without a normal session end (R14.1), the background task
-counts (R26.2) and the child processes of each agent (user requests, 2026-10-27)."""
+"exited" row of an agent that ended without a normal session end, the background task
+counts and the child processes of each agent (user requests, 2026-10-27)."""
 
 import asyncio
 import io

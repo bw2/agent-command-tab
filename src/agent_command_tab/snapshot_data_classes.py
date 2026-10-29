@@ -1,4 +1,4 @@
-"""The snapshot that the core publishes to every view (PLAN.md section 4).
+"""The snapshot that the core publishes to every view.
 
 Plain, immutable records that convert to JSON, so that a later web page, phone app or second
 computer can receive exactly what the menu bar list receives. They are named tuples (not data
@@ -45,9 +45,9 @@ AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent sess
                              "into its agent tool (its adapter's), in menu order. is_paused_with_the_processes_below_it "
                              "is True for a paused row whose pause also stopped the processes below the agent (Pause "
                              "from the list), False for an agent suspended with Ctrl+Z by hand. A row whose agent "
-                             "ended without a normal session end (a crash, or killed; R14.1) has the status "
+                             "ended without a normal session end (a crash, or killed) has the status "
                              "\"exited\" and ended_abnormally_at, when that was noticed. background_task_count is "
-                             "how many background shells and background agents it runs (R26.2), and "
+                             "how many background shells and background agents it runs, and "
                              "child_processes the ChildProcessEntry of each process it started, oldest first.")
 
 ChildProcessEntry = collections.namedtuple(

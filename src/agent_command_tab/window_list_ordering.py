@@ -1,4 +1,4 @@
-"""The order of windows in the list: stable while running, changed only by the user (R11, R12)."""
+"""The order of windows in the list: stable while running, changed only by the user."""
 
 
 def update_window_list_order(previous_window_order, current_window_ids):
@@ -24,7 +24,7 @@ def update_window_list_order(previous_window_order, current_window_ids):
 
 
 def move_window_in_window_list_order(window_order, moved_window_id, drop_before_window_id):
-    """Returns the window order with one window moved, as when its row is dragged (R12).
+    """Returns the window order with one window moved, as when its row is dragged.
 
     Args:
         window_order: Window IDs in list order.

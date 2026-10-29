@@ -1,4 +1,4 @@
-"""Adapter for agent tools that have no adapter of their own (PLAN.md section 11, R22)."""
+"""Adapter for agent tools that have no adapter of their own."""
 
 from agent_command_tab.agent_adapters.base import (AgentToolAdapter, command_line_runs_a_shell,
                                                    split_command_line_into_program_names)

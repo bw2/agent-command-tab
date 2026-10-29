@@ -1,4 +1,4 @@
-"""Reads the monitors from AppKit as plain dicts for the core (PLAN.md section 4), checks saved
+"""Reads the monitors from AppKit as plain dicts for the core, checks saved
 window frames against them, and saves the frames of the windows that keep one. Main thread only."""
 
 import objc

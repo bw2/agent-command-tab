@@ -1,4 +1,4 @@
-"""Builds the published snapshot from plain data gathered from iTerm2 (PLAN.md section 4).
+"""Builds the published snapshot from plain data gathered from iTerm2.
 
 Everything here is pure: the connection thread gathers iTerm2's windows, tabs and session
 variables into plain dicts (the same shape the test fixtures use), and this module turns them
@@ -93,7 +93,7 @@ def resolve_agent_sessions(gathered_windows, previous_agent_sessions, specific_a
                            process_is_alive, process_is_stopped):
     """Returns which tabs run an agent, keeping an agent whose tab's foreground job changed while it lives.
 
-    PLAN.md section 4: a `commandLine` change alone does not mean the agent exited (Claude Code's
+    A `commandLine` change alone does not mean the agent exited (Claude Code's
     Ctrl+G opens an editor in the same terminal, and Ctrl+Z suspends the agent). Such a tab keeps
     its agent, marked as in the background, while the process recorded at detection still exists,
     also when the program in front would count as an unknown agent tool (the generic adapter):
@@ -194,14 +194,14 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         stuck_threshold_seconds: The stuck time limit (iterm2_connection_thread.STUCK_THRESHOLD_SECONDS).
         seen_session_id: The session being seen right now (selected in the key iTerm2 window
             while iTerm2 is active), or None.
-        highlighted_session_id: The session shown as in front (R41), or None.
+        highlighted_session_id: The session shown as in front, or None.
         now: The current time.
     """
     first_session = gathered_tab["first_session"]
     session_id = first_session["session_id"]
     session_tracking = session_tracking or {}
     claude_agent_record = claude_agent_record or {}
-    # PLAN.md section 5: the agent process's folder first; iTerm2's `path` can be empty or stale.
+    # The agent process's folder first; iTerm2's `path` can be empty or stale.
     working_folder = claude_agent_record.get("cwd") or agent_session["working_folder"] or first_session.get("path") or ""
     agent_session_name = claude_agent_record.get("name") or ""
     tab_title_set_by_user = bool(gathered_tab.get("title_override_format"))
@@ -287,8 +287,8 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
 
 
 def build_exited_agent_session_entry(last_agent_session_entry, ended_at, highlighted_session_id, gathered_tab):
-    """Returns the row of an agent that ended without a normal session end (a crash, or killed;
-    R14.1), kept for EXITED_ROW_SECONDS: what its row last showed (name, tool, folder, preview),
+    """Returns the row of an agent that ended without a normal session end (a crash, or
+    killed), kept for EXITED_ROW_SECONDS: what its row last showed (name, tool, folder, preview),
     gray and "exited" since it ended, without the readings of a running agent. A title the user
     gives the tab meanwhile (Rename stays in its menu) is its name.
 
@@ -313,7 +313,7 @@ def build_exited_agent_session_entry(last_agent_session_entry, ended_at, highlig
 def build_window_entry(gathered_window, agent_session_entries):
     """Returns the WindowEntry for a window that has at least one agent session.
 
-    A window without a title of its own is named after its first agent session's folder (R9.1).
+    A window without a title of its own is named after its first agent session's folder.
     """
     window_title_set_by_user = bool(gathered_window.get("title_override_format"))
     if window_title_set_by_user:
@@ -342,7 +342,7 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
         agent_sessions: The tabs that run an agent, from resolve_agent_sessions.
         monitors: Monitor dicts {"monitor_id", "name", "frame", "visible_frame"} from the main
             thread, in NSScreen's order (menu-bar monitor first); empty before the first screen
-            layout message. The snapshot lists the monitor groups left to right (R31, Q4).
+            layout message. The snapshot lists the monitor groups left to right.
         window_order: Window IDs in the list's order (window_list_ordering).
         session_tracking_by_session_id: Per-session tracking dicts (see build_agent_session_entry).
         displayed_state_by_session_id: {session_id: DisplayedState} from the previous snapshot.

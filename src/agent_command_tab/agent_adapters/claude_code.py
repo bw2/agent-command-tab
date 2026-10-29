@@ -50,7 +50,7 @@ def remove_config_folder_settings_from_launch_command(launch_command):
 class ClaudeCodeAdapter(AgentToolAdapter):
     """Claude Code runs as `claude ...` (iTerm2's jobName is its version number, so the command line is used).
 
-    Screen patterns are from Claude Code 2.1.302 (PHASE0_RESULTS.md).
+    Screen patterns are from Claude Code 2.1.302.
     """
 
     agent_tool_name = "Claude Code"

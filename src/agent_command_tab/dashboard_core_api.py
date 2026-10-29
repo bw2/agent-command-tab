@@ -1,4 +1,4 @@
-"""The boundary between the core and its views (PLAN.md section 4, "Core and views").
+"""The boundary between the core and its views.
 
 Every user action is an ActionRequest. The menu bar list builds requests exactly as a later
 web page, phone app or second computer would, and the core runs them through one registry

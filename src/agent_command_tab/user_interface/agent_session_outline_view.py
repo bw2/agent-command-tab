@@ -1,4 +1,4 @@
-"""The shared list of monitors, windows and agent session tabs (PLAN.md section 8, "Shared list").
+"""The shared list of monitors, windows and agent session tabs.
 
 Three instances exist (dropdown, sidebar and list window), each with its own NSOutlineView,
 expanded rows, open previews and selection, fed the same snapshots. Main thread only.
@@ -58,7 +58,7 @@ ROW_HEIGHT = 20
 PREVIEW_LINE_HEIGHT = 16  # the height of a 12-point line, so the tree's lines carry on beside the preview
 PREVIEW_LINE_COUNT = 2
 PREVIEW_AREA_HEIGHT = PREVIEW_LINE_HEIGHT * PREVIEW_LINE_COUNT
-TAB_ROW_HEIGHT_WITH_PREVIEW = ROW_HEIGHT + PREVIEW_AREA_HEIGHT  # a tab row whose preview is open (R23)
+TAB_ROW_HEIGHT_WITH_PREVIEW = ROW_HEIGHT + PREVIEW_AREA_HEIGHT  # a tab row whose preview is open
 FONT_SIZE = 12
 PREVIEW_FONT_SIZE = 11
 PREVIEW_BUTTON_SIZE = 16  # an expanded window row's button that opens or closes its tabs' previews
@@ -1521,7 +1521,7 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def set_all_expanded(self, expanded):
-        """Expands or collapses every monitor and window row (R8.1), leaving the tabs' previews
+        """Expands or collapses every monitor and window row, leaving the tabs' previews
         as they are (user request, 2026-10-19). Collapsing keeps the windows collapsed before,
         also those whose rows Hide Idle hides."""
         self.finish_rename()
@@ -1723,7 +1723,7 @@ class AgentSessionListController(NSObject):
             self.add_menu_item(menu, "Show window", "menuFocus:")
             self.add_menu_item(menu, "Rename", "menuRename:")
             menu.addItem_(NSMenuItem.separatorItem())
-            # A new tab in this window, in the folder of its selected tab's agent session (R13).
+            # A new tab in this window, in the folder of its selected tab's agent session.
             for agent_tool_name in self.owner.list_agent_tool_names():
                 self.add_menu_item(menu, f"New tab with {agent_tool_name} session…", "menuNewAgentSessionInWindow:"
                                    ).setRepresentedObject_(agent_tool_name)
@@ -1765,7 +1765,7 @@ class AgentSessionListController(NSObject):
             if item.parent_item is not None and item.parent_item.entry.total_tab_count < 2:
                 move_to_new_window_item.setEnabled_(False)
                 move_to_new_window_item.setToolTip_("This tab is its window's only tab")
-            # Typed into the agent only while it waits at its prompt (R15.1; user request, 2026-10-19).
+            # Typed into the agent only while it waits at its prompt (user request, 2026-10-19).
             menu.addItem_(NSMenuItem.separatorItem())
             for command in SLASH_COMMANDS_IN_THE_TAB_MENU:
                 command_item = self.add_menu_item(menu, command, "menuSendSlashCommand:")
@@ -1924,7 +1924,7 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def add_new_window_menu_items(self, menu):
         """Adds "New Claude Code window" and the like, one per agent tool the settings include:
-        each starts that tool in a new iTerm2 window (R13.1)."""
+        each starts that tool in a new iTerm2 window."""
         for agent_tool_name in self.owner.list_agent_tool_names():
             self.add_menu_item(menu, f"New {agent_tool_name} window", "menuNewWindowWithAgentSession:"
                                ).setRepresentedObject_(agent_tool_name)
@@ -2023,7 +2023,7 @@ class AgentSessionListController(NSObject):
         tab_entry = self.menu_target_item.entry
         self.owner.duplicate_agent_session(tab_entry.tab_id, tab_entry.working_folder, tab_entry.agent_tool_name)
 
-    # ----- drag and drop (PLAN.md section 9) -----
+    # ----- drag and drop -----
 
     def outlineView_pasteboardWriterForItem_(self, outline_view, item):
         # Dragging one of several selected rows would drag them all; only the row under the
@@ -2071,7 +2071,7 @@ class AgentSessionListController(NSObject):
                     outline_view.setDropItem_dropChildIndex_(proposed_item, len(proposed_item.child_items))
                 return NSDragOperationMove
             return NSDragOperationNone
-        # Windows reorder among the windows of the same group (R12), in the manual order only...
+        # Windows reorder among the windows of the same group, in the manual order only...
         parent_item = dragged_item.parent_item
         if self.list_sort_order == "manual":
             if proposed_item is parent_item and child_index >= 0:
@@ -2080,7 +2080,7 @@ class AgentSessionListController(NSObject):
                 sibling_items = parent_item.child_items if parent_item is not None else self.top_level_items
                 outline_view.setDropItem_dropChildIndex_(parent_item, sibling_items.index(proposed_item))
                 return NSDragOperationMove
-        # ...or move to another monitor when dropped into that monitor's group (R32).
+        # ...or move to another monitor when dropped into that monitor's group.
         target_monitor_item = None
         if proposed_item is not None and proposed_item.kind == "monitor":
             target_monitor_item = proposed_item

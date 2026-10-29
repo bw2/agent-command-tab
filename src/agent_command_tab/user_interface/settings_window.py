@@ -1,4 +1,4 @@
-"""The settings window (R34, R35). Every change applies at once and is saved.
+"""The settings window. Every change applies at once and is saved.
 
 Settings are added here as the features that use them are built (see settings_store).
 """
@@ -399,7 +399,7 @@ class SettingsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def update_edge_choices(self):
-        """Enables only the outer edges of the menu-bar monitor, where the sidebar goes (R5). When
+        """Enables only the outer edges of the menu-bar monitor, where the sidebar goes. When
         neither of its edges is outer (it stands between two monitors), both stay enabled: the
         saved side then picks the outer edge of the monitor nearest it (choose_sidebar_edge)."""
         screens = read_monitors_from_screens()
@@ -424,7 +424,7 @@ class SettingsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def show_placement_fallback_note(self, settings):
-        """Says where the sidebar is when it can't go where the settings ask (PLAN.md section 8)."""
+        """Says where the sidebar is when it can't go where the settings ask."""
         self.edge_note.setStringValue_(describe_sidebar_placement_fallback(settings["sidebar_edge"], read_monitors_from_screens()))
 
     def controlChanged_(self, sender):

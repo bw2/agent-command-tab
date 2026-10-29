@@ -1,4 +1,4 @@
-"""What the dashboard reads from an agent's screen (PLAN.md section 6, sources 3 and 4). Pure functions.
+"""What the dashboard reads from an agent's screen. Pure functions.
 
 - Whether a permission dialog is showing: Claude Code reports nothing when the user answers a
   permission prompt, and iTerm2's status stays "waiting" until the approved tool finishes
@@ -41,7 +41,7 @@ def screen_shows_permission_dialog(screen_lines, permission_dialog_screen_patter
 
 def read_typed_input_area_text(screen_lines_with_faint_flags, input_line_marker, input_area_end_pattern):
     """Returns the text typed into the agent's input box, or None when the box can't be found on
-    screen (PLAN.md section 8, "Sending /compact and /clear").
+    screen.
 
     The input line is the last line starting with the marker; the input area runs from it to
     the line just below it that matches input_area_end_pattern (a multi-line draft continues on

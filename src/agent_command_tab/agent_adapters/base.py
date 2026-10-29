@@ -1,4 +1,4 @@
-"""What every agent tool adapter provides (PLAN.md section 11)."""
+"""What every agent tool adapter provides."""
 
 import os
 import shlex
@@ -63,7 +63,7 @@ class AgentToolAdapter:
             screen_readings.input_area_is_empty; None when unknown.
         input_area_end_pattern: Compiled pattern of the line just below the input area.
         seconds_before_enter: The pause between a typed command and its Enter, so the tool
-            doesn't take the two as one paste (PLAN.md section 8, "Sending /compact and /clear").
+            doesn't take the two as one paste.
         working_screen_pattern: Compiled pattern of screen text the tool shows only while a turn
             runs, which tells whether a session whose row has no state (a tool that reports
             none) waits at its prompt; None when unknown.

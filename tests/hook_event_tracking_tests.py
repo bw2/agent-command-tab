@@ -72,7 +72,7 @@ class ApplyHookEventTests(unittest.TestCase):
         hook_state = apply_hook_event(hook_state, make_event("Stop", 2.0, background_tasks=[{"id": "a1", "status": "running"}]))
         self.assertEqual(hook_state["background_task_ids"], {"a1"})
         # Codex's events list none, so its sessions stay unknown (the process tree counts its shells),
-        # also after its SessionStart, which has source "startup" too (PHASE0_RESULTS.md).
+        # also after its SessionStart, which has source "startup" too.
         self.assertIsNone(apply_events(make_event("Stop", 1.0, agent_tool_name="Codex"))["background_task_ids"])
         self.assertIsNone(apply_events(make_event("SessionStart", 1.0, agent_tool_name="Codex", source="startup"),
                                        make_event("Stop", 2.0, agent_tool_name="Codex"))["background_task_ids"])

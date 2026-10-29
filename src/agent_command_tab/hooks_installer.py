@@ -1,9 +1,9 @@
-"""The app's own hooks in Claude Code's and Codex's settings (PLAN.md section 6, "Hook events"):
+"""The app's own hooks in Claude Code's and Codex's settings:
 installing, removing and checking them (user request, 2026-10-27).
 
 Each hook runs hook_event_forwarder.py, which sends the event to the app. The events tell the
-app when an agent's session ended normally (so a crash leaves an "exited" row, R14.1), and
-Claude Code's background shells and agents (the lights after a tab's name, R26.2). The entries
+app when an agent's session ended normally (so a crash leaves an "exited" row), and
+Claude Code's background shells and agents (the lights after a tab's name). The entries
 are the app's by their command, which names hook_event_forwarder.py, so installing again
 replaces them and removing takes out only them. Each file the installer changes is copied first
 to <file>.agent-command-tab-backup.
@@ -13,7 +13,7 @@ to <file>.agent-command-tab-backup.
   reads its hooks when it starts, so only sessions started afterwards report.
 - Codex: hooks.json in its home folder. Codex runs a new hook only once the user approves it in
   its /hooks screen, which records the approval in config.toml under
-  [hooks.state."<hooks.json path>:<event>:<group>:<hook>"] (PHASE0_RESULTS.md), with a hash of
+  [hooks.state."<hooks.json path>:<event>:<group>:<hook>"], with a hash of
   the hook as it was then, so a changed hook needs approving again (compute_codex_approval_hash).
 """
 
@@ -55,22 +55,10 @@ HOOKS_ARE_MISSING = "missing"
 HOOKS_AWAIT_APPROVAL = "needs approval"  # Codex: in hooks.json, not yet approved in its /hooks screen
 
 
-def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FORWARDER_FILE_PATH, python_home=None):
+def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FORWARDER_FILE_PATH):
     """Returns the hook command: this Python (python_path, or the one running), isolated (-I) and
-    without site packages (-S), running the forwarder.
-
-    A Python that finds its library through PYTHONHOME (python_home, or this process's), as the
-    one inside AgentCommandTab.app does (py2app's launcher sets it), would ignore it under -I and
-    look for the Python it was built from instead, which other Macs don't have. Its command sets
-    PYTHONHOME with /usr/bin/env and clears PYTHONPATH, and -P keeps the forwarder's own folder
-    off the module path, the rest of what -I does.
-    """
-    python_home = python_home or os.environ.get("PYTHONHOME")
-    if python_home:
-        parts = ("/usr/bin/env", "-u", "PYTHONPATH", f"PYTHONHOME={python_home}", python_path or sys.executable, "-P", "-S",
-                 forwarder_path, agent_tool_name)
-    else:
-        parts = (python_path or sys.executable, "-I", "-S", forwarder_path, agent_tool_name)
+    without site packages (-S), running the forwarder."""
+    parts = (python_path or sys.executable, "-I", "-S", forwarder_path, agent_tool_name)
     return " ".join(shlex.quote(part) for part in parts)
 
 

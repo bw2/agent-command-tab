@@ -112,7 +112,7 @@ def wait_for_app_process(process):
 def run_with_restarts(verbose):
     """Starts the app process and restarts it, with a growing delay, whenever it exits to reconnect.
 
-    PLAN.md section 4: the `iterm2` package can't reconnect within one process, so the app
+    The `iterm2` package can't reconnect within one process, so the app
     exits with RECONNECT_EXIT_STATUS when iTerm2's connection drops, and this supervisor starts
     it again (1 s, doubling up to 30 s, reset after a run that lasted a minute).
     """

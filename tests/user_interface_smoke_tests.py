@@ -1,4 +1,4 @@
-"""Builds the list from a sample snapshot in an off-screen window (PLAN.md section 17, UI smoke test).
+"""Builds the list from a sample snapshot in an off-screen window.
 
 Set AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the list looks like.
 """

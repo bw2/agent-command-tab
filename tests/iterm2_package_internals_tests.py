@@ -1,4 +1,4 @@
-"""Guards the private or undocumented parts of the `iterm2` package that the core relies on (PLAN.md section 4).
+"""Guards the private or undocumented parts of the `iterm2` package that the core relies on.
 
 If a new `iterm2` release renames them, these tests fail instead of the app silently going
 back to NSAppleScript on a background thread, losing half of its connection watchdog, or

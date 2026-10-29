@@ -1,15 +1,15 @@
-"""What the app's hooks (hooks_installer, hook_event_forwarder) report about each agent process
-(PLAN.md section 6, "Hook events"). Pure functions.
+"""What the app's hooks (hooks_installer, hook_event_forwarder) report about each agent process.
+Pure functions.
 
 An agent process whose hooks reported anything is known to report: when it is gone without a
-normal session end, it crashed or was killed (R14.1). Claude Code's events also list its
-background shells and agents (R26.2).
+normal session end, it crashed or was killed. Claude Code's events also list its
+background shells and agents.
 """
 
 from agent_command_tab.agent_process_tree import NAMES_OF_AGENT_PROGRAMS, SHELL_AND_WRAPPER_PROCESS_NAMES
 
 # A session end that leaves the process running: Claude Code's /clear ends one conversation and
-# starts the next in the same process (PHASE0_RESULTS.md), and so does /resume (its "resume", one
+# starts the next in the same process, and so does /resume (its "resume", one
 # of the reasons Claude Code 2.1.311's program lists). A SessionStart after any session end also
 # means the process goes on.
 SESSION_END_REASONS_OF_A_PROCESS_THAT_GOES_ON = frozenset({"clear", "resume"})
