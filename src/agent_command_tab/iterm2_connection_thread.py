@@ -352,8 +352,12 @@ class DashboardCore:
         # For each tab whose row goes by its own agent (choose_status_value_of_the_tabs_own_agent):
         # the status iTerm2 held at the last check while an agent program ran inside the tab's agent.
         self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id = {}
-        # {session ID: (the status value set in iTerm2, when the dashboard first saw it)}, so a turn
-        # end its hooks report counts until iTerm2 sets another value (find_when_the_hooks_ended_the_turn).
+        # {session ID: (the status value set in iTerm2, when the dashboard first saw it, when it was
+        # set as far as the hooks go)}, so a turn end its hooks report counts until iTerm2 sets another
+        # value (find_when_the_hooks_ended_the_turn). A value already set when the dashboard first sees
+        # the tab was set at a time it doesn't know, maybe before a turn end the hooks reported while
+        # the app wasn't running, so that one is -inf: after each restart of the app, a row whose agent
+        # had ended its turn with a background task running showed "stuck" (user report, 2026-10-29).
         self.status_set_in_iterm2_and_since_by_session_id = {}
         # {session ID: when iTerm2 last reported a change of the session's status variable}; a value
         # already set when the dashboard connected has none (find_status_set_in_iterm2_since_the_job_started).
@@ -608,7 +612,7 @@ class DashboardCore:
         status = read_claude_code_session_status(claude_agent_record.get("config_folder"), agent_session["process_id"])
         hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
         if status == "shell" and (hook_state or {}).get("background_task_ids") != set() and find_when_the_hooks_ended_the_turn(
-                hook_state, self.status_set_in_iterm2_and_since_by_session_id.get(session_id, (None, float("inf")))[1]) is not None:
+                hook_state, self.status_set_in_iterm2_and_since_by_session_id.get(session_id, (None, float("inf"), float("inf")))[2]) is not None:
             return False
         return status is not None and status != "idle"
 
@@ -1276,14 +1280,15 @@ class DashboardCore:
                 status_set_in_iterm2_changed = (status_set_in_iterm2_and_since is None
                                                 or status_set_in_iterm2_and_since[0] != first_session["status_set_in_iterm2"])
                 if status_set_in_iterm2_changed:
-                    status_set_in_iterm2_and_since = (first_session["status_set_in_iterm2"], now)
+                    status_set_in_iterm2_and_since = (first_session["status_set_in_iterm2"], now,
+                                                      now if status_set_in_iterm2_and_since is not None else float("-inf"))
                     self.status_set_in_iterm2_and_since_by_session_id[session_id] = status_set_in_iterm2_and_since
                 first_session["status"] = self.choose_status_value_of_the_tabs_own_agent(
                     session_id, first_session, previous_tracking, status_set_in_iterm2_changed)
                 ends_no_turn = False
                 if agent_session is not None and map_iterm2_status_value_to_state(first_session["status"]) == "working":
                     hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
-                    if (find_when_the_hooks_ended_the_turn(hook_state, status_set_in_iterm2_and_since[1]) is not None
+                    if (find_when_the_hooks_ended_the_turn(hook_state, status_set_in_iterm2_and_since[2]) is not None
                             and not self.claude_code_reports_the_turn_going_on(agent_session)):
                         first_session["status"] = "idle"  # its turn ended, though iTerm2 still says working while a background task runs
                     elif self.claude_code_reports_the_turn_over(agent_session, now - max(

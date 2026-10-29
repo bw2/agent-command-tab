@@ -229,6 +229,18 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
             self.core.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=8.0))
             self.assertTrue(self.core.claude_code_reports_the_session_busy("s1", agent_session))
 
+    def test_a_stop_from_before_the_app_first_saw_the_tab_still_ends_the_turn(self):  # user report, 2026-10-29
+        # The app restarted after the turn ended, while a background task ran: the Stop it saved counts, though
+        # the dashboard first sees iTerm2's working after it, and Claude Code says "shell" rather than idle.
+        self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
+        self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0, background_tasks=[{"id": "b1", "status": "running"}]))
+        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+                                        lambda config_folder, process_id: "shell"):
+            self.assertEqual(self.track(10.0), "idle")
+            self.assertFalse(self.core.claude_code_reports_the_session_busy("s1", self.core.agent_sessions["s1"]))
+            self.assertEqual(self.track(11.0, "waiting"), "waiting")  # a value set since counts
+            self.assertEqual(self.track(12.0, "working"), "working")
+
     def test_a_value_iterm2_sets_after_the_stop_counts(self):
         self.track(1.0)
         self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0))

@@ -115,7 +115,8 @@ def find_when_the_hooks_ended_the_turn(hook_state, iterm2_status_change_time):
 
     Args:
         hook_state: The agent process's apply_hook_event state, or None.
-        iterm2_status_change_time: When iTerm2's status value for the tab last changed.
+        iterm2_status_change_time: When iTerm2's status value for the tab last changed, or -inf
+            for a value already set when the dashboard first saw the tab (as after a restart).
     """
     if (hook_state is None or hook_state.get("last_turn_end_at") is None
             or hook_state.get("agent_tool_name") not in AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS):
