@@ -288,6 +288,12 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
             self.core.note_hook_event(make_event("Stop", 101, sent_at=8.0, background_tasks=[{"id": "b1", "status": "running"}]))
             self.assertEqual(self.track(9.0), "idle")
             self.assertEqual(self.core.session_tracking_by_session_id["s1"]["last_turn_ended_at"], 9.0)
+            # Blocked again, it starts a command while b1 runs: "shell" says nothing, but the main agent's
+            # PreToolUse (no agent_id) after the Stop shows the turn going on (code review, 2026-10-28).
+            self.core.note_hook_event(make_event("Stop", 101, sent_at=10.0, background_tasks=[{"id": "b1", "status": "running"}]))
+            self.assertEqual(self.track(11.0), "idle")
+            self.core.note_hook_event(make_event("PreToolUse", 101, sent_at=12.0))
+            self.assertEqual(self.track(13.0), "working")
 
 
 class ChildProcessReadingTests(unittest.TestCase):

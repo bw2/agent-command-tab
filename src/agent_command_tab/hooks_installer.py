@@ -32,14 +32,17 @@ FORWARDER_FILE_NAME = "hook_event_forwarder.py"
 FORWARDER_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), FORWARDER_FILE_NAME)
 SECONDS_A_HOOK_MAY_RUN = 10
 BACKUP_FILE_SUFFIX = ".agent-command-tab-backup"
-# The events each agent tool's hooks report, each with the tools a PostToolUse entry is limited
-# to (Claude Code's background shells and agents start from Bash and Agent tool calls; Task is
-# the Agent tool's older name), so other tool calls start no forwarder. Claude Code's prompts and
-# turn ends tell when a turn ended while iTerm2's status still says working, as its Claude Code
-# integration keeps it while a background task runs (hook_event_tracking.find_when_the_hooks_ended_the_turn).
+# The events each agent tool's hooks report, each with the tools a PreToolUse or PostToolUse
+# entry is limited to (Claude Code's background shells and agents start from Bash and Agent tool
+# calls; Task is the Agent tool's older name), so other tool calls start no forwarder. Claude
+# Code's prompts and turn ends tell when a turn ended while iTerm2's status still says working, as
+# its Claude Code integration keeps it while a background task runs, and the main agent's tool
+# calls after a Stop that another Stop hook blocked tell that the turn goes on, from the start of
+# its first command (PreToolUse; code review, 2026-10-28;
+# hook_event_tracking.find_when_the_hooks_ended_the_turn).
 HOOK_EVENTS_BY_AGENT_TOOL_NAME = {
     "Claude Code": [("SessionStart", None), ("UserPromptSubmit", None), ("Stop", None), ("SubagentStop", None),
-                    ("SessionEnd", None), ("PostToolUse", "Bash|Agent|Task")],
+                    ("SessionEnd", None), ("PreToolUse", "Bash|Agent|Task"), ("PostToolUse", "Bash|Agent|Task")],
     "Codex": [("SessionStart", None), ("Stop", None), ("SessionEnd", None)],
 }
 # Codex's /hooks screen shows a hook's statusMessage as its name, "Unnamed hook" without one, and

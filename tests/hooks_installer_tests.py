@@ -80,7 +80,7 @@ class SettingsTests(unittest.TestCase):
         positions = list_positions_of_the_apps_hooks(settings, COMMAND, EVENTS)
         self.assertEqual(dict((event_name, (group_index, hook_index)) for event_name, group_index, hook_index in positions),
                          {"SessionStart": (0, 0), "UserPromptSubmit": (0, 0), "Stop": (1, 0), "SubagentStop": (0, 0),
-                          "SessionEnd": (0, 0), "PostToolUse": (0, 0)})
+                          "SessionEnd": (0, 0), "PreToolUse": (1, 0), "PostToolUse": (0, 0)})  # after the user's own
         self.assertIsNone(list_positions_of_the_apps_hooks(USERS_SETTINGS, COMMAND, EVENTS))
         self.assertIsNone(list_positions_of_the_apps_hooks(settings, "/other/python -I -S x 'Claude Code'", EVENTS))
 

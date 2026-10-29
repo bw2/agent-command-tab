@@ -22,6 +22,9 @@ SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS = frozenset({"
 AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS = frozenset({"Claude Code"})
 # A background task Claude Code lists counts while it runs (its list also holds finished ones until it reports them).
 STATUSES_OF_A_RUNNING_BACKGROUND_TASK = frozenset({"running", "pending", None})
+# The hook events of a tool call starting and finishing (hooks_installer registers both for Claude Code's
+# Bash, Agent and Task); the main agent's, after a Stop, show its turn going on (code review, 2026-10-28).
+TOOL_EVENT_NAMES = frozenset({"PreToolUse", "PostToolUse"})
 
 
 def find_agent_process_id_of_hook_event(ancestor_processes):
@@ -56,19 +59,24 @@ def apply_hook_event(hook_state, event):
     no session started since), or None, "background_task_ids": the IDs of its background shells
     and agents, or None while not known (no new start, no list since the app started; always for
     Codex, whose events list none), "last_prompt_at" and "last_turn_end_at": when the last prompt
-    was submitted and the last turn ended, or None}.
+    was submitted and the last turn ended, or None, "last_main_agent_tool_event_at": when the
+    main agent last started or finished a tool call the hooks report (PreToolUse, PostToolUse;
+    a subagent's carry its agent_id), or None}.
 
     Args:
         hook_state: The state before, or None for the process's first event.
         event: An event from hook_event_forwarder.reduce_hook_payload.
     """
     hook_state = dict(hook_state or {"agent_tool_name": event.get("agent_tool_name"), "session_ended_at": None,
-                                     "background_task_ids": None, "last_prompt_at": None, "last_turn_end_at": None})
+                                     "background_task_ids": None, "last_prompt_at": None, "last_turn_end_at": None,
+                                     "last_main_agent_tool_event_at": None})
     event_name = event.get("hook_event_name")
     if event_name == "UserPromptSubmit":
         hook_state["last_prompt_at"] = event.get("sent_at")
     if event_name == "Stop":
         hook_state["last_turn_end_at"] = event.get("sent_at")
+    if event_name in TOOL_EVENT_NAMES and not event.get("agent_id"):
+        hook_state["last_main_agent_tool_event_at"] = event.get("sent_at")
     background_task_ids = set(hook_state["background_task_ids"]) if hook_state["background_task_ids"] is not None else None
     if (event_name == "SessionStart" and event.get("source") == "startup"
             and hook_state["agent_tool_name"] in AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS):
@@ -96,9 +104,11 @@ def find_when_the_hooks_ended_the_turn(hook_state, iterm2_status_change_time):
     2026-10-27); a value set after the Stop, or a later prompt, counts again.
 
     A Stop that another Stop hook blocks (Claude Code's goal feature) doesn't end the turn; when
-    iTerm2's value doesn't change as the turn goes on (it already said working), only Claude
-    Code's own report tells (DashboardCore.claude_code_reports_the_turn_going_on, which the
-    core checks before going by this). Only for the tools whose hooks report prompts
+    iTerm2's value doesn't change as the turn goes on (it already said working), a tool call of
+    the main agent after it tells (a background shell fires no hook, and a background agent's
+    events carry its agent_id; code review, 2026-10-28), and so does Claude Code's own report
+    (DashboardCore.claude_code_reports_the_turn_going_on, which the core checks before going by
+    this). Only for the tools whose hooks report prompts
     (AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS): without them a turn that
     follows right after (Codex running a message `codex queue` held) would look ended, and Codex
     sets its own status accurately anyway.
@@ -113,5 +123,7 @@ def find_when_the_hooks_ended_the_turn(hook_state, iterm2_status_change_time):
     turn_ended_at = hook_state["last_turn_end_at"]
     if (hook_state.get("last_prompt_at") is not None and hook_state["last_prompt_at"] >= turn_ended_at) \
             or iterm2_status_change_time > turn_ended_at:
+        return None
+    if hook_state.get("last_main_agent_tool_event_at") is not None and hook_state["last_main_agent_tool_event_at"] > turn_ended_at:
         return None
     return turn_ended_at

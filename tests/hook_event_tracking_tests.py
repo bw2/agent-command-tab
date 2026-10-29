@@ -93,6 +93,17 @@ class TurnEndTests(unittest.TestCase):
         self.assertIsNone(find_when_the_hooks_ended_the_turn(apply_events(make_event("UserPromptSubmit", 10.0)), 5.0))
         self.assertIsNone(find_when_the_hooks_ended_the_turn(None, 5.0))
 
+    def test_a_tool_call_of_the_main_agent_after_the_stop_shows_the_turn_going_on(self):  # code review, 2026-10-28
+        # Another Stop hook (Claude Code's goal feature) blocked the Stop, and the turn runs a command.
+        hook_state = apply_events(make_event("UserPromptSubmit", 10.0), make_event("PostToolUse", 15.0), make_event("Stop", 20.0))
+        self.assertEqual(find_when_the_hooks_ended_the_turn(hook_state, 10.5), 20.0)  # its tool call came before the Stop
+        # A background agent's tool calls carry its agent_id, so they don't count; the main agent's do.
+        self.assertEqual(find_when_the_hooks_ended_the_turn(
+            apply_hook_event(hook_state, make_event("PreToolUse", 25.0, agent_id="a34")), 10.5), 20.0)
+        hook_state = apply_hook_event(hook_state, make_event("PreToolUse", 25.0))
+        self.assertIsNone(find_when_the_hooks_ended_the_turn(hook_state, 10.5))
+        self.assertEqual(find_when_the_hooks_ended_the_turn(apply_hook_event(hook_state, make_event("Stop", 30.0)), 10.5), 30.0)
+
     def test_codex_goes_by_its_own_status(self):
         # Its hooks report no prompts, so a turn right after the Stop (a message `codex queue` held) couldn't undo it.
         hook_state = apply_events(make_event("Stop", 20.0, agent_tool_name="Codex"))
