@@ -269,6 +269,7 @@ class ListPanelController(NSViewController):
         self.install_hooks_button.setToolTip_(HOOKS_NOTE_TOOL_TIP)
         root_view.addSubview_(self.install_hooks_button)
         self.agent_tool_names_to_install_hooks_for = []
+        self.shown_bars_state = None  # what update_top_and_bottom_bar_buttons last showed
         self.setView_(root_view)
         root_view.controller = self
         self.update_top_and_bottom_bar_buttons()
@@ -343,28 +344,36 @@ class ListPanelController(NSViewController):
     def update_top_and_bottom_bar_buttons(self):
         """Gives the expand or collapse button (top bar) and the pause or resume button (bottom
         bar) the look of the list's current state and shows each only when it applies; the top bar
-        refits when its button appears or goes. Called after every snapshot and expansion change.
+        refits when its button appears or goes. Called after every snapshot and expansion change,
+        so the controls are only touched when what they show changes (code review, 2026-10-29).
 
         The expand or collapse button shows while the list has two or more windows (user request,
         2026-10-19); the pause or resume button while it has an agent session that a click would
         pause or resume."""
+        agent_session_entries = self.list_controller.list_agent_session_entries()
+        sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(agent_session_entries)
+        snapshot = self.list_controller.snapshot
+        note, agent_tool_names_to_install_hooks_for = choose_hooks_note(
+            snapshot.hooks_status_per_agent_tool if snapshot is not None else (),
+            {entry.agent_tool_name for entry in agent_session_entries})
+        bars_state = (EXPAND_OR_COLLAPSE_ALL_LOOKS[self.list_controller.is_fully_expanded()],
+                      self.list_controller.count_window_rows() < 2,
+                      PAUSE_OR_RESUME_ALL_LOOKS["pause" if sessions_to_pause else "resume"],
+                      not (sessions_to_pause or sessions_to_resume), note, list(agent_tool_names_to_install_hooks_for))
+        if bars_state == self.shown_bars_state:
+            return
+        self.shown_bars_state = bars_state
+        (expand_or_collapse_all_look, expand_or_collapse_all_button_is_hidden, pause_or_resume_all_look,
+         pause_or_resume_all_button_is_hidden, _, self.agent_tool_names_to_install_hooks_for) = bars_state
         expand_or_collapse_all_button_was_hidden = self.expand_or_collapse_all_button.isHidden()
-        symbol_name, fallback_title, tool_tip = EXPAND_OR_COLLAPSE_ALL_LOOKS[self.list_controller.is_fully_expanded()]
-        show_symbol_on_button(self.expand_or_collapse_all_button, symbol_name, fallback_title, tool_tip)
-        self.expand_or_collapse_all_button.setToolTip_(tool_tip)
-        self.expand_or_collapse_all_button.setHidden_(self.list_controller.count_window_rows() < 2)
-        sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(
-            self.list_controller.list_agent_session_entries())
-        symbol_name, fallback_title, tool_tip = PAUSE_OR_RESUME_ALL_LOOKS["pause" if sessions_to_pause else "resume"]
-        show_symbol_on_button(self.pause_or_resume_all_button, symbol_name, fallback_title, tool_tip)
-        self.pause_or_resume_all_button.setToolTip_(tool_tip)
-        self.pause_or_resume_all_button.setHidden_(not (sessions_to_pause or sessions_to_resume))
+        show_symbol_on_button(self.expand_or_collapse_all_button, *expand_or_collapse_all_look)
+        self.expand_or_collapse_all_button.setToolTip_(expand_or_collapse_all_look[2])
+        self.expand_or_collapse_all_button.setHidden_(expand_or_collapse_all_button_is_hidden)
+        show_symbol_on_button(self.pause_or_resume_all_button, *pause_or_resume_all_look)
+        self.pause_or_resume_all_button.setToolTip_(pause_or_resume_all_look[2])
+        self.pause_or_resume_all_button.setHidden_(pause_or_resume_all_button_is_hidden)
         if self.expand_or_collapse_all_button.isHidden() != expand_or_collapse_all_button_was_hidden:
             self.fit_top_bar_to_width()
-        snapshot = self.list_controller.snapshot
-        note, self.agent_tool_names_to_install_hooks_for = choose_hooks_note(
-            snapshot.hooks_status_per_agent_tool if snapshot is not None else (),
-            {entry.agent_tool_name for entry in self.list_controller.list_agent_session_entries()})
         self.hooks_note_text_field.setStringValue_(note)
         self.fit_bottom_bar_to_width()
 
@@ -449,7 +458,9 @@ class ListPanelController(NSViewController):
         list_height = min(max(list_height + LIST_BOTTOM_PADDING, SMALLEST_LIST_HEIGHT), largest_list_height)
         width = self.list_controller.measure_widest_row_width() + SPACE_FOR_SCROLLER_AND_MARGINS
         width = min(max(width, SMALLEST_POPOVER_WIDTH), usable_frame.size.width * LARGEST_SHARE_OF_SCREEN_WIDTH)
-        self.setPreferredContentSize_((width, list_height + bars_height))
+        preferred_size = self.preferredContentSize()
+        if (preferred_size.width, preferred_size.height) != (width, list_height + bars_height):  # it runs after every snapshot
+            self.setPreferredContentSize_((width, list_height + bars_height))
 
 
 def build_dropdown_popover(list_panel_controller):

@@ -72,6 +72,8 @@ SECONDS_AN_AGENT_TAKES_TO_START_ITS_HELPERS = 30
 SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS = 30  # while a session is idle
 CONTEXT_USAGE_CHECK_INTERVAL_SECONDS = 5
 RESOURCE_USAGE_CHECK_INTERVAL_SECONDS = 3  # the Memory and CPU columns
+# After a first reading, which gives no CPU use yet, the second follows this soon (code review, 2026-10-29).
+SECONDS_BETWEEN_THE_FIRST_TWO_CPU_READINGS = 0.5
 CPU_PERCENT_SHOWN_AS_IDLE = 3  # an idle agent's CPU use wavers between 0 and 2 percent
 SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED = 5  # "Kill Session": SIGTERM, then SIGKILL (a sub row's "Kill" too)
 SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER = 0.5  # a sub row's Info
@@ -373,6 +375,7 @@ class DashboardCore:
         self.window_room_lock = asyncio.Lock()
         self.left_out_agent_tool_names = frozenset()  # the settings' Harnesses section
         self.resource_usage_is_read = False  # while the Memory or CPU column is shown, or the list is sorted by one
+        self.resource_usage_reading_needed = asyncio.Event()  # set when resource_usage_is_read turns on
         self.claude_agents_by_process_id = {}
         self.key_terminal_window_id = None  # None while no terminal window (for example iTerm2's Settings) has keyboard focus
         self.last_seen_session_id = None
@@ -1155,6 +1158,8 @@ class DashboardCore:
         tools the Harnesses section leaves out of the list, whether memory and CPU use are read,
         and the codex program for `codex queue`."""
         self.left_out_agent_tool_names = frozenset(core_settings["left_out_agent_tool_names"])
+        if core_settings["resource_usage_is_read"] and not self.resource_usage_is_read:
+            self.resource_usage_reading_needed.set()  # read now rather than at the end of the current wait
         self.resource_usage_is_read = core_settings["resource_usage_is_read"]
         self.codex_command_path = core_settings["codex_command_path"]
         self.snapshot_needed.set()
@@ -1972,10 +1977,21 @@ class DashboardCore:
         every process below it, read every RESOURCE_USAGE_CHECK_INTERVAL_SECONDS in a worker
         thread (a few system calls per process, no subprocess). Both are rounded (to the
         megabyte, to a whole percent, and below CPU_PERCENT_SHOWN_AS_IDLE to 0) so that an idle
-        session's row and the snapshot don't change at every reading."""
+        session's row and the snapshot don't change at every reading.
+
+        A column shown, or the list sorted by memory or CPU, starts the readings at once
+        (resource_usage_reading_needed), and a session's first reading, which can't give its CPU
+        use yet, is followed by a second after SECONDS_BETWEEN_THE_FIRST_TWO_CPU_READINGS, so the
+        values and the order show up within a second rather than after 3 to 6 (code review, 2026-10-29)."""
         cpu_time_readings_by_session_id = {}  # (process ID, CPU seconds, read at) from the last reading
+        seconds_until_the_next_reading = RESOURCE_USAGE_CHECK_INTERVAL_SECONDS
         while True:
-            await asyncio.sleep(RESOURCE_USAGE_CHECK_INTERVAL_SECONDS)
+            try:
+                await asyncio.wait_for(self.resource_usage_reading_needed.wait(), seconds_until_the_next_reading)
+            except asyncio.TimeoutError:
+                pass
+            self.resource_usage_reading_needed.clear()
+            seconds_until_the_next_reading = RESOURCE_USAGE_CHECK_INTERVAL_SECONDS
             if not self.resource_usage_is_read:
                 # Columns shown again later start over rather than average over the hidden time.
                 cpu_time_readings_by_session_id.clear()
@@ -2001,6 +2017,8 @@ class DashboardCore:
                     # A new agent process in the tab starts its CPU time over.
                     if previous_reading is not None and previous_reading[0] == process_id:
                         cpu_percent = compute_cpu_percent(previous_reading[1:], (usage[1], now))
+                    else:
+                        seconds_until_the_next_reading = SECONDS_BETWEEN_THE_FIRST_TWO_CPU_READINGS
                     cpu_time_readings_by_session_id[session_id] = (process_id, usage[1], now)
                     memory_bytes, cpu_percent = round_memory_and_cpu_use(usage[0], cpu_percent)
                 self.note_reading_value(session_id, "memory_bytes", memory_bytes)

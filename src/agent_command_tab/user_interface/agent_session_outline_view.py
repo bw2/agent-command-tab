@@ -7,8 +7,11 @@ How snapshots are applied without breaking expansion, renames or drags:
 - one OutlineListItem per (kind, ID) lives as long as that ID exists, so expansion and
   selection, which NSOutlineView tracks by item identity, survive updates;
 - when the rows' structure (which rows, in which order, how tall) is unchanged, the items'
-  entries are replaced and only the visible rows are redrawn; otherwise the outline view is
-  reloaded and the expansion and selection are restored from the controller's own records;
+  entries are replaced and only the visible rows are redrawn; when rows came, went or moved
+  within their parent (Hide Idle, Show Idle, a tab opening or closing, a sort), just those are
+  removed, moved and inserted (update_rows_in_place); otherwise (rows changing parent, as when
+  monitor rows come or go) the outline view is reloaded and the expansion and selection are
+  restored from the controller's own records;
 - while a rename or a drag is in progress, or the button is held down on a row or on a row's
   own button, snapshots are held and the newest is applied when that ends.
 """
@@ -27,13 +30,14 @@ from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundS
                     NSImageView, NSInsetRect, NSLeftArrowFunctionKey, NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
                     NSMakeRect, NSMenu, NSMenuItem, NSMutableAttributedString, NSMutableParagraphStyle, NSOutlineView,
                     NSParagraphStyleAttributeName, NSPasteboardItem, NSRightArrowFunctionKey,
-                    NSTableCellView, NSTableColumn, NSTableColumnAutoresizingMask, NSTableRowView,
+                    NSTableCellView, NSTableColumn, NSTableColumnAutoresizingMask, NSTableRowView, NSTableViewAnimationEffectNone,
                     NSTableViewLastColumnOnlyAutoresizingStyle, NSTableViewSelectionHighlightStyleRegular,
                     NSTableViewStylePlain, NSTextAlignmentCenter, NSTextAlignmentLeft, NSTextAlignmentRight, NSTextField,
                     NSTrackingActiveAlways, NSTrackingArea, NSTrackingCursorUpdate, NSTrackingInVisibleRect,
                     NSTrackingMouseEnteredAndExited, NSTrackingMouseMoved, NSView,
+                    NSViewFrameDidChangeNotification, NSWindowDidChangeOcclusionStateNotification,
                     NSWindowStyleMaskNonactivatingPanel, NSZeroRect)
-from Foundation import NSMutableIndexSet, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
+from Foundation import NSMutableIndexSet, NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 from agent_command_tab.agent_adapters import (list_agent_tool_names_whose_sessions_can_talk_to_each_other,
                                               list_slash_commands_of_the_built_in_agent_tools)
@@ -87,6 +91,9 @@ ROW_RIGHT_MARGIN = 8
 TEXT_FIELD_INSETS = 5  # a label's text sits a few points inside its field
 # A collapsed window's state counts can grow ("9 idle" becomes "10 idle") without widening the dropdown.
 ROOM_FOR_GROWING_DETAILS = "0000"
+DIM_DOT_ALPHA = 0.25  # a working dot's opacity in the dim half of its blink
+# How many measured text widths a list keeps (measure_text_width) before it starts over.
+LARGEST_NUMBER_OF_KEPT_TEXT_WIDTHS = 5000
 SECONDS_TO_HOLD_BEFORE_PEEKING = 0.15
 SMALLEST_TAB_NAME_WIDTH = 80  # a narrower sidebar or window drops columns (COLUMN_NAMES_IN_DROP_ORDER)
 # The spare room a sidebar's or list window's column keeps beyond its widest text, and how much
@@ -158,7 +165,6 @@ SELECTION_OUTLINE_CORNER_RADIUS = 4
 TAB_DRAG_TYPE = "org.agent-command-tab.tab-id"
 WINDOW_DRAG_TYPE = "org.agent-command-tab.window-id"
 COLUMN_IDENTIFIER = "main"
-ROW_VIEW_IDENTIFIER = "agent-list-row"
 
 
 class OutlineListItem(NSObject):
@@ -334,6 +340,20 @@ def list_sessions_and_processes_of_process_rows(process_items):
     return [(process_item.parent_item.entry.session_id, process_item.entry) for process_item in process_items]
 
 
+def list_moves_that_reorder(items_before, items_after):
+    """Returns the (from index, to index) moves that, made one after another, turn items_before
+    into items_after, the same items in another order: each move takes the item at the first index
+    out and puts it back at the second, as NSOutlineView's moveItemAtIndex:inParent:toIndex:inParent: does."""
+    items = list(items_before)
+    moves = []
+    for target_index, item in enumerate(items_after):
+        current_index = items.index(item)
+        if current_index != target_index:
+            moves.append((current_index, target_index))
+            items.insert(target_index, items.pop(current_index))
+    return moves
+
+
 def build_index_set(indexes):
     """Returns an NSIndexSet holding the given row indexes."""
     index_set = NSMutableIndexSet.alloc().init()
@@ -466,6 +486,7 @@ class ColumnTitlesRowView(NSView):
             self.addSubview_(subview)
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}  # set by the list controller
         self.room_for_the_previews_button = 0  # set by the list controller; the column at the right edge has no title
+        self.laid_out_for_list_width = None  # the list's width at the last layout
         self.on_title_clicked = lambda title_name: None  # set by the list controller
         self.title_name_under_press = None
         return self
@@ -531,8 +552,9 @@ class ColumnTitlesRowView(NSView):
 
     def layout(self):
         objc.super(ColumnTitlesRowView, self).layout()
+        self.laid_out_for_list_width = self.outline_view.frame().size.width
         placed_columns = place_columns_from_the_right(
-            self.outline_view.frame().size.width - ROW_RIGHT_MARGIN - self.room_for_the_previews_button, self.column_widths)
+            self.laid_out_for_list_width - ROW_RIGHT_MARGIN - self.room_for_the_previews_button, self.column_widths)
         # "Name" is centered over the room the rows' names have, up to the columns.
         names_right_edge = min((column_x for column_x, _ in placed_columns.values()), default=ROW_LEFT_MARGIN) - GAP_BEFORE_DETAILS
         name_title_size = self.name_title_text_field.fittingSize()
@@ -710,14 +732,26 @@ class AgentSessionListController(NSObject):
         # Called when the row of column titles needs another height; the panel sets it so the list moves under it.
         self.on_column_titles_row_height_changed = lambda: None
         self.items_by_key = {}
+        # The items of rows Hide Idle hides, while their window or tab is in the snapshot: a row that
+        # shows again comes back as the item the outline view knows (find_or_make_item).
+        self.hidden_items_by_key = {}
         self.top_level_items = []
         self.new_window_row_item = OutlineListItem.alloc().initWithKind_itemId_("new_window", "new_window")
         self.collapsed_item_keys = set()
         # Tab rows whose preview is open: one more level that opens and closes, closed at first (user request, 2026-10-19).
         self.open_preview_item_keys = set()
         self.row_structure = []
+        # Each item's row view and the outer row view around it, kept across reloads
+        # (outlineView_viewForTableColumn_item_, outlineView_rowViewForItem_).
+        self.row_views_by_item_key = {}
+        self.outer_row_views_by_item_key = {}
         self.snapshot = None
         self.held_snapshot = None
+        # Set by the app for its three lists (the dropdown's, the sidebar's and the list window's):
+        # one that isn't on screen then rebuilds its rows only when it appears (apply_snapshot,
+        # prepare_to_appear), and rows_wait_for_the_list_to_appear says it has a rebuild to do.
+        self.defers_rebuilding_while_hidden = False
+        self.rows_wait_for_the_list_to_appear = False
         self.rename_in_progress = False
         self.drag_in_progress = False
         self.row_press_in_progress = False  # the button is down on a row (row_pressed until row_released)
@@ -736,7 +770,13 @@ class AgentSessionListController(NSObject):
         self.item_whose_expansion_is_changing = None
         self.item_being_renamed = None
         self.title_before_rename = ""
+        self.text_widths_by_text_and_font = {}  # measure_text_width's
         self.regular_font = NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, NSFontWeightRegular)
+        # The state dots' glyphs come from fonts other than the monospaced one and differ by a
+        # fraction of a point, so each row is measured with the widest (measure_widest_row_width),
+        # and a state change doesn't change the dropdown's width.
+        self.widest_dot_glyph = max((dot_glyph for dot_glyph, _ in DOT_GLYPH_AND_COLOR_BY_STATE.values()),
+                                    key=lambda dot_glyph: self.measure_text_width(dot_glyph, self.regular_font))
         self.bold_font = NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, NSFontWeightBold)
         # The status text, easier to read and still lighter than the front tab's bold name (user
         # request, 2026-10-28). Every weight of the font is as wide, so columns are measured in the regular one.
@@ -771,6 +811,7 @@ class AgentSessionListController(NSObject):
         # The room the window rows' previews button takes at the right edge, in a column of its
         # own, while a tab has a preview (measure_right_columns; user request, 2026-10-26).
         self.room_for_the_previews_button = 0
+        self.list_width_at_the_last_measure = None  # the outline view's width measure_right_columns last fit the columns to
         self.width_is_set_by_the_user = False  # True for the sidebar's and the list window's lists; the dropdown fits its width to the rows
         self.list_sort_order = "manual"  # set by the Sort pop-up or a column title's click (list_sorting.py)
         self.list_sort_order_is_reversed = False
@@ -781,6 +822,11 @@ class AgentSessionListController(NSObject):
         self.fill_column_titles()
         self.refresh_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.6, self, "refreshTimerFired:", None, True)
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, "windowOcclusionStateChanged:", NSWindowDidChangeOcclusionStateNotification, None)
+        self.outline_view.setPostsFrameChangedNotifications_(True)
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, "outlineViewFrameChanged:", NSViewFrameDidChangeNotification, self.outline_view)
         return self
 
     # ----- building the view -----
@@ -845,17 +891,34 @@ class AgentSessionListController(NSObject):
             text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(title, {
                 NSFontAttributeName: self.column_title_font, NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
                 NSParagraphStyleAttributeName: paragraph_style}))
+        row_view.setNeedsLayout_(True)  # the titles' sizes may have changed
 
     # ----- applying snapshots -----
 
     @objc.python_method
     def apply_snapshot(self, snapshot):
         """Shows a new snapshot (held while a rename or drag is in progress, or the button is down
-        on a row: a sorted list could reorder its rows under the held button)."""
+        on a row: a sorted list could reorder its rows under the held button). A list that defers
+        rebuilding while hidden and isn't on screen (the closed dropdown, a hidden sidebar or list
+        window) only keeps it: rebuilding the rows nobody sees took most of the time of a click on
+        Hide Idle in the dropdown, so prepare_to_appear rebuilds them just before the list appears
+        (code review, 2026-10-29)."""
         if self.rename_in_progress or self.drag_in_progress or self.row_press_in_progress:
             self.held_snapshot = snapshot
             return
         self.snapshot = snapshot
+        if self.defers_rebuilding_while_hidden and not self.list_is_on_screen():
+            self.rows_wait_for_the_list_to_appear = True
+            return
+        self.rebuild_rows_from_the_snapshot()
+
+    @objc.python_method
+    def rebuild_rows_from_the_snapshot(self):
+        """Builds the items from self.snapshot, in the sort order and without the rows Hide Idle
+        hides, then updates the rows in place when only some came or went (update_rows_in_place),
+        reloads them when their structure changed otherwise, and else redraws them."""
+        snapshot = self.snapshot
+        children_before_by_parent = self.list_children_by_parent()
         self.measure_right_columns()
         show_monitor_rows = snapshot_shows_monitor_rows(snapshot)
         new_top_level_items = []
@@ -877,20 +940,34 @@ class AgentSessionListController(NSObject):
                 for window_item in window_items:
                     window_item.parent_item = None
                 new_top_level_items.extend(window_items)
+        keys_with_saved_row_state = live_keys | list_window_and_tab_item_keys(snapshot)
         for key in set(self.items_by_key) - live_keys:
             removed_item = self.items_by_key.pop(key)
-            removed_item.parent_item = None  # break the parent-child cycle so the item can be freed
-            removed_item.child_items = []
-        keys_with_saved_row_state = live_keys | list_window_and_tab_item_keys(snapshot)
+            if key in keys_with_saved_row_state:  # hidden by Hide Idle (code review, 2026-10-29)
+                self.hidden_items_by_key[key] = removed_item
+            else:
+                removed_item.parent_item = None  # break the parent-child cycle so the item can be freed
+                removed_item.child_items = []
+        for key in set(self.hidden_items_by_key) - keys_with_saved_row_state:
+            gone_item = self.hidden_items_by_key.pop(key)
+            gone_item.parent_item = None
+            gone_item.child_items = []
         self.collapsed_item_keys &= keys_with_saved_row_state
         self.open_preview_item_keys &= keys_with_saved_row_state
+        # A row's views stay while its window or tab is in the snapshot, also while Hide Idle hides
+        # it, so Show Idle puts them back rather than building new ones (code review, 2026-10-29).
+        for views_by_item_key in (self.row_views_by_item_key, self.outer_row_views_by_item_key):
+            for key in set(views_by_item_key) - keys_with_saved_row_state - {self.new_window_row_item.key}:
+                del views_by_item_key[key]
         self.top_level_items = new_top_level_items
         new_row_structure = self.list_row_structure()
         if new_row_structure == self.row_structure:
             self.redraw_visible_rows()
         else:
+            heights_before_by_key = {(kind, item_id): height for kind, item_id, _, height in self.row_structure}
             self.row_structure = new_row_structure
-            self.reload_and_restore_expansion()
+            if not self.update_rows_in_place(children_before_by_parent, heights_before_by_key):
+                self.reload_and_restore_expansion()
         self.on_snapshot_or_expansion_changed()  # a closed window may be gone
 
     @objc.python_method
@@ -958,7 +1035,9 @@ class AgentSessionListController(NSObject):
         key = (kind, item_id)
         item = self.items_by_key.get(key)
         if item is None:
-            item = OutlineListItem.alloc().initWithKind_itemId_(kind, item_id)
+            item = self.hidden_items_by_key.pop(key, None)
+            if item is None:
+                item = OutlineListItem.alloc().initWithKind_itemId_(kind, item_id)
             self.items_by_key[key] = item
         item.entry = entry
         live_keys.add(key)
@@ -982,6 +1061,96 @@ class AgentSessionListController(NSObject):
                 visit(item.child_items)
         visit(self.top_level_items)
         return structure
+
+    @objc.python_method
+    def list_children_by_parent(self):
+        """Returns {parent item, or None for the top level: its child items in order}, which is
+        what the outline view shows, since every rebuild either leaves it the same or passes it on."""
+        children_by_parent = {None: self.top_level_items + [self.new_window_row_item]}
+
+        def visit(items):
+            for item in items:
+                children_by_parent[item] = list(item.child_items)
+                visit(item.child_items)
+        visit(self.top_level_items)
+        return children_by_parent
+
+    @objc.python_method
+    def update_rows_in_place(self, children_before_by_parent, heights_before_by_key):
+        """Takes the outline view from the rows it shows (children_before_by_parent) to the
+        rebuilt ones by removing, moving and inserting only the rows that went, moved or came, so
+        the other rows keep their views, layout and drawing: Hide Idle, Show Idle, a tab opening or
+        closing, a sort, a snapshot that reorders rows under a sort (code review, 2026-10-29).
+        reloadData would lay out and draw every row again.
+
+        Returns False when that isn't enough and reload_and_restore_expansion has to do it, having
+        changed nothing: a row changed parent (monitor rows came or went), a row got its first rows
+        below it or lost its last (the outline view keeps whether a row can open), or rows changed
+        below a row that isn't listed (inside a collapsed monitor). Also False after AppKit refused
+        a change; the reload then puts right whatever it had done.
+
+        Args:
+            children_before_by_parent: list_children_by_parent's, from before the rebuild.
+            heights_before_by_key: Each row's height before the rebuild, by item key.
+        """
+        children_after_by_parent = self.list_children_by_parent()
+        parent_before_by_item = {child: parent for parent, children in children_before_by_parent.items() for child in children}
+        parent_after_by_item = {child: parent for parent, children in children_after_by_parent.items() for child in children}
+        if any(parent_before_by_item[item] is not parent for item, parent in parent_after_by_item.items()
+               if item in parent_before_by_item):
+            return False
+        # (parent, indexes of the rows that went, moves of the rows that stay, indexes of the rows that came)
+        changes = []
+        for parent, children_before in children_before_by_parent.items():
+            if parent is not None and parent not in parent_after_by_item:
+                continue  # the parent went, and its rows with it
+            children_after = children_after_by_parent[parent]
+            children_before_set, children_after_set = set(children_before), set(children_after)
+            went = [index for index, child in enumerate(children_before) if child not in children_after_set]
+            came = [index for index, child in enumerate(children_after) if child not in children_before_set]
+            # Also for a parent whose rows all stay: hiding a tab can reorder the windows under a sort by memory, say.
+            moves = list_moves_that_reorder([child for child in children_before if child in children_after_set],
+                                            [child for child in children_after if child in children_before_set])
+            if not went and not came and not moves:
+                continue
+            if parent is not None and (not children_before or not children_after or self.outline_view.rowForItem_(parent) < 0):
+                return False
+            changes.append((parent, went, moves, came))
+        if not changes:
+            return False
+
+        def change_the_rows():
+            self.outline_view.beginUpdates()
+            try:
+                # The rows that went, then the moves among those left, then the rows that came, at their final places.
+                for parent, went, moves, came in changes:
+                    if went:
+                        self.outline_view.removeItemsAtIndexes_inParent_withAnimation_(
+                            build_index_set(went), parent, NSTableViewAnimationEffectNone)
+                    for from_index, to_index in moves:
+                        self.outline_view.moveItemAtIndex_inParent_toIndex_inParent_(from_index, parent, to_index, parent)
+                    if came:
+                        self.outline_view.insertItemsAtIndexes_inParent_withAnimation_(
+                            build_index_set(came), parent, NSTableViewAnimationEffectNone)
+            finally:
+                self.outline_view.endUpdates()
+        try:
+            # Without the outline view's slide, which moved rows would otherwise get for about 0.4 s
+            # (code review, 2026-10-29).
+            run_without_animation(change_the_rows)
+        except objc.error as error:
+            print(f"agent-command-tab: the rows couldn't be changed in place, so they are reloaded ({error})", flush=True)
+            return False
+        run_without_animation(lambda: self.apply_expansion_state(
+            [children_after_by_parent[parent][index] for parent, _, _, came in changes for index in came]))
+        rows_whose_height_changed = [self.outline_view.rowForItem_(item) for item in parent_after_by_item
+                                     if item.key in heights_before_by_key
+                                     and heights_before_by_key[item.key] != self.measure_row_height(item)]
+        if any(row >= 0 for row in rows_whose_height_changed):
+            run_without_animation(lambda: self.outline_view.noteHeightOfRowsWithIndexesChanged_(
+                build_index_set(row for row in rows_whose_height_changed if row >= 0)))
+        self.redraw_visible_rows()  # a row's tree connector follows whether it is its window's last
+        return True
 
     @objc.python_method
     def reload_and_restore_expansion(self):
@@ -1093,9 +1262,32 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def prepare_to_appear(self):
-        """Brings the rows up to date just before the dropdown or the sidebar is shown."""
-        self.measure_right_columns()
+        """Brings the rows up to date just before the dropdown, the sidebar or the list window is
+        shown: rebuilds them when a snapshot or a setting changed them while the list was hidden
+        (apply_snapshot), then refills them."""
+        if self.rows_wait_for_the_list_to_appear:
+            self.rows_wait_for_the_list_to_appear = False
+            self.rebuild_rows_from_the_snapshot()
+        else:
+            self.measure_right_columns()
         self.fill_visible_rows()
+
+    def windowOcclusionStateChanged_(self, notification):
+        """Rebuilds rows that waited while the list was hidden as soon as its window is on screen
+        again, also when it comes back without prepare_to_appear: a list window restored from the
+        Dock, or the app unhidden (code review, 2026-10-29)."""
+        if (self.rows_wait_for_the_list_to_appear and notification.object() == self.outline_view.window()
+                and self.list_is_on_screen()):
+            self.prepare_to_appear()
+
+    def outlineViewFrameChanged_(self, notification):
+        """A sidebar or list window made narrower or wider drops or brings back columns at once
+        (measure_right_columns), rather than at the next 0.6-second refresh, which could leave the
+        tab names squeezed out of view meanwhile (code review, 2026-10-29)."""
+        if (self.width_is_set_by_the_user and self.snapshot is not None
+                and self.outline_view.bounds().size.width != self.list_width_at_the_last_measure):
+            self.measure_right_columns()
+            self.redraw_visible_rows()
 
     # ----- data source -----
 
@@ -1117,10 +1309,15 @@ class AgentSessionListController(NSObject):
     # ----- drawing rows -----
 
     def outlineView_viewForTableColumn_item_(self, outline_view, table_column, item):
-        row_view = outline_view.makeViewWithIdentifier_owner_(ROW_VIEW_IDENTIFIER, self)
+        # Each item keeps its row view, so rows that come back (Show Idle) or are reloaded (a change
+        # update_rows_in_place can't make) get the same views back, and fill_row_view skips those
+        # whose look didn't change:
+        # reloadData leaves no view for makeViewWithIdentifier_owner_ to reuse, and a new one
+        # takes about a millisecond to build and fill (code review, 2026-10-29).
+        row_view = self.row_views_by_item_key.get(item.key)
         if row_view is None:
             row_view = AgentListRowView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, ROW_HEIGHT))
-            row_view.setIdentifier_(ROW_VIEW_IDENTIFIER)
+            self.row_views_by_item_key[item.key] = row_view
             row_view.name_text_field.setDelegate_(self)
             row_view.preview_toggle_button.setTarget_(self)
             row_view.preview_toggle_button.setAction_("previewToggleButtonClicked:")
@@ -1135,7 +1332,13 @@ class AgentSessionListController(NSObject):
         return self.measure_row_height(item)
 
     def outlineView_rowViewForItem_(self, outline_view, item):
-        return RowViewWithSelectionOutline.alloc().initWithFrame_(NSZeroRect)
+        # Kept per item, as its row view is: in a new outer row view, AppKit would lay out and draw
+        # the kept row view again, about twice per row and reload (code review, 2026-10-29).
+        outer_row_view = self.outer_row_views_by_item_key.get(item.key)
+        if outer_row_view is None:
+            outer_row_view = RowViewWithSelectionOutline.alloc().initWithFrame_(NSZeroRect)
+            self.outer_row_views_by_item_key[item.key] = outer_row_view
+        return outer_row_view
 
     # A selected tab row's outline runs on over its process rows, which AppKit doesn't redraw
     # when the selection changes or process rows come and go below it.
@@ -1430,9 +1633,14 @@ class AgentSessionListController(NSObject):
         shows_preview_toggle_button = bool(tabs_that_open) and self.row_is_open(item)
         all_previews_are_open = all(self.tab_row_is_open(tab_item) for tab_item in tabs_that_open)
         shows_disclosure_button = self.row_can_open(item)
-        # Everything the row's look depends on: an unchanged row is neither refilled nor laid out
+        # A working dot blinks by its field's opacity alone, which needs neither a refill nor a
+        # layout, so a blink isn't part of the look (code review, 2026-10-29).
+        dot_alpha = DIM_DOT_ALPHA if parts.dot_blinks and self.blink_phase_is_dim else 1.0
+        if row_view.dot_text_field.alphaValue() != dot_alpha:
+            row_view.dot_text_field.setAlphaValue_(dot_alpha)
+        # Everything else the row's look depends on: an unchanged row is neither refilled nor laid out
         # again, which keeps the 0.6-second refresh cheap with many rows.
-        look = (parts, item.kind, is_in_front, parts.dot_blinks and self.blink_phase_is_dim, self.preview_is_open(item),
+        look = (parts, item.kind, is_in_front, self.preview_is_open(item),
                 shows_disclosure_button, self.row_is_open(item), shows_preview_toggle_button, all_previews_are_open,
                 tuple(self.column_widths.values()), self.room_for_the_previews_button, bool(item.child_items))
         if look == row_view.look:
@@ -1445,11 +1653,9 @@ class AgentSessionListController(NSObject):
         if shows_disclosure_button:
             show_symbol_on_button(row_view.disclosure_button, *DISCLOSURE_ARROW_LOOKS[self.row_is_open(item)],
                                   point_size=DISCLOSURE_ARROW_POINT_SIZE)
-        dot_color = build_color_from_name(parts.dot_color_name)
-        if parts.dot_blinks and self.blink_phase_is_dim:
-            dot_color = dot_color.colorWithAlphaComponent_(0.25)
         row_view.dot_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
-            build_dot_text(parts.dot_glyph), {NSFontAttributeName: self.regular_font, NSForegroundColorAttributeName: dot_color}))
+            build_dot_text(parts.dot_glyph), {NSFontAttributeName: self.regular_font,
+                                              NSForegroundColorAttributeName: build_color_from_name(parts.dot_color_name)}))
         # Only the dot and the lights say what they mean; the row as a whole has no hover text (user requests, 2026-10-19 and 2026-10-27).
         row_view.dot_text_field.setToolTip_(parts.dot_tool_tip or None)
         row_view.details_text_field.setToolTip_(parts.details_tool_tip or None)
@@ -1529,7 +1735,18 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def measure_text_width(self, text, font):
-        return NSAttributedString.alloc().initWithString_attributes_(text, {NSFontAttributeName: font}).size().width
+        """Returns the text's width in points in this font. Widths are kept, since the same texts
+        ("idle", "2m", a tab's name) are measured again for every snapshot, every 0.6-second
+        refresh and every refit of the dropdown (code review, 2026-10-29); the list starts over
+        once it keeps LARGEST_NUMBER_OF_KEPT_TEXT_WIDTHS, as elapsed times keep making new texts."""
+        key = (text, font)
+        width = self.text_widths_by_text_and_font.get(key)
+        if width is None:
+            if len(self.text_widths_by_text_and_font) >= LARGEST_NUMBER_OF_KEPT_TEXT_WIDTHS:
+                self.text_widths_by_text_and_font.clear()
+            width = NSAttributedString.alloc().initWithString_attributes_(text, {NSFontAttributeName: font}).size().width
+            self.text_widths_by_text_and_font[key] = width
+        return width
 
     @objc.python_method
     def measure_name_x(self, connector_text, dot_glyph):
@@ -1552,6 +1769,7 @@ class AgentSessionListController(NSObject):
         so the columns don't move as numbers change by a digit. The icon column's width fits the widest tool
         icon, or is 0 when all agent sessions use the same tool. A narrow sidebar or window then
         drops columns in COLUMN_NAMES_IN_DROP_ORDER to keep room for names."""
+        self.list_width_at_the_last_measure = self.outline_view.bounds().size.width
         agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)
                                  if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden)] if self.snapshot else []
         now = time.time()
@@ -1588,10 +1806,15 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def update_column_titles_row(self):
         """Gives the row of column titles the columns' widths, and has the panel fit the list under
-        it when it needs another height."""
-        self.column_titles_row_view.column_widths = dict(self.column_widths)
-        self.column_titles_row_view.room_for_the_previews_button = self.room_for_the_previews_button
-        self.column_titles_row_view.setNeedsLayout_(True)
+        it when it needs another height. The row is laid out again only when the widths changed:
+        the 0.6-second refresh calls this every time (code review, 2026-10-29)."""
+        if (self.column_widths != self.column_titles_row_view.column_widths
+                or self.room_for_the_previews_button != self.column_titles_row_view.room_for_the_previews_button
+                # A scroll bar that takes room narrows the list but not the titles row.
+                or self.outline_view.frame().size.width != self.column_titles_row_view.laid_out_for_list_width):
+            self.column_titles_row_view.column_widths = dict(self.column_widths)
+            self.column_titles_row_view.room_for_the_previews_button = self.room_for_the_previews_button
+            self.column_titles_row_view.setNeedsLayout_(True)
         if self.measure_column_titles_row_height() != self.column_titles_row_view.frame().size.height:
             self.on_column_titles_row_height_changed()
 
@@ -1644,11 +1867,6 @@ class AgentSessionListController(NSObject):
         the rows inside collapsed windows and a window's counts as if it were collapsed, so the
         dropdown keeps one size while rows are expanded and collapsed (user request, milestone 2)."""
         measure_text_width = self.measure_text_width
-        # The state dots' glyphs come from fonts other than the monospaced one and differ by a
-        # fraction of a point, so each row is measured with the widest, and a state change doesn't
-        # change the dropdown's width.
-        widest_dot_glyph = max((dot_glyph for dot_glyph, _ in DOT_GLYPH_AND_COLOR_BY_STATE.values()),
-                               key=lambda dot_glyph: measure_text_width(dot_glyph, self.regular_font))
         widest_row_width = 0
         preview_buttons_width = GAP_BEFORE_DETAILS + PREVIEW_BUTTON_SIZE
         for item in self.list_all_items():
@@ -1661,7 +1879,7 @@ class AgentSessionListController(NSObject):
             else:
                 parts_and_button_widths = [(self.build_row_text_parts(item), 0)]
             for parts, button_width in parts_and_button_widths:
-                row_width = (self.measure_name_x(parts.connector_text, widest_dot_glyph if parts.dot_glyph else "")
+                row_width = (self.measure_name_x(parts.connector_text, self.widest_dot_glyph if parts.dot_glyph else "")
                              + measure_text_width(parts.name_text, self.choose_name_font(item)) + NAME_FIELD_PADDING
                              + GAP_BEFORE_DETAILS + measure_text_width(parts.details_text + ROOM_FOR_GROWING_DETAILS, self.regular_font)
                              + 2 * TEXT_FIELD_INSETS + ROW_RIGHT_MARGIN + button_width)
@@ -1795,8 +2013,16 @@ class AgentSessionListController(NSObject):
         else:
             self.collapsed_item_keys |= {key for key, item in self.items_by_key.items()
                                          if item.child_items and item.kind in ("monitor", "window")}
-        # Row by row rather than through reloadData, which would rebuild every row view.
-        run_without_animation(lambda: self.apply_expansion_state(self.top_level_items))
+        # Row by row rather than through reloadData, which would rebuild every row view, in one
+        # update, so the outline view lays out its rows once rather than after each window's
+        # change (code review, 2026-10-29).
+        def change_every_rows_expansion():
+            self.outline_view.beginUpdates()
+            try:
+                self.apply_expansion_state(self.top_level_items)
+            finally:
+                self.outline_view.endUpdates()
+        run_without_animation(change_every_rows_expansion)
         self.redraw_visible_rows()
         self.on_row_count_changed()
         self.on_snapshot_or_expansion_changed()

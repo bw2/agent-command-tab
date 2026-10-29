@@ -33,12 +33,13 @@ from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGH
                                                                 SMALLEST_SORT_POPUP_WIDTH, TOP_BAR_HEIGHT, ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
+                                                                         DIM_DOT_ALPHA,
                                                                          GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT, SMALLEST_TAB_NAME_WIDTH,
                                                                          TAB_ROW_HEIGHT_WITH_PREVIEW, TEXT_FIELD_INSETS,
                                                                          AgentSessionListController, RowButton,
                                                                          RowViewWithSelectionOutline, build_index_set,
                                                                          choose_room_for_a_columns_texts,
-                                                                         compute_selection_outline_rect)
+                                                                         compute_selection_outline_rect, list_moves_that_reorder)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons
 from agent_command_tab.user_interface.app_icon import build_app_icon
 from agent_command_tab.user_interface.named_colors import COLOR_MAKERS_BY_NAME
@@ -675,6 +676,166 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(outline_view.numberOfRows(), 8)
         self.assertEqual(panel.idle_tabs_button.title(), "Hide Idle")
 
+    def test_a_hidden_list_rebuilds_its_rows_only_when_it_appears(self):  # code review, 2026-10-29
+        outline_view = self.list_controller.outline_view
+        self.list_controller.defers_rebuilding_while_hidden = True  # as the app sets it for its three lists
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # on screen: rebuilt at once
+        self.assertEqual(outline_view.numberOfRows(), 8)
+        self.window.orderOut_(None)  # the dropdown closes
+        self.list_controller.set_idle_tabs_are_hidden(True)
+        self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=3))  # the second window's tabs are idle
+        self.assertEqual(outline_view.numberOfRows(), 8)  # nothing rebuilt while hidden
+        self.assertTrue(self.list_controller.rows_wait_for_the_list_to_appear)
+        self.list_controller.prepare_to_appear()  # just before it shows again, as show_popover does
+        self.window.orderFrontRegardless()
+        self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                         ["w1", "1", "2", "3", "new_window"])
+        self.assertFalse(self.list_controller.rows_wait_for_the_list_to_appear)
+
+    def test_a_reload_puts_back_each_rows_own_views(self):  # code review, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        first_tab_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
+        first_tab_outer_row_view = outline_view.rowViewAtRow_makeIfNecessary_(1, True)
+        idle_tab_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 5, True)  # analysis-0
+        self.list_controller.set_idle_tabs_are_hidden(True)  # the rows' structure changes, so they are reloaded
+        self.assertIs(outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True), first_tab_row_view)
+        self.assertIs(outline_view.rowViewAtRow_makeIfNecessary_(1, True), first_tab_outer_row_view)
+        self.list_controller.set_idle_tabs_are_hidden(False)  # the hidden rows come back with their views
+        self.assertIs(outline_view.viewAtColumn_row_makeIfNecessary_(0, 5, True), idle_tab_row_view)
+        self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=1))  # analysis-1 closes
+        self.assertNotIn(("tab", "11"), self.list_controller.row_views_by_item_key)
+        self.assertNotIn(("tab", "11"), self.list_controller.outer_row_views_by_item_key)
+
+    def test_hide_idle_and_show_idle_change_only_the_rows_that_go_or_come(self):  # code review, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        second_window_item = outline_view.itemAtRow_(4)  # tandem-repeats, whose two tabs are idle
+        with unittest.mock.patch.object(self.list_controller, "reload_and_restore_expansion") as reload:
+            self.list_controller.set_idle_tabs_are_hidden(True)
+            self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                             ["w1", "1", "2", "3", "new_window"])
+            self.list_controller.set_idle_tabs_are_hidden(False)
+            self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                             ["w1", "1", "2", "3", "w2", "10", "11", "new_window"])
+        self.assertFalse(reload.called)
+        self.assertIs(outline_view.itemAtRow_(4), second_window_item)  # the same item, still expanded
+        self.assertTrue(outline_view.isItemExpanded_(second_window_item))
+
+    def test_hiding_a_tab_that_reorders_the_windows_shows_their_new_order(self):  # code review, 2026-10-29
+        # Sorted by memory, w1 ranks first by its idle 1200M tab; once that tab is hidden, w2's 800M tab ranks it first.
+        window_one = WindowEntry("w1", "one", False, (0, 0, 800, 600), 2, (
+            make_entry("1", "big-idle", "idle")._replace(memory_bytes=1200), make_entry("2", "working", "working")._replace(memory_bytes=300)))
+        window_two = WindowEntry("w2", "two", False, (0, 0, 800, 600), 1, (make_entry("3", "asking", "asking")._replace(memory_bytes=800),))
+        monitor = MonitorEntry("1", "Built-in", (0, 0, 2000, 1300), (0, 0, 2000, 1260), (window_one, window_two))
+        self.list_controller.set_list_sort_order("memory_usage", False)
+        self.list_controller.apply_snapshot(ComputerSnapshot("c", "Test Mac", 1.0, (monitor,)))
+        outline_view = self.list_controller.outline_view
+        self.assertEqual(outline_view.itemAtRow_(0).item_id, "w1")
+        self.list_controller.set_idle_tabs_are_hidden(True)
+        self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                         ["w2", "3", "w1", "2", "new_window"])
+
+    def test_a_sort_moves_the_rows_in_place(self):  # code review, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        first_tab_row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)  # planning
+        with unittest.mock.patch.object(self.list_controller, "reload_and_restore_expansion") as reload:
+            self.list_controller.set_list_sort_order("alphabet", False)
+            self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                             ["w1", "3", "2", "1", "w2", "10", "11", "new_window"])
+            self.list_controller.set_list_sort_order("manual", False)
+            self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                             ["w1", "1", "2", "3", "w2", "10", "11", "new_window"])
+        self.assertFalse(reload.called)
+        self.assertIs(outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True), first_tab_row_view)
+
+    def test_rows_that_change_parent_are_reloaded(self):  # code review, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        with unittest.mock.patch.object(self.list_controller, "reload_and_restore_expansion",
+                                        wraps=self.list_controller.reload_and_restore_expansion) as reload:
+            self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # the windows go under monitor rows
+        self.assertTrue(reload.called)
+        self.assertEqual([outline_view.itemAtRow_(row).kind for row in range(outline_view.numberOfRows())],
+                         ["monitor", "window", "tab", "tab", "tab", "monitor", "window", "tab", "tab", "new_window"])
+
+    def test_a_collapsed_windows_tabs_are_hidden_and_shown_in_place(self):  # code review, 2026-10-29
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_one = window_one._replace(agent_sessions=window_one.agent_sessions + (make_entry("4", "waiting", "idle"),))
+        snapshot = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),))
+        self.list_controller.apply_snapshot(snapshot)
+        outline_view = self.list_controller.outline_view
+        first_window_item = outline_view.itemAtRow_(0)
+        self.list_controller.toggle_expansion(first_window_item)  # collapsed, with an idle tab among the others
+        with unittest.mock.patch.object(self.list_controller, "reload_and_restore_expansion") as reload:
+            self.list_controller.set_idle_tabs_are_hidden(True)
+            self.list_controller.set_idle_tabs_are_hidden(False)
+            self.list_controller.set_idle_tabs_are_hidden(True)
+        self.assertFalse(reload.called)
+        self.list_controller.toggle_expansion(first_window_item)
+        self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                         ["w1", "1", "2", "3", "new_window"])
+
+    def test_the_moves_that_reorder_rows(self):  # code review, 2026-10-29
+        for items_before, items_after in ((["a", "b", "c"], ["c", "a", "b"]), (["a", "b", "c", "d"], ["d", "c", "b", "a"]),
+                                          (["a", "b"], ["a", "b"]), (["a", "b", "c"], ["b", "c", "a"])):
+            items = list(items_before)
+            for from_index, to_index in list_moves_that_reorder(items_before, items_after):
+                items.insert(to_index, items.pop(from_index))
+            self.assertEqual(items, items_after)
+        self.assertEqual(list_moves_that_reorder(["a", "b"], ["a", "b"]), [])
+
+    def test_rows_that_waited_are_rebuilt_when_the_window_shows_again_by_any_way(self):  # code review, 2026-10-29
+        outline_view = self.list_controller.outline_view
+        self.list_controller.defers_rebuilding_while_hidden = True
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.orderOut_(None)  # minimized, or the app hidden
+        self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=3))
+        self.assertEqual(outline_view.numberOfRows(), 8)
+        self.window.orderFrontRegardless()  # restored from the Dock: no prepare_to_appear
+        self.list_controller.windowOcclusionStateChanged_(unittest.mock.Mock(object=lambda: self.window))
+        self.assertEqual(outline_view.numberOfRows(), 9)
+        self.assertFalse(self.list_controller.rows_wait_for_the_list_to_appear)
+
+    def test_a_working_dot_blinks_without_its_row_being_refilled(self):  # code review, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)  # planning, working
+        look_before = row_view.look
+        self.list_controller.refreshTimerFired_(None)  # the dim half of the blink
+        self.assertEqual(row_view.dot_text_field.alphaValue(), DIM_DOT_ALPHA)
+        self.assertIs(row_view.look, look_before)  # not refilled, so not laid out again either
+        self.list_controller.refreshTimerFired_(None)
+        self.assertEqual(row_view.dot_text_field.alphaValue(), 1.0)
+
+    def test_measured_text_widths_are_kept_up_to_a_limit(self):  # code review, 2026-10-29
+        font = self.list_controller.regular_font
+        width = self.list_controller.measure_text_width("idle", font)
+        self.assertEqual(self.list_controller.text_widths_by_text_and_font[("idle", font)], width)
+        with unittest.mock.patch("agent_command_tab.user_interface.agent_session_outline_view.LARGEST_NUMBER_OF_KEPT_TEXT_WIDTHS", 2):
+            for text in ("1m", "2m", "3m"):
+                self.list_controller.measure_text_width(text, font)
+        self.assertLessEqual(len(self.list_controller.text_widths_by_text_and_font), 2)
+        self.assertEqual(self.list_controller.measure_text_width("idle", font), width)
+
+    def test_the_column_titles_row_is_laid_out_again_only_when_the_widths_change(self):  # code review, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        titles_row_view = self.list_controller.column_titles_row_view
+        titles_row_view.layoutSubtreeIfNeeded()
+        self.list_controller.measure_right_columns()  # as the 0.6-second refresh does
+        self.assertFalse(titles_row_view.needsLayout())
+        self.list_controller.set_shown_columns(["state"])
+        self.assertTrue(titles_row_view.needsLayout())
+
+    def test_the_bars_controls_are_set_only_when_what_they_show_changes(self):  # code review, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        with unittest.mock.patch("agent_command_tab.user_interface.popover_container.show_symbol_on_button") as show_symbol:
+            self.list_controller.apply_snapshot(make_sample_snapshot())  # the same state
+            self.assertEqual(show_symbol.call_count, 0)
+            self.list_controller.set_all_expanded(False)  # the expand or collapse button's look changes
+            self.assertEqual(show_symbol.call_count, 2)
+
     def test_hide_idle_keeps_hidden_rows_collapsed_or_with_their_previews_open(self):
         outline_view = self.apply_snapshot_with_previews()
         self.click_row_arrow(5)  # opens analysis-0's preview (idle)
@@ -1148,9 +1309,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(snapshot)
         self.assertGreater(self.list_controller.column_widths["context_tokens"], 0)
         self.assertGreater(self.list_controller.column_widths["agent_tool_icon"], 0)
-        self.window.setContentSize_((200, 260))  # the narrowest sidebar
+        self.window.setContentSize_((200, 260))  # the narrowest sidebar: the columns follow at once (code review, 2026-10-29)
         self.window.contentView().layoutSubtreeIfNeeded()
-        self.list_controller.measure_right_columns()
         self.assertEqual((self.list_controller.column_widths["context_tokens"], self.list_controller.column_widths["agent_tool_icon"]),
                          (0, 0))
         # The rest go too, the time since the last status change last, so the names stay readable.
@@ -1158,7 +1318,6 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(self.list_controller.measure_room_left_for_tab_names(), SMALLEST_TAB_NAME_WIDTH)
         self.window.setContentSize_((300, 260))
         self.window.contentView().layoutSubtreeIfNeeded()
-        self.list_controller.measure_right_columns()
         self.assertGreater(self.list_controller.column_widths["state_duration"], 0)  # kept while there is room for it
 
     def test_a_column_keeps_spare_room_so_a_digit_more_or_less_doesnt_move_it(self):  # user request, 2026-10-28
@@ -2541,6 +2700,16 @@ class SettingsWindowSmokeTests(unittest.TestCase):
             with unittest.mock.patch("agent_command_tab.app_controller.save_settings"):
                 AppController.settings_changed(stand_in_app_controller, dict(stand_in_app_controller.settings, **changed_setting))
             self.assertEqual(stand_in_app_controller.move_the_settings_window_clear_of_the_sidebar.called, moves, changed_setting)
+
+    def test_the_core_and_the_sidebar_get_settings_only_when_their_part_changed(self):  # code review, 2026-10-29
+        stand_in_app_controller = unittest.mock.Mock(core_settings_sent_last=None)
+        with unittest.mock.patch("agent_command_tab.app_controller.build_core_settings", side_effect=lambda settings: {"x": 1}):
+            AppController.apply_settings_to_the_core_and_every_list(stand_in_app_controller, dict(DEFAULT_SETTINGS))
+            AppController.apply_settings_to_the_core_and_every_list(stand_in_app_controller, dict(DEFAULT_SETTINGS),
+                                                                    sidebar_settings_changed=False)
+        self.assertEqual(stand_in_app_controller.connection_thread.send_core_settings.call_count, 1)
+        self.assertEqual(stand_in_app_controller.sidebar_controller.apply_settings.call_count, 1)
+        self.assertEqual(stand_in_app_controller.list_window_controller.apply_settings.call_count, 2)
 
     def test_the_autolaunch_script_follows_only_a_change_of_start_with_iterm2(self):  # user request, 2026-10-28
         for changed_setting, applied_values in (({"app_starts_with_iterm2": False}, [False]), ({"shown_columns": ["state"]}, [])):

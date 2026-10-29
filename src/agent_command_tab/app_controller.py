@@ -147,6 +147,7 @@ class AppController(NSObject):
         self.note_application_unless_it_is_the_dashboard(NSWorkspace.sharedWorkspace().frontmostApplication())
         self.peek_in_progress = None  # {"application_in_front"} while a tab row is held
         self.settings_save_is_scheduled = False  # a moved window's frame waits to be written (window_frame_changed)
+        self.core_settings_sent_last = None  # apply_settings_to_the_core_and_every_list's
         self.peek_waiting_for_put_back = None  # a released peek until the app in front before is back
         self.list_window_drag_check_timer = None  # while the list window's title bar is dragged
         self.latest_snapshot_lock = threading.Lock()
@@ -159,6 +160,10 @@ class AppController(NSObject):
         self.status_item_controller = MenuBarStatusItemController.alloc().initWithPopover_owner_(self.popover, self)
         self.sidebar_controller = SidebarController.alloc().initWithOwner_(self)
         self.list_window_controller = ListWindowController.alloc().initWithOwner_(self)
+        for list_controller in self.list_all_list_controllers():
+            # Only the list on screen rebuilds its rows for each snapshot and setting; the others
+            # do once they appear (code review, 2026-10-29).
+            list_controller.defers_rebuilding_while_hidden = True
         self.settings_window_controller = SettingsWindowController.alloc().initWithOwner_(self)
         # Calls back on the key filter's own thread.
         self.global_shortcut_key_filter = GlobalShortcutKeyFilter(lambda: AppHelper.callAfter(self.global_shortcut_pressed))
@@ -834,7 +839,7 @@ class AppController(NSObject):
                                                  takes_keyboard_focus=not self.settings_window_controller.is_open())
             elif show_as_before == "window":
                 self.list_window_controller.hide()
-        self.apply_settings_to_the_core_and_every_list(new_settings)
+        self.apply_settings_to_the_core_and_every_list(new_settings, sidebar_settings_changed=sidebar_may_have_moved)
         self.settings_window_controller.reflect_settings(new_settings)
         if self.settings_window_controller.is_open():
             if sidebar_may_have_moved:  # a sidebar widened at its edge or in the window would cover it (code review, 2026-10-28)
@@ -874,11 +879,17 @@ class AppController(NSObject):
             print(f"agent-command-tab: removed {autolaunch_script_path}; iTerm2 no longer starts the app", flush=True)
 
     @objc.python_method
-    def apply_settings_to_the_core_and_every_list(self, settings):
+    def apply_settings_to_the_core_and_every_list(self, settings, sidebar_settings_changed=True):
         """Hands the settings to the core, the sidebar, the list window and the three lists: at
-        the start and after every change."""
-        self.connection_thread.send_core_settings(build_core_settings(settings))
-        self.sidebar_controller.apply_settings(settings)
+        the start and after every change. The core gets them only when its part changed (each time
+        it builds a whole snapshot on its thread to compare), and the sidebar only when one of
+        SETTINGS_THAT_PLACE_THE_SIDEBAR changed (code review, 2026-10-29)."""
+        core_settings = build_core_settings(settings)
+        if core_settings != self.core_settings_sent_last:
+            self.core_settings_sent_last = core_settings
+            self.connection_thread.send_core_settings(core_settings)
+        if sidebar_settings_changed:
+            self.sidebar_controller.apply_settings(settings)
         self.list_window_controller.apply_settings(settings)
         self.apply_list_settings(settings)
 
