@@ -57,7 +57,7 @@ IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle"),
                           True: ("Show Idle", "Show tabs whose agent is idle")}
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
-HOOKS_NOTE_TOOL_TIP = ("These hooks provide AgentCommandTab with more details about agent status, including whether it "
+HOOKS_NOTE_TOOL_TIP = ("These hooks provide AgentCommandTab more details about agent status, including whether it "
                        "launched background processes, etc.")  # the user's wording, 2026-10-28
 
 
@@ -73,7 +73,8 @@ def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
     missing_agent_tool_names = [agent_tool_name for agent_tool_name, status in hooks_status_per_agent_tool
                                 if status == HOOKS_ARE_MISSING and agent_tool_name in listed_agent_tool_names]
     if missing_agent_tool_names:
-        return f"No hooks for {' and '.join(missing_agent_tool_names)}", missing_agent_tool_names
+        # The user's wording, 2026-10-28 ("No hooks for Claude Code" until then).
+        return f"{' and '.join(missing_agent_tool_names)} hooks not installed yet", missing_agent_tool_names
     if any(status == HOOKS_AWAIT_APPROVAL and agent_tool_name in listed_agent_tool_names
            for agent_tool_name, status in hooks_status_per_agent_tool):
         return "Approve the Codex hooks: /hooks in Codex", []

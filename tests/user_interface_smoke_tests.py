@@ -1700,7 +1700,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel = self.dropdown_panel_controller
         snapshot = make_sample_snapshot()  # Claude Code and Codex sessions
         for hooks_status_per_agent_tool, expected_note, shows_button in (
-                ((("Claude Code", "missing"), ("Codex", "missing")), "No hooks for Claude Code and Codex", True),
+                ((("Claude Code", "missing"), ("Codex", "missing")), "Claude Code and Codex hooks not installed yet", True),
+                ((("Claude Code", "missing"), ("Codex", "installed")), "Claude Code hooks not installed yet", True),
                 ((("Claude Code", "installed"), ("Codex", "needs approval")), "Approve the Codex hooks: /hooks in Codex", False),
                 ((("Claude Code", "installed"), ("Codex", "installed")), "", False)):
             self.list_controller.apply_snapshot(snapshot._replace(hooks_status_per_agent_tool=hooks_status_per_agent_tool))

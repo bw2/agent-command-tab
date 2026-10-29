@@ -618,9 +618,8 @@ class AppController(NSObject):
         alert = NSAlert.alloc().init()
         alert.setMessageText_(f"Install the hooks for {' and '.join(agent_tool_names)}?")
         alert.setInformativeText_(
-            "They tell a crashed agent from one that ended normally, and count Claude Code's background "
-            "shells and agents. They are added to:\n\n" + "\n".join(file_paths)
-            + f"\n\nEach file is first copied to its name plus {BACKUP_FILE_SUFFIX}. Sessions started from now on use them."
+            "They are added to:\n\n" + "\n".join(file_paths)
+            + f"\n\nEach file is first copied to its name plus {BACKUP_FILE_SUFFIX}. Sessions started after this will use the hooks."
             + (" Codex then asks you to approve them: type /hooks in Codex." if "Codex" in agent_tool_names else ""))
         alert.addButtonWithTitle_("Install")
         alert.addButtonWithTitle_("Cancel")
