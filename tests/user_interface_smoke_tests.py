@@ -77,6 +77,8 @@ class RecordingOwner:
         self.note_to_send = None  # what the Talk to Each Other window returns: None for Cancel
         self.recipient_titles_to_choose = None  # the tab chosen under "Send the message to:", or None for each of them
         self.hooks_install_requests = []
+        self.process_info_requests = []  # (session ID, process ID)
+        self.lists_closed_after_escape = []
 
     def submit_action(self, action_request):
         self.submitted_actions.append(action_request)
@@ -129,6 +131,12 @@ class RecordingOwner:
 
     def install_hooks(self, agent_tool_names):
         self.hooks_install_requests.append(list(agent_tool_names))
+
+    def show_process_info(self, session_id, process_id):
+        self.process_info_requests.append((session_id, process_id))
+
+    def close_the_list_after_escape(self, list_controller):
+        self.lists_closed_after_escape.append(list_controller)
 
     def window_frame_changed(self, setting_name, frame):
         pass  # the list window's frame is saved by the app controller, not looked at here
@@ -791,7 +799,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
     def select_rows(self, *rows):
         self.list_controller.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(rows), False)
 
-    def test_only_window_and_tab_rows_can_be_selected_and_the_selection_is_an_outline(self):
+    def test_monitor_rows_and_the_plus_row_cant_be_selected_and_the_selection_is_an_outline(self):
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))
         outline_view = self.list_controller.outline_view
         self.assertTrue(outline_view.allowsMultipleSelection())
@@ -1615,9 +1623,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.set_shown_columns(["context_tokens", "memory_usage", "state", "state_duration"])
         name_frame = self.lay_out_row_view(3).name_text_field.frame()
         self.assertLessEqual(name_frame.origin.x + name_frame.size.width, self.lay_out_row_view(3).column_views["memory_usage"].frame().origin.x)
-        # Not selectable; a double-click shows its tab.
-        self.assertEqual(self.list_controller.outlineView_selectionIndexesForProposedSelection_(
-            outline_view, build_index_set([2, 3])).count(), 0)
+        # Selectable alone or together, but not with a window or tab row: then its tab is selected
+        # instead (user request, 2026-10-29). A double-click shows its tab.
+        def choose_selection(proposed_rows):
+            chosen_rows = self.list_controller.outlineView_selectionIndexesForProposedSelection_(
+                outline_view, build_index_set(proposed_rows))
+            return [row for row in range(outline_view.numberOfRows()) if chosen_rows.containsIndex_(row)]
+        self.assertEqual(choose_selection([2, 3]), [2, 3])
+        self.assertEqual(choose_selection([2, 3, 5]), [1, 5])
+        self.assertEqual(choose_selection([0, 1, 2]), [0, 1])
         process_item = outline_view.itemAtRow_(2)
         self.list_controller.find_clicked_item = lambda: process_item
         self.list_controller.rowDoubleClicked_(None)
@@ -1628,6 +1642,143 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(outline_view.numberOfRows(), 9)
         self.click_row_arrow(1)
         self.assertEqual(outline_view.numberOfRows(), 8)
+
+    def test_a_process_rows_menu_has_only_info_and_kill_and_kill_asks_first(self):  # user request, 2026-10-29
+        self.apply_snapshot_with_child_processes()
+        self.click_row_arrow(1)
+        self.assertEqual(self.build_right_click_menu_titles(3), ["Info", "---", "Kill"])
+        menu_items_by_title = self.build_right_click_menu_items_by_title(3)
+        self.list_controller.menuShowProcessInfo_(menu_items_by_title["Info"])
+        self.assertEqual(self.owner.process_info_requests, [("s1", 202)])
+        self.list_controller.menuKillProcess_(menu_items_by_title["Kill"])  # the user says No
+        self.assertEqual(self.owner.confirmation_action_names, ["kill_process"])  # remembered apart from Kill session's "kill"
+        self.assertTrue(self.owner.confirmation_questions[0].startswith(
+            'Kill ends "python3 -c import time; time.sleep(600) xxx'))
+        self.assertIn("…\" (process 202) and every process it started", self.owner.confirmation_questions[0])  # a long command is cut
+        self.assertEqual(self.submitted_actions, [])
+        self.owner.answer_to_confirmation = True
+        self.list_controller.menuKillProcess_(menu_items_by_title["Kill"])
+        self.assertEqual([(request.action, request.target, request.arguments) for request in self.submitted_actions],
+                         [("end_child_process", {"session_id": "s1"}, {"process_id": 202})])
+        # A right-click on one of several selected process rows acts on all of them.
+        self.list_controller.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set([2, 3]), False)
+        menu_items_by_title = self.build_right_click_menu_items_by_title(3)
+        self.assertEqual(list(menu_items_by_title), ["Info", "", "Kill 2 processes"])  # "" is the separator
+        self.assertFalse(menu_items_by_title["Info"].isEnabled())
+        self.list_controller.menuKillProcess_(menu_items_by_title["Kill 2 processes"])
+        self.assertTrue(self.owner.confirmation_questions[-1].startswith('Kill ends 2 processes ("caffeinate -i -t 300", "python3'))
+        self.assertEqual([request.arguments["process_id"] for request in self.submitted_actions[1:]], [201, 202])
+
+    def test_kill_and_info_still_work_when_a_process_ends_while_the_question_or_menu_is_open(self):  # code review, 2026-10-29
+        self.apply_snapshot_with_child_processes()
+        self.click_row_arrow(1)
+        self.select_rows(2, 3)
+        menu_items_by_title = self.build_right_click_menu_items_by_title(3)
+
+        def answer_yes_after_caffeinate_ended(explanation, action_name):
+            self.apply_snapshot_with_child_processes(child_processes=(
+                ChildProcessEntry(202, "python3 -c import time; time.sleep(600)", 950.0, True, None, None),))
+            return True
+        self.owner.ask_for_confirmation = answer_yes_after_caffeinate_ended
+        self.list_controller.menuKillProcess_(menu_items_by_title["Kill 2 processes"])
+        self.assertEqual([(request.target, request.arguments) for request in self.submitted_actions],
+                         [({"session_id": "s1"}, {"process_id": 201}), ({"session_id": "s1"}, {"process_id": 202})])
+        self.apply_snapshot_with_child_processes()  # both processes again
+        self.list_controller.outline_view.deselectAll_(None)
+        self.assertEqual(self.build_right_click_menu_titles(3), ["Info", "---", "Kill"])  # python3, whose row goes as the menu is open
+        self.apply_snapshot_with_child_processes(child_processes=())
+        self.list_controller.menuShowProcessInfo_(None)
+        self.assertEqual(self.owner.process_info_requests, [("s1", 202)])
+
+    def press_key(self, characters, key_code, modifier_flags=0):
+        """Sends a key press to the list as AppKit does."""
+        outline_view = self.list_controller.outline_view
+        outline_view.keyDown_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+            NSEventTypeKeyDown, NSMakePoint(0, 0), modifier_flags, 0, outline_view.window().windowNumber(), None, characters,
+            characters, False, key_code))
+
+    def test_return_shows_the_selected_tab_or_window_and_esc_closes_the_list(self):  # user request, 2026-10-29
+        self.apply_snapshot_with_child_processes()
+        self.click_row_arrow(1)  # rows: w1, planning, its 2 processes, phase0-tests, codex-review, w2, ...
+        for rows, characters, key_code, expected_target in (
+                ([1], "\r", 36, {"session_id": "s1"}),
+                ([0], "\x03", 76, {"window_id": "w1"}),  # the number pad's Enter
+                ([3], "\r", 36, {"session_id": "s1"}),  # a process row shows its tab
+                ([4, 5], "\r", 36, {"session_id": "s3"})):  # of several, the last one selected
+            self.select_rows(*rows)
+            self.press_key(characters, key_code)
+            self.assertEqual(self.submitted_actions[-1].target, expected_target, rows)
+        action_count = len(self.submitted_actions)
+        self.press_key("\r", 36, NSEventModifierFlagCommand)  # left to AppKit
+        self.assertEqual(len(self.submitted_actions), action_count)
+        self.press_key("\x1b", 53)
+        self.assertEqual(self.owner.lists_closed_after_escape, [self.list_controller])
+
+    def test_delete_kills_what_the_selected_rows_show_always_asking_first(self):  # user request, 2026-10-29
+        self.apply_snapshot_with_child_processes()
+        self.click_row_arrow(1)
+        self.owner.answer_to_confirmation = True
+        for rows, characters, key_code in (([1], "\x7f", 51), ([6], "", 117), ([2, 3], "\x7f", 51)):
+            self.select_rows(*rows)
+            self.press_key(characters, key_code)
+        # Not Kill session's "kill", and processes apart from sessions (code review, 2026-10-29).
+        self.assertEqual(self.owner.confirmation_action_names,
+                         ["kill_with_the_delete_key", "kill_with_the_delete_key", "kill_process_with_the_delete_key"])
+        self.assertEqual([(request.action, request.target, request.arguments) for request in self.submitted_actions],
+                         [("end_agent_process", {"session_id": "s1"}, None),
+                          ("end_agent_processes", {"session_ids": ["s10", "s11"]}, None),  # a window row: all its tabs
+                          ("end_child_process", {"session_id": "s1"}, {"process_id": 201}),
+                          ("end_child_process", {"session_id": "s1"}, {"process_id": 202})])
+
+    def test_left_on_process_rows_selects_their_tab_and_typing_a_name_selects_its_row(self):  # user request, 2026-10-29
+        self.apply_snapshot_with_child_processes()
+        self.click_row_arrow(1)
+        self.select_rows(3)
+        self.press_key(NSLeftArrowFunctionKey, 123)
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
+        self.assertEqual(self.list_controller.outline_view.numberOfRows(), 10)  # the tab row stays open
+        for characters, key_code in (("t", 17), ("a", 0)):
+            self.press_key(characters, key_code)
+        self.assertEqual([item.entry.title for item in self.list_controller.list_selected_items()], ["tandem-repeats"])
+
+    def test_the_first_asking_tab_is_selected_opening_its_collapsed_window(self):  # user request, 2026-10-29
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_two = window_two._replace(agent_sessions=(window_two.agent_sessions[0]._replace(status="asking"),)
+                                         + window_two.agent_sessions[1:])
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
+        outline_view = self.list_controller.outline_view
+        self.list_controller.toggle_expansion(outline_view.itemAtRow_(0))  # collapses agent-command-tab
+        self.select_rows(2)  # tandem-repeats
+        self.list_controller.select_the_first_asking_tab()
+        self.assertTrue(outline_view.isItemExpanded_(outline_view.itemAtRow_(0)))
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["phase0-tests"])
+        self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=1)._replace(monitors=(
+            snapshot.monitors[0]._replace(windows=(window_one._replace(agent_sessions=window_one.agent_sessions[:1]),)),)))
+        self.select_rows(1)
+        self.list_controller.select_the_first_asking_tab()  # no agent asks
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
+
+    def test_r_and_command_r_rename_the_one_selected_tab_or_window_row(self):  # user request, 2026-10-29
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        for row, modifier_flags, renamed_title in ((1, 0, "planning"), (0, NSEventModifierFlagCommand, "agent-command-tab")):
+            self.select_rows(row)
+            self.press_key("r", 15, modifier_flags)
+            self.assertTrue(self.list_controller.rename_in_progress)
+            self.assertEqual(self.list_controller.title_before_rename, renamed_title)
+            self.list_controller.cancel_rename()
+        self.select_rows(1, 2)
+        self.press_key("r", 15)  # with several rows selected, nothing is renamed
+        self.assertFalse(self.list_controller.rename_in_progress)
+        # Right after another letter, R goes on selecting a row by name (code review, 2026-10-29).
+        self.select_rows(1)
+        self.list_controller.last_name_letter_typed_at = 0
+        self.press_key("t", 17)
+        self.press_key("r", 15)
+        self.assertFalse(self.list_controller.rename_in_progress)
+        self.press_key("r", 15, NSEventModifierFlagCommand)  # Command-R still renames
+        self.assertTrue(self.list_controller.rename_in_progress)
+        self.list_controller.cancel_rename()
 
     def test_the_right_and_left_arrow_keys_open_and_close_a_selected_tab_row(self):  # code review, 2026-10-28
         outline_view = self.apply_snapshot_with_child_processes()
@@ -1832,6 +1983,16 @@ class AutomaticIconColorTests(unittest.TestCase):
         calls.clear()
         AppController.global_shortcut_pressed(stand_in_app_controller)
         self.assertEqual(calls, ["close dropdown", "show"])
+        # The sidebar it shows has the first agent asking a question selected (user request, 2026-10-29).
+        stand_in_app_controller.sidebar_controller.list_controller.select_the_first_asking_tab.assert_called_once_with()
+
+    def test_esc_hides_a_sidebar_that_hides_by_itself_and_gives_the_keyboard_back(self):  # user request, 2026-10-29
+        for sidebar_hides_by_itself in (True, False):  # True also for one the menu's Show sidebar slid in (code review, 2026-10-29)
+            stand_in_app_controller = unittest.mock.Mock()
+            stand_in_app_controller.sidebar_controller.hides_by_itself.return_value = sidebar_hides_by_itself
+            AppController.close_the_list_after_escape(stand_in_app_controller, stand_in_app_controller.sidebar_controller.list_controller)
+            self.assertEqual(stand_in_app_controller.sidebar_controller.hide_now.called, sidebar_hides_by_itself)
+            stand_in_app_controller.give_activation_to.assert_called_once_with(stand_in_app_controller.last_other_active_application)
 
 
 class AgentToolIconTests(unittest.TestCase):
@@ -2428,6 +2589,15 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertEqual(list_window_controller.window.level(), NSFloatingWindowLevel)
         list_window_controller.apply_settings(dict(self.owner.settings, list_window_is_always_on_top=False))
         self.assertEqual(list_window_controller.window.level(), NSNormalWindowLevel)
+
+    def test_esc_closes_the_window_also_while_a_field_is_being_typed_in(self):  # user request, 2026-10-29
+        window = self.controller.window
+        window.orderFront_(None)
+        window.makeFirstResponder_(self.controller.launch_command_fields[0])
+        self.assertTrue(window.isVisible())
+        window.sendEvent_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+            NSEventTypeKeyDown, NSMakePoint(0, 0), 0, 0, window.windowNumber(), None, "\x1b", "\x1b", False, 53))
+        self.assertFalse(window.isVisible())
 
     def test_settings_are_grouped_in_boxes_under_section_titles_in_a_resizable_scrolling_window(self):
         rows_view = self.controller.rows_view  # flipped: y grows downward

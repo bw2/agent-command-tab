@@ -16,8 +16,10 @@ How snapshots are applied without breaking expansion, renames or drags:
 import time
 
 import objc
-from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundStyleNormal, NSBezierPath, NSColor, NSCursor,
-                    NSDragOperationMove, NSDragOperationNone, NSEventModifierFlagControl, NSFont, NSFontAttributeName,
+from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundStyleNormal, NSBezierPath, NSCarriageReturnCharacter,
+                    NSColor, NSCursor, NSDeleteCharacter, NSDeleteFunctionKey, NSDragOperationMove, NSDragOperationNone,
+                    NSEnterCharacter, NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagOption,
+                    NSFont, NSFontAttributeName,
                     NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName,
                     NSGraphicsContext,
                     NSImageOnly, NSImageScaleNone,
@@ -45,6 +47,7 @@ from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_i
 from agent_command_tab.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
 from agent_command_tab.user_interface.named_colors import build_color_from_name
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
+from agent_command_tab.user_interface.process_info_alert import shorten_command_for_alert
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
                                                                  LONGEST_TEXT_BY_COLUMN_FIELD_NAME, RowTextParts,
                                                                  build_agent_session_row_text_parts,
@@ -138,7 +141,14 @@ COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usag
                               "agent_tool_icon", "state", "state_duration"]
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
 AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER = list_agent_tool_names_whose_sessions_can_talk_to_each_other()
-SELECTABLE_ROW_KINDS = ("window", "tab")  # not monitor rows or the "+" row (user request, 2026-10-21)
+# Not monitor rows or the "+" row (user request, 2026-10-21); process rows only alone or with
+# other process rows (outlineView_selectionIndexesForProposedSelection_; user request, 2026-10-29).
+SELECTABLE_ROW_KINDS = ("window", "tab", "process")
+ESCAPE_CHARACTER = "\x1b"  # the Esc key's characters (AppKit names no constant for it)
+RENAME_KEY = "r"  # alone or with Command (user request, 2026-10-29)
+# A letter typed this soon after another continues a name typed to select its row, as AppKit's own
+# selecting by name does for about this long.
+SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME = 1.0
 # The hover text of the greyed-out items in the menu of several selected rows that have all exited.
 AGENTS_HAVE_ENDED_TOOL_TIP = "The agents have ended"
 SELECTION_OUTLINE_WIDTH = 1.5
@@ -172,14 +182,14 @@ class OutlineListItem(NSObject):
 class OutlineViewWithoutDisclosureTriangles(NSOutlineView):
     """An NSOutlineView that draws no disclosure triangles of its own (each row has its own arrow
     button), that tells its delegate when the button goes down on a row and comes back up, so
-    holding a tab row can show that tab for a moment, and that has its delegate open and close
-    selected tab rows with the Right and Left arrow keys."""
+    holding a tab row can show that tab for a moment, and that lets its delegate handle the
+    list's own keys first (handle_key_press)."""
 
     def frameOfOutlineCellAtRow_(self, row):
         return NSZeroRect
 
     def keyDown_(self, event):
-        if not self.delegate().open_or_close_selected_tab_rows_for_arrow_key(event.charactersIgnoringModifiers()):
+        if not self.delegate().handle_key_press(event.charactersIgnoringModifiers(), event.modifierFlags()):
             objc.super(OutlineViewWithoutDisclosureTriangles, self).keyDown_(event)
 
     def mouseDown_(self, event):
@@ -274,6 +284,13 @@ def list_window_and_tab_item_keys(snapshot):
 def snapshot_shows_monitor_rows(snapshot):
     """Whether the list groups windows under monitor rows: only with two or more monitors."""
     return len(snapshot.monitors) > 1
+
+
+def list_sessions_and_processes_of_process_rows(process_items):
+    """Returns [(session ID, ChildProcessEntry)] for process rows' items, read at once: a snapshot
+    applied while a menu or an alert is open takes a row whose process ended away from its tab
+    row (code review, 2026-10-29)."""
+    return [(process_item.parent_item.entry.session_id, process_item.entry) for process_item in process_items]
 
 
 def build_index_set(indexes):
@@ -620,7 +637,8 @@ class AgentSessionListController(NSObject):
         confirm_closing_window(window_entry): asks the user whether to close that window;
             returns True for yes.
         ask_for_confirmation(explanation, action_name): asks "Are you sure?" before the action
-            ("clear" or "kill"), unless a remembered Yes lets it run; returns True for yes.
+            (one of settings_store.ACTIONS_THAT_ASK_FOR_CONFIRMATION), unless a remembered Yes
+            lets it run; returns True for yes.
         submit_action_and_report_failure(action_request, failure_title): like submit_action,
             and tells the user if the action failed.
         duplicate_agent_session(tab_id, folder, agent_tool_name): opens a copy of the tab's agent
@@ -632,6 +650,9 @@ class AgentSessionListController(NSObject):
         ask_for_note_asking_agent_sessions_to_talk_to_each_other(agent_session_entries,
             left_out_agent_session_entries): shows the Talk to Each Other window; returns (the
             note the user may have edited, the entries chosen to get it), or None for Cancel.
+        show_process_info(session_id, process_id): shows a process row's Info window.
+        close_the_list_after_escape(list_controller): Esc was pressed in the list; the owner
+            closes it and gives the keyboard back to the app that had it.
     """
 
     def initWithOwner_(self, owner):
@@ -667,6 +688,8 @@ class AgentSessionListController(NSObject):
         self.item_under_press = None  # the row the button last went down on: a drag moves only that row
         self.menu_target_item = None
         self.menu_target_agent_session_entries = []  # the agent sessions of the selected rows, for their menu
+        self.menu_target_processes = []  # (session ID, ChildProcessEntry) of each process a process row's menu acts on
+        self.last_name_letter_typed_at = 0  # when a key last went to the outline view's selecting of a row by name
         self.applying_expansion_state = False
         self.item_whose_expansion_is_changing = None
         self.item_being_renamed = None
@@ -1075,10 +1098,15 @@ class AgentSessionListController(NSObject):
     # ----- selection (user request, 2026-10-21) -----
 
     def outlineView_selectionIndexesForProposedSelection_(self, outline_view, proposed_selection_indexes):
-        """Keeps only window and tab rows of a proposed selection (a Shift-click range can span a monitor row)."""
-        return build_index_set(row for row in range(outline_view.numberOfRows())
-                               if proposed_selection_indexes.containsIndex_(row)
-                               and outline_view.itemAtRow_(row).kind in SELECTABLE_ROW_KINDS)
+        """Keeps the window, tab and process rows of a proposed selection (a Shift-click range can
+        span a monitor row). Process rows are selected alone or together, but not with window or
+        tab rows: then each one's tab is selected instead (user request, 2026-10-29)."""
+        selected_items = [outline_view.itemAtRow_(row) for row in range(outline_view.numberOfRows())
+                          if proposed_selection_indexes.containsIndex_(row)
+                          and outline_view.itemAtRow_(row).kind in SELECTABLE_ROW_KINDS]
+        if any(item.kind != "process" for item in selected_items):
+            selected_items = [item.parent_item if item.kind == "process" else item for item in selected_items]
+        return build_index_set(outline_view.rowForItem_(item) for item in selected_items)
 
     @objc.python_method
     def list_selected_items(self):
@@ -1145,6 +1173,133 @@ class AgentSessionListController(NSObject):
             return False
         self.set_previews_open(selected_items, is_open)
         return True
+
+    @objc.python_method
+    def handle_key_press(self, characters, modifier_flags):
+        """Handles the list's own keys; returns whether it did, otherwise the outline view handles
+        the key (moving the selection, or typing a name's first letters to select its row).
+
+        - Right and Left arrows open and close the selected tab rows (open_or_close_selected_tab_rows_for_arrow_key);
+          Left on selected process rows selects their tabs, as in Finder's lists.
+        - Return or Enter shows the selected tab or window, or a selected process row's tab, as a
+          double-click does (user request, 2026-10-29).
+        - Delete or Forward Delete kills the selected rows' agent sessions, or the selected
+          processes, asking first (user request, 2026-10-29).
+        - Esc closes the list and gives the keyboard back to the app that had it (user request, 2026-10-29).
+        - R or Command-R renames the one selected tab or window row (user request, 2026-10-29).
+          An R typed within SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME of another letter goes on
+          selecting a row by name instead, or it would rename the row the first letters chose
+          and the next letters would replace its title (code review, 2026-10-29).
+
+        The others are left to AppKit while Command, Option or Control is held: Control-Return
+        opens the selected row's menu (macOS's context menu key, from macOS 15).
+
+        Args:
+            characters: The key event's charactersIgnoringModifiers.
+            modifier_flags: The key event's modifierFlags.
+        """
+        if self.open_or_close_selected_tab_rows_for_arrow_key(characters):
+            return True
+        selected_items = self.list_selected_items()
+        process_rows_alone_are_selected = bool(selected_items) and all(item.kind == "process" for item in selected_items)
+        if characters == NSLeftArrowFunctionKey and process_rows_alone_are_selected:
+            self.outline_view.selectRowIndexes_byExtendingSelection_(
+                build_index_set(self.outline_view.rowForItem_(item.parent_item) for item in selected_items), False)
+            return True
+        is_plain_key = not modifier_flags & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl)
+        if (characters == RENAME_KEY and not modifier_flags & (NSEventModifierFlagOption | NSEventModifierFlagControl)
+                and (not is_plain_key or time.time() - self.last_name_letter_typed_at >= SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME)
+                and self.rename_the_selected_row()):
+            return True
+        if not is_plain_key:
+            return False
+        if characters in (NSCarriageReturnCharacter, NSEnterCharacter):
+            return self.show_the_selected_row()
+        if characters in (NSDeleteCharacter, NSDeleteFunctionKey):
+            if process_rows_alone_are_selected:
+                self.kill_processes(list_sessions_and_processes_of_process_rows(selected_items), "kill_process_with_the_delete_key")
+                return True
+            return self.kill_the_agent_sessions_of_the_selected_rows()
+        if characters == ESCAPE_CHARACTER:
+            self.owner.close_the_list_after_escape(self)
+            return True
+        if characters and characters.isprintable():  # the outline view takes it as a letter of a name typed to select a row
+            self.last_name_letter_typed_at = time.time()
+        return False
+
+    @objc.python_method
+    def show_the_selected_row(self):
+        """Shows the selected tab or window, or a selected process row's tab, as a double-click
+        does; of several selected rows, the last one selected, whose menu Control-Return opens.
+        Returns whether there was one to show."""
+        selected_row = self.outline_view.selectedRow()
+        item = self.outline_view.itemAtRow_(selected_row) if selected_row >= 0 else None
+        if item is not None and item.kind == "process":
+            item = item.parent_item
+        if item is None or item.kind not in ("window", "tab"):
+            return False
+        self.show_item(item)
+        return True
+
+    @objc.python_method
+    def select_the_first_asking_tab(self):
+        """Selects the first tab row, top to bottom, whose agent asks a question, opening the
+        collapsed monitor and window rows above it, and scrolls to it (user request,
+        2026-10-29: the global shortcut does this as it shows the list). The selection stays as
+        it is while no agent asks."""
+        def find_first_asking_tab_and_its_ancestors(items, ancestors):
+            for item in items:
+                if item.kind == "tab" and item.entry.status == "asking":
+                    return item, ancestors
+                if item.kind in ("monitor", "window"):
+                    found = find_first_asking_tab_and_its_ancestors(item.child_items, ancestors + [item])
+                    if found is not None:
+                        return found
+            return None
+        found = find_first_asking_tab_and_its_ancestors(self.top_level_items, [])
+        if found is None:
+            return
+        tab_item, ancestors = found
+        for ancestor in ancestors:  # top down: a row inside a collapsed one can't be expanded
+            if not self.outline_view.isItemExpanded_(ancestor):
+                self.toggle_expansion(ancestor)
+        row = self.outline_view.rowForItem_(tab_item)
+        if row >= 0:
+            self.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set([row]), False)
+            self.outline_view.scrollRowToVisible_(row)
+
+    @objc.python_method
+    def rename_the_selected_row(self):
+        """Renames the selected tab or window row, as its menu's Rename does, when it is the only
+        selected row. Returns whether it was."""
+        selected_items = self.list_selected_items()
+        if len(selected_items) != 1 or selected_items[0].kind not in ("window", "tab"):
+            return False
+        self.begin_rename(selected_items[0])
+        return True
+
+    @objc.python_method
+    def kill_the_agent_sessions_of_the_selected_rows(self):
+        """Kills the agent session of a selected tab row, or those of several selected rows or of
+        a window row's tabs, as Kill session and Kill sessions do, but always asking first
+        (remembered apart from them, user request, 2026-10-29): a key is easy to press by
+        mistake. Returns whether there was one to kill ("exited" rows have none)."""
+        selected_items = self.list_selected_items()
+        if len(selected_items) == 1 and selected_items[0].kind == "tab":
+            if selected_items[0].entry.status == "exited":
+                return False
+            self.kill_agent_session(selected_items[0].entry, "kill_with_the_delete_key")
+            return True
+        agent_session_entries = [entry for entry in self.list_agent_session_entries_of_the_selected_rows() if entry.status != "exited"]
+        if not agent_session_entries:
+            return False
+        self.kill_agent_sessions(agent_session_entries, "kill_with_the_delete_key")
+        return True
+
+    def outlineView_typeSelectStringForTableColumn_item_(self, outline_view, table_column, item):
+        # Typing a name's first letters selects its row, as in Finder's lists (user request,
+        # 2026-10-29); window and tab rows only, not the commands of process rows.
+        return self.build_row_text_parts(item).name_text if item.kind in ("window", "tab") else None
 
     def disclosureButtonClicked_(self, sender):
         row = self.outline_view.rowForView_(sender)
@@ -1697,9 +1852,20 @@ class AgentSessionListController(NSObject):
         menu.removeAllItems()
         menu.setAutoenablesItems_(False)
         item = self.find_clicked_item()
-        if item is not None and item.kind == "process":
-            item = item.parent_item  # a process row has its tab's menu
         self.menu_target_item = item
+        if item is not None and item.kind == "process":  # only Info and Kill (user requests, 2026-10-29)
+            # A right-click on one of several selected process rows acts on all of them, as Finder's menus do.
+            selected_items = self.list_selected_items()
+            self.menu_target_processes = list_sessions_and_processes_of_process_rows(
+                selected_items if any(selected_item is item for selected_item in selected_items) else [item])
+            info_item = self.add_menu_item(menu, "Info", "menuShowProcessInfo:")
+            if len(self.menu_target_processes) > 1:
+                info_item.setEnabled_(False)
+                info_item.setToolTip_("Info shows one process at a time")
+            menu.addItem_(NSMenuItem.separatorItem())
+            self.add_menu_item(menu, "Kill" if len(self.menu_target_processes) == 1
+                               else f"Kill {len(self.menu_target_processes)} processes", "menuKillProcess:")
+            return
         selected_items = self.list_selected_items()
         if item is not None and len(selected_items) >= 2 and any(selected_item is item for selected_item in selected_items):
             # A right-click on one of several selected rows; a single row keeps its own menu, selected
@@ -1896,11 +2062,16 @@ class AgentSessionListController(NSObject):
             f"{command} wasn't sent to every session")
 
     def menuKillSelectedSessions_(self, sender):
-        agent_session_entries = self.menu_target_agent_session_entries
+        self.kill_agent_sessions(self.menu_target_agent_session_entries, "kill")
+
+    @objc.python_method
+    def kill_agent_sessions(self, agent_session_entries, confirmation_action_name):
+        """Ends the agent processes of these sessions once the user says yes (or chose to be
+        asked no more under confirmation_action_name)."""
         if self.owner.ask_for_confirmation(
                 f"Kill ends the agent processes of {describe_session_count(len(agent_session_entries))} "
                 f"({list_tab_titles_for_alert(agent_session_entries)}) at once, with whatever they were doing; "
-                "their tabs stay open with their shells.", "kill"):
+                "their tabs stay open with their shells.", confirmation_action_name):
             self.owner.submit_action_and_report_failure(
                 ActionRequest("end_agent_processes", {"session_ids": [entry.session_id for entry in agent_session_entries]}),
                 "Not every session was ended")
@@ -1997,12 +2168,49 @@ class AgentSessionListController(NSObject):
             f"{command} wasn't sent")
 
     def menuKillSession_(self, sender):
-        tab_item = self.menu_target_item
+        self.kill_agent_session(self.menu_target_item.entry, "kill")
+
+    @objc.python_method
+    def kill_agent_session(self, tab_entry, confirmation_action_name):
+        """Ends a tab's agent process once the user says yes (or chose to be asked no more under confirmation_action_name)."""
         if self.owner.ask_for_confirmation(
-                f'Kill session ends the {tab_item.entry.agent_tool_name} process in "{tab_item.entry.tab_title}" at once, '
-                "with whatever it was doing; the tab stays open with its shell.", "kill"):
+                f'Kill session ends the {tab_entry.agent_tool_name} process in "{tab_entry.tab_title}" at once, '
+                "with whatever it was doing; the tab stays open with its shell.", confirmation_action_name):
             self.owner.submit_action_and_report_failure(
-                ActionRequest("end_agent_process", {"session_id": tab_item.entry.session_id}), "The session wasn't ended")
+                ActionRequest("end_agent_process", {"session_id": tab_entry.session_id}), "The session wasn't ended")
+
+    def menuShowProcessInfo_(self, sender):
+        session_id, child_process_entry = self.menu_target_processes[0]  # the row clicked: Info is off for several
+        self.owner.show_process_info(session_id, child_process_entry.process_id)
+
+    def menuKillProcess_(self, sender):
+        self.kill_processes(self.menu_target_processes, "kill_process")
+
+    @objc.python_method
+    def kill_processes(self, sessions_and_processes, confirmation_action_name):
+        """Ends these processes, and every process each started, once the user says yes (or chose
+        to be asked no more under confirmation_action_name).
+
+        Args:
+            sessions_and_processes: [(session ID, ChildProcessEntry)]
+                (list_sessions_and_processes_of_process_rows), read before any menu or alert shows.
+        """
+        if len(sessions_and_processes) == 1:
+            child_process_entry = sessions_and_processes[0][1]
+            what_ends = (f'"{shorten_command_for_alert(child_process_entry.command_text)}" (process '
+                         f"{child_process_entry.process_id}) and every process it started")
+        else:
+            what_ends = (f"{len(sessions_and_processes)} processes ("
+                         + ", ".join(f'"{shorten_command_for_alert(child_process_entry.command_text)}"'
+                                     for _, child_process_entry in sessions_and_processes)
+                         + ") and every process they started")
+        if not self.owner.ask_for_confirmation(f"Kill ends {what_ends} at once, with whatever they were doing.",
+                                               confirmation_action_name):
+            return
+        for session_id, child_process_entry in sessions_and_processes:  # the core refuses those that have ended
+            self.owner.submit_action_and_report_failure(
+                ActionRequest("end_child_process", {"session_id": session_id}, {"process_id": child_process_entry.process_id}),
+                "The process wasn't ended")
 
     def menuCloseWindow_(self, sender):
         window_item = self.menu_target_item

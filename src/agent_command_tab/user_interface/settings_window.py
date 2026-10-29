@@ -8,7 +8,8 @@ import threading
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxCustom, NSBoxSeparator, NSButton,
-                    NSColor, NSControlSizeMini, NSControlSizeSmall, NSFont, NSMakeRect, NSNoTitle, NSNormalWindowLevel,
+                    NSColor, NSControlSizeMini, NSControlSizeSmall, NSEventModifierFlagCommand, NSEventModifierFlagControl,
+                    NSEventModifierFlagOption, NSEventTypeKeyDown, NSFont, NSMakeRect, NSNoTitle, NSNormalWindowLevel,
                     NSPopUpButton, NSScreen, NSScrollView, NSSwitch, NSTextField, NSView, NSViewMinXMargin, NSViewWidthSizable,
                     NSWindow, NSWindowOcclusionStateVisible, NSWindowStyleMaskClosable,
                     NSWindowStyleMaskResizable, NSWindowStyleMaskTitled, NSWorkspace)
@@ -17,7 +18,7 @@ from PyObjCTools import AppHelper
 
 from agent_command_tab.settings_store import (LIST_COLUMNS, SMALLEST_WINDOW_SIZES, find_launch_command_problem,
                                               is_valid_setting_value, replace_agent_tool_field)
-from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_TITLES
+from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_TITLES, ESCAPE_CHARACTER
 from agent_command_tab.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
 from agent_command_tab.user_interface.named_colors import make_light_and_dark_mode_color_maker
 from agent_command_tab.user_interface.screen_layout import (WindowFrameSavingController,
@@ -84,6 +85,19 @@ class FlippedView(NSView):
 
     def isFlipped(self):
         return True
+
+
+class SettingsWindow(NSWindow):
+    """The settings window: Esc closes it as its close button does (user request, 2026-10-29),
+    also while a field is being typed in, whose text field would otherwise take Esc as a request
+    for completions. Closing saves that field (SettingsWindowController.windowWillClose_)."""
+
+    def sendEvent_(self, event):
+        if (event.type() == NSEventTypeKeyDown and event.charactersIgnoringModifiers() == ESCAPE_CHARACTER
+                and not event.modifierFlags() & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl)):
+            self.performClose_(None)
+            return
+        objc.super(SettingsWindow, self).sendEvent_(event)
 
 
 class SettingsWindowController(WindowFrameSavingController):
@@ -234,7 +248,7 @@ class SettingsWindowController(WindowFrameSavingController):
         scroll_view.setAutohidesScrollers_(True)
         scroll_view.setDrawsBackground_(False)
         scroll_view.setDocumentView_(rows_view)
-        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        window = SettingsWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, WINDOW_WIDTH, rows_height),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable, NSBackingStoreBuffered, False)
         window.setTitle_("AgentCommandTab Settings")

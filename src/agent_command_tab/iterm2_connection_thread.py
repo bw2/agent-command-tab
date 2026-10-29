@@ -28,7 +28,7 @@ from agent_command_tab.agent_process_tree import (an_agent_program_runs_through_
                                                   process_has_its_terminal, process_is_alive,
                                                   process_is_stopped, read_child_processes,
                                                   read_name_the_process_was_started_as, read_process_arguments_and_environment,
-                                                  read_process_current_folder, read_process_info,
+                                                  read_process_current_folder, read_process_details, read_process_info,
                                                   read_process_tree_resource_usage)
 from agent_command_tab.hook_event_tracking import (SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS,
                                                    apply_hook_event, find_agent_process_id_of_hook_event,
@@ -73,7 +73,8 @@ SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS = 30  # while a session is idle
 CONTEXT_USAGE_CHECK_INTERVAL_SECONDS = 5
 RESOURCE_USAGE_CHECK_INTERVAL_SECONDS = 3  # the Memory and CPU columns
 CPU_PERCENT_SHOWN_AS_IDLE = 3  # an idle agent's CPU use wavers between 0 and 2 percent
-SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED = 5  # "Kill Session": SIGTERM, then SIGKILL
+SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED = 5  # "Kill Session": SIGTERM, then SIGKILL (a sub row's "Kill" too)
+SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER = 0.5  # a sub row's Info
 CONVERSATION_FILE_RETRY_SECONDS = 15  # a conversation file not found yet (Codex writes it at the first prompt)
 CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up again in case the conversation changed
 CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "conversation_preview")  # screen reading values read from it
@@ -409,6 +410,8 @@ class DashboardCore:
         register("send_slash_command_to_agent_sessions", self.handle_send_slash_command_to_agent_sessions, True, True)
         register("end_agent_process", self.handle_end_agent_process, False, False)
         register("end_agent_processes", self.handle_end_agent_processes, False, False)
+        register("read_child_process_details", self.handle_read_child_process_details, True, False)
+        register("end_child_process", self.handle_end_child_process, False, False)
         register("pause_agent_sessions", self.handle_pause_agent_sessions, True, True)
         register("resume_agent_sessions", self.handle_resume_agent_sessions, True, True)
         register("ask_agent_sessions_to_talk_to_each_other", self.handle_ask_agent_sessions_to_talk_to_each_other, True, True)
@@ -731,6 +734,51 @@ class DashboardCore:
         """end_agent_process for every session of target {"session_ids": [...]} (the menu of
         several selected rows; user request, 2026-10-21)."""
         return await self.run_for_each_agent_session(action_request, self.handle_end_agent_process)
+
+    def child_process_is_listed(self, session_id, process_id):
+        """Whether the session's tab row lists the process as one of its sub rows, so a sub row's
+        Info and Kill can't reach any other process."""
+        return any(child_process.process_id == process_id
+                   for child_process in self.screen_readings_by_session_id.get(session_id, {}).get("child_processes", ()))
+
+    async def handle_read_child_process_details(self, action_request):
+        """Returns, in its details, what a sub row's Info shows about the process in arguments
+        {"process_id"} of target {"session_id"} (user request, 2026-10-29): read_process_details's
+        dict, with "cpu_percent", its and its descendants' CPU use over
+        SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER, rounded as the row's is."""
+        process_id = action_request.arguments["process_id"]
+        if not self.child_process_is_listed(action_request.target["session_id"], process_id):
+            return ActionResult(False, "that process is no longer listed under its tab")
+        first_resource_usage, first_read_at = read_process_tree_resource_usage(process_id), time.time()
+        await asyncio.sleep(SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER)
+        details, read_at = read_process_details(process_id), time.time()
+        if first_resource_usage is None or details is None:
+            return ActionResult(False, "that process has ended")
+        details["memory_bytes"], details["cpu_percent"] = round_memory_and_cpu_use(
+            details["memory_bytes"], compute_cpu_percent((first_resource_usage[1], first_read_at), (details["cpu_seconds"], read_at)))
+        return ActionResult(True, details=details)
+
+    async def handle_end_child_process(self, action_request):
+        """Ends the process in arguments {"process_id"}, a sub row of target {"session_id"}, and
+        every process below it ("Kill" in a sub row's menu; user request, 2026-10-29): killing
+        only a shell would leave the command in it running. SIGTERM, then SIGCONT for those
+        stopped (a paused session's), and SIGKILL for any still running
+        SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later, as Kill Session does."""
+        process_id = action_request.arguments["process_id"]
+        if not self.child_process_is_listed(action_request.target["session_id"], process_id):
+            return ActionResult(False, "that process is no longer listed under its tab")
+        # Listed first: once it ends, the processes below it are no longer its descendants.
+        process_ids = [process_id] + [process.process_id for process in list_descendant_processes(process_id, maximum_depth=None)]
+        send_signal_to_processes(process_ids, signal.SIGTERM)
+        send_signal_to_processes([listed_process_id for listed_process_id in process_ids if process_is_stopped(listed_process_id)],
+                                 signal.SIGCONT)
+        deadline = time.time() + SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED
+        while time.time() < deadline:
+            if not any(process_is_alive(listed_process_id) for listed_process_id in process_ids):
+                return ActionResult(True)
+            await asyncio.sleep(0.2)
+        send_signal_to_processes(process_ids, signal.SIGKILL)
+        return ActionResult(True)
 
     async def handle_pause_agent_sessions(self, action_request):
         """Pauses the agent sessions of target {"session_ids": [...]}: each agent as Ctrl+Z does,

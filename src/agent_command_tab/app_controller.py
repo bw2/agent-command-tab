@@ -43,6 +43,7 @@ from agent_command_tab.user_interface.app_icon import build_app_icon
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.menu_bar_status_item import MenuBarStatusItemController
 from agent_command_tab.user_interface.popover_container import ListPanelController, build_dropdown_popover
+from agent_command_tab.user_interface.process_info_alert import build_process_info_alert
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
                                                             convert_rect_to_frame_list, grow_frame_to_smallest_size,
                                                             read_monitors_from_screens)
@@ -60,14 +61,27 @@ APPEARANCE_NAMES_BY_CHOICE = {"auto": None, "dark": NSAppearanceNameDarkAqua, "l
 SETTINGS_THAT_PLACE_THE_SIDEBAR = ("show_as", "sidebar_mode", "sidebar_edge", "sidebar_width")
 
 
-def build_main_menu_with_the_edit_shortcuts():
-    """Returns a main menu holding just an Edit menu: Undo, Redo, Cut, Copy, Paste and Select All.
+def build_main_menu_with_the_settings_and_edit_shortcuts(settings_target):
+    """Returns a main menu holding an app menu whose Settings items open the settings with
+    Command-comma, as in nearly every Mac app, and Command-period (user request, 2026-10-29),
+    and an Edit menu: Undo, Redo, Cut, Copy, Paste and Select All.
 
     The dashboard, an accessory app, never shows a menu bar, but AppKit finds the Command-key
-    editing shortcuts in the main menu's items; without them, Command-C, V, X, A and Z do
-    nothing in its text fields (the Talk to Each Other note, renames, the settings). The items
-    have no target, so each goes to the field being edited.
+    shortcuts in the main menu's items; without them, Command-C, V, X, A and Z do
+    nothing in its text fields (the Talk to Each Other note, renames, the settings). The Edit
+    items have no target, so each goes to the field being edited.
+
+    Args:
+        settings_target: The object whose settingsShortcutPressed_ opens the settings (the AppController).
     """
+    app_menu = NSMenu.alloc().initWithTitle_("AgentCommandTab")
+    for key in (",", "."):
+        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Settings…", "settingsShortcutPressed:", key)
+        settings_item.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
+        settings_item.setTarget_(settings_target)
+        app_menu.addItem_(settings_item)
+    app_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("AgentCommandTab", None, "")
+    app_menu_item.setSubmenu_(app_menu)
     edit_menu = NSMenu.alloc().initWithTitle_("Edit")
     for title, action_name, key, modifier_flags in (
             ("Undo", "undo:", "z", NSEventModifierFlagCommand),
@@ -82,6 +96,7 @@ def build_main_menu_with_the_edit_shortcuts():
     edit_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Edit", None, "")
     edit_menu_item.setSubmenu_(edit_menu)
     main_menu = NSMenu.alloc().initWithTitle_("")
+    main_menu.addItem_(app_menu_item)
     main_menu.addItem_(edit_menu_item)
     return main_menu
 
@@ -315,17 +330,20 @@ class AppController(NSObject):
     def global_shortcut_pressed(self):
         """The global shortcut shows the list as the menu bar icon does and, pressed again, hides
         it, giving the keyboard back to the app that had it (user request, 2026-10-21)
-        (choose_what_the_global_shortcut_does)."""
+        (choose_what_the_global_shortcut_does). The list it shows has the first agent asking a
+        question selected (user request, 2026-10-29)."""
         self.close_a_dropdown_the_menu_showed()
         what_to_do = choose_what_the_global_shortcut_does(
             self.settings["show_as"], self.settings["sidebar_mode"], self.sidebar_controller.is_shown,
             self.list_window_controller.is_in_front(), self.popover.isShown())
         if what_to_do == "show_sidebar":
             self.show_the_sidebar()  # for a few seconds, or for good if it stays visible
+            self.sidebar_controller.list_controller.select_the_first_asking_tab()
         elif what_to_do == "hide_sidebar":
             self.sidebar_controller.hide_now()
         elif what_to_do == "show_window":
             self.show_the_list_window()
+            self.list_window_controller.list_controller.select_the_first_asking_tab()
         elif what_to_do == "hide_window":
             self.list_window_controller.hide()
             self.list_window_closed()
@@ -333,9 +351,29 @@ class AppController(NSObject):
                 self.give_activation_to(self.last_other_active_application)
         elif what_to_do == "open_dropdown":
             self.status_item_controller.show_popover()
+            self.dropdown_list_controller.select_the_first_asking_tab()
         elif what_to_do == "close_dropdown":
             self.close_dropdown()
             self.give_activation_to(self.application_in_front_before_dropdown)
+
+    @objc.python_method
+    def close_the_list_after_escape(self, list_controller):
+        """Esc in a list closes it and gives the keyboard back to the app that had it, as a second
+        press of the global shortcut does (user request, 2026-10-29); a sidebar set to stay
+        visible stays, and gives the keyboard back."""
+        if list_controller is self.dropdown_list_controller:
+            self.close_dropdown()
+            self.give_activation_to(self.application_in_front_before_dropdown)
+            return
+        if list_controller is self.list_window_controller.list_controller:
+            self.list_window_controller.hide()
+            self.list_window_closed()
+        elif self.sidebar_controller.hides_by_itself():  # also one the menu's Show sidebar slid in (code review, 2026-10-29)
+            self.sidebar_controller.hide_now()
+        self.give_activation_to(self.last_other_active_application)
+
+    def settingsShortcutPressed_(self, sender):
+        self.open_settings()
 
     @objc.python_method
     def show_the_list_window(self):
@@ -686,6 +724,21 @@ class AppController(NSObject):
         self.run_alert_in_front(alert)
 
     @objc.python_method
+    def show_process_info(self, session_id, process_id):
+        """Shows a sub row's Info window (user request, 2026-10-29) once the core has read its
+        process's details, or an alert saying why it couldn't."""
+        self.submit_action(ActionRequest("read_child_process_details", {"session_id": session_id}, {"process_id": process_id})
+                           ).add_done_callback(lambda done_future: AppHelper.callAfter(self.show_process_info_alert,
+                                                                                      done_future.result()))
+
+    @objc.python_method
+    def show_process_info_alert(self, action_result):
+        if not action_result.succeeded:
+            self.report_action_failure(action_result, "The process info couldn't be read")
+            return
+        self.run_alert_in_front(build_process_info_alert(action_result.details, time.time()))
+
+    @objc.python_method
     def find_launch_command(self, agent_tool_name):
         return next((agent_tool["launch_command"] for agent_tool in self.settings["agent_tools"]
                      if agent_tool["agent_tool_name"] == agent_tool_name), "")
@@ -933,8 +986,8 @@ def run_menu_bar_app(verbose):
     application.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, no Info.plist needed
     # For anything else that shows NSApp's icon; the dialogs get it from run_alert_in_front (user request, 2026-10-28).
     application.setApplicationIconImage_(build_app_icon())
-    application.setMainMenu_(build_main_menu_with_the_edit_shortcuts())
     app_controller = AppController.alloc().initWithVerbose_(verbose)
+    application.setMainMenu_(build_main_menu_with_the_settings_and_edit_shortcuts(app_controller))
     app_controller.start()
     # runEventLoop(installInterrupt=True) installs its Ctrl+C handler only when no NSApplication
     # exists yet, and one was made above, so it is installed here. Ctrl+C then terminates the app,

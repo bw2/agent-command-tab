@@ -41,8 +41,12 @@ GLOBAL_SHORTCUT_CHOICES = ["shift_command_tab", "command_fn_tab", "off"]
 # The app's look (user request, 2026-10-27): auto follows macOS's Light or Dark setting.
 APPEARANCE_CHOICES = ["auto", "dark", "light"]
 # The actions that ask "Are you sure?" with a "Remember my choice" checkbox: a Yes with it checked
-# puts the action in actions_that_run_without_asking (user request, 2026-10-27).
-ACTIONS_THAT_ASK_FOR_CONFIRMATION = ["clear", "kill", "close_window"]
+# puts the action in actions_that_run_without_asking (user request, 2026-10-27). "kill" is Kill
+# session; "kill_process", a sub row's Kill, "kill_with_the_delete_key", the Delete key's kill of
+# the selected rows' sessions, and "kill_process_with_the_delete_key", its kill of selected process
+# rows, are each remembered apart (user requests, 2026-10-29; code review, 2026-10-29).
+ACTIONS_THAT_ASK_FOR_CONFIRMATION = ["clear", "kill", "close_window", "kill_process", "kill_with_the_delete_key",
+                                     "kill_process_with_the_delete_key"]
 # The windows whose frames ([x, y, width, height]) are saved, with their smallest sizes.
 # The settings window is never narrower than the width its rows are laid out for.
 SMALLEST_WINDOW_SIZES = {"list_window_frame": (250, 200), "settings_window_frame": (540, 240)}

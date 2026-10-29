@@ -472,6 +472,35 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
     return sorted(child_processes, key=lambda child_process: child_process["child"].started_at)  # oldest first, detached ones too
 
 
+def read_process_details(process_id):
+    """Returns what a sub row's Info shows about its process (user request, 2026-10-29), or None
+    if it is gone: {"process_id", "command_line": its arguments as ps shows them, "agent_command":
+    the command in it as the agent wrote it, for a Claude Code shell, else None, "working_folder"
+    ("" if unknown), "started_at", "subprocesses": [{"process_id", "command_text"
+    (build_command_text's)}] of the processes below it, oldest first (user request, 2026-10-29),
+    and "memory_bytes" and "cpu_seconds" (read_process_tree_resource_usage's), its and theirs
+    together}. The command line keeps its line breaks, as a command with a heredoc has them."""
+    process = read_process_info(process_id)
+    resource_usage = read_process_tree_resource_usage(process_id)
+    if process is None or resource_usage is None:
+        return None
+    arguments = read_process_arguments_and_environment(process_id)[0]
+    processes_below = sorted(list_descendant_processes(process_id, maximum_depth=None), key=lambda process_below: process_below.started_at)
+    return {
+        "process_id": process_id,
+        "command_line": " ".join(arguments) or process.name,
+        "agent_command": find_the_command_a_claude_code_shell_runs(arguments),
+        "working_folder": read_process_current_folder(process_id),
+        "started_at": process.started_at,
+        "subprocesses": [
+            {"process_id": process_below.process_id,
+             "command_text": build_command_text(read_process_arguments_and_environment(process_below.process_id)[0], process_below.name)}
+            for process_below in processes_below],
+        "memory_bytes": resource_usage[0],
+        "cpu_seconds": resource_usage[1],
+    }
+
+
 def choose_helper_process_ids(descendant_processes):
     """Returns the IDs of the processes running below an agent between its turns (MCP servers, for
     example), which choose_command_the_agent_is_waiting_on never takes for a command, nor anything

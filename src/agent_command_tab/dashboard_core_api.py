@@ -11,8 +11,9 @@ ActionRequest = collections.namedtuple("ActionRequest", ["action", "target", "ar
 ActionRequest.__doc__ = ("One user action. target is a dict with any of computer_id, window_id, tab_id and "
                          "session_id; arguments is a dict, for example {\"new_title\": \"Reviews\"}.")
 
-ActionResult = collections.namedtuple("ActionResult", ["succeeded", "message"], defaults=[""])
-ActionResult.__doc__ = "What an action did. message explains a failure in plain words."
+ActionResult = collections.namedtuple("ActionResult", ["succeeded", "message", "details"], defaults=["", None])
+ActionResult.__doc__ = ("What an action did. message explains a failure in plain words; details is what an action "
+                        "that reads something returns (a dict), else None.")
 
 ActionDefinition = collections.namedtuple(
     "ActionDefinition", ["handler", "may_come_from_another_computer", "types_into_a_session"])
