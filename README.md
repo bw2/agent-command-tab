@@ -55,8 +55,8 @@ The shortcut needs the Accessibility permission (System Settings > Privacy & Sec
 .venv/bin/python -m unittest discover -s tests -p '*_tests.py'
 ```
 
-[docs/RELEASING.md](docs/RELEASING.md) describes how to publish a version.
+[docs/RELEASING.md](https://github.com/bw2/agent-command-tab/blob/main/docs/RELEASING.md) describes how to publish a version.
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The app uses iTerm2's `iterm2` Python package, which is licensed GPL-2.0-or-later. pip and the Homebrew formula install it alongside as a separate package.
+MIT; see [LICENSE](https://github.com/bw2/agent-command-tab/blob/main/LICENSE). The app uses iTerm2's `iterm2` Python package, which is licensed GPL-2.0-or-later. pip and the Homebrew formula install it alongside as a separate package.
