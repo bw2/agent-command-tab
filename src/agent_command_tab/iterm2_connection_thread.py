@@ -586,26 +586,30 @@ class DashboardCore:
         box is empty during a turn too. False when Claude Code reports nothing (another tool). Its
         "shell" while a background task runs after the turn ended, as its hooks report
         (find_when_the_hooks_ended_the_turn), counts as at the prompt: its input box takes text
-        then (code review, 2026-10-27)."""
+        then (code review, 2026-10-27). With no background task running, that "shell" is a
+        command of a turn that another Stop hook kept going (claude_code_reports_the_turn_going_on;
+        code review, 2026-10-28)."""
         claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
         if claude_agent_record is None:
             return False
         status = read_claude_code_session_status(claude_agent_record.get("config_folder"), agent_session["process_id"])
-        if status == "shell" and find_when_the_hooks_ended_the_turn(
-                self.hook_state_by_agent_process_id.get(agent_session["process_id"]),
-                self.status_set_in_iterm2_and_since_by_session_id.get(session_id, (None, float("inf")))[1]) is not None:
+        hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
+        if status == "shell" and (hook_state or {}).get("background_task_ids") != set() and find_when_the_hooks_ended_the_turn(
+                hook_state, self.status_set_in_iterm2_and_since_by_session_id.get(session_id, (None, float("inf")))[1]) is not None:
             return False
         return status is not None and status != "idle"
 
-    def claude_code_reports_the_turn_over(self, agent_session, seconds_iterm2s_value_has_held):
+    def claude_code_reports_the_turn_over(self, agent_session, seconds_working_has_held):
         """Whether Claude Code's own report of the session (read_claude_code_session_status) says
         idle, for a tab iTerm2 says is working, at a moment that can't be a turn's start: the
-        hooks reported the turn's end and no prompt since, or iTerm2's value has held for
-        SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING. iTerm2's Claude Code integration
-        set working again after turns that had ended with nothing running, which left their rows
-        "stuck" (user report, 2026-10-28; what set it isn't known). Claude Code says "shell" while
-        a command runs and "busy" while a Stop hook keeps the turn going, so neither ends here.
-        False when Claude Code reports nothing (another tool)."""
+        hooks reported the turn's end and no prompt since, or working has held for
+        SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING since iTerm2's value changed and
+        since the last prompt the hooks reported (Claude Code's own report may lag a new turn's
+        start; code review, 2026-10-28). iTerm2's Claude Code integration set working again after
+        turns that had ended with nothing running, which left their rows "stuck" (user report,
+        2026-10-28; what set it isn't known). Claude Code says "shell" while a command runs and
+        "busy" while a Stop hook keeps the turn going, so neither ends here. False when Claude
+        Code reports nothing (another tool)."""
         process_id = agent_session["process_id"]
         claude_agent_record = self.claude_agents_by_process_id.get(process_id)
         if claude_agent_record is None:
@@ -613,9 +617,24 @@ class DashboardCore:
         # No time is passed for iTerm2's value: it may have been set after the turn's end.
         hooks_report_the_turn_over = find_when_the_hooks_ended_the_turn(
             self.hook_state_by_agent_process_id.get(process_id), float("-inf")) is not None
-        if not hooks_report_the_turn_over and seconds_iterm2s_value_has_held < SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING:
+        if not hooks_report_the_turn_over and seconds_working_has_held < SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING:
             return False
         return read_claude_code_session_status(claude_agent_record.get("config_folder"), process_id) == "idle"
+
+    def claude_code_reports_the_turn_going_on(self, agent_session):
+        """Whether Claude Code's own report of the session (read_claude_code_session_status) says
+        its turn goes on after the Stop its hooks reported: another Stop hook (Claude Code's goal
+        feature) can block a Stop, and iTerm2's value then says working all along (code review,
+        2026-10-28). That is "busy" or "waiting", or "shell" while none of its background tasks
+        runs, so the command is the turn's own: while one runs after the turn ended, Claude Code
+        says "shell" too. False when Claude Code reports nothing (another tool)."""
+        process_id = agent_session["process_id"]
+        claude_agent_record = self.claude_agents_by_process_id.get(process_id)
+        if claude_agent_record is None:
+            return False
+        status = read_claude_code_session_status(claude_agent_record.get("config_folder"), process_id)
+        background_task_ids = (self.hook_state_by_agent_process_id.get(process_id) or {}).get("background_task_ids")
+        return status in ("busy", "waiting") or (status == "shell" and background_task_ids == set())
 
     def codex_conversation_may_be_another_sessions(self, session_id, agent_session):
         """Whether this Codex agent session shares its folder with another Codex agent session, or
@@ -1172,8 +1191,10 @@ class DashboardCore:
     def update_session_tracking(self, now):
         """Records when each session's status value changed and when its turns start and end, and
         forgets sessions that are gone. A turn end the tab agent's hooks report counts while
-        iTerm2's value still says working (find_when_the_hooks_ended_the_turn), and so does
-        Claude Code's own idle (claude_code_reports_the_turn_over)."""
+        iTerm2's value still says working (find_when_the_hooks_ended_the_turn), unless Claude
+        Code's own report says the turn goes on (claude_code_reports_the_turn_going_on), and so
+        does Claude Code's own idle (claude_code_reports_the_turn_over), which ends no turn
+        unless the hooks reported one."""
         live_session_ids = set()
         for gathered_window in self.gathered_windows:
             for gathered_tab in gathered_window["tabs"]:
@@ -1199,15 +1220,20 @@ class DashboardCore:
                     self.status_set_in_iterm2_and_since_by_session_id[session_id] = status_set_in_iterm2_and_since
                 first_session["status"] = self.choose_status_value_of_the_tabs_own_agent(
                     session_id, first_session, previous_tracking, status_set_in_iterm2_changed)
-                if (agent_session is not None and map_iterm2_status_value_to_state(first_session["status"]) == "working"
-                        and find_when_the_hooks_ended_the_turn(self.hook_state_by_agent_process_id.get(agent_session["process_id"]),
-                                                               status_set_in_iterm2_and_since[1]) is not None):
-                    first_session["status"] = "idle"  # its turn ended, though iTerm2 still says working while a background task runs
-                if (agent_session is not None and map_iterm2_status_value_to_state(first_session["status"]) == "working"
-                        and self.claude_code_reports_the_turn_over(agent_session, now - status_set_in_iterm2_and_since[1])):
-                    first_session["status"] = "idle"
+                ends_no_turn = False
+                if agent_session is not None and map_iterm2_status_value_to_state(first_session["status"]) == "working":
+                    hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
+                    if (find_when_the_hooks_ended_the_turn(hook_state, status_set_in_iterm2_and_since[1]) is not None
+                            and not self.claude_code_reports_the_turn_going_on(agent_session)):
+                        first_session["status"] = "idle"  # its turn ended, though iTerm2 still says working while a background task runs
+                    elif self.claude_code_reports_the_turn_over(agent_session, now - max(
+                            status_set_in_iterm2_and_since[1], (hook_state or {}).get("last_prompt_at") or float("-inf"))):
+                        first_session["status"] = "idle"
+                        # Without a turn end from the hooks, the working it replaces may be one iTerm2 set with
+                        # no turn at all (as the app restarted, say), so it ends no turn (code review, 2026-10-28).
+                        ends_no_turn = find_when_the_hooks_ended_the_turn(hook_state, float("-inf")) is None
                 tracking = track_status_value(previous_tracking, first_session["status"], now,
-                                              self.screen_readings_by_session_id.get(session_id))
+                                              self.screen_readings_by_session_id.get(session_id), ends_no_turn)
                 self.session_tracking_by_session_id[session_id] = tracking
                 if (previous_tracking is not None and tracking is not previous_tracking
                         and map_iterm2_status_value_to_state(first_session["status"]) == "asking"):

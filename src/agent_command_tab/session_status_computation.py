@@ -110,7 +110,7 @@ def status_change_ends_a_turn(previous_state, new_state):
     return new_state == "done" or (new_state == "idle" and previous_state in STATES_OF_A_TURN_UNDER_WAY)
 
 
-def track_status_value(session_tracking, iterm2_status_value, now, screen_reading=None):
+def track_status_value(session_tracking, iterm2_status_value, now, screen_reading=None, ends_no_turn=False):
     """Returns a session's tracking updated for its iTerm2 status value read now.
 
     The tracking records when the value last changed, when the current turn started (working
@@ -128,6 +128,9 @@ def track_status_value(session_tracking, iterm2_status_value, now, screen_readin
             None: a permission prompt that a check since it appeared found answered No or Esc
             ended the turn, though iTerm2 still says waiting, so working next is the turn the
             next prompt starts (code review, 2026-10-28).
+        ends_no_turn: Whether the value replaces one that may belong to no turn at all, so a
+            change from working to it records no turn end (Claude Code's own idle over a working
+            that iTerm2 set without a turn; code review, 2026-10-28).
 
     Returns:
         session_tracking itself when the value is unchanged, else a new dict with "status_value",
@@ -148,7 +151,7 @@ def track_status_value(session_tracking, iterm2_status_value, now, screen_readin
                             and bool(screen_reading.get("turn_was_interrupted")))
     if new_state == "working" and (previous_state not in STATES_OF_A_TURN_UNDER_WAY or turn_was_interrupted):
         tracking["turn_started_at"] = now
-    if status_change_ends_a_turn(previous_state, new_state):
+    if status_change_ends_a_turn(previous_state, new_state) and not ends_no_turn:
         tracking["last_turn_ended_at"] = now
     return tracking
 

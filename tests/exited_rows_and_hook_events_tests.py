@@ -258,6 +258,36 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
                                         lambda config_folder, process_id: "idle"):
             self.assertEqual(self.track(1.0), "working")  # may be a turn's start, before Claude Code's own report says busy
             self.assertEqual(self.track(1.0 + SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING), "idle")
+        # No turn the dashboard saw ended, so the row is idle, not done (code review, 2026-10-28).
+        self.assertNotIn("last_turn_ended_at", self.core.session_tracking_by_session_id["s1"])
+
+    def test_a_new_prompt_gets_the_wait_before_claude_codes_own_idle_counts(self):  # code review, 2026-10-28
+        self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
+        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+                                        lambda config_folder, process_id: "idle"):  # its own report lags the new turn
+            self.track(1.0)  # a working that iTerm2 set with no turn
+            self.assertEqual(self.track(1.0 + SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING), "idle")
+            self.core.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=30.0))
+            self.assertEqual(self.track(31.0), "working")  # iTerm2's value held 30 s, but the prompt is 1 s old
+            self.assertEqual(self.core.session_tracking_by_session_id["s1"]["turn_started_at"], 31.0)
+
+    def test_a_stop_another_stop_hook_blocked_keeps_the_turn_going(self):  # code review, 2026-10-28
+        # Claude Code's goal feature blocks the Stop, and the turn goes on with iTerm2 at working all along.
+        self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
+        claude_code_status = {"value": "busy"}
+        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+                                        lambda config_folder, process_id: claude_code_status["value"]):
+            self.assertEqual(self.track(1.0), "working")
+            self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0, background_tasks=[]))
+            self.assertEqual(self.track(6.0), "working")  # it thinks on
+            claude_code_status["value"] = "shell"
+            self.assertEqual(self.track(7.0), "working")  # a command of its own, since no background task runs
+            self.assertNotIn("last_turn_ended_at", self.core.session_tracking_by_session_id["s1"])
+            self.assertTrue(self.core.claude_code_reports_the_session_busy("s1", self.core.agent_sessions["s1"]))  # nothing typed in
+            # The Stop that ends it, leaving a background task running, which Claude Code reports as "shell" too.
+            self.core.note_hook_event(make_event("Stop", 101, sent_at=8.0, background_tasks=[{"id": "b1", "status": "running"}]))
+            self.assertEqual(self.track(9.0), "idle")
+            self.assertEqual(self.core.session_tracking_by_session_id["s1"]["last_turn_ended_at"], 9.0)
 
 
 class ChildProcessReadingTests(unittest.TestCase):

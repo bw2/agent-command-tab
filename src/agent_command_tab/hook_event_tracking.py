@@ -96,8 +96,9 @@ def find_when_the_hooks_ended_the_turn(hook_state, iterm2_status_change_time):
     2026-10-27); a value set after the Stop, or a later prompt, counts again.
 
     A Stop that another Stop hook blocks (Claude Code's goal feature) doesn't end the turn; when
-    iTerm2's value doesn't change as the turn goes on (it already said working), the row shows
-    the turn ended until the next prompt. Only for the tools whose hooks report prompts
+    iTerm2's value doesn't change as the turn goes on (it already said working), only Claude
+    Code's own report tells (DashboardCore.claude_code_reports_the_turn_going_on, which the
+    core checks before going by this). Only for the tools whose hooks report prompts
     (AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS): without them a turn that
     follows right after (Codex running a message `codex queue` held) would look ended, and Codex
     sets its own status accurately anyway.
