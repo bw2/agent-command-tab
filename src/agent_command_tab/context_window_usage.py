@@ -7,8 +7,9 @@ conversation file (user request, milestone 2: a tokens column, for example "425k
 - Codex writes ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<ID>.jsonl with "token_count"
   events whose last_token_usage.total_tokens is the context in use (find_codex_conversation_files).
 - The context window's size, for the share in use (user request, 2026-10-26: "134k (13%)" in the
-  Tokens column): Codex reports it with its usage; for Claude Code it follows from the model the session
-  was started with, from its arguments, environment or settings (read_claude_code_model_setting).
+  Tokens column): Codex reports it with its usage; for Claude Code it follows from the model of the
+  latest reply (read_model_from_claude_code_transcript) and from the model the session was started
+  with, from its arguments, environment or settings (read_claude_code_model_setting).
 
 Only the last BYTES_TO_READ_FROM_THE_END bytes are read, since transcripts reach tens of megabytes.
 """
@@ -17,6 +18,7 @@ import datetime
 import glob
 import json
 import os
+import re
 
 from agent_command_tab.claude_code_transcript_records import (RECORD_KINDS_THAT_START_A_TURN, classify_user_record,
                                                               list_message_blocks)
@@ -26,6 +28,14 @@ BYTES_TO_READ_FROM_THE_END = 512 * 1024
 LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END = 16 * 1024 * 1024
 CLAUDE_CODE_CONTEXT_WINDOW_TOKENS = 200_000
 CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS = 1_000_000
+# The newest version in each Claude model family whose context window is 200k unless chosen with
+# the "[1m]" suffix, from Claude Code 2.1.314's built-in model list. Newer models, and models not
+# listed, have a 1M window (user request, 2026-10-30: claude-opus-5-5 showed "175k (87%)" while
+# its status line said 1000k).
+NEWEST_CLAUDE_MODEL_VERSIONS_WITH_A_200K_CONTEXT_WINDOW = {"opus": (4, 6), "sonnet": (4, 6), "haiku": (4, 5)}
+# "claude-opus-4-6", "claude-haiku-4-5-20251001", "claude-opus-4-20250514" (4.0): a minor version
+# has one or two digits, so a date isn't taken for one.
+CLAUDE_MODEL_FAMILY_AND_VERSION_PATTERN = re.compile(r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?!\d)")
 
 
 def read_last_lines(file_path, byte_count=BYTES_TO_READ_FROM_THE_END):
@@ -124,11 +134,39 @@ def read_claude_code_model_setting(process_arguments, process_environment, confi
     return model if isinstance(model, str) else None
 
 
-def choose_claude_code_context_window_tokens(model_setting, context_tokens):
+def read_model_from_claude_code_transcript(file_path):
+    """Returns the model of the latest reply in a Claude Code transcript (for example
+    "claude-opus-5-5", without the "[1m]" suffix it may have been chosen with), or None."""
+    for record in read_last_records(file_path):
+        model = (record.get("message") or {}).get("model") if record.get("type") == "assistant" else None
+        if isinstance(model, str) and model != "<synthetic>":
+            return model
+    return None
+
+
+def claude_model_has_a_200k_context_window(model):
+    """Returns whether a Claude model's context window is 200k unless chosen with the "[1m]"
+    suffix: a Claude 3 model, or one up to NEWEST_CLAUDE_MODEL_VERSIONS_WITH_A_200K_CONTEXT_WINDOW
+    in its family, in its Bedrock and Vertex spellings too ("us.anthropic.claude-opus-4-6-v1")."""
+    if "claude-3-" in model:
+        return True
+    match = CLAUDE_MODEL_FAMILY_AND_VERSION_PATTERN.search(model)
+    return bool(match) and (int(match[2]), int(match[3] or 0)) <= NEWEST_CLAUDE_MODEL_VERSIONS_WITH_A_200K_CONTEXT_WINDOW[match[1]]
+
+
+def choose_claude_code_context_window_tokens(model_setting, model, context_tokens):
     """Returns the size of a Claude Code session's context window: 1M for a model chosen with the
-    "[1m]" suffix, or once the context holds more than 200k tokens (a 1M model chosen some other
-    way), else 200k."""
-    if (model_setting or "").lower().endswith("[1m]") or (context_tokens or 0) > CLAUDE_CODE_CONTEXT_WINDOW_TOKENS:
+    "[1m]" suffix, once the context holds more than 200k tokens (a 1M model chosen some other
+    way), or when its latest reply's model isn't one with a 200k window
+    (claude_model_has_a_200k_context_window), else 200k.
+
+    Args:
+        model_setting: The model the session was started with (read_claude_code_model_setting), or None.
+        model: The model of its latest reply (read_model_from_claude_code_transcript), or None.
+        context_tokens: The tokens in its context, or None.
+    """
+    if ((model_setting or "").lower().endswith("[1m]") or (context_tokens or 0) > CLAUDE_CODE_CONTEXT_WINDOW_TOKENS
+            or not claude_model_has_a_200k_context_window(model or "")):
         return CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS
     return CLAUDE_CODE_CONTEXT_WINDOW_TOKENS
 

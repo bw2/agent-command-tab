@@ -12,6 +12,7 @@ from agent_command_tab.agent_process_tree import read_process_arguments_and_envi
 from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens, find_claude_code_transcript,
                                                     read_claude_code_model_setting,
                                                     read_context_tokens_from_claude_code_transcript,
+                                                    read_model_from_claude_code_transcript,
                                                     read_turn_started_at_from_claude_code_transcript)
 from agent_command_tab.session_preview_computation import read_preview_fields_from_claude_code_transcript
 
@@ -98,7 +99,7 @@ class ClaudeCodeAdapter(AgentToolAdapter):
     def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
         return choose_claude_code_context_window_tokens(read_claude_code_model_setting(
             *read_process_arguments_and_environment(agent_process_id), (claude_agent_record or {}).get("config_folder")),
-            context_tokens)
+            read_model_from_claude_code_transcript(conversation_file_path), context_tokens)
 
     def read_turn_started_at(self, conversation_file_path):
         return read_turn_started_at_from_claude_code_transcript(conversation_file_path)

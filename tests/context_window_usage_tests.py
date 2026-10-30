@@ -5,13 +5,14 @@ import tempfile
 import time
 import unittest
 
-from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens, find_claude_code_transcript,
+from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens,
+                                                    claude_model_has_a_200k_context_window, find_claude_code_transcript,
                                                     find_codex_conversation_files, format_token_count,
                                                     read_claude_code_model_setting,
                                                     read_context_tokens_from_claude_code_transcript,
                                                     read_context_tokens_from_codex_conversation_file,
                                                     read_context_window_tokens_from_codex_conversation_file, read_last_lines,
-                                                    read_last_records,
+                                                    read_last_records, read_model_from_claude_code_transcript,
                                                     read_turn_started_at_from_claude_code_transcript,
                                                     read_turn_started_at_from_codex_conversation_file)
 
@@ -80,9 +81,31 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(read_claude_code_model_setting(["claude", "--verbose"], environment, config_folder), "sonnet[1m]")
         self.assertEqual(read_claude_code_model_setting(["claude", "--verbose"], {}, config_folder), "opus[1m]")
         self.assertIsNone(read_claude_code_model_setting(["claude"], {}, os.path.join(self.folder.name, "no-config")))
-        self.assertEqual(choose_claude_code_context_window_tokens("opus[1m]", 40_000), 1_000_000)
-        self.assertEqual(choose_claude_code_context_window_tokens("sonnet", 40_000), 200_000)
-        self.assertEqual(choose_claude_code_context_window_tokens(None, 250_000), 1_000_000)  # more than 200k fits only in 1M
+        self.assertEqual(choose_claude_code_context_window_tokens("opus[1m]", "claude-opus-4-6", 40_000), 1_000_000)
+        self.assertEqual(choose_claude_code_context_window_tokens("sonnet", "claude-sonnet-4-6", 40_000), 200_000)
+        self.assertEqual(choose_claude_code_context_window_tokens(None, "claude-opus-4-6", 250_000), 1_000_000)  # more than 200k fits only in 1M
+
+    def test_a_claude_code_sessions_context_window_follows_its_latest_replys_model(self):  # user request, 2026-10-30
+        path = self.write_lines("models.jsonl", [
+            {"type": "assistant", "message": {"model": "claude-opus-4-6", "usage": {"input_tokens": 5}}},
+            {"type": "assistant", "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 175_000}}},  # after /model
+            {"type": "assistant", "message": {"model": "<synthetic>", "usage": {"input_tokens": 0}}},
+        ])
+        self.assertEqual(read_model_from_claude_code_transcript(path), "claude-opus-5-5")
+        self.assertIsNone(read_model_from_claude_code_transcript(self.write_lines("no_reply.jsonl", [{"type": "user"}])))
+        # Claude Code started with no model setting: its default model's own window.
+        self.assertEqual(choose_claude_code_context_window_tokens(None, "claude-opus-5-5", 175_000), 1_000_000)
+        self.assertEqual(choose_claude_code_context_window_tokens(None, "claude-haiku-4-5-20251001", 50_000), 200_000)
+        self.assertEqual(choose_claude_code_context_window_tokens(None, None, 50_000), 1_000_000)  # not known: 1M
+
+    def test_only_claude_3_models_and_those_up_to_opus_and_sonnet_4_6_and_haiku_4_5_have_a_200k_window(self):
+        for model in ["claude-3-7-sonnet-20250219", "claude-opus-4-20250514", "claude-opus-4-1-20250805", "claude-opus-4-5",
+                      "claude-sonnet-4-5-20250929", "claude-opus-4-6", "us.anthropic.claude-sonnet-4-6-v1:0",
+                      "claude-haiku-4-5-20251001"]:
+            self.assertTrue(claude_model_has_a_200k_context_window(model), model)
+        for model in ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-sonnet-5-5",
+                      "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-4-10", ""]:
+            self.assertFalse(claude_model_has_a_200k_context_window(model), model)
 
     def test_files_without_usage_or_missing_files_give_none(self):
         self.assertIsNone(read_context_tokens_from_claude_code_transcript(self.write_lines("empty.jsonl", [{"type": "user"}])))
