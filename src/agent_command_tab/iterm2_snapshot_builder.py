@@ -48,6 +48,14 @@ def session_has_background_work(screen_reading):
             or any(child_process.is_background_shell for child_process in screen_reading.get("child_processes", ())))
 
 
+def agent_waits_for_its_first_prompt(screen_reading):
+    """Returns whether an agent has had no message since it started, which makes its idle session
+    "new" (user request, 2026-10-30): its hooks report no prompt since its start, and its
+    conversation file shows no reply, which a prompt sent while the app wasn't running to hear it
+    would have brought."""
+    return bool(screen_reading.get("hooks_report_no_prompt_since_the_agent_started")) and screen_reading.get("context_tokens") is None
+
+
 def choose_tool_the_agent_is_waiting_on(state, screen_reading, now):
     """Returns (name, started at) of the tool a working agent waits on, or None: the command it
     started, found from its processes at once ("running_command"), else the newest tool call of
@@ -255,6 +263,10 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         )
         status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
                                                      previous_displayed_state, now)
+    if state == "idle" and agent_waits_for_its_first_prompt(screen_reading or {}):
+        state, reason = "new", "started, with no message sent to it yet"
+        status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
+                                                     previous_displayed_state, now)
     if state == "idle" and session_has_background_work(screen_reading or {}):
         state, reason = "background", "at its prompt, with background processes running"
         status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
@@ -367,6 +379,7 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
     """
     exited_agent_sessions_by_session_id = exited_agent_sessions_by_session_id or {}
     window_entries_by_window_id = {}
+    window_count_by_title = collections.Counter()  # numbers the windows with the same title, in iTerm2's order
     for gathered_window in gathered_windows:
         agent_session_entries = []
         for gathered_tab in gathered_window["tabs"]:
@@ -384,7 +397,10 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
                 screen_readings_by_session_id.get(first_session["session_id"]), stuck_threshold_seconds,
                 seen_session_id, highlighted_session_id, now))
         if agent_session_entries:
-            window_entries_by_window_id[gathered_window["window_id"]] = build_window_entry(gathered_window, agent_session_entries)
+            window_entry = build_window_entry(gathered_window, agent_session_entries)
+            window_count_by_title[window_entry.title] += 1
+            window_entries_by_window_id[gathered_window["window_id"]] = window_entry._replace(
+                number_among_windows_with_the_same_title=window_count_by_title[window_entry.title])
 
     monitors = sorted(monitors, key=lambda monitor: (monitor["frame"][0], monitor["frame"][1])) or [PLACEHOLDER_MONITOR]
     monitor_index_by_window_id = assign_windows_to_monitors_by_largest_overlap(

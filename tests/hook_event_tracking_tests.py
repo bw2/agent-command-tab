@@ -4,7 +4,8 @@ event, whether its session ended normally, and Claude Code's background shells a
 import unittest
 
 from agent_command_tab.hook_event_tracking import (apply_hook_event, find_agent_process_id_of_hook_event,
-                                                   find_when_the_hooks_ended_the_turn)
+                                                   find_when_the_hooks_ended_the_turn,
+                                                   hooks_report_no_prompt_since_the_agent_started)
 
 
 def make_event(hook_event_name, sent_at, **fields):
@@ -41,6 +42,23 @@ class FindAgentProcessIdOfHookEventTests(unittest.TestCase):
 
 
 class ApplyHookEventTests(unittest.TestCase):
+    def test_no_prompt_since_the_start_until_the_first_one(self):  # user request, 2026-10-30
+        started = apply_events(make_event("SessionStart", 1.0, source="startup"))
+        self.assertTrue(hooks_report_no_prompt_since_the_agent_started(started))
+        # A /clear before the first prompt keeps it; a prompt ends it, also after a later /clear.
+        cleared = apply_hook_event(started, make_event("SessionStart", 2.0, source="clear"))
+        self.assertTrue(hooks_report_no_prompt_since_the_agent_started(cleared))
+        prompted = apply_hook_event(cleared, make_event("UserPromptSubmit", 3.0))
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(prompted))
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_hook_event(prompted, make_event("SessionStart", 4.0, source="clear"))))
+        # Not without the start (a resumed conversation, or a state from before starts were
+        # recorded), nor for Codex, whose hooks report no prompts.
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_events(make_event("SessionStart", 1.0, source="resume"))))
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_events(make_event("Stop", 1.0))))
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(
+            apply_events(make_event("SessionStart", 1.0, source="startup", agent_tool_name="Codex"))))
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(None))
+
     def test_a_normal_session_end_is_kept_but_clear_goes_on(self):
         hook_state = apply_events(make_event("SessionStart", 1.0, source="startup"))
         self.assertIsNone(hook_state["session_ended_at"])

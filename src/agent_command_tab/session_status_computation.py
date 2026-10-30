@@ -10,9 +10,12 @@ the agent runs (agent_process_tree). A turn end the agent's hooks reported
 # "paused": the agent process is stopped (Pause from the list, or Ctrl+Z) until it is resumed.
 # "background": idle, but with background processes it started still running (user request,
 # 2026-10-28; iterm2_snapshot_builder.session_has_background_work), so it isn't taken for idle.
-STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "background", "done", "idle", "paused", "unknown", "exited"]
+# "new": idle, but no message has been sent to it since it started (user request, 2026-10-30;
+# iterm2_snapshot_builder.agent_waits_for_its_first_prompt), so Hide Idle doesn't hide it.
+STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "background", "done", "new", "idle", "paused", "unknown",
+                           "exited"]
 # Between turns: the agent waits at its prompt, so /compact and /clear can be typed into it.
-STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done", "background"})
+STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done", "background", "new"})
 # During a turn, as iTerm2's status shows it: a permission prompt in between doesn't end the turn.
 STATES_OF_A_TURN_UNDER_WAY = frozenset({"working", "asking"})
 

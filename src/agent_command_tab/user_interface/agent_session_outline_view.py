@@ -47,7 +47,8 @@ from agent_command_tab.list_sorting import sort_agent_session_entries, sort_wind
 from agent_command_tab.session_status_computation import (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT,
                                                           split_agent_sessions_into_pausable_and_resumable)
 from agent_command_tab.settings_store import DEFAULT_SETTINGS
-from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries, replace_title_in_snapshot
+from agent_command_tab.snapshot_data_classes import (build_window_title_shown_in_the_list, iterate_agent_session_entries,
+                                                     rename_window_entry, replace_title_in_snapshot)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image, describe_agent_tool_icon
 from agent_command_tab.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
 from agent_command_tab.user_interface.named_colors import build_color_from_name, choose_list_background_color
@@ -95,6 +96,15 @@ DIM_DOT_ALPHA = 0.25  # a working dot's opacity in the dim half of its blink
 # How many measured text widths a list keeps (measure_text_width) before it starts over.
 LARGEST_NUMBER_OF_KEPT_TEXT_WIDTHS = 5000
 SECONDS_TO_HOLD_BEFORE_PEEKING = 0.15
+# How long a list waits for a window the "+" row opened to show, to select its tab row: its agent
+# starts within seconds, and a launch command that fails leaves a plain shell window, which an
+# agent started there by hand later mustn't move the selection to (code review, 2026-10-30).
+SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW = 60
+# How long after the "+" row opened that window a list still selects its tab row once both show: a
+# list that wasn't on screen when the window showed (the dropdown, which closes as "+" is used),
+# and a row Hide Idle hid for a moment (its tab "idle" until the hooks' report of its start makes
+# it "new"). Not hours later, with the selection the user left there since (code review, 2026-10-30).
+SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW = 10 * 60
 SMALLEST_TAB_NAME_WIDTH = 80  # a narrower sidebar or window drops columns (COLUMN_NAMES_IN_DROP_ORDER)
 # The spare room a sidebar's or list window's column keeps beyond its widest text, and how much
 # narrower that text may get before the column shrinks (choose_room_for_a_columns_texts).
@@ -757,6 +767,10 @@ class AgentSessionListController(NSObject):
         # prepare_to_appear), and rows_wait_for_the_list_to_appear says it has a rebuild to do.
         self.defers_rebuilding_while_hidden = False
         self.rows_wait_for_the_list_to_appear = False
+        # (window ID, when the "+" row opened it) of the window select_window_once_it_shows waits for, or None;
+        # once it showed, the same in window_that_showed, until the next rebuild selects its tab row.
+        self.window_waited_for = None
+        self.window_that_showed = None
         self.rename_in_progress = False
         self.drag_in_progress = False
         self.row_press_in_progress = False  # the button is down on a row (row_pressed until row_released)
@@ -912,6 +926,7 @@ class AgentSessionListController(NSObject):
             self.held_snapshot = snapshot
             return
         self.snapshot = snapshot
+        self.note_whether_the_window_waited_for_showed()
         if self.defers_rebuilding_while_hidden and not self.list_is_on_screen():
             self.rows_wait_for_the_list_to_appear = True
             return
@@ -973,6 +988,7 @@ class AgentSessionListController(NSObject):
             self.row_structure = new_row_structure
             if not self.update_rows_in_place(children_before_by_parent, heights_before_by_key):
                 self.reload_and_restore_expansion()
+        self.select_the_window_that_showed()
         self.on_snapshot_or_expansion_changed()  # a closed window may be gone
 
     @objc.python_method
@@ -1532,11 +1548,61 @@ class AgentSessionListController(NSObject):
         found = find_first_asking_tab_and_its_ancestors(self.top_level_items, [])
         if found is None:
             return
-        tab_item, ancestors = found
+        self.select_row_alone_and_scroll_to_it(*found)
+
+    @objc.python_method
+    def select_window_once_it_shows(self, window_id):
+        """Selects the first tab row of a window the "+" row opened, as select_the_first_asking_tab
+        selects a row, once the window is in a snapshot: it is listed only after its agent has
+        started (user request, 2026-10-30: in the folder of another window, it looked like that
+        window). It waits SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW at most for the window to show;
+        a list that isn't on screen then selects it when it appears, within
+        SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW of the "+"."""
+        self.window_waited_for = (window_id, time.time())
+        self.window_that_showed = None
+
+    @objc.python_method
+    def note_whether_the_window_waited_for_showed(self):
+        """Once the snapshot has the window select_window_once_it_shows waits for, has the next
+        rebuild select its tab row (select_the_window_that_showed), and past
+        SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW without it, stops waiting. Checked for every
+        snapshot, also one a hidden list only keeps, so the wait ends when the window shows rather
+        than when the list next appears (code review, 2026-10-30)."""
+        if self.window_waited_for is None:
+            return
+        window_id, opened_at = self.window_waited_for
+        if time.time() - opened_at > SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW:
+            self.window_waited_for = None
+        elif any(window_entry.window_id == window_id for monitor_entry in self.snapshot.monitors
+                 for window_entry in monitor_entry.windows):
+            self.window_that_showed = self.window_waited_for
+            self.window_waited_for = None
+
+    @objc.python_method
+    def select_the_window_that_showed(self):
+        """Selects the first tab row of the window note_whether_the_window_waited_for_showed found,
+        once, unless SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW have passed since the "+" opened it;
+        while Hide Idle hides the window's rows, it waits for them, within that time."""
+        if self.window_that_showed is None:
+            return
+        window_id, opened_at = self.window_that_showed
+        if time.time() - opened_at > SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW:
+            self.window_that_showed = None
+            return
+        window_item = self.items_by_key.get(("window", window_id))
+        if window_item is not None and window_item.child_items:
+            self.window_that_showed = None
+            self.select_row_alone_and_scroll_to_it(
+                window_item.child_items[0], [item for item in (window_item.parent_item, window_item) if item is not None])
+
+    @objc.python_method
+    def select_row_alone_and_scroll_to_it(self, item, ancestors):
+        """Selects only the item's row and scrolls to it, first expanding the collapsed rows among
+        its ancestors (the monitor and window rows above it, top down)."""
         for ancestor in ancestors:  # top down: a row inside a collapsed one can't be expanded
             if not self.outline_view.isItemExpanded_(ancestor):
                 self.toggle_expansion(ancestor)
-        row = self.outline_view.rowForItem_(tab_item)
+        row = self.outline_view.rowForItem_(item)
         if row >= 0:
             self.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set([row]), False)
             self.outline_view.scrollRowToVisible_(row)
@@ -2162,8 +2228,8 @@ class AgentSessionListController(NSObject):
         renamed_item = self.items_by_key.get(item.key) if item is not None else None
         if renamed_item is not None and renamed_item.entry is not None and new_title.strip():
             # Shown at once; the next snapshot confirms it (or puts the old name back if iTerm2 refused).
-            renamed_item.entry = renamed_item.entry._replace(
-                **{"tab_title" if renamed_item.kind == "tab" else "title": new_title.strip()})
+            renamed_item.entry = (renamed_item.entry._replace(tab_title=new_title.strip()) if renamed_item.kind == "tab"
+                                  else rename_window_entry(renamed_item.entry, new_title.strip()))
         self.redraw_visible_rows()
 
     @objc.python_method
@@ -2257,7 +2323,8 @@ class AgentSessionListController(NSObject):
             if other_window_items:
                 submenu = NSMenu.alloc().initWithTitle_("Move to window")
                 for window_item in other_window_items:
-                    submenu_item = self.add_menu_item(submenu, window_item.entry.title, "menuMoveToWindow:")
+                    submenu_item = self.add_menu_item(submenu, build_window_title_shown_in_the_list(window_item.entry),
+                                                      "menuMoveToWindow:")
                     submenu_item.setRepresentedObject_(window_item.item_id)
                 move_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Move to window", None, "")
                 move_item.setSubmenu_(submenu)

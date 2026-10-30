@@ -5,8 +5,8 @@ from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
 from agent_command_tab.iterm2_snapshot_builder import (DisplayedState, build_computer_snapshot,
                                                        build_folder_display_name, compute_context_fill_percent,
                                                        compute_displayed_state_since, resolve_agent_sessions)
-from agent_command_tab.snapshot_data_classes import (ChildProcessEntry, convert_snapshot_to_json_ready_dict,
-                                                     iterate_agent_session_entries)
+from agent_command_tab.snapshot_data_classes import (ChildProcessEntry, build_window_title_shown_in_the_list,
+                                                     convert_snapshot_to_json_ready_dict, iterate_agent_session_entries)
 
 MONITOR = {"monitor_id": "display-1", "name": "Built-in", "frame": (0, 0, 2000, 1300), "visible_frame": (0, 0, 2000, 1260)}
 
@@ -95,6 +95,17 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual(window.agent_sessions[0].tab_title, "Review bot")
         self.assertTrue(window.agent_sessions[0].tab_title_set_by_user)
 
+    def test_windows_with_the_same_title_are_numbered_in_iterm2s_order(self):  # user request, 2026-10-30
+        # The list order (newest first here) doesn't change which window keeps the plain title.
+        snapshot = build_snapshot([make_window(window_id, [make_tab(window_id + "-tab", "claude", path=path)])
+                                   for window_id, path in (("a", "/x/catalogs"), ("b", "/x/explorer"), ("c", "/x/catalogs"),
+                                                           ("d", "/x/catalogs"))],
+                                  window_order=["d", "c", "b", "a"])
+        windows = snapshot.monitors[0].windows
+        self.assertEqual([window.title for window in windows], ["catalogs", "catalogs", "explorer", "catalogs"])
+        self.assertEqual([build_window_title_shown_in_the_list(window) for window in windows],
+                         ["catalogs (3)", "catalogs (2)", "explorer", "catalogs"])
+
     def test_window_order_is_the_list_order_and_unknown_windows_follow(self):
         snapshot = build_snapshot([make_window(window_id, [make_tab(window_id + "-tab", "claude")]) for window_id in "abc"],
                                   window_order=["c", "a"])
@@ -164,6 +175,18 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual((entry.status, entry.status_reason), ("background", "at its prompt, with background processes running"))
         self.assertEqual(build_entry("idle", {"child_processes": (helper,)}).status, "idle")  # a helper isn't background work
         self.assertEqual(build_entry("working", {"background_task_count": 1}).status, "working")  # the turn goes first
+
+    def test_an_idle_session_with_no_prompt_since_it_started_is_new(self):  # user request, 2026-10-30
+        def build_entry(status, screen_reading):
+            return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
+                                  screen_readings={"session-1": screen_reading}).monitors[0].windows[0].agent_sessions[0]
+        no_prompt = {"hooks_report_no_prompt_since_the_agent_started": True}
+        entry = build_entry("idle", no_prompt)
+        self.assertEqual((entry.status, entry.status_reason), ("new", "started, with no message sent to it yet"))
+        self.assertEqual(build_entry("idle", {}).status, "idle")
+        self.assertEqual(build_entry("working", no_prompt).status, "working")
+        # A reply in its conversation file: a prompt was sent while the app wasn't running to hear it.
+        self.assertEqual(build_entry("idle", dict(no_prompt, context_tokens=58_000)).status, "idle")
 
     def test_a_tool_call_open_for_5_seconds_or_more_shows_as_running(self):  # user request, 2026-10-28
         def build_entry(screen_reading, status="working"):

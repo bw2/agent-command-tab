@@ -61,7 +61,9 @@ def apply_hook_event(hook_state, event):
     Codex, whose events list none), "last_prompt_at" and "last_turn_end_at": when the last prompt
     was submitted and the last turn ended, or None, "last_main_agent_tool_event_at": when the
     main agent last started or finished a tool call the hooks report (PreToolUse, PostToolUse;
-    a subagent's carry its agent_id), or None}.
+    a subagent's carry its agent_id), or None}, and once its SessionStart for a new process arrived,
+    "startup_reported_at": when it did (a key only then, so the states hook_states_store saved
+    before there was one still load).
 
     Args:
         hook_state: The state before, or None for the process's first event.
@@ -71,6 +73,8 @@ def apply_hook_event(hook_state, event):
                                      "background_task_ids": None, "last_prompt_at": None, "last_turn_end_at": None,
                                      "last_main_agent_tool_event_at": None})
     event_name = event.get("hook_event_name")
+    if event_name == "SessionStart" and event.get("source") == "startup":
+        hook_state["startup_reported_at"] = event.get("sent_at")
     if event_name == "UserPromptSubmit":
         hook_state["last_prompt_at"] = event.get("sent_at")
     if event_name == "Stop":
@@ -93,6 +97,16 @@ def apply_hook_event(hook_state, event):
     if event_name == "SessionEnd" and event.get("reason") not in SESSION_END_REASONS_OF_A_PROCESS_THAT_GOES_ON:
         hook_state["session_ended_at"] = event.get("sent_at")
     return hook_state
+
+
+def hooks_report_no_prompt_since_the_agent_started(hook_state):
+    """Returns whether the hooks reported the agent process starting (its SessionStart for a new
+    process) and no prompt since, which makes its idle row "new" (user request, 2026-10-30). Only
+    for the tools whose hooks report prompts (AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS);
+    a process whose start came before the app recorded starts (no "startup_reported_at") isn't new."""
+    return (hook_state is not None
+            and hook_state.get("agent_tool_name") in AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS
+            and hook_state.get("startup_reported_at") is not None and hook_state.get("last_prompt_at") is None)
 
 
 def find_when_the_hooks_ended_the_turn(hook_state, iterm2_status_change_time):

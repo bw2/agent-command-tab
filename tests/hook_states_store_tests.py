@@ -35,6 +35,15 @@ class HookStatesFileTests(unittest.TestCase):
         self.assertEqual(turn_ended["background_task_ids"], {"b1", "b2"})
         self.assertIsNone(unknown_tasks["background_task_ids"])
 
+    def test_a_started_state_and_one_saved_before_starts_were_recorded_both_load(self):  # user request, 2026-10-30
+        started = apply_hook_event(None, make_event("SessionStart", 101, source="startup"))
+        self.assertEqual(started["startup_reported_at"], 50.0)
+        saved_before = apply_hook_event(None, make_event("Stop", 102))
+        self.assertNotIn("startup_reported_at", saved_before)
+        states = {101: (1000.25, started), 102: (2000.5, saved_before)}
+        save_hook_states(self.file_path, states)
+        self.assertEqual(load_hook_states(self.file_path), states)
+
     def test_missing_unreadable_or_malformed_file_gives_no_states(self):
         self.assertEqual(load_hook_states(self.file_path), {})
         os.makedirs(os.path.dirname(self.file_path))

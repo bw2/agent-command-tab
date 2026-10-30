@@ -31,7 +31,8 @@ from agent_command_tab.agent_process_tree import (an_agent_program_runs_through_
                                                   read_process_tree_resource_usage)
 from agent_command_tab.hook_event_tracking import (SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS,
                                                    apply_hook_event, find_agent_process_id_of_hook_event,
-                                                   find_when_the_hooks_ended_the_turn)
+                                                   find_when_the_hooks_ended_the_turn,
+                                                   hooks_report_no_prompt_since_the_agent_started)
 from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, check_hooks
 from agent_command_tab.hook_states_store import load_hook_states, save_hook_states
 from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
@@ -471,8 +472,8 @@ class DashboardCore:
             action_request.arguments["launch_command"])
 
     async def handle_send_slash_command(self, action_request):
-        """Types /compact or /clear into an agent session that waits at its prompt, idle, done or
-        background as its row shows it (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT;
+        """Types /compact or /clear into an agent session that waits at its prompt, idle, done,
+        background or new as its row shows it (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT;
         iterm2_actions.type_slash_command checks its input box)."""
         session_id = action_request.target["session_id"]
         # Checked and typed holding the tab's lock, as every typing into a tab is: a held message may be being pasted.
@@ -602,8 +603,8 @@ class DashboardCore:
                      if agent_session_entry.session_id == session_id), "")
 
     def agent_waits_at_its_prompt(self, session_id, agent_session):
-        """Whether the agent session waits at its prompt: its row shows idle, done or background
-        (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT), and Claude Code doesn't report it busy."""
+        """Whether the agent session waits at its prompt: its row shows idle, done, background or
+        new (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT), and Claude Code doesn't report it busy."""
         displayed_state = self.displayed_state_by_session_id.get(session_id)
         return (displayed_state is not None and displayed_state.state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
                 and not self.claude_code_reports_the_session_busy(session_id, agent_session))
@@ -1607,7 +1608,8 @@ class DashboardCore:
         otherwise the background shells seen below the agent and its detached jobs
         (read_child_processes_periodically). Also whether the hooks report the turn over with
         background tasks running, as Claude Code's "shell" in `claude agents --json` then means
-        (iterm2_snapshot_builder; code review, 2026-10-29)."""
+        (iterm2_snapshot_builder; code review, 2026-10-29), and whether they report no prompt since
+        the agent started, which makes its idle row "new" (user request, 2026-10-30)."""
         for session_id, agent_session in self.agent_sessions.items():
             reading = self.screen_readings_by_session_id.setdefault(session_id, {})
             hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
@@ -1617,6 +1619,7 @@ class DashboardCore:
                 if reported_background_task_ids is not None else reading.get("background_shell_count", 0))
             reading["hooks_report_background_tasks_after_the_turn"] = bool(
                 reported_background_task_ids and find_when_the_hooks_ended_the_turn(hook_state, float("-inf")) is not None)
+            reading["hooks_report_no_prompt_since_the_agent_started"] = hooks_report_no_prompt_since_the_agent_started(hook_state)
 
     def read_again_the_status_of_claude_agents_iterm2_reports_none_for(self):
         """Returns claude_agents_by_process_id with the status of each Claude Code agent whose tab

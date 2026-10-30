@@ -7,7 +7,7 @@ Claude Code's background shells and agents (the lights after a tab's name). The 
 are the app's by their command, which names hook_event_forwarder.py, so installing again
 replaces them and removing takes out only them. Each file the installer changes is copied first
 to <file>.agent-command-tab-backup, the first time only, so that keeps the file as it was before
-the app changed it.
+the app changed it ({} for a file the app created).
 
 - Claude Code: settings.json in each config folder in use (claude_code.list_claude_config_folders,
   so a Claude Code started with CLAUDE_CONFIG_DIR=~/.claude_work gets them too). A session
@@ -235,6 +235,11 @@ def write_settings_file(settings, file_path):
         if not os.path.exists(file_path + BACKUP_FILE_SUFFIX):
             shutil.copy2(file_path, file_path + BACKUP_FILE_SUFFIX)
         mode = os.stat(file_path).st_mode & 0o777
+    elif not os.path.exists(file_path + BACKUP_FILE_SUFFIX):
+        # There was no file: the backup says so with {}, what a missing file reads as, or the next
+        # write would copy the app's own file there (code review, 2026-10-30).
+        with open(file_path + BACKUP_FILE_SUFFIX, "w") as backup_file:
+            backup_file.write("{}\n")
     file_descriptor, temporary_path = tempfile.mkstemp(dir=os.path.dirname(file_path), suffix=".tmp")
     with os.fdopen(file_descriptor, "w") as temporary_file:
         json.dump(settings, temporary_file, indent=2, ensure_ascii=False)

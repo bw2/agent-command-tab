@@ -59,12 +59,15 @@ ChildProcessEntry.__doc__ = ("One process an agent started, a sub row of its ope
 
 WindowEntry = collections.namedtuple(
     "WindowEntry",
-    ["window_id", "title", "window_title_set_by_user", "frame", "total_tab_count", "agent_sessions", "selected_tab_id"],
-    defaults=[None],
+    ["window_id", "title", "window_title_set_by_user", "frame", "total_tab_count", "agent_sessions", "selected_tab_id",
+     "number_among_windows_with_the_same_title"],
+    defaults=[None, 1],
 )
 WindowEntry.__doc__ = ("One iTerm2 window with at least one agent session tab. total_tab_count includes the tabs "
                        "that are hidden because they run no agent. selected_tab_id is the window's own selected "
-                       "tab, which may run no agent (unlike is_in_front, which marks only the key window's tab).")
+                       "tab, which may run no agent (unlike is_in_front, which marks only the key window's tab). "
+                       "number_among_windows_with_the_same_title is 1 for the first window in iTerm2's order with "
+                       "its title, 2 for the next one, and so on (build_window_title_shown_in_the_list).")
 
 MonitorEntry = collections.namedtuple("MonitorEntry", ["monitor_id", "name", "frame", "visible_frame", "windows"])
 MonitorEntry.__doc__ = "One monitor and the windows assigned to it, in the core's window list order."
@@ -94,18 +97,33 @@ def convert_snapshot_to_json_ready_dict(snapshot):
     return snapshot
 
 
+def rename_window_entry(window_entry, new_title):
+    """Returns the window entry with a new title, for a rename the list shows before a snapshot
+    from the core confirms it: numbered 1 until that snapshot numbers it among the windows with
+    the new title, rather than keeping the old title's number (code review, 2026-10-30)."""
+    return window_entry._replace(title=new_title, number_among_windows_with_the_same_title=1)
+
+
 def replace_title_in_snapshot(snapshot, kind, item_id, new_title):
     """Returns the snapshot with one window's title (kind "window") or one tab's title (kind
     "tab") replaced, for a rename the list shows before a snapshot from the core confirms it."""
 
     def replace_title_in_window(window_entry):
         if kind == "window":
-            return window_entry._replace(title=new_title) if window_entry.window_id == item_id else window_entry
+            return rename_window_entry(window_entry, new_title) if window_entry.window_id == item_id else window_entry
         return window_entry._replace(agent_sessions=tuple(
             entry._replace(tab_title=new_title) if entry.tab_id == item_id else entry for entry in window_entry.agent_sessions))
     return snapshot._replace(monitors=tuple(
         monitor_entry._replace(windows=tuple(replace_title_in_window(window_entry) for window_entry in monitor_entry.windows))
         for monitor_entry in snapshot.monitors))
+
+
+def build_window_title_shown_in_the_list(window_entry):
+    """Returns the window's title, with its number after it for the second and later windows
+    with that title ("tandem-repeat-catalogs (2)"): a window opened in the same folder as
+    another otherwise looks like the same window (user request, 2026-10-30)."""
+    number = window_entry.number_among_windows_with_the_same_title
+    return window_entry.title if number == 1 else f"{window_entry.title} ({number})"
 
 
 def iterate_agent_session_entries(snapshot):

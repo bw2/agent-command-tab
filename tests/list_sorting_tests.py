@@ -122,6 +122,13 @@ class SortWindowEntriesTests(unittest.TestCase):
         self.assertEqual([window.title for window in sort_window_entries(self.windows, "alphabet")],
                          ["Alpha", "empty", "middle", "zebra"])
 
+    def test_alphabet_puts_windows_with_the_same_title_in_their_numbers_order(self):  # user request, 2026-10-30
+        windows = [make_window("w1", "catalogs", [])._replace(number_among_windows_with_the_same_title=2),
+                   make_window("w2", "catalogs", []), make_window("w3", "catalogs", [])._replace(number_among_windows_with_the_same_title=3)]
+        self.assertEqual([window.window_id for window in sort_window_entries(windows, "alphabet")], ["w2", "w1", "w3"])
+        self.assertEqual([window.window_id for window in sort_window_entries(windows, "alphabet", is_reversed=True)],
+                         ["w3", "w1", "w2"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -150,6 +150,12 @@ class RowTextPartsTests(unittest.TestCase):
                          "Asking: the agent is waiting for your answer to a question, or for permission to use a tool")
         self.assertEqual(build_monitor_row_text_parts(MonitorEntry("m", "Built-in", (0, 0, 1, 1), (0, 0, 1, 1), ())).dot_tool_tip, "")
 
+    def test_a_window_row_shows_its_number_after_a_title_an_earlier_window_has(self):  # user request, 2026-10-30
+        window = make_window(["idle"])
+        self.assertEqual(build_window_row_text_parts(window, [], True).name_text, "project")
+        self.assertEqual(build_window_row_text_parts(window._replace(number_among_windows_with_the_same_title=2), [], True).name_text,
+                         "project (2)")
+
     def test_window_row_expanded_and_collapsed(self):
         window = make_window(["idle", "asking", "idle"])
         expanded_parts = build_window_row_text_parts(window, [], True)

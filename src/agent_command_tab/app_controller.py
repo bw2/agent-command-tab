@@ -35,7 +35,7 @@ from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
 from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
                                               load_settings_resolving_paths_at_first_run,
                                               move_the_settings_folder_of_the_old_name, save_settings)
-from agent_command_tab.snapshot_data_classes import choose_folder_for_new_agent_window
+from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list, choose_folder_for_new_agent_window
 from agent_command_tab.start_with_iterm2 import (AUTOLAUNCH_SCRIPT_FILE_NAME, build_command_that_starts_this_copy_of_the_app,
                                                  find_iterm2_autolaunch_folder, update_autolaunch_script_to_match_setting)
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
@@ -639,7 +639,7 @@ class AppController(NSObject):
         """Asks "Are you sure?" before an iTerm2 window, and the agent sessions in it, is closed."""
         agent_session_count = len(window_entry.agent_sessions)
         other_tab_count = window_entry.total_tab_count - agent_session_count
-        explanation = (f'Closing "{window_entry.title}" ends the {agent_session_count} agent '
+        explanation = (f'Closing "{build_window_title_shown_in_the_list(window_entry)}" ends the {agent_session_count} agent '
                        f'session{"" if agent_session_count == 1 else "s"} running in it')
         if other_tab_count:
             explanation += f' and closes its {other_tab_count} other tab{"" if other_tab_count == 1 else "s"}'
@@ -729,16 +729,21 @@ class AppController(NSObject):
             sidebar_window.setLevel_(sidebar_window_level)
 
     @objc.python_method
-    def submit_action_and_report_failure(self, action_request, failure_title):
+    def submit_action_and_report_failure(self, action_request, failure_title, after_success=None):
         """Sends an action the user chose from a menu to the core and, should it fail, says why
-        in an alert, since the list alone wouldn't show it (a command not typed, say)."""
+        in an alert, since the list alone wouldn't show it (a command not typed, say). Once it
+        succeeds, after_success(action_result), if given, runs on the main thread."""
+
+        def handle_action_result(action_result):
+            if not action_result.succeeded:
+                self.report_action_failure(action_result, failure_title)
+            elif after_success is not None:
+                after_success(action_result)
         self.submit_action(action_request).add_done_callback(
-            lambda done_future: AppHelper.callAfter(self.report_action_failure, done_future.result(), failure_title))
+            lambda done_future: AppHelper.callAfter(handle_action_result, done_future.result()))
 
     @objc.python_method
     def report_action_failure(self, action_result, failure_title):
-        if action_result.succeeded:
-            return
         alert = NSAlert.alloc().init()
         alert.setMessageText_(failure_title)
         alert.setInformativeText_(action_result.message[:1].upper() + action_result.message[1:] + ".")
@@ -748,16 +753,10 @@ class AppController(NSObject):
     def show_process_info(self, session_id, process_id):
         """Shows a sub row's Info window (user request, 2026-10-29) once the core has read its
         process's details, or an alert saying why it couldn't."""
-        self.submit_action(ActionRequest("read_child_process_details", {"session_id": session_id}, {"process_id": process_id})
-                           ).add_done_callback(lambda done_future: AppHelper.callAfter(self.show_process_info_alert,
-                                                                                      done_future.result()))
-
-    @objc.python_method
-    def show_process_info_alert(self, action_result):
-        if not action_result.succeeded:
-            self.report_action_failure(action_result, "The process info couldn't be read")
-            return
-        self.run_alert_in_front(build_process_info_alert(action_result.details, time.time()))
+        self.submit_action_and_report_failure(
+            ActionRequest("read_child_process_details", {"session_id": session_id}, {"process_id": process_id}),
+            "The process info couldn't be read",
+            lambda action_result: self.run_alert_in_front(build_process_info_alert(action_result.details, time.time())))
 
     @objc.python_method
     def find_launch_command(self, agent_tool_name):
@@ -792,7 +791,17 @@ class AppController(NSObject):
         self.close_dropdown()
         self.submit_action_and_report_failure(ActionRequest("start_agent_session", {}, {
             "folder": choose_folder_for_new_agent_window(snapshot, time.time(), os.path.expanduser("~")),
-            "launch_command": launch_command}), "The agent wasn't started")
+            "launch_command": launch_command}), "The agent wasn't started", self.select_the_new_window_once_it_shows)
+
+    @objc.python_method
+    def select_the_new_window_once_it_shows(self, action_result):
+        """Has every list select the tab row of the window start_agent_session opened once the
+        window shows in it (user request, 2026-10-30: in the folder of another window, it looked
+        like that window)."""
+        if action_result.details is None:  # iTerm2 gave no window: its session ended right away
+            return
+        for list_controller in self.list_all_list_controllers():
+            list_controller.select_window_once_it_shows(action_result.details["window_id"])
 
     @objc.python_method
     def open_settings(self):

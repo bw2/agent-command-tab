@@ -11,6 +11,7 @@ sessions go last in either direction.
 """
 
 from agent_command_tab.session_status_computation import STATES_IN_URGENCY_ORDER
+from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list
 
 
 def find_when_the_shown_state_started(agent_session_entry):
@@ -108,7 +109,8 @@ def sort_window_entries(window_entries, list_sort_order, list_ranked_agent_sessi
     if list_sort_order == "manual":
         return list(window_entries)
     if list_sort_order == "alphabet":
-        return sort_by_rank(window_entries, lambda window_entry: window_entry.title.casefold(), is_reversed)
+        return sort_by_rank(window_entries, lambda window_entry: build_window_title_shown_in_the_list(window_entry).casefold(),
+                            is_reversed)
     rank_agent_session = AGENT_SESSION_RANK_BY_LIST_SORT_ORDER[list_sort_order]
 
     def rank_window_by_its_first_agent_session(window_entry):

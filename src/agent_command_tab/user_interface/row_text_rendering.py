@@ -12,6 +12,7 @@ import time
 from agent_command_tab.context_window_usage import format_token_count
 from agent_command_tab.list_sorting import find_when_the_shown_state_started
 from agent_command_tab.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
+from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list
 
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
@@ -57,6 +58,7 @@ DOT_GLYPH_AND_COLOR_BY_STATE = {
     "working": ("●", "green"),
     "background": ("●", "yellow"),  # steady, the color of the background task lights (user request, 2026-10-28)
     "done": ("✔", "green"),
+    "new": ("✦", "green"),  # user request, 2026-10-30
     "idle": ("○", "gray"),
     "paused": ("‖", "purple"),
     "unknown": ("◌", "gray"),
@@ -74,6 +76,7 @@ STATE_TEXT_COLOR_NAME_BY_STATE = {
     "working": "green_text",  # a tab row's "thinking" and "running"
     "background": "amber",  # its "running" in yellow (user request, 2026-10-28), darker in light mode to read on white
     "done": "gray_in_light_mode_only",
+    "new": "green_text",  # user request, 2026-10-30
     "idle": "light_gray",  # a little fainter than gray (user request, 2026-10-28)
     "paused": "purple",
     "unknown": "pure_black_or_white",
@@ -95,6 +98,7 @@ MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2
     "working": "the agent is thinking or running a command",
     "background": "the agent is at its prompt, and processes it started keep running in the background",
     "done": "the agent is done and you haven't looked at its last message yet",  # the user's wording, 2026-10-27
+    "new": "the agent has started, and no message has been sent to it yet",
     "idle": "nothing new here since you last looked at this tab",
     # A plain CONT signal would leave it a background job (agent_session_pausing), so Resume types fg.
     "paused": "the agent process has been suspended (Ctrl+Z, or a STOP signal); Resume types fg to continue it",
@@ -326,7 +330,7 @@ def build_window_row_text_parts(window_entry, is_last_child_at_each_level, is_ex
         dot_blinks=most_urgent_state == "working",  # blinks like its working tab's dot
         # Its most urgent tab's state, without "The most urgent status among this window's tabs:" before it (user request, 2026-10-27).
         dot_tool_tip=describe_state(most_urgent_state),
-        name_text=window_entry.title,
+        name_text=build_window_title_shown_in_the_list(window_entry),
         details_text=details_text,
     )
 

@@ -3,6 +3,7 @@
 Set AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the list looks like.
 """
 
+import concurrent.futures
 import io
 import math
 import os
@@ -25,19 +26,23 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSNormalWindowLevel, NSPopover,
                     NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSView, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
-from Foundation import NSIndexSet
+from Foundation import NSContainsRect, NSIndexSet
 
 from agent_command_tab.app_controller import AppController, yield_activation_to
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS
+from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
-from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry
+from agent_command_tab.snapshot_data_classes import (AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry,
+                                                     build_window_title_shown_in_the_list)
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
                                                                 PANEL_SIDE_MARGIN, POPOVER_WIDTH, SMALLEST_POPOVER_WIDTH,
                                                                 SMALLEST_SORT_POPUP_WIDTH, TOP_BAR_HEIGHT, ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
                                                                          DIM_DOT_ALPHA,
-                                                                         GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT, SMALLEST_TAB_NAME_WIDTH,
+                                                                         GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT,
+                                                                         SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW,
+                                                                         SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW, SMALLEST_TAB_NAME_WIDTH,
                                                                          TAB_ROW_HEIGHT_WITH_PREVIEW, TEXT_FIELD_INSETS,
                                                                          AgentSessionListController, RowButton,
                                                                          RowViewWithSelectionOutline, build_index_set,
@@ -1293,6 +1298,24 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(tab_item.entry.tab_title, "new name")
         self.assertEqual(self.submitted_actions[-1].action, "rename_tab")
 
+    def test_a_renamed_window_shows_no_number_until_the_core_numbers_it_again(self):  # code review, 2026-10-30
+        # "proj (2)" renamed "other" showed "other (2)".
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two._replace(number_among_windows_with_the_same_title=2))),)))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        window_row = 4
+        window_item = self.list_controller.outline_view.itemAtRow_(window_row)
+        self.list_controller.begin_rename(window_item)
+        self.assertEqual(self.list_controller.title_before_rename, "tandem-repeats")  # the title, without its number
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, window_row, False)
+        row_view.name_text_field.setStringValue_("other")
+        notification = type("NotificationStandIn", (), {"object": lambda self: row_view.name_text_field})()
+        self.list_controller.controlTextDidEndEditing_(notification)
+        self.assertEqual(build_window_title_shown_in_the_list(window_item.entry), "other")
+        self.assertEqual(self.submitted_actions[-1].action, "rename_window")
+
     def test_a_rename_ended_by_a_click_on_another_row_keeps_the_new_name_after_the_release(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.window.contentView().layoutSubtreeIfNeeded()
@@ -2062,6 +2085,96 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.select_the_first_asking_tab()  # no agent asks
         self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
 
+    def test_a_window_the_plus_row_opened_is_selected_and_scrolled_to_once_it_shows(self):  # user request, 2026-10-30
+        # In the folder of another window, it looked like that window, and nothing pointed to it.
+        snapshot = make_sample_snapshot(second_window_tabs=12)
+        new_window = WindowEntry("w3", "tandem-repeats", False, (0, 0, 800, 600), 1, (make_entry("30", "new-session", "idle"),),
+                                 number_among_windows_with_the_same_title=2)
+        with_the_new_window = snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=snapshot.monitors[0].windows + (new_window,)),))
+        outline_view = self.list_controller.outline_view
+        self.list_controller.apply_snapshot(snapshot)
+        self.select_rows(1)
+        self.list_controller.select_window_once_it_shows("w3")
+        self.list_controller.apply_snapshot(snapshot)  # its agent hasn't started yet
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
+        self.list_controller.apply_snapshot(with_the_new_window)
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["new-session"])
+        self.assertGreater(outline_view.visibleRect().origin.y, 0)  # scrolled down to it, at the end of the list
+        self.assertTrue(NSContainsRect(outline_view.visibleRect(), outline_view.rectOfRow_(outline_view.selectedRow())))
+        self.select_rows(1)
+        self.list_controller.apply_snapshot(with_the_new_window._replace(taken_at=2.0))  # only once
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
+        # While Hide Idle hides its row, nothing is selected; once the row shows, it is (its tab
+        # was "idle" until the hooks' report of its start made it "new"; code review, 2026-10-30).
+        self.list_controller.set_idle_tabs_are_hidden(True)
+        self.list_controller.apply_snapshot(snapshot)
+        self.list_controller.select_window_once_it_shows("w3")
+        self.list_controller.apply_snapshot(with_the_new_window)
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
+        self.list_controller.set_idle_tabs_are_hidden(False)
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["new-session"])
+        self.select_rows(1)
+        # Nor once the wait is over: its launch command failed, and an agent was started there by
+        # hand later (code review, 2026-10-30).
+        self.list_controller.apply_snapshot(snapshot)
+        self.list_controller.select_window_once_it_shows("w3")
+        with unittest.mock.patch("agent_command_tab.user_interface.agent_session_outline_view.time.time",
+                                 return_value=time.time() + SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW + 1):
+            self.list_controller.apply_snapshot(snapshot)
+        self.list_controller.apply_snapshot(with_the_new_window)
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
+
+    def test_a_hidden_list_selects_a_window_that_showed_in_time_when_it_appears_later(self):  # code review, 2026-10-30
+        # The wait for the window ended when the list next appeared, so the dropdown, closed as
+        # "+" is used, selected nothing once reopened a minute later.
+        snapshot = make_sample_snapshot()
+        new_window = WindowEntry("w3", "tandem-repeats", False, (0, 0, 800, 600), 1, (make_entry("30", "new-session", "new"),))
+        self.list_controller.defers_rebuilding_while_hidden = True  # as the app sets it for its three lists
+        self.list_controller.apply_snapshot(snapshot)
+        self.window.orderOut_(None)  # the dropdown closes
+        self.list_controller.select_window_once_it_shows("w3")
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=snapshot.monitors[0].windows + (new_window,)),)))
+        with unittest.mock.patch("agent_command_tab.user_interface.agent_session_outline_view.time.time",
+                                 return_value=time.time() + SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW + 60):
+            self.list_controller.prepare_to_appear()
+        self.window.orderFrontRegardless()
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["new-session"])
+        # Not hours later, though: the selection the user left there since stays (code review, 2026-10-30).
+        self.select_rows(1)
+        self.window.orderOut_(None)
+        self.list_controller.select_window_once_it_shows("w3")
+        self.list_controller.apply_snapshot(self.list_controller.snapshot._replace(taken_at=3.0))  # it shows at once
+        with unittest.mock.patch("agent_command_tab.user_interface.agent_session_outline_view.time.time",
+                                 return_value=time.time() + SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW + 1):
+            self.list_controller.prepare_to_appear()
+        self.window.orderFrontRegardless()
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
+
+    def test_hide_idle_keeps_a_new_tab_so_a_window_the_plus_row_opened_is_selected(self):  # user request, 2026-10-30
+        snapshot = make_sample_snapshot()
+        new_window = WindowEntry("w3", "tandem-repeats", False, (0, 0, 800, 600), 1, (make_entry("30", "new-session", "new"),),
+                                 number_among_windows_with_the_same_title=2)
+        self.list_controller.set_idle_tabs_are_hidden(True)
+        self.list_controller.apply_snapshot(snapshot)
+        self.list_controller.select_window_once_it_shows("w3")
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=snapshot.monitors[0].windows + (new_window,)),)))
+        outline_view = self.list_controller.outline_view
+        self.assertEqual([outline_view.itemAtRow_(row).item_id for row in range(outline_view.numberOfRows())],
+                         ["w1", "1", "2", "3", "w3", "30", "new_window"])  # tandem-repeats' idle tabs are hidden
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["new-session"])
+
+    def test_move_to_window_tells_windows_with_the_same_title_apart(self):  # user request, 2026-10-30
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(
+            window_one, window_two, window_two._replace(window_id="w3", number_among_windows_with_the_same_title=2,
+                                                       agent_sessions=(make_entry("30", "new-session", "idle"),)))),)))
+        submenu = self.build_right_click_menu_items_by_title(1)["Move to window"].submenu()
+        self.assertEqual([menu_item.title() for menu_item in submenu.itemArray()], ["tandem-repeats", "tandem-repeats (2)"])
+
     def test_r_and_command_r_rename_the_one_selected_tab_or_window_row(self):  # user request, 2026-10-29
         self.list_controller.apply_snapshot(make_sample_snapshot())
         for row, modifier_flags, renamed_title in ((1, 0, "planning"), (0, NSEventModifierFlagCommand, "agent-command-tab")):
@@ -2347,6 +2460,34 @@ class AutomaticIconColorTests(unittest.TestCase):
                          [("duplicate_agent_session", "The tab wasn't duplicated"), ("start_agent_session", "The agent wasn't started"),
                           ("start_agent_session", "The agent wasn't started")])
         stand_in_app_controller.submit_action.assert_not_called()
+
+    def test_a_new_window_is_selected_in_every_list_once_it_shows(self):  # user request, 2026-10-30
+        stand_in_app_controller = unittest.mock.Mock(settings=DEFAULT_SETTINGS, latest_snapshot_lock=threading.Lock(),
+                                                     latest_snapshot=None)
+        AppController.start_agent_session_from_menu(stand_in_app_controller, None, None, "Claude Code")
+        self.assertIs(stand_in_app_controller.submit_action_and_report_failure.call_args.args[2],
+                      stand_in_app_controller.select_the_new_window_once_it_shows)
+        list_controllers = [unittest.mock.Mock(), unittest.mock.Mock(), unittest.mock.Mock()]
+        stand_in_app_controller.list_all_list_controllers.return_value = list_controllers
+        AppController.select_the_new_window_once_it_shows(stand_in_app_controller, ActionResult(True, details={"window_id": "w9"}))
+        AppController.select_the_new_window_once_it_shows(stand_in_app_controller, ActionResult(True))  # its session ended right away
+        for list_controller in list_controllers:
+            list_controller.select_window_once_it_shows.assert_called_once_with("w9")
+
+    def test_after_success_runs_only_once_the_action_succeeded(self):  # user request, 2026-10-30
+        for action_result, runs_after_success in ((ActionResult(True), True), (ActionResult(False, "the folder is gone"), False)):
+            stand_in_app_controller = unittest.mock.Mock()
+            done_future = concurrent.futures.Future()
+            done_future.set_result(action_result)
+            stand_in_app_controller.submit_action.return_value = done_future
+            after_success = unittest.mock.Mock()
+            with unittest.mock.patch("agent_command_tab.app_controller.AppHelper.callAfter",
+                                     side_effect=lambda function, *arguments: function(*arguments)):
+                AppController.submit_action_and_report_failure(stand_in_app_controller, ActionRequest("start_agent_session", {}),
+                                                               "The agent wasn't started", after_success)
+            self.assertEqual(after_success.call_args_list, [unittest.mock.call(action_result)] if runs_after_success else [])
+            self.assertEqual(stand_in_app_controller.report_action_failure.call_args_list,
+                             [] if runs_after_success else [unittest.mock.call(action_result, "The agent wasn't started")])
 
 
 class AgentToolIconTests(unittest.TestCase):

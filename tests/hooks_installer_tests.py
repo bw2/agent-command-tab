@@ -166,6 +166,13 @@ class FilesTests(unittest.TestCase):
         # the removal replaced (code review, 2026-10-30).
         self.assertEqual(self.read_json(self.claude_settings_path + BACKUP_FILE_SUFFIX), USERS_SETTINGS)
 
+    def test_the_backup_of_a_file_the_app_created_is_empty(self):  # code review, 2026-10-30
+        # The removal that follows copied the app's own hooks.json there, as if it were the original.
+        self.assertEqual(install_hooks("Codex"), [self.codex_hooks_path])  # a new hooks.json
+        self.assertEqual(self.read_json(self.codex_hooks_path + BACKUP_FILE_SUFFIX), {})
+        self.assertEqual(remove_hooks("Codex"), [self.codex_hooks_path])
+        self.assertEqual(self.read_json(self.codex_hooks_path + BACKUP_FILE_SUFFIX), {})
+
     def test_codex_hooks_need_its_approval(self):
         self.assertEqual(install_hooks("Codex"), [self.codex_hooks_path])  # a new hooks.json
         self.assertEqual(check_hooks("Codex"), HOOKS_AWAIT_APPROVAL)

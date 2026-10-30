@@ -12,7 +12,7 @@ ActionRequest.__doc__ = ("One user action. target is a dict with any of computer
 
 ActionResult = collections.namedtuple("ActionResult", ["succeeded", "message", "details"], defaults=["", None])
 ActionResult.__doc__ = ("What an action did. message explains a failure in plain words; details is what an action "
-                        "that reads something returns (a dict), else None.")
+                        "that reads something returns, or the window an action opened (a dict), else None.")
 
 class ActionRegistry:
     """Maps action names to their handlers. The flags for requests from another computer and for

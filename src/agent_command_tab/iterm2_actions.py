@@ -184,6 +184,9 @@ async def start_agent_session(connection, app, window_id, folder, launch_command
         folder: The folder the agent starts in ("~" is expanded).
         launch_command: The shell command that starts the agent tool, for example "claude".
         tab_index: Where the new tab goes among the window's tabs; None puts it last.
+
+    Returns:
+        An ActionResult; a new window's has details {"window_id": its ID}.
     """
     folder = os.path.expanduser(folder)
     if not os.path.isdir(folder):
@@ -192,8 +195,10 @@ async def start_agent_session(connection, app, window_id, folder, launch_command
         return ActionResult(False, "the agent tool has no launch command (see Settings)")
     profile = build_new_agent_session_profile(folder, launch_command)
     if window_id is None:
-        await iterm2.Window.async_create(connection, profile_customizations=profile)
-        return ActionResult(True)
+        # Its ID lets the lists select it once its agent shows (user request, 2026-10-30); iTerm2
+        # gives no window when its session ended right away.
+        window = await iterm2.Window.async_create(connection, profile_customizations=profile)
+        return ActionResult(True, details={"window_id": window.window_id} if window is not None else None)
     window = app.get_window_by_id(window_id)
     if window is None:
         return ActionResult(False, "that window no longer exists")
