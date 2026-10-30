@@ -147,22 +147,36 @@ async def read_the_shell_prompt(session, agent_process_id):
     return None
 
 
-def list_processes_below_the_agent_to_stop(agent_process_id):
+def list_processes_below_the_agent_to_stop(agent_process_id, detached_processes=()):
     """Returns ({process ID: ProcessInfo} of the processes below the agent a pause stops, the IDs
     of those below it that belong to another user, which it can't stop: a command run with sudo).
-    Leaves out the dashboard's own process, those it runs in and those it started, so a
-    dashboard started from the agent's own commands keeps running."""
+    The detached processes its conversation started (launchd adopted them when their shell ended,
+    and the list shows them under the agent) count as below it, with the processes below them
+    (code review, 2026-10-29). Leaves out the dashboard's own process, those it runs in and those
+    it started, so a dashboard started from the agent's own commands keeps running.
+
+    Args:
+        agent_process_id: The agent's process.
+        detached_processes: The ProcessInfo of each detached process its conversation started
+            (agent_process_tree.choose_detached_processes_of_the_conversation's).
+    """
     dashboard_process_ids = set(list_the_process_and_its_ancestor_ids(os.getpid())) | {
         process.process_id
         for process in list_descendant_processes_and_other_users_process_ids(os.getpid(), maximum_depth=None)[0]}
     processes_below, other_users_process_ids_below = list_descendant_processes_and_other_users_process_ids(
         agent_process_id, maximum_depth=None)
+    for detached_process in detached_processes:
+        processes_below_the_detached_process, other_users_process_ids_below_the_detached_process = \
+            list_descendant_processes_and_other_users_process_ids(detached_process.process_id, maximum_depth=None)
+        processes_below = processes_below + [detached_process] + processes_below_the_detached_process
+        other_users_process_ids_below = other_users_process_ids_below + other_users_process_ids_below_the_detached_process
     return ({process.process_id: process for process in processes_below if process.process_id not in dashboard_process_ids},
             other_users_process_ids_below)
 
 
-async def pause_agent_session(session, agent_process_id, agent_tool_name):
-    """Suspends the agent like Ctrl+Z, then stops every process below it.
+async def pause_agent_session(session, agent_process_id, agent_tool_name, detached_processes=()):
+    """Suspends the agent like Ctrl+Z, then stops every process below it, the detached processes
+    its conversation started included (list_processes_below_the_agent_to_stop).
 
     An agent that doesn't take Ctrl+Z as "suspend" (an older Claude Code took it as undo) gets
     SIGTSTP, the signal Ctrl+Z sends in an ordinary terminal, and SIGSTOP, which nothing can
@@ -174,6 +188,7 @@ async def pause_agent_session(session, agent_process_id, agent_tool_name):
         session: The tab's iterm2.Session.
         agent_process_id: The agent's process.
         agent_tool_name: The agent's tool, as its row names it.
+        detached_processes: The ProcessInfo of each detached process its conversation started.
 
     Returns:
         (ActionResult, PauseRecord), or (a failed ActionResult, None) when the agent is gone. The
@@ -184,7 +199,7 @@ async def pause_agent_session(session, agent_process_id, agent_tool_name):
     if agent is None:
         return ActionResult(False, "the agent's process has ended"), None
     was_suspended_by_hand = process_is_stopped(agent_process_id)
-    processes_below, other_users_process_ids_below = list_processes_below_the_agent_to_stop(agent_process_id)
+    processes_below, other_users_process_ids_below = list_processes_below_the_agent_to_stop(agent_process_id, detached_processes)
     if not was_suspended_by_hand:
         await session.async_send_text(CONTROL_Z, suppress_broadcast=True)
         if not await wait_until(lambda: process_is_stopped(agent_process_id), SECONDS_TO_WAIT_FOR_CONTROL_Z):
@@ -192,7 +207,7 @@ async def pause_agent_session(session, agent_process_id, agent_tool_name):
             if not await wait_until(lambda: process_is_stopped(agent_process_id), SECONDS_TO_WAIT_FOR_SIGTSTP):
                 send_signal_to_processes([agent_process_id], signal.SIGSTOP)
         processes_started_meanwhile, other_users_process_ids_started_meanwhile = list_processes_below_the_agent_to_stop(
-            agent_process_id)
+            agent_process_id, detached_processes)
         processes_below.update(processes_started_meanwhile)
         other_users_process_ids_below = sorted(set(other_users_process_ids_below) | set(other_users_process_ids_started_meanwhile))
     stopped_process_ids = set(send_signal_to_processes(sorted(processes_below), signal.SIGSTOP))

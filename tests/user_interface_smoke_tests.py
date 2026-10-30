@@ -282,6 +282,18 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.outlineView_acceptDrop_item_childIndex_(outline_view, None, window_item, 0)
         self.assertEqual(self.submitted_actions[-1].arguments["drop_before_tab_id"], "1")
 
+    def test_dropping_a_window_back_in_place_moves_nothing(self):  # code review, 2026-10-29
+        # It moved past the windows Hide Idle hides after it.
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        self.list_controller.dragged_item = outline_view.itemAtRow_(0)
+        for child_index in (0, 1):
+            self.list_controller.outlineView_acceptDrop_item_childIndex_(outline_view, None, None, child_index)
+        self.assertEqual(self.submitted_actions, [])
+        self.list_controller.outlineView_acceptDrop_item_childIndex_(outline_view, None, None, 2)
+        self.assertEqual(self.submitted_actions[-1].action, "reorder_window_list")
+        self.assertIsNone(self.submitted_actions[-1].arguments["drop_before_window_id"])  # after the last window
+
     def test_sort_orders_change_only_the_order_of_the_rows(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
 
@@ -871,6 +883,18 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.set_all_expanded(False)  # Collapse All: agent-command-tab, and tandem-repeats stays collapsed
         self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
         self.assertEqual(outline_view.numberOfRows(), 3)  # the two collapsed windows and "+"
+        self.list_controller.set_all_expanded(True)
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)  # tandem-repeats hidden while expanded
+        self.list_controller.set_all_expanded(False)  # Collapse All collapses it too (code review, 2026-10-29)
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
+        self.assertEqual(outline_view.numberOfRows(), 3)
+
+    def test_collapse_all_collapses_a_window_hidden_since_it_first_appeared(self):  # code review, 2026-10-29
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # tandem-repeats (two idle tabs) never gets a row
+        self.list_controller.set_all_expanded(False)
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
+        self.assertEqual(self.list_controller.outline_view.numberOfRows(), 3)  # the two collapsed windows and "+"
 
     def test_hide_idle_leaves_a_monitor_row_its_pause_item_when_all_of_its_windows_are_hidden(self):
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # Studio Display: two idle tabs
@@ -879,6 +903,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         studio_display_row = next(row for row in range(outline_view.numberOfRows())
                                   if outline_view.itemAtRow_(row).key == ("monitor", "2"))
         self.assertEqual(self.build_right_click_menu_titles(studio_display_row), ["Pause 2 sessions"])
+        # Collapse All collapses that monitor too, though it has no rows below it now (code review, 2026-10-29).
+        self.list_controller.set_all_expanded(False)
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
+        self.assertEqual([outline_view.itemAtRow_(row).key[0] for row in range(outline_view.numberOfRows())],
+                         ["monitor", "monitor", "new_window"])
 
     def test_sort_popup_reports_the_choice_to_the_owner(self):
         self.dropdown_panel_controller.list_sort_order_popup.selectItemWithTitle_("Activity")
@@ -2135,7 +2164,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertLess(button_frame.origin.y + button_frame.size.height, BOTTOM_BAR_HEIGHT)
         panel.installHooksClicked_(panel.install_hooks_button)
         self.assertEqual(self.owner.hooks_install_requests, [["Claude Code"]])
-        only_claude_code = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(snapshot.monitors[0].windows[1],)),),
+        # In the narrowest sidebar the button doesn't fit before the pause or resume button, so it
+        # is left out rather than covering that button (code review, 2026-10-29).
+        panel_view = panel.view()
+        wide_size = panel_view.frame().size
+        panel_view.setFrameSize_((200, wide_size.height))
+        self.assertTrue(panel.install_hooks_button.isHidden())
+        panel_view.setFrameSize_(wide_size)
+        self.assertFalse(panel.install_hooks_button.isHidden())
+        only_claude_code =snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(snapshot.monitors[0].windows[1],)),),
                                              hooks_status_per_agent_tool=(("Codex", "missing"),))
         self.list_controller.apply_snapshot(only_claude_code)  # no Codex session listed: nothing to say about its hooks
         self.assertTrue(panel.hooks_note_text_field.isHidden())
@@ -2214,14 +2251,24 @@ class AutomaticIconColorTests(unittest.TestCase):
             # Closed first, so a dropdown it kept open closes too (user request, 2026-10-28).
             settings_window_controller = unittest.mock.Mock(close_if_open=lambda: calls.append("close settings"))
 
+            application_in_front_before_dropdown = "iTerm2"
+
+            def __init__(self):
+                self.dropdown_is_shown = True  # one the menu's Show popup opened (code review, 2026-10-28)
+                self.popover = unittest.mock.Mock(isShown=lambda: self.dropdown_is_shown)
+
             def retry_the_global_shortcut_if_it_lacks_permission(self):
                 pass
 
-            def close_dropdown(self):  # one the menu's Show popup opened (code review, 2026-10-28)
+            def close_dropdown(self):
                 calls.append("close dropdown")
+                self.dropdown_is_shown = False
+
+            def give_activation_to(self, application):
+                calls.append(f"give the keyboard to {application}")
 
             def close_a_dropdown_the_menu_showed(self):
-                AppController.close_a_dropdown_the_menu_showed(self)
+                return AppController.close_a_dropdown_the_menu_showed(self)
 
             def show_the_sidebar(self):
                 AppController.show_the_sidebar(self)
@@ -2235,21 +2282,24 @@ class AutomaticIconColorTests(unittest.TestCase):
                                                               ("docked", False, "show for good")):
             stand_in_app_controller.settings = {"show_as": "sidebar", "sidebar_mode": sidebar_mode}
             stand_in_app_controller.sidebar_controller.is_shown = sidebar_is_shown
+            stand_in_app_controller.dropdown_is_shown = True
             calls.clear()
             AppController.menu_bar_icon_clicked(stand_in_app_controller)
             self.assertEqual(calls, ["close settings", "close dropdown", expected_call], sidebar_mode)
         stand_in_app_controller.settings = {"show_as": "window", "sidebar_mode": "auto_hide"}
+        stand_in_app_controller.dropdown_is_shown = True
         calls.clear()
         AppController.menu_bar_icon_clicked(stand_in_app_controller)
         self.assertEqual(calls, ["close settings", "close dropdown", "show window"])
-        # The global shortcut does so too (code review, 2026-10-28).
+        # The global shortcut does so too (code review, 2026-10-28), and gives the keyboard back to
+        # the app that had it before the dropdown, since the sidebar takes none (code review, 2026-10-29).
         stand_in_app_controller.settings = {"show_as": "sidebar", "sidebar_mode": "auto_hide"}
         stand_in_app_controller.sidebar_controller.is_shown = False
         stand_in_app_controller.list_window_controller = unittest.mock.Mock(is_in_front=lambda: False)
-        stand_in_app_controller.popover = unittest.mock.Mock(isShown=lambda: True)
+        stand_in_app_controller.dropdown_is_shown = True
         calls.clear()
         AppController.global_shortcut_pressed(stand_in_app_controller)
-        self.assertEqual(calls, ["close dropdown", "show"])
+        self.assertEqual(calls, ["close dropdown", "give the keyboard to iTerm2", "show"])
         # The sidebar it shows has the first agent asking a question selected (user request, 2026-10-29).
         stand_in_app_controller.sidebar_controller.list_controller.select_the_first_asking_tab.assert_called_once_with()
 
@@ -2260,6 +2310,23 @@ class AutomaticIconColorTests(unittest.TestCase):
             AppController.close_the_list_after_escape(stand_in_app_controller, stand_in_app_controller.sidebar_controller.list_controller)
             self.assertEqual(stand_in_app_controller.sidebar_controller.hide_now.called, sidebar_hides_by_itself)
             stand_in_app_controller.give_activation_to.assert_called_once_with(stand_in_app_controller.last_other_active_application)
+
+    def test_a_dropdown_opened_over_the_dashboards_own_window_gives_the_keyboard_to_the_last_other_app(self):
+        # With the list window that Show popup hid in front, or the settings window that a click on
+        # the icon closed, the dashboard itself was the frontmost app, and Esc gave the keyboard to
+        # it with no window left; a settings window or list window still open gets it back (code
+        # review, 2026-10-29).
+        for application_in_front_is_the_dashboard, open_window, gets_the_last_other_app in (
+                (True, None, True), (True, "settings", False), (True, "list", False), (False, None, False)):
+            stand_in_app_controller = unittest.mock.Mock()
+            stand_in_app_controller.settings_window_controller.is_open.return_value = open_window == "settings"
+            stand_in_app_controller.list_window_controller.window.isVisible.return_value = open_window == "list"
+            application_in_front = unittest.mock.Mock()
+            application_in_front.processIdentifier.return_value = os.getpid() if application_in_front_is_the_dashboard else 1
+            AppController.note_application_in_front_before_dropdown(stand_in_app_controller, application_in_front)
+            self.assertIs(stand_in_app_controller.application_in_front_before_dropdown,
+                          stand_in_app_controller.last_other_active_application if gets_the_last_other_app
+                          else application_in_front)
 
 
 class AgentToolIconTests(unittest.TestCase):
@@ -2693,14 +2760,16 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_the_settings_window_opens_clear_of_a_shown_sidebar_and_stays_at_the_normal_level(self):
         # A stand-in app controller, as in the top bar drag test: only the windows this looks at.
         # The sidebar is 400 wide at the right edge of a 1500-point monitor; the settings window
-        # (540 wide) reaches into it.
-        for sidebar_is_shown, expected_frames in ((True, [(560, 200, 540, 600)]), (False, [])):
+        # (540 wide) reaches into it. Beside a 1200-wide sidebar it stays where it is rather than
+        # being made 300 wide (code review, 2026-10-29).
+        for sidebar_is_shown, sidebar_width, expected_frames in ((True, 400, [(560, 200, 540, 600)]), (False, 400, []),
+                                                                 (True, 1200, [])):
             levels, frames = [], []
             stand_in_app_controller = unittest.mock.Mock(settings={"list_window_is_always_on_top": False})
             stand_in_app_controller.list_window_controller.window.isVisible.return_value = False
             sidebar_controller = stand_in_app_controller.sidebar_controller
             sidebar_controller.window.isVisible.return_value = sidebar_is_shown
-            sidebar_controller.window.frame.return_value = NSMakeRect(1100, 0, 400, 970)
+            sidebar_controller.window.frame.return_value = NSMakeRect(1500 - sidebar_width, 0, sidebar_width, 970)
             sidebar_controller.placement = SidebarPlacement(0, "right", True)
             sidebar_controller.screens = [{"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)}]
             settings_window = stand_in_app_controller.settings_window_controller.window

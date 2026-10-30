@@ -3,10 +3,11 @@
 import asyncio
 import os
 import tempfile
+import time
 import unittest
 import unittest.mock
 
-from agent_command_tab import iterm2_actions
+from agent_command_tab import iterm2_actions, iterm2_connection_thread
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.iterm2_connection_thread import DashboardCore
@@ -151,6 +152,33 @@ class ClearedConversationTests(unittest.TestCase):
             ActionRequest("send_slash_command", {"session_id": "s1"}, {"command": "/clear"})))
         self.assertFalse(action_result.succeeded)
         self.assertIn("suspended", action_result.message)
+
+
+class OpenToolCallSnapshotTests(unittest.TestCase):  # code review, 2026-10-29
+    def test_a_snapshot_is_asked_for_once_an_open_tool_call_is_old_enough_to_show_as_running(self):
+        # The conversation file may not change again by then, so the row showed "thinking" until
+        # some other change asked for a snapshot.
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = os.path.join(folder.name, "conversation.jsonl")
+        with open(path, "w") as file:
+            file.write("{}\n")
+        adapter = StandInAdapter(path)
+        adapter.read_preview_fields = lambda conversation_file_path: {"open_tool_name": "WebFetch",
+                                                                      "open_tool_started_at": time.time()}
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        agent_session = {"adapter": adapter, "process_id": 4242, "is_in_background": False}
+        core.agent_sessions = {"s1": agent_session}
+
+        async def read_the_file_then_wait():
+            await core.update_conversation_file_readings("s1", agent_session)
+            core.snapshot_needed.clear()  # the new preview asked for one at once
+            await asyncio.sleep(0.1)
+            is_asked_for_before_the_tool_shows_as_running = core.snapshot_needed.is_set()
+            await asyncio.sleep(0.5)
+            return is_asked_for_before_the_tool_shows_as_running, core.snapshot_needed.is_set()
+        with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING", 0.3):
+            self.assertEqual(asyncio.run(read_the_file_then_wait()), (False, True))
 
 
 if __name__ == "__main__":

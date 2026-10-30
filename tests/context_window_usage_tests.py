@@ -93,6 +93,10 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(read_last_lines(path, byte_count=10), ["second"])  # the 10 bytes start inside "first"
         self.assertEqual(read_last_lines(path, byte_count=1000), ["second", "first", "x" * 100])
 
+    def test_a_newest_line_longer_than_the_bytes_read_is_read_whole(self):  # code review, 2026-10-29
+        path = self.write_lines("long_last_line.jsonl", ["x" * 100, "first", "y" * 100])
+        self.assertEqual(read_last_lines(path, byte_count=10), ["y" * 100, "first"])  # 10, then 40, then 160 of its 208 bytes
+
     def test_records_are_the_json_objects_newest_first(self):
         path = self.write_lines("mixed.jsonl", [{"type": "user"}, "not json", "[1, 2]", '"text"', {"type": "assistant"}])
         self.assertEqual(list(read_last_records(path)), [{"type": "assistant"}, {"type": "user"}])

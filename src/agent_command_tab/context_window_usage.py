@@ -22,25 +22,32 @@ from agent_command_tab.claude_code_transcript_records import (RECORD_KINDS_THAT_
                                                               list_message_blocks)
 
 BYTES_TO_READ_FROM_THE_END = 512 * 1024
+# A file whose newest record is longer than this many bytes gives no lines (read_last_lines).
+LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END = 16 * 1024 * 1024
 CLAUDE_CODE_CONTEXT_WINDOW_TOKENS = 200_000
 CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS = 1_000_000
 
 
 def read_last_lines(file_path, byte_count=BYTES_TO_READ_FROM_THE_END):
-    """Returns the file's last complete lines within its last byte_count bytes, newest first."""
-    try:
-        with open(file_path, "rb") as file:
-            file.seek(0, os.SEEK_END)
-            size = file.tell()
-            file.seek(max(0, size - byte_count))
-            text = file.read().decode(errors="replace")
-    except OSError:
-        return []
-    # Only "\n" ends a line: JSON leaves U+2028 and U+0085 inside strings, which splitlines() would split at.
-    lines = [line for line in text.split("\n") if line]
-    if size > byte_count:
-        lines = lines[1:]  # the first line was cut
-    return list(reversed(lines))
+    """Returns the file's last complete lines within its last byte_count bytes, newest first. When
+    those bytes hold no complete line, as when the newest record is a large tool result, it reads
+    four times as many, up to LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END (code review, 2026-10-29)."""
+    while True:
+        try:
+            with open(file_path, "rb") as file:
+                file.seek(0, os.SEEK_END)
+                size = file.tell()
+                file.seek(max(0, size - byte_count))
+                text = file.read().decode(errors="replace")
+        except OSError:
+            return []
+        # Only "\n" ends a line: JSON leaves U+2028 and U+0085 inside strings, which splitlines() would split at.
+        lines = [line for line in text.split("\n") if line]
+        if size > byte_count:
+            lines = lines[1:]  # the first line was cut
+        if lines or size <= byte_count or byte_count >= LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END:
+            return list(reversed(lines))
+        byte_count = min(byte_count * 4, LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END)
 
 
 def read_last_records(file_path):

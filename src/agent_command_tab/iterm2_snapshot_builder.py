@@ -230,9 +230,12 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
     elif (map_iterm2_status_value_to_state(first_session.get("status")) is None
           and claude_agent_record.get("status") in CLAUDE_AGENTS_STATUSES_TO_STATES):
         # iTerm2 has no status for the tab, neither its variable nor its tab bar's (the core reads
-        # that when the variable is empty): Claude Code's own report, up to a minute old. It can't
-        # tell "done" from "idle", and the screen checks behind "stuck" and an answered "asking" don't run.
+        # that when the variable is empty): Claude Code's own report, which the core reads again from
+        # its session file for each snapshot (code review, 2026-10-29). It can't tell "done" from
+        # "idle", and the screen checks behind "stuck" and an answered "asking" don't run.
         state = CLAUDE_AGENTS_STATUSES_TO_STATES[claude_agent_record["status"]]
+        if claude_agent_record["status"] == "shell" and (screen_reading or {}).get("hooks_report_background_tasks_after_the_turn"):
+            state = "idle"  # its turn is over, and its background tasks run (code review, 2026-10-29)
         reason = "from claude agents --json: iTerm2 reports no status for this tab"
         status_since = compute_displayed_state_since(state, now, previous_displayed_state, now)
     else:

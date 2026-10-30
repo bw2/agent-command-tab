@@ -61,7 +61,11 @@ def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FO
     without site packages (-S), running the forwarder. The running Python is named by a path that
     survives upgrades (installed_copy_paths.find_python_of_this_copy: a venv's bin/python), and a
     Python in a Homebrew version folder by its stable opt/ path, as FORWARDER_FILE_PATH is, so the
-    hooks keep working after `brew upgrade` or a venv made again with a newer Python."""
+    hooks keep working after a `brew upgrade` that keeps the Python version. The forwarder of a
+    copy installed with pip, pipx or Homebrew is in the venv's lib/python3.X/site-packages, so a
+    venv made again with another Python version (a formula that moves to a newer Python, say) needs
+    Install Hooks again; check_hooks then reports the hooks missing, since their command differs
+    (code review, 2026-10-29)."""
     python_path = replace_homebrew_version_folder_with_its_stable_link(python_path) if python_path else find_python_of_this_copy()
     parts = (python_path, "-I", "-S", forwarder_path, agent_tool_name)
     return " ".join(shlex.quote(part) for part in parts)

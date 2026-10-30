@@ -154,6 +154,16 @@ class PauseTests(unittest.TestCase):
         self.assertEqual(processes.signals, [(101, signal.SIGSTOP), (102, signal.SIGSTOP)])
         self.assertEqual(pause_record, make_pause_record(PROMPT, RIGHT_PROMPT))
 
+    def test_the_detached_processes_its_conversation_started_are_stopped_and_recorded_too(self):  # code review, 2026-10-29
+        processes = FakeProcesses()
+        tab = FakeTab([PROMPT], on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))
+        detached_process = ProcessInfo(300, 1, "python3", STARTED_AT)  # launchd adopted it when its shell ended
+        action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(
+            tab, AGENT_PROCESS_ID, TOOL, detached_processes=[detached_process]))
+        self.assertTrue(action_result.succeeded)
+        self.assertEqual(processes.signals, [(101, signal.SIGSTOP), (102, signal.SIGSTOP), (300, signal.SIGSTOP)])
+        self.assertEqual(pause_record.stopped_processes, [(101, STARTED_AT), (102, STARTED_AT), (300, STARTED_AT)])
+
     def test_an_agent_that_ignores_control_z_gets_sigtstp_then_sigstop(self):
         processes = FakeProcesses()
         processes.kill = lambda process_id, signal_number: (
@@ -425,7 +435,7 @@ class ResumeTests(unittest.TestCase):
                                                  ("vim /tmp/prompt.md", False)):  # Claude Code's Ctrl+G editor
             core = self.make_core_with_one_agent_tab(command_line_in_front)
 
-            async def pause_stand_in(session, agent_process_id, agent_tool_name):
+            async def pause_stand_in(session, agent_process_id, agent_tool_name, detached_processes=()):
                 return ActionResult(True), make_pause_record()
             with unittest.mock.patch.object(iterm2_connection_thread, "process_is_stopped", return_value=False), \
                     unittest.mock.patch.object(iterm2_connection_thread, "process_has_its_terminal", return_value=True), \
@@ -442,7 +452,7 @@ class ResumeTests(unittest.TestCase):
         core.pause_record_by_tab_and_agent = {("s1", AGENT_PROCESS_ID): older_pause_record}
         newer_pause_record = make_pause_record()._replace(agent_process=(200, STARTED_AT))
 
-        async def pause_stand_in(session, agent_process_id, agent_tool_name):
+        async def pause_stand_in(session, agent_process_id, agent_tool_name, detached_processes=()):
             return ActionResult(True), newer_pause_record
         with unittest.mock.patch.object(iterm2_connection_thread, "process_is_stopped", return_value=False), \
                 unittest.mock.patch.object(iterm2_connection_thread, "process_has_its_terminal", return_value=True), \
@@ -451,6 +461,26 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(pause.call_count, 1)
         self.assertEqual(core.pause_record_by_tab_and_agent,
                          {("s1", AGENT_PROCESS_ID): older_pause_record, ("s1", 200): newer_pause_record})
+
+    def test_a_pause_from_the_list_stops_the_detached_processes_its_sub_rows_show_too(self):  # code review, 2026-10-29
+        core = self.make_core_with_one_agent_tab("claude")
+        core.agent_sessions["s1"]["started_at"] = STARTED_AT
+        core.claude_agents_by_process_id = {AGENT_PROCESS_ID: {"sessionId": "conversation-1"}}
+        detached_process = ProcessInfo(300, 1, "python3", STARTED_AT + 5)  # launchd adopted it when its shell ended
+        other_detached_process = ProcessInfo(301, 1, "python3", STARTED_AT + 6)  # another conversation's
+        detached_processes_passed = []
+
+        async def pause_stand_in(session, agent_process_id, agent_tool_name, detached_processes=()):
+            detached_processes_passed.extend(detached_processes)
+            return ActionResult(True), make_pause_record()
+        with unittest.mock.patch.object(iterm2_connection_thread, "list_detached_processes", return_value=[
+                    (detached_process, ["python3", "/private/tmp/conversation-1/job.py"], None),
+                    (other_detached_process, ["python3", "/private/tmp/conversation-2/job.py"], None)]), \
+                unittest.mock.patch.object(iterm2_connection_thread, "process_is_stopped", return_value=False), \
+                unittest.mock.patch.object(iterm2_connection_thread, "process_has_its_terminal", return_value=True), \
+                unittest.mock.patch.object(iterm2_connection_thread, "pause_agent_session", side_effect=pause_stand_in):
+            asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
+        self.assertEqual(detached_processes_passed, [detached_process])
 
     def test_a_second_resume_while_the_first_is_under_way_does_nothing(self):
         core = self.make_core_with_one_agent_tab("-zsh")

@@ -82,5 +82,23 @@ class TimeIterm2SetTheStatusTests(unittest.TestCase):
                                      StandInSession())["status_set_in_iterm2_at"])
 
 
+class NoStatusAtAllTests(unittest.TestCase):
+    def test_a_tab_iterm2_gives_no_status_goes_by_claude_codes_session_file_read_now(self):  # code review, 2026-10-29
+        # Not by the `claude agents --json` record, which is up to a minute old.
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.gathered_windows = [{"window_id": "w1", "tabs": [
+            {"tab_id": "t1", "first_session": {"session_id": "s1", "status": None}},
+            {"tab_id": "t2", "first_session": {"session_id": "s2", "status": "working"}}]}]
+        core.agent_sessions = {"s1": {"process_id": 101}, "s2": {"process_id": 102}}
+        core.claude_agents_by_process_id = {101: {"status": "idle", "config_folder": None},
+                                            102: {"status": "idle", "config_folder": None}}
+        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+                                        lambda config_folder, process_id: "busy"):
+            claude_agents_by_process_id = core.read_again_the_status_of_claude_agents_iterm2_reports_none_for()
+        self.assertEqual(claude_agents_by_process_id[101]["status"], "busy")
+        self.assertEqual(claude_agents_by_process_id[102]["status"], "idle")  # iTerm2 gives this tab a status
+        self.assertEqual(core.claude_agents_by_process_id[101]["status"], "idle")  # the stored record stays
+
+
 if __name__ == "__main__":
     unittest.main()

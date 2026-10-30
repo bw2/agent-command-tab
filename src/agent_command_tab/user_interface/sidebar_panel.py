@@ -208,8 +208,10 @@ class SidebarController(NSObject):
 
     @objc.python_method
     def apply_settings(self, settings):
-        """Shows, hides or moves the sidebar to match the settings (called on every settings
-        change). One kept hidden stays hidden unless Show as or the sidebar's mode changed."""
+        """Shows, hides or moves the sidebar to match the settings (called when one of
+        app_controller.SETTINGS_THAT_PLACE_THE_SIDEBAR changes, the only settings it reads, so the
+        others in self.settings may be out of date). One kept hidden stays hidden unless Show as
+        or the sidebar's mode changed."""
         if self.settings is not None and (settings["show_as"], settings["sidebar_mode"]) != (
                 self.settings["show_as"], self.settings["sidebar_mode"]):
             self.is_kept_hidden = False

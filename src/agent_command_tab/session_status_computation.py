@@ -2,7 +2,9 @@
 
 A state comes from iTerm2's `status` variable plus the core's readings of the session: whether
 the permission dialog is still on screen, a screen fingerprint (for "stuck"), and the command
-the agent runs (agent_process_tree). Hook events are added as a further source in phase 2.
+the agent runs (agent_process_tree). A turn end the agent's hooks reported
+(hook_event_tracking) turns iTerm2's "working" into idle before this module sees the value
+(DashboardCore.update_session_tracking).
 """
 
 # "paused": the agent process is stopped (Pause from the list, or Ctrl+Z) until it is resumed.
@@ -14,10 +16,17 @@ STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done", "backgroun
 # During a turn, as iTerm2's status shows it: a permission prompt in between doesn't end the turn.
 STATES_OF_A_TURN_UNDER_WAY = frozenset({"working", "asking"})
 
-# A Claude Code session's own report in `claude agents --json`, for a tab for which iTerm2 has no
-# status at all, neither its `status` variable nor what its tab bar shows (for example without
-# iTerm2's Claude Code integration hooks; user request, 2026-10-21).
-CLAUDE_AGENTS_STATUSES_TO_STATES = {"idle": "idle", "busy": "working", "waiting": "asking"}
+# Claude Code's own report of a session (its <config folder>/sessions/<pid>.json, which `claude
+# agents --json` reads too) as the iTerm2 status value it stands for. "shell" is a command running:
+# the turn's, or a background task after the turn ended, which the hooks tell apart.
+CLAUDE_CODE_SESSION_STATUSES_TO_ITERM2_STATUS_VALUES = {"idle": "idle", "busy": "working", "shell": "working",
+                                                        "waiting": "waiting"}
+
+# Claude Code's tools that finish in seconds, so one its conversation file shows open for the
+# stuck threshold hangs and the row shows "stuck" (user request, 2026-10-30). A command the agent
+# started (Bash), a subagent (Agent, Task) and an MCP tool can take long, so they are left out.
+TOOLS_THAT_FINISH_IN_SECONDS = frozenset({"WebFetch", "WebSearch", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+                                          "Glob", "Grep"})
 
 ITERM2_STATUS_WORDS_TO_STATES = {
     "idle": "idle",
@@ -41,6 +50,14 @@ def map_iterm2_status_value_to_state(iterm2_status_value):
     if not iterm2_status_value:
         return None
     return ITERM2_STATUS_WORDS_TO_STATES.get(str(iterm2_status_value).strip().lower())
+
+
+# The state of a Claude Code session's own report in `claude agents --json`, for a tab for which
+# iTerm2 has no status at all, neither its `status` variable nor what its tab bar shows (for
+# example without iTerm2's Claude Code integration hooks; user request, 2026-10-21). Made from the
+# table above, which a second table kept by hand drifted from (it lacked "shell"; code review, 2026-10-29).
+CLAUDE_AGENTS_STATUSES_TO_STATES = {status: map_iterm2_status_value_to_state(iterm2_status_value)
+                                    for status, iterm2_status_value in CLAUDE_CODE_SESSION_STATUSES_TO_ITERM2_STATUS_VALUES.items()}
 
 
 def update_permission_dialog_reading(screen_reading, dialog_is_showing, interrupted_line_count,
@@ -165,7 +182,9 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
       tool's permission dialog: Claude Code reports nothing when a prompt is answered, and
       iTerm2's status stays "waiting" until the approved tool finishes (Phase 0).
     - "stuck" is working with no screen change (progress noise masked) for the threshold while
-      running no command of its own: an agent waiting on a long command it started is working.
+      running no command of its own and with no tool call open, or waiting the threshold on a
+      tool that finishes in seconds (TOOLS_THAT_FINISH_IN_SECONDS, a web fetch say): an agent
+      waiting on a long command it started, a subagent or an MCP tool is working.
     - "done" means the last turn ended after the tab was last seen (selected in the key iTerm2
       window while iTerm2 was the active app), whether the status now says done or idle, so it
       lasts until the tab is seen; a turn that ended while the tab was seen counts as idle.
@@ -181,7 +200,8 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         screen_reading: {"permission_dialog_is_showing": bool, "permission_dialog_checked_at":
             float, "permission_dialog_gone_since": float, "turn_was_interrupted": bool,
             "fingerprint_changed_at": float, "running_command": (name, started at) or None,
-            "command_last_seen_running_at": float} (any key may be missing), or None.
+            "command_last_seen_running_at": float, "conversation_preview": {"open_tool_name": str,
+            "open_tool_started_at": float or None, ...}} (any key may be missing), or None.
         stuck_threshold_seconds: How long a working session may show no screen change.
         now: The current time.
 
@@ -202,6 +222,16 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
     if state == "working":
         if screen_reading.get("running_command"):
             return "working", f"running {screen_reading['running_command'][0]}"  # waiting on its command, never stuck
+        preview_fields = screen_reading.get("conversation_preview") or {}
+        open_tool_started_at = preview_fields.get("open_tool_started_at")
+        if open_tool_started_at is not None:
+            # Waiting on a tool call its conversation file shows open, which starts no command:
+            # stuck only for a tool that finishes in seconds, once open for the threshold (user
+            # request, 2026-10-30); a subagent or an MCP tool may run long.
+            open_tool_name = preview_fields["open_tool_name"]
+            if open_tool_name in TOOLS_THAT_FINISH_IN_SECONDS and now - open_tool_started_at >= stuck_threshold_seconds:
+                return "stuck", f"waiting on {open_tool_name} for {max(1, round((now - open_tool_started_at) / 60))} min"
+            return "working", f"running {open_tool_name}"
         # Stuck means thinking with nothing new on screen, so the clock also restarts when a command ends.
         quiet_since = max(screen_reading.get("fingerprint_changed_at", working_since), working_since,
                           screen_reading.get("command_last_seen_running_at", 0))

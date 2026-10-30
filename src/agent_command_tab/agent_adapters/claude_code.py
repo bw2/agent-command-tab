@@ -85,8 +85,7 @@ class ClaudeCodeAdapter(AgentToolAdapter):
 
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         """Returns the transcript named after the record's `sessionId`: in the record's own config
-        folder first (one created after the app started is in no list made then), else in one of
-        the config folders."""
+        folder first, else in one of the config folders."""
         conversation_id = await self.find_conversation_id(agent_process_id, claude_agent_record)
         if not conversation_id:
             return None

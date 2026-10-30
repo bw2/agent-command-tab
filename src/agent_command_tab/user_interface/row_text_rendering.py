@@ -10,6 +10,7 @@ import collections
 import time
 
 from agent_command_tab.context_window_usage import format_token_count
+from agent_command_tab.list_sorting import find_when_the_shown_state_started
 from agent_command_tab.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
 
 RowTextParts = collections.namedtuple(
@@ -264,9 +265,8 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         state_text=state_text,
         state_color_name=STATE_TEXT_COLOR_NAME_BY_STATE[state],
         state_text_is_semibold=state not in STATES_WHOSE_TEXT_IS_IN_THE_REGULAR_WEIGHT,
-        elapsed_time_text=format_elapsed_time(now - (agent_session_entry.running_tool_started_at
-                                                     if agent_session_entry.running_tool_name
-                                                     else agent_session_entry.status_since)),
+        # The same start the Status Changed sort goes by (code review, 2026-10-29).
+        elapsed_time_text=format_elapsed_time(now - find_when_the_shown_state_started(agent_session_entry)),
         context_text=format_context_text(agent_session_entry.context_tokens, agent_session_entry.context_fill_percent),
         context_fill_percent_color_name=choose_context_fill_percent_color_name(agent_session_entry.context_fill_percent),
         created_time_text=format_clock_time(started_at, now) if started_at is not None else "",

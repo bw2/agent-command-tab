@@ -57,7 +57,8 @@ SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
 # The settings' Appearance (settings_store.APPEARANCE_CHOICES; user request, 2026-10-27): the
 # NSAppearance name the app is drawn in, or None to follow macOS's Light or Dark setting.
 APPEARANCE_NAMES_BY_CHOICE = {"auto": None, "dark": NSAppearanceNameDarkAqua, "light": NSAppearanceNameAqua}
-# The settings whose change can put the sidebar where an open settings window is.
+# The settings whose change can put the sidebar where an open settings window is: every setting
+# the sidebar reads, and the only ones whose change reaches it (SidebarController.apply_settings).
 SETTINGS_THAT_PLACE_THE_SIDEBAR = ("show_as", "sidebar_mode", "sidebar_edge", "sidebar_width")
 
 
@@ -134,7 +135,6 @@ class AppController(NSObject):
         self = objc.super(AppController, self).init()
         if self is None:
             return None
-        self.verbose = verbose
         move_the_settings_folder_of_the_old_name()  # before the settings and the docked window frames are read
         self.settings = load_settings_resolving_paths_at_first_run()
         self.reserved_screen_area = None
@@ -327,9 +327,12 @@ class AppController(NSObject):
     def close_a_dropdown_the_menu_showed(self):
         """Closes a dropdown that the menu bar icon's menu's Show popup opened while "Show as" is
         Sidebar or Window (an open settings window keeps it open), before a click on the icon or
-        the global shortcut shows the list the way the settings ask (code review, 2026-10-28)."""
-        if self.settings["show_as"] != "popup":
-            self.close_dropdown()
+        the global shortcut shows the list the way the settings ask (code review, 2026-10-28).
+        Returns whether it closed one."""
+        if self.settings["show_as"] == "popup" or not self.popover.isShown():
+            return False
+        self.close_dropdown()
+        return not self.popover.isShown()
 
     @objc.python_method
     def global_shortcut_pressed(self):
@@ -337,10 +340,14 @@ class AppController(NSObject):
         it, giving the keyboard back to the app that had it (user request, 2026-10-21)
         (choose_what_the_global_shortcut_does). The list it shows has the first agent asking a
         question selected (user request, 2026-10-29)."""
-        self.close_a_dropdown_the_menu_showed()
+        closed_a_dropdown_the_menu_showed = self.close_a_dropdown_the_menu_showed()
         what_to_do = choose_what_the_global_shortcut_does(
             self.settings["show_as"], self.settings["sidebar_mode"], self.sidebar_controller.is_shown,
             self.list_window_controller.is_in_front(), self.popover.isShown())
+        if what_to_do in ("show_sidebar", "hide_sidebar") and closed_a_dropdown_the_menu_showed:
+            # The sidebar takes no keyboard, so the app that had it before the dropdown gets it
+            # back, as when the shortcut closes the dropdown itself (code review, 2026-10-29).
+            self.give_activation_to(self.application_in_front_before_dropdown)
         if what_to_do == "show_sidebar":
             self.show_the_sidebar()  # for a few seconds, or for good if it stays visible
             self.sidebar_controller.list_controller.select_the_first_asking_tab()
@@ -554,7 +561,14 @@ class AppController(NSObject):
 
     @objc.python_method
     def note_application_in_front_before_dropdown(self, application):
-        """The dropdown activates the dashboard; a peek ends by bringing back what was in front before."""
+        """The dropdown activates the dashboard; a peek ends by bringing back what was in front
+        before, and Esc or the shortcut give it the keyboard back. When that was the dashboard
+        itself with no window left to take the keyboard (the list window that Show popup hid, or
+        the settings window that a click on the icon closed), the last other active app stands
+        in; a settings window or list window still open gets the keyboard back (code review, 2026-10-29)."""
+        if (application is not None and application.processIdentifier() == os.getpid()
+                and not self.settings_window_controller.is_open() and not self.list_window_controller.window.isVisible()):
+            application = self.last_other_active_application
         self.application_in_front_before_dropdown = application
 
     @objc.python_method
@@ -784,7 +798,9 @@ class AppController(NSObject):
     @objc.python_method
     def move_the_settings_window_clear_of_the_sidebar(self):
         """Moves the settings window sideways, keeping its size where the monitor has room, off a
-        shown sidebar's strip: the sidebar is above other windows and would cover it."""
+        shown sidebar's strip: the sidebar is above other windows and would cover it. Beside a
+        sidebar too wide to leave the window its smallest width, it stays where it is: made
+        narrower, its rows were cut off (code review, 2026-10-29)."""
         sidebar_controller = self.sidebar_controller
         if not sidebar_controller.window.isVisible() or sidebar_controller.placement is None:
             return
@@ -793,7 +809,8 @@ class AppController(NSObject):
         frame_clear_of_the_sidebar = compute_frame_clear_of_area(
             settings_frame, convert_rect_to_frame_list(sidebar_controller.window.frame()), sidebar_controller.placement.edge,
             sidebar_controller.screens[sidebar_controller.placement.screen_index]["visible_frame"], settings_frame[2])
-        if frame_clear_of_the_sidebar is not None:
+        if (frame_clear_of_the_sidebar is not None
+                and frame_clear_of_the_sidebar[2] >= SMALLEST_WINDOW_SIZES["settings_window_frame"][0]):
             settings_window.setFrame_display_(NSMakeRect(*frame_clear_of_the_sidebar), True)
 
     @objc.python_method
@@ -967,6 +984,7 @@ class AppController(NSObject):
         docked sidebar took."""
         self.save_settings_before_exiting()
         self.give_room_back_before_exiting()
+        sys.stdout.flush()  # os._exit skips it, losing the last lines of the log (code review, 2026-10-29)
         os._exit(0)
 
     def applicationWillTerminate_(self, notification):

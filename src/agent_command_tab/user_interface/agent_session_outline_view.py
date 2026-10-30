@@ -2011,13 +2011,16 @@ class AgentSessionListController(NSObject):
     def set_all_expanded(self, expanded):
         """Expands or collapses every monitor and window row, leaving the tabs' previews
         as they are (user request, 2026-10-19). Collapsing keeps the windows collapsed before,
-        also those whose rows Hide Idle hides."""
+        and collapses those whose rows Hide Idle hides too, also those hidden since they first
+        appeared, which have no row item yet, as expanding expands them (code review, 2026-10-29)."""
         self.finish_rename()
         if expanded:
             self.collapsed_item_keys.clear()
         else:
-            self.collapsed_item_keys |= {key for key, item in self.items_by_key.items()
-                                         if item.child_items and item.kind in ("monitor", "window")}
+            # Every monitor, also one whose windows Hide Idle all hides, which has no rows below it now.
+            self.collapsed_item_keys |= {key for key, item in self.items_by_key.items() if item.kind == "monitor"}
+            if self.snapshot is not None:
+                self.collapsed_item_keys |= {key for key in list_window_and_tab_item_keys(self.snapshot) if key[0] == "window"}
         # Row by row rather than through reloadData, which would rebuild every row view, in one
         # update, so the outline view lays out its rows once rather than after each window's
         # change (code review, 2026-10-29).
@@ -2662,6 +2665,8 @@ class AgentSessionListController(NSObject):
         sibling_items = target_item.child_items if target_item is not None else self.top_level_items
         remaining_items = [sibling_item for sibling_item in sibling_items if sibling_item is not dragged_item]
         original_index = sibling_items.index(dragged_item)
+        if child_index in (original_index, original_index + 1):
+            return True  # dropped back where it was: moving it would put it past the hidden windows after it (code review, 2026-10-29)
         drop_index = child_index - (1 if original_index < child_index else 0)
         drop_before_window_id = remaining_items[drop_index].item_id if 0 <= drop_index < len(remaining_items) else None
         self.submit_action(ActionRequest("reorder_window_list", {"window_id": dragged_item.item_id},

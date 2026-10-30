@@ -61,6 +61,16 @@ class AgentInsideATabAgentTests(unittest.TestCase):
         self.assertEqual(self.track(4.0, "done"), {"s1": "done", "s2": "done", "s3": "done"})
         self.assertEqual(self.core.iterm2_status_seen_while_an_inner_agent_ran_by_session_id, {})
 
+    def test_a_tab_first_seen_while_an_agent_runs_inside_its_agent_goes_by_its_own_agent(self):  # code review, 2026-10-29
+        # The app restarted while the inner agent ran and had set idle: the check came only once
+        # iTerm2's value changed, so Claude Code's busy agent showed idle meanwhile.
+        self.core.session_tracking_by_session_id.clear()  # as a new core has it
+        self.core.status_set_in_iterm2_and_since_by_session_id.clear()
+        self.an_agent_runs_inside = True
+        # Codex's screen isn't checked yet, and the third tool reports nothing: iTerm2's value counts for them.
+        self.assertEqual(self.track(2.0, "idle"), {"s1": "working", "s2": "idle", "s3": "idle"})
+        self.assertEqual(self.track(3.0), {"s1": "working", "s2": "idle", "s3": "idle"})
+
     def test_after_the_inner_agent_ends_its_last_status_counts_only_once_the_tabs_agent_agrees(self):
         self.an_agent_runs_inside = True
         self.track(2.0, "idle")  # the inner agent starts
@@ -77,6 +87,9 @@ class AgentInsideATabAgentTests(unittest.TestCase):
         self.assertEqual(self.track(5.0, "done"), {"s1": "done", "s2": "done", "s3": "done"})
 
     def test_the_processes_are_listed_only_when_the_status_set_in_iterm2_changed(self):
+        # The first sighting (setUp's) counts as a change (code review, 2026-10-29).
+        self.assertEqual(self.list_descendant_processes.call_count, 3)
+        self.list_descendant_processes.reset_mock()
         self.core.update_session_tracking(2.0)
         self.list_descendant_processes.assert_not_called()
         self.track(3.0, "idle")

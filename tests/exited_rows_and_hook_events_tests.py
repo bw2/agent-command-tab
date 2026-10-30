@@ -241,6 +241,24 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
             self.assertEqual(self.track(11.0, "waiting"), "waiting")  # a value set since counts
             self.assertEqual(self.track(12.0, "working"), "working")
 
+    def test_a_snapshot_matches_the_agents_to_their_tabs_before_the_status_tracking(self):  # code review, 2026-10-29
+        # Tracking first found no agent on the first pass after a restart, missed the saved Stop
+        # above, and the next pass took the turn as one ending then: "done" for a turn long over.
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.app = unittest.mock.Mock()
+        agent_sessions_seen_by_the_tracking = []
+
+        class StopAfterTheTracking(Exception):
+            pass
+        core.update_session_tracking = lambda now: agent_sessions_seen_by_the_tracking.append(
+            {session_id: agent_session["process_id"] for session_id, agent_session in core.agent_sessions.items()})
+        core.record_seen_time_for_the_seen_session = unittest.mock.Mock(side_effect=StopAfterTheTracking)
+        with unittest.mock.patch.object(iterm2_connection_thread, "resolve_agent_sessions",
+                                        return_value={"s1": make_agent_session(101)}), \
+                self.assertRaises(StopAfterTheTracking):
+            core.publish_snapshot_if_changed()
+        self.assertEqual(agent_sessions_seen_by_the_tracking, [{"s1": 101}])
+
     def test_a_value_iterm2_sets_after_the_stop_counts(self):
         self.track(1.0)
         self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0))

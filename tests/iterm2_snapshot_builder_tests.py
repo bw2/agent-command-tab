@@ -123,13 +123,17 @@ class BuildComputerSnapshotTests(unittest.TestCase):
 
     def test_claude_codes_own_report_fills_in_while_iterm2_reports_no_status(self):
         # After iTerm2 restarts, its API returns no status for a tab until the session's next hook event.
-        def build_entry(iterm2_status, claude_agents_status, displayed_states=None):
+        def build_entry(iterm2_status, claude_agents_status, displayed_states=None, screen_reading=None):
             return build_snapshot([make_window("w", [make_tab("1", "claude", status=iterm2_status, job_pid=42)])],
                                   claude_agents_by_process_id={42: {"name": "n", "status": claude_agents_status}},
-                                  displayed_states=displayed_states).monitors[0].windows[0].agent_sessions[0]
-        for claude_agents_status, state in (("idle", "idle"), ("busy", "working"), ("waiting", "asking"),
+                                  displayed_states=displayed_states,
+                                  screen_readings={"session-1": screen_reading or {}}).monitors[0].windows[0].agent_sessions[0]
+        for claude_agents_status, state in (("idle", "idle"), ("busy", "working"), ("shell", "working"), ("waiting", "asking"),
                                             (None, "unknown"), ("some new word", "unknown")):
             self.assertEqual(build_entry(None, claude_agents_status).status, state, claude_agents_status)
+        # "shell" after a turn the hooks saw end, with its background tasks running (code review, 2026-10-29).
+        self.assertEqual(build_entry(None, "shell", screen_reading={"hooks_report_background_tasks_after_the_turn": True,
+                                                                    "background_task_count": 1}).status, "background")
         self.assertEqual(build_entry(None, "idle").status_reason, "from claude agents --json: iTerm2 reports no status for this tab")
         self.assertEqual(build_entry("working", "idle").status, "working")  # iTerm2's status wins once there is one
         self.assertEqual(build_entry(None, "idle", {"session-1": DisplayedState("idle", 500.0, 400.0)}).status_since, 500.0)

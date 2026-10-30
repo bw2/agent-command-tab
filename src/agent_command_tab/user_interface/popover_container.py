@@ -387,22 +387,25 @@ class ListPanelController(NSViewController):
     @objc.python_method
     def fit_bottom_bar_to_width(self):
         """Puts the hooks note after the Settings button at the bottom left, then its Install Hooks
-        button (when there is something to install), the note cut short before the button and the
-        pause or resume button."""
+        button (when there is something to install and room for it before the pause or resume
+        button, which it covered in a narrow sidebar: code review, 2026-10-29), the note cut short
+        before the button and the pause or resume button."""
         note = self.hooks_note_text_field.stringValue()
-        shows_install_button = bool(note and self.agent_tool_names_to_install_hooks_for)
         self.hooks_note_text_field.setHidden_(not note)
-        self.install_hooks_button.setHidden_(not shows_install_button)
         if not note:
+            self.install_hooks_button.setHidden_(True)
             return
         right_end_x = (self.pause_or_resume_all_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
                        if not self.pause_or_resume_all_button.isHidden() else self.view().bounds().size.width - PANEL_SIDE_MARGIN)
+        settings_button_frame = self.settings_button.frame()
+        note_x = settings_button_frame.origin.x + settings_button_frame.size.width + 8
         button_width, button_height = self.install_hooks_button.frame().size
+        shows_install_button = (bool(self.agent_tool_names_to_install_hooks_for)
+                                and note_x + GAP_BETWEEN_TOP_BAR_BUTTONS + button_width <= right_end_x)
+        self.install_hooks_button.setHidden_(not shows_install_button)
         if shows_install_button:
             right_end_x -= button_width + GAP_BETWEEN_TOP_BAR_BUTTONS
         note_size = self.hooks_note_text_field.fittingSize()
-        settings_button_frame = self.settings_button.frame()
-        note_x = settings_button_frame.origin.x + settings_button_frame.size.width + 8
         note_width = max(min(note_size.width, right_end_x - note_x), 0)
         self.hooks_note_text_field.setFrame_(NSMakeRect(note_x, (BOTTOM_BAR_HEIGHT - note_size.height) / 2,
                                                         note_width, note_size.height))

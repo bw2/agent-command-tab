@@ -83,6 +83,18 @@ class HookStatesAcrossRestartsTests(unittest.TestCase):
         self.assertEqual(find_when_the_hooks_ended_the_turn(hook_state, 5.5), 6.0)
         self.assertEqual(hook_state["background_task_ids"], {"b1"})
 
+    def test_dump_snapshot_starts_from_the_saved_states_without_writing_the_file(self):  # code review, 2026-10-29
+        core = self.make_core()
+        core.note_hook_event(make_event("Stop", 101, sent_at=6.0, background_tasks=[{"id": "b1", "status": "running"}]))
+        with open(self.file_path) as saved_file:
+            saved_file_contents = saved_file.read()
+        core_of_dump_snapshot = DashboardCore(lambda snapshot: None, lambda message: None,
+                                              started_at_and_hook_state_by_agent_process_id_to_start_with=load_hook_states(self.file_path))
+        self.assertEqual(core_of_dump_snapshot.hook_state_by_agent_process_id, core.hook_state_by_agent_process_id)
+        core_of_dump_snapshot.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=8.0))
+        with open(self.file_path) as saved_file:
+            self.assertEqual(saved_file.read(), saved_file_contents)
+
     def test_a_process_gone_or_started_again_with_the_same_id_gets_no_state(self):
         core = self.make_core()
         core.note_hook_event(make_event("Stop", 101, sent_at=6.0, background_tasks=[]))
