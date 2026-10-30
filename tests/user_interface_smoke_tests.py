@@ -1086,6 +1086,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(len(redraw_count), 1)
         self.click_row_arrow(1)  # its process rows go
         self.assertGreater(len(redraw_count), 1)
+        # With nothing selected, rows coming and going redraw nothing (code review, 2026-10-30).
+        self.list_controller.outline_view.deselectAll_(None)
+        redraw_count.clear()
+        self.click_row_arrow(1)  # its process rows come back
+        self.assertEqual(redraw_count, [])
 
     def test_several_selected_rows_share_one_menu_that_acts_on_their_sessions(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())

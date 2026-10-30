@@ -1150,15 +1150,11 @@ class DashboardCore:
             conversation_id = await agent_session["adapter"].find_conversation_id(process_id, claude_agent_record)
         launch_command_for_the_copy = agent_session["adapter"].build_launch_command_for_a_copy(
             action_request.arguments["launch_command"], conversation_id, claude_agent_record)
-        action_result = await iterm2_actions.duplicate_agent_session(
+        # Without the conversation's ID, the copy starts a new conversation, silently: nothing showed
+        # the notices a successful result carried (user's choice, 2026-10-30).
+        return await iterm2_actions.duplicate_agent_session(
             self.connection, self.app, action_request.target["tab_id"], action_request.arguments["folder"],
             launch_command_for_the_copy)
-        if action_result.succeeded and conversation_is_shared_with_another_codex_session:
-            return ActionResult(True, "another Codex session runs or ran in the same folder, so its conversation can't be told apart, "
-                                      "and the copy starts a new conversation")
-        if action_result.succeeded and not conversation_id:
-            return ActionResult(True, "the conversation's ID wasn't found, so the copy starts a new conversation")
-        return action_result
 
     async def handle_close_window(self, action_request):
         return await iterm2_actions.close_window(self.app, action_request.target["window_id"])

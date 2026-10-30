@@ -681,7 +681,9 @@ class AppController(NSObject):
         alert.setMessageText_(f"Install the hooks for {' and '.join(agent_tool_names)}?")
         alert.setInformativeText_(
             "They are added to:\n\n" + "\n".join(file_paths)
-            + f"\n\nEach file is first copied to its name plus {BACKUP_FILE_SUFFIX}. Sessions started after this will use the hooks."
+            # The installer copies a file only the first time (code review, 2026-10-30).
+            + f"\n\nThe first time, each file is copied to its name plus {BACKUP_FILE_SUFFIX}, which keeps it as it was "
+              "before the app changed it. Sessions started after this will use the hooks."
             + (" Codex then asks you to approve them: type /hooks in Codex." if "Codex" in agent_tool_names else ""))
         alert.addButtonWithTitle_("Install")
         alert.addButtonWithTitle_("Cancel")

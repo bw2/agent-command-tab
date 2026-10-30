@@ -173,13 +173,16 @@ def run_with_restarts(verbose):
     app it starts gets the open lock file too, so the lock stays held while either runs: an app
     left running after its supervisor ended still keeps a second copy out (code review, 2026-10-30).
     """
+    from agent_command_tab.installed_copy_paths import find_python_of_this_copy
     running_lock_file = take_the_running_lock_or_name_the_copy_holding_it()  # held, open, until this supervisor returns
     if running_lock_file is None:
         return 0
     restart_delay_seconds = 1
     while True:
         started_at = time.time()
-        command = [sys.executable, "-m", "agent_command_tab.command_line", "app"] + (["--verbose"] if verbose else [])
+        # By the Python's path that survives `brew upgrade`, which deletes the version folder
+        # sys.executable can be in (code review, 2026-10-30).
+        command = [find_python_of_this_copy(), "-m", "agent_command_tab.command_line", "app"] + (["--verbose"] if verbose else [])
         exit_status = wait_for_app_process(subprocess.Popen(
             command, env=dict(os.environ, **{RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE: str(running_lock_file.fileno())}),
             pass_fds=[running_lock_file.fileno()]))

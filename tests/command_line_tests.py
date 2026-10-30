@@ -114,15 +114,21 @@ class RunningLockTests(unittest.TestCase):  # one copy at a time (user request, 
     def test_the_supervisor_hands_the_lock_to_the_app_it_starts(self):  # code review, 2026-10-30
         # So an app left running after its supervisor ended still keeps a second copy out.
         popen_keyword_arguments = []
+        commands = []
 
         def start_the_app(command, **keyword_arguments):
+            commands.append(command)
             popen_keyword_arguments.append(keyword_arguments)
             return FakeAppProcess([0])
         with tempfile.TemporaryFile("a+") as lock_file, \
                 unittest.mock.patch.object(command_line, "take_the_running_lock_or_name_the_copy_holding_it",
                                            return_value=lock_file), \
+                unittest.mock.patch("agent_command_tab.installed_copy_paths.find_python_of_this_copy",
+                                    return_value="/opt/homebrew/opt/agent-command-tab/libexec/bin/python"), \
                 unittest.mock.patch.object(command_line.subprocess, "Popen", side_effect=start_the_app):
             self.assertEqual(command_line.run_with_restarts(verbose=False), 0)
+            # By the Python's path that survives `brew upgrade`, not sys.executable (code review, 2026-10-30).
+            self.assertEqual(commands[0][0], "/opt/homebrew/opt/agent-command-tab/libexec/bin/python")
             self.assertEqual(popen_keyword_arguments[0]["pass_fds"], [lock_file.fileno()])
             self.assertEqual(popen_keyword_arguments[0]["env"][command_line.RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE],
                              str(lock_file.fileno()))

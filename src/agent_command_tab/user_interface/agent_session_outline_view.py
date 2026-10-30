@@ -1058,27 +1058,14 @@ class AgentSessionListController(NSObject):
     def list_row_structure(self):
         """Returns the (kind, ID) keys of all items in display order, with each parent's child
         count and each row's height (measure_row_height)."""
-        structure = []
-
-        def visit(items):
-            for item in items:
-                structure.append((item.kind, item.item_id, len(item.child_items), self.measure_row_height(item)))
-                visit(item.child_items)
-        visit(self.top_level_items)
-        return structure
+        return [(item.kind, item.item_id, len(item.child_items), self.measure_row_height(item)) for item in self.list_all_items()]
 
     @objc.python_method
     def list_children_by_parent(self):
         """Returns {parent item, or None for the top level: its child items in order}, which is
         what the outline view shows, since every rebuild either leaves it the same or passes it on."""
-        children_by_parent = {None: self.top_level_items + [self.new_window_row_item]}
-
-        def visit(items):
-            for item in items:
-                children_by_parent[item] = list(item.child_items)
-                visit(item.child_items)
-        visit(self.top_level_items)
-        return children_by_parent
+        return {None: self.top_level_items + [self.new_window_row_item],
+                **{item: list(item.child_items) for item in self.list_all_items()}}
 
     @objc.python_method
     def update_rows_in_place(self, children_before_by_parent, heights_before_by_key):
@@ -1351,11 +1338,15 @@ class AgentSessionListController(NSObject):
     def outlineViewSelectionDidChange_(self, notification):
         self.redraw_selection_outlines()
 
+    # A row view coming or going matters only while a row is selected: AppKit calls these once for
+    # each row view of a reload, and each redraw went over every row view (code review, 2026-10-30).
     def outlineView_didAddRowView_forRow_(self, outline_view, row_view, row):
-        self.redraw_selection_outlines()
+        if outline_view.numberOfSelectedRows():
+            self.redraw_selection_outlines()
 
     def outlineView_didRemoveRowView_forRow_(self, outline_view, row_view, row):
-        self.redraw_selection_outlines()
+        if outline_view.numberOfSelectedRows():
+            self.redraw_selection_outlines()
 
     @objc.python_method
     def redraw_selection_outlines(self):

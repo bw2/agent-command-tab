@@ -14,7 +14,7 @@ from agent_command_tab.dashboard_core_api import ActionResult
 from agent_command_tab.monitor_assignment import (assign_windows_to_monitors_by_largest_overlap,
                                                   compute_window_frame_on_another_monitor)
 from agent_command_tab.screen_readings import count_lines_matching, input_area_is_empty, read_typed_input_area_text
-from agent_command_tab.tab_order_computation import compute_full_tab_order_after_move
+from agent_command_tab.window_list_ordering import move_id_before_another
 
 SECONDS_FOR_FULL_SCREEN_ANIMATION = 1.0
 SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED = 0.5  # the box empties within a redraw of the Enter
@@ -121,8 +121,9 @@ async def move_tab_to_window_position(app, tab_id, target_window_id, drop_before
         return ActionResult(False, "that tab or window no longer exists")
     tabs_by_tab_id = {target_tab.tab_id: target_tab for target_tab in target_window.tabs}
     tabs_by_tab_id[tab_id] = tab
-    new_tab_order = compute_full_tab_order_after_move([target_tab.tab_id for target_tab in target_window.tabs],
-                                                      tab_id, drop_before_tab_id)
+    # Every tab of the window, those the list hides (no agent) too: iTerm2 needs them all, and a
+    # hidden tab keeps its place next to its neighbors. A tab from another window is new to them.
+    new_tab_order = move_id_before_another([target_tab.tab_id for target_tab in target_window.tabs], tab_id, drop_before_tab_id)
     await target_window.async_set_tabs([tabs_by_tab_id[ordered_tab_id] for ordered_tab_id in new_tab_order])
     return ActionResult(True)
 
