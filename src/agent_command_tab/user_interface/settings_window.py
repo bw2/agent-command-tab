@@ -7,9 +7,9 @@ import collections
 import threading
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSBox, NSBoxCustom, NSBoxSeparator, NSButton,
+from AppKit import (NSApp, NSBackingStoreBuffered, NSBezierPath, NSBox, NSBoxCustom, NSBoxSeparator, NSButton,
                     NSColor, NSControlSizeMini, NSControlSizeSmall, NSEventModifierFlagCommand, NSEventModifierFlagControl,
-                    NSEventModifierFlagOption, NSEventTypeKeyDown, NSFont, NSMakeRect, NSNoTitle, NSNormalWindowLevel,
+                    NSEventModifierFlagOption, NSEventTypeKeyDown, NSFont, NSInsetRect, NSMakeRect, NSNoTitle, NSNormalWindowLevel,
                     NSPopUpButton, NSScreen, NSScrollView, NSSwitch, NSTextField, NSView, NSViewMinXMargin, NSViewWidthSizable,
                     NSWindow, NSWindowOcclusionStateVisible, NSWindowStyleMaskClosable,
                     NSWindowStyleMaskResizable, NSWindowStyleMaskTitled, NSWorkspace)
@@ -87,6 +87,23 @@ class FlippedView(NSView):
         return True
 
 
+class LaunchCommandField(NSTextField):
+    """A launch command's field, outlined in red while its command can't be run
+    (show_launch_command_problem). Drawn here rather than as its layer's border, whose color is a
+    CGColor, which PyObjC without its Quartz package passes only as an untyped pointer, with a
+    warning each time (code review, 2026-10-30)."""
+
+    shows_a_problem = False
+
+    def drawRect_(self, rect):
+        objc.super(LaunchCommandField, self).drawRect_(rect)
+        if self.shows_a_problem:
+            NSColor.systemRedColor().setStroke()
+            outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSInsetRect(self.bounds(), 1, 1), 3, 3)
+            outline.setLineWidth_(2)
+            outline.stroke()
+
+
 class SettingsWindow(NSWindow):
     """The settings window: Esc closes it as its close button does (user request, 2026-10-29),
     also while a field is being typed in, whose text field would otherwise take Esc as a request
@@ -118,11 +135,15 @@ class SettingsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def show(self, settings):
-        """Opens (or brings forward) the window showing these settings, at its last frame while
-        that is on a connected screen, else in the middle of the main screen, as tall as its rows."""
+        """Opens the window showing these settings, at its last frame while that is on a connected
+        screen, else in the middle of the main screen, as tall as its rows; brings an open one
+        forward as it is, which every settings change reaches already (it was closed and built
+        again, losing its scroll position and an edit under way; code review, 2026-10-30)."""
+        if self.is_open():
+            NSApp.activateIgnoringOtherApps_(True)
+            self.window.makeKeyAndOrderFront_(None)
+            return
         self.settings = dict(settings)
-        if self.window is not None:
-            self.window.close()
         self.window = self.build_window()
         place_window_at_saved_frame_or_center(self.window, settings["settings_window_frame"])
         # The saved height can be from other sections, shown for another "Show as", or from older margins.
@@ -224,7 +245,8 @@ class SettingsWindowController(WindowFrameSavingController):
             include_switch = self.make_switch(agent_tool["is_included"])
             self.include_switches.append(include_switch)
             # Right-aligned, so the command fields start together (user request, 2026-10-25).
-            launch_command_field = self.make_text_field(agent_tool["launch_command"], LAUNCH_COMMAND_FIELD_WIDTH)
+            launch_command_field = self.make_text_field(agent_tool["launch_command"], LAUNCH_COMMAND_FIELD_WIDTH,
+                                                        LaunchCommandField)
             self.launch_command_fields.append(launch_command_field)
             harness_rows += [SettingsRow(agent_tool["agent_tool_name"], include_switch),
                              SettingsRow("Command", launch_command_field, continues_the_row_above=True)]
@@ -403,8 +425,8 @@ class SettingsWindowController(WindowFrameSavingController):
         return popup
 
     @objc.python_method
-    def make_text_field(self, text, width):
-        text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, width, 22))
+    def make_text_field(self, text, width, text_field_class=NSTextField):
+        text_field = text_field_class.alloc().initWithFrame_(NSMakeRect(0, 0, width, 22))
         text_field.setStringValue_(text)
         text_field.setTarget_(self)
         text_field.setAction_("controlChanged:")
@@ -504,10 +526,8 @@ class SettingsWindowController(WindowFrameSavingController):
     def show_launch_command_problem(self, launch_command_field, checked_launch_command, problem):
         if launch_command_field.stringValue() != checked_launch_command:
             return  # edited since; that edit's own check decides
-        launch_command_field.setWantsLayer_(True)
-        launch_command_field.layer().setBorderColor_(NSColor.systemRedColor().CGColor())
-        launch_command_field.layer().setBorderWidth_(2 if problem else 0)
-        launch_command_field.layer().setCornerRadius_(3)
+        launch_command_field.shows_a_problem = bool(problem)
+        launch_command_field.setNeedsDisplay_(True)
         launch_command_field.setToolTip_(problem or None)
 
     @objc.python_method

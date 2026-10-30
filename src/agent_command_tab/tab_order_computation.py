@@ -4,6 +4,8 @@ The list hides tabs without an agent, but iTerm2 needs every tab of a window in 
 Hidden tabs keep their place relative to their neighbors.
 """
 
+from agent_command_tab.window_list_ordering import move_id_before_another
+
 
 def compute_full_tab_order_after_move(full_tab_ids, moved_tab_id, drop_before_visible_tab_id):
     """Returns every tab ID of the target window in its new order.
@@ -18,9 +20,4 @@ def compute_full_tab_order_after_move(full_tab_ids, moved_tab_id, drop_before_vi
     Returns:
         A list of tab IDs that contains moved_tab_id exactly once.
     """
-    remaining_tab_ids = [tab_id for tab_id in full_tab_ids if tab_id != moved_tab_id]
-    if drop_before_visible_tab_id in remaining_tab_ids:
-        insert_position = remaining_tab_ids.index(drop_before_visible_tab_id)
-    else:
-        insert_position = len(remaining_tab_ids)
-    return remaining_tab_ids[:insert_position] + [moved_tab_id] + remaining_tab_ids[insert_position:]
+    return move_id_before_another(full_tab_ids, moved_tab_id, drop_before_visible_tab_id)

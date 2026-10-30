@@ -95,7 +95,8 @@ def compute_dragged_sidebar_width(width_at_start, pointer_x_at_start, pointer_x,
 
 
 def pointer_is_at_edge(pointer_location, screen_frame, edge):
-    """Returns whether the pointer touches the chosen edge of the screen (its full frame)."""
+    """Returns whether the pointer touches the chosen edge of screen_frame (x, y, width, height):
+    the screen's full width, over the sidebar's height (SidebarController.pointer_moved)."""
     pointer_x, pointer_y = pointer_location
     x, y, width, height = screen_frame
     if not y <= pointer_y <= y + height:

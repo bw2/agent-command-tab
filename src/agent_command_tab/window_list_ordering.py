@@ -34,11 +34,18 @@ def move_window_in_window_list_order(window_order, moved_window_id, drop_before_
     Returns:
         A list of window IDs; unchanged when moved_window_id is unknown.
     """
-    if moved_window_id not in window_order or moved_window_id == drop_before_window_id:
+    if moved_window_id not in window_order:
         return list(window_order)
-    remaining_window_ids = [window_id for window_id in window_order if window_id != moved_window_id]
-    if drop_before_window_id in remaining_window_ids:
-        insert_position = remaining_window_ids.index(drop_before_window_id)
-    else:
-        insert_position = len(remaining_window_ids)
-    return remaining_window_ids[:insert_position] + [moved_window_id] + remaining_window_ids[insert_position:]
+    return move_id_before_another(window_order, moved_window_id, drop_before_window_id)
+
+
+def move_id_before_another(ids, moved_id, drop_before_id):
+    """Returns the IDs with moved_id just before drop_before_id, or at the end when that isn't
+    among them (None, say); unchanged for an ID dropped before itself. moved_id may be new to the
+    IDs (a tab moved from another window). The window list and a window's tabs share it (code
+    review, 2026-10-30: the tabs' copy moved a tab dropped before itself to the end)."""
+    if moved_id == drop_before_id:
+        return list(ids)
+    remaining_ids = [item_id for item_id in ids if item_id != moved_id]
+    insert_position = remaining_ids.index(drop_before_id) if drop_before_id in remaining_ids else len(remaining_ids)
+    return remaining_ids[:insert_position] + [moved_id] + remaining_ids[insert_position:]

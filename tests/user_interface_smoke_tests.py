@@ -6,9 +6,11 @@ Set AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the l
 import io
 import math
 import os
+import threading
 import time
 import unittest
 import unittest.mock
+import warnings
 
 from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, NSAppearance, NSAppearanceNameAqua,
                     NSAppearanceNameDarkAqua, NSApplication,
@@ -2328,6 +2330,19 @@ class AutomaticIconColorTests(unittest.TestCase):
                           stand_in_app_controller.last_other_active_application if gets_the_last_other_app
                           else application_in_front)
 
+    def test_new_tab_new_window_and_duplicate_report_a_failure(self):  # code review, 2026-10-30
+        # They failed silently, a tab's folder deleted since, say.
+        stand_in_app_controller = unittest.mock.Mock(settings=DEFAULT_SETTINGS, latest_snapshot_lock=threading.Lock(),
+                                                     latest_snapshot=None)
+        AppController.duplicate_agent_session(stand_in_app_controller, "t1", "/gone", "Claude Code")
+        AppController.start_agent_session_from_menu(stand_in_app_controller, "w1", "/gone", "Claude Code")
+        AppController.start_agent_session_from_menu(stand_in_app_controller, None, None, "Claude Code")
+        self.assertEqual([(call.args[0].action, call.args[1])
+                          for call in stand_in_app_controller.submit_action_and_report_failure.call_args_list],
+                         [("duplicate_agent_session", "The tab wasn't duplicated"), ("start_agent_session", "The agent wasn't started"),
+                          ("start_agent_session", "The agent wasn't started")])
+        stand_in_app_controller.submit_action.assert_not_called()
+
 
 class AgentToolIconTests(unittest.TestCase):
     def test_codex_shows_the_openai_logo_in_the_names_color(self):
@@ -2396,6 +2411,21 @@ class SidebarWidthDragTests(unittest.TestCase):
         self.controller.finish_width_drag()
         self.assertEqual(self.owner.saved_widths, [550])
         self.assertFalse(self.controller.width_drag_is_in_progress())
+
+    def test_the_edge_shows_an_auto_hiding_sidebar_only_beside_it(self):  # code review, 2026-10-30
+        # In the menu bar's band or a bottom Dock's, the pointer was never over the sidebar it
+        # showed, which hid again and again.
+        self.controller.settings = dict(self.controller.settings, sidebar_mode="auto_hide")
+        self.controller.screens = [{"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 60, 1500, 910)}]
+        self.controller.is_shown = False
+        shown = []
+        self.controller.set_shown = shown.append
+        for pointer_y, shows in ((990, False), (30, False), (500, True)):  # the menu bar, the Dock, beside the sidebar
+            shown.clear()
+            with unittest.mock.patch("agent_command_tab.user_interface.sidebar_panel.NSEvent") as stand_in_event_class:
+                stand_in_event_class.mouseLocation.return_value = NSMakePoint(1499.5, pointer_y)
+                self.controller.pointer_moved()
+            self.assertEqual(shown, [True] if shows else [], pointer_y)
 
     def test_a_click_without_movement_saves_nothing(self):
         self.controller.start_width_drag(1100)
@@ -2678,6 +2708,16 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller = SettingsWindowController.alloc().initWithOwner_(self.owner)
         self.controller.settings = dict(self.owner.settings)
         self.controller.window = self.controller.build_window()  # built without showing it
+
+    def test_showing_an_open_window_brings_it_forward_as_it_is(self):  # code review, 2026-10-30
+        # It was closed and built again, losing its scroll position and an edit under way.
+        open_window = self.controller.window
+        with unittest.mock.patch.object(self.controller, "is_open", return_value=True), \
+                unittest.mock.patch.object(open_window, "makeKeyAndOrderFront_") as bring_forward, \
+                unittest.mock.patch("agent_command_tab.user_interface.settings_window.NSApp"):
+            self.controller.show(dict(self.owner.settings))
+        self.assertIs(self.controller.window, open_window)
+        bring_forward.assert_called_once_with(None)
 
     def test_every_control_fits_in_the_narrowest_window(self):
         # In every "Show as" layout, with the accessibility button shown too, each control ends inside
@@ -2978,6 +3018,17 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         last_command_field = self.controller.launch_command_fields[-1]
         self.assertEqual(rows_view.frame().size.height - (last_command_field.frame().origin.y + last_command_field.frame().size.height),
                          27)
+
+    def test_a_command_that_cant_run_is_outlined_in_red_without_a_warning(self):  # code review, 2026-10-30
+        # The layer's border took a CGColor, an untyped pointer without Quartz, with a warning each time.
+        command_field = self.controller.launch_command_fields[0]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            for problem in ("nosuchprogram: command not found", None):
+                self.controller.show_launch_command_problem(command_field, command_field.stringValue(), problem)
+                self.assertEqual((command_field.shows_a_problem, command_field.toolTip()), (bool(problem), problem))
+                bitmap = command_field.bitmapImageRepForCachingDisplayInRect_(command_field.bounds())
+                command_field.cacheDisplayInRect_toBitmapImageRep_(command_field.bounds(), bitmap)  # draws the outline
 
     def test_the_command_fields_start_together_keep_their_width_and_scroll_a_longer_command(self):
         command_fields = self.controller.launch_command_fields

@@ -471,8 +471,9 @@ class DashboardCore:
             action_request.arguments["launch_command"])
 
     async def handle_send_slash_command(self, action_request):
-        """Types /compact or /clear into an agent session that waits at its prompt, idle or done
-        as its row shows it (iterm2_actions.type_slash_command checks its input box)."""
+        """Types /compact or /clear into an agent session that waits at its prompt, idle, done or
+        background as its row shows it (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT;
+        iterm2_actions.type_slash_command checks its input box)."""
         session_id = action_request.target["session_id"]
         # Checked and typed holding the tab's lock, as every typing into a tab is: a held message may be being pasted.
         async with self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock()):
@@ -601,8 +602,8 @@ class DashboardCore:
                      if agent_session_entry.session_id == session_id), "")
 
     def agent_waits_at_its_prompt(self, session_id, agent_session):
-        """Whether the agent session waits at its prompt: its row shows idle or done, and Claude
-        Code doesn't report it busy."""
+        """Whether the agent session waits at its prompt: its row shows idle, done or background
+        (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT), and Claude Code doesn't report it busy."""
         displayed_state = self.displayed_state_by_session_id.get(session_id)
         return (displayed_state is not None and displayed_state.state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT
                 and not self.claude_code_reports_the_session_busy(session_id, agent_session))
@@ -967,7 +968,7 @@ class DashboardCore:
 
     async def paste_message_once_the_agent_waits_at_its_prompt(self, session_id, agent_process_id, message):
         """Checks every SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT until the agent session
-        waits at its prompt (its row shows idle or done) with an empty input box, then pastes the
+        waits at its prompt (agent_waits_at_its_prompt) with an empty input box, then pastes the
         message there and presses Enter. Gives up after
         SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT, or once the tab's agent process is no
         longer agent_process_id (keep_trying_until_the_agent_takes_it)."""

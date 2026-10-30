@@ -6,7 +6,8 @@ app when an agent's session ended normally (so a crash leaves an "exited" row), 
 Claude Code's background shells and agents (the lights after a tab's name). The entries
 are the app's by their command, which names hook_event_forwarder.py, so installing again
 replaces them and removing takes out only them. Each file the installer changes is copied first
-to <file>.agent-command-tab-backup.
+to <file>.agent-command-tab-backup, the first time only, so that keeps the file as it was before
+the app changed it.
 
 - Claude Code: settings.json in each config folder in use (claude_code.list_claude_config_folders,
   so a Claude Code started with CLAUDE_CONFIG_DIR=~/.claude_work gets them too). A session
@@ -223,12 +224,16 @@ def read_settings_file(file_path):
 
 
 def write_settings_file(settings, file_path):
-    """Copies the file to its backup, then replaces it at once with the new contents, keeping its
-    permissions. A symlink (a dotfiles manager's) stays: the file it points to is the one replaced."""
+    """Copies the file to its backup the first time only, so the backup keeps the file as it was
+    before the app first changed it (each write replaced it, with a later install or a removal
+    leaving the app's own version there; code review, 2026-10-30), then replaces the file at once
+    with the new contents, keeping its permissions. A symlink (a dotfiles manager's) stays: the
+    file it points to is the one replaced."""
     file_path = os.path.realpath(file_path)
     mode = 0o644
     if os.path.exists(file_path):
-        shutil.copy2(file_path, file_path + BACKUP_FILE_SUFFIX)
+        if not os.path.exists(file_path + BACKUP_FILE_SUFFIX):
+            shutil.copy2(file_path, file_path + BACKUP_FILE_SUFFIX)
         mode = os.stat(file_path).st_mode & 0o777
     file_descriptor, temporary_path = tempfile.mkstemp(dir=os.path.dirname(file_path), suffix=".tmp")
     with os.fdopen(file_descriptor, "w") as temporary_file:

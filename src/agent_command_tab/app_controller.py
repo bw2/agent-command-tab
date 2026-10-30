@@ -765,26 +765,32 @@ class AppController(NSObject):
     @objc.python_method
     def duplicate_agent_session(self, tab_id, folder, agent_tool_name):
         """Opens a copy of a tab's agent session right after it, continuing a copy of its
-        conversation where the tool allows (like Chrome's Duplicate, user request, milestone 2)."""
-        self.submit_action(ActionRequest("duplicate_agent_session", {"tab_id": tab_id},
-                                         {"folder": folder or "~", "launch_command": self.find_launch_command(agent_tool_name)}))
+        conversation where the tool allows (like Chrome's Duplicate, user request, milestone 2).
+        A failure (the tab's folder deleted since, say) is reported, as for the other menu actions
+        (code review, 2026-10-30)."""
+        self.submit_action_and_report_failure(
+            ActionRequest("duplicate_agent_session", {"tab_id": tab_id},
+                          {"folder": folder or "~", "launch_command": self.find_launch_command(agent_tool_name)}),
+            "The tab wasn't duplicated")
 
     @objc.python_method
     def start_agent_session_from_menu(self, window_id, folder, agent_tool_name):
         """Starts an agent tool in a new tab of a window, or in a new window in the
         folder of the tab in front, else of the tab used most recently within a day, else the
-        home folder (no folder picker: user request, milestone 2)."""
+        home folder (no folder picker: user request, milestone 2). A failure is reported (code
+        review, 2026-10-30)."""
         launch_command = self.find_launch_command(agent_tool_name)
         if window_id is not None:
-            self.submit_action(ActionRequest("start_agent_session", {"window_id": window_id},
-                                             {"folder": folder or "~", "launch_command": launch_command}))
+            self.submit_action_and_report_failure(ActionRequest("start_agent_session", {"window_id": window_id},
+                                                                {"folder": folder or "~", "launch_command": launch_command}),
+                                                  "The agent wasn't started")
             return
         with self.latest_snapshot_lock:
             snapshot = self.latest_snapshot
         self.close_dropdown()
-        self.submit_action(ActionRequest("start_agent_session", {}, {
+        self.submit_action_and_report_failure(ActionRequest("start_agent_session", {}, {
             "folder": choose_folder_for_new_agent_window(snapshot, time.time(), os.path.expanduser("~")),
-            "launch_command": launch_command}))
+            "launch_command": launch_command}), "The agent wasn't started")
 
     @objc.python_method
     def open_settings(self):
@@ -934,11 +940,13 @@ class AppController(NSObject):
             list_panel_controller.list_controller.set_shown_columns(settings["shown_columns"])
 
     @objc.python_method
-    def reserve_screen_area(self, frame):
-        """Docked sidebar: asks the core to keep iTerm2 windows out of frame (None ends it)."""
-        if frame != self.reserved_screen_area:
-            self.reserved_screen_area = frame
-            self.connection_thread.send_reserved_screen_area(frame)
+    def reserve_screen_area(self, reserved_area):
+        """Docked sidebar: asks the core to keep iTerm2 windows out of the sidebar's area,
+        {"frame": (x, y, width, height), "edge": "right" or "left", "monitor_visible_frame": (...)}
+        (DashboardCore.set_reserved_screen_area), or None to end it."""
+        if reserved_area != self.reserved_screen_area:
+            self.reserved_screen_area = reserved_area
+            self.connection_thread.send_reserved_screen_area(reserved_area)
 
     @objc.python_method
     def sidebar_width_changed(self, width):

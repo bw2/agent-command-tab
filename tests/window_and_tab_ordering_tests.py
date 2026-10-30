@@ -41,6 +41,9 @@ class ComputeFullTabOrderTests(unittest.TestCase):
     def test_tab_from_another_window(self):
         self.assertEqual(compute_full_tab_order_after_move(["x", "y"], "moved", "y"), ["x", "moved", "y"])
 
+    def test_drop_on_itself_changes_nothing(self):  # it moved the tab to the end (code review, 2026-10-30)
+        self.assertEqual(compute_full_tab_order_after_move(["a", "b", "c"], "a", "a"), ["a", "b", "c"])
+
 
 if __name__ == "__main__":
     unittest.main()

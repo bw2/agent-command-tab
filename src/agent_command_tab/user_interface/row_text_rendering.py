@@ -89,7 +89,9 @@ STATES_WHOSE_TEXT_IS_IN_THE_REGULAR_WEIGHT = frozenset({"idle"})
 MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2026-10-28
     "asking": "the agent is waiting for your answer to a question, or for permission to use a tool",
     "error": "the agent reported an error",
-    "stuck": "the agent has been thinking for 10 minutes with nothing new on screen and no command running",
+    # Also a tool that should take seconds, open that long (user request and code review, 2026-10-30).
+    "stuck": ("the agent has been thinking for 10 minutes with nothing new on screen and no command running, "
+              "or has waited 10 minutes on a tool that should take seconds (a web fetch, a file read)"),
     "working": "the agent is thinking or running a command",
     "background": "the agent is at its prompt, and processes it started keep running in the background",
     "done": "the agent is done and you haven't looked at its last message yet",  # the user's wording, 2026-10-27

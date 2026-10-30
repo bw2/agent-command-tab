@@ -162,6 +162,9 @@ class FilesTests(unittest.TestCase):
         self.assertEqual(remove_hooks("Claude Code"), [self.claude_settings_path])
         self.assertEqual(self.read_json(self.claude_settings_path), USERS_SETTINGS)
         self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_MISSING)
+        # The backup still holds the file from before the first change, not the app's version
+        # the removal replaced (code review, 2026-10-30).
+        self.assertEqual(self.read_json(self.claude_settings_path + BACKUP_FILE_SUFFIX), USERS_SETTINGS)
 
     def test_codex_hooks_need_its_approval(self):
         self.assertEqual(install_hooks("Codex"), [self.codex_hooks_path])  # a new hooks.json

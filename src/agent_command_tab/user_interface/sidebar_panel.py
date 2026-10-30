@@ -31,6 +31,7 @@ from AppKit import (NSAnimationContext, NSBackingStoreBuffered, NSCursor, NSEven
                     NSWindowStyleMaskNonactivatingPanel)
 from Foundation import NSObject, NSTimer
 
+from agent_command_tab.settings_store import LARGEST_SIDEBAR_WIDTH, SMALLEST_SIDEBAR_WIDTH
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
 from agent_command_tab.user_interface.popover_container import ListPanelController
 from agent_command_tab.user_interface.screen_layout import read_monitors_from_screens
@@ -41,8 +42,6 @@ SECONDS_BEFORE_HIDING = 0.5
 # Slid in by the menu bar icon, its menu's "Show sidebar" or the global shortcut.
 SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT = 5
 SLIDE_ANIMATION_SECONDS = 0.15
-SMALLEST_WIDTH = 200
-LARGEST_WIDTH = 1200
 WIDTH_DRAG_STRIP_THICKNESS = 6
 CF_STRING_ENCODING_UTF8 = 0x08000100
 
@@ -132,7 +131,8 @@ class SidebarController(NSObject):
 
     The owner is the app controller (see AgentSessionListController for the methods it has);
     the sidebar also calls its sidebar_width_changed(width) after the user drags the width, and
-    reserve_screen_area(frame or None) whenever the docked area starts, moves or ends.
+    reserve_screen_area(reserved_area or None) whenever the docked area starts, moves or ends:
+    {"frame", "edge", "monitor_visible_frame"} (update_placement).
     """
 
     def initWithOwner_(self, owner):
@@ -406,8 +406,13 @@ class SidebarController(NSObject):
             return
         pointer = NSEvent.mouseLocation()
         if not self.is_shown:
-            if pointer_is_at_edge((pointer.x, pointer.y), self.screens[self.placement.screen_index]["frame"],
-                                  self.placement.edge):
+            # The edge counts only beside the sidebar, not in the menu bar's or a bottom Dock's
+            # band, where the pointer is never over the sidebar it showed, which then hid again
+            # and again (code review, 2026-10-30).
+            screen = self.screens[self.placement.screen_index]
+            frame_beside_the_sidebar = (screen["frame"][0], screen["visible_frame"][1], screen["frame"][2],
+                                        screen["visible_frame"][3])
+            if pointer_is_at_edge((pointer.x, pointer.y), frame_beside_the_sidebar, self.placement.edge):
                 self.set_shown(True)
             return
         if self.pointer_is_over_sidebar():
@@ -473,7 +478,7 @@ class SidebarController(NSObject):
             return
         pointer_x_at_start, width_at_start = self.width_drag_start
         width = compute_dragged_sidebar_width(width_at_start, pointer_x_at_start, pointer_x, self.placement.edge,
-                                              SMALLEST_WIDTH, LARGEST_WIDTH)
+                                              SMALLEST_SIDEBAR_WIDTH, LARGEST_SIDEBAR_WIDTH)
         screen = self.screens[self.placement.screen_index]
         frame = compute_sidebar_frame(screen["visible_frame"], screen["frame"], self.placement.edge, width, True)
         self.window.setFrame_display_(NSMakeRect(*frame), True)

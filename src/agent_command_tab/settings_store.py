@@ -54,6 +54,9 @@ SIDEBAR_EDGES = ["right", "left"]
 # auto_hide: slides in when the pointer touches the edge; floating: always visible over windows;
 # docked: always visible, and iTerm2 windows on that monitor are kept out of its area.
 SIDEBAR_MODES = ["auto_hide", "floating", "docked"]
+# The narrowest and widest the sidebar can be, typed in the settings or dragged at its edge (sidebar_panel).
+SMALLEST_SIDEBAR_WIDTH = 200
+LARGEST_SIDEBAR_WIDTH = 1200
 # A tab row's information columns that the settings can show or hide, in their left-to-right
 # order (the tool icon column, right before state, shows by itself when two or more agent tools
 # run). Memory and CPU usage count the agent and every process below it. The state and its
@@ -111,7 +114,8 @@ def is_valid_setting_value(name, value):
     if name == "shown_columns":
         return isinstance(value, list) and all(column_name in LIST_COLUMNS for column_name in value)
     if name == "sidebar_width":
-        return isinstance(value, (int, float)) and not isinstance(value, bool) and 200 <= value <= 1200
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and SMALLEST_SIDEBAR_WIDTH <= value <= LARGEST_SIDEBAR_WIDTH)
     if name == "agent_tools":
         return (isinstance(value, list) and value
                 and all(isinstance(tool, dict) and isinstance(tool.get("agent_tool_name"), str) and tool["agent_tool_name"]

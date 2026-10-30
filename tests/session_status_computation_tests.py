@@ -169,6 +169,12 @@ class ComputeSessionStatusTests(unittest.TestCase):
         reading = {"permission_dialog_is_showing": False, "permission_dialog_checked_at": 762,
                    "permission_dialog_gone_since": 760, "fingerprint_changed_at": 90}
         self.assertEqual(compute_state("waiting", 100, screen_reading=reading, now=880), "working")
+        # So too for a tool that finishes in seconds, open since before the prompt (code review, 2026-10-30).
+        reading["conversation_preview"] = {"open_tool_name": "Edit", "open_tool_started_at": 99}
+        self.assertEqual(compute_session_status_from_sources("waiting", 100, None, None, False, reading, 600, 880),
+                         ("working", "running Edit"))
+        self.assertEqual(compute_session_status_from_sources("waiting", 100, None, None, False, reading, 600, 1400),
+                         ("stuck", "waiting on Edit for 11 min"))
 
     def test_denied_permission_waits_for_instructions(self):
         reading = {"permission_dialog_is_showing": False, "permission_dialog_checked_at": 105,

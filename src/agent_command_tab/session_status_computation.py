@@ -227,10 +227,12 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         if open_tool_started_at is not None:
             # Waiting on a tool call its conversation file shows open, which starts no command:
             # stuck only for a tool that finishes in seconds, once open for the threshold (user
-            # request, 2026-10-30); a subagent or an MCP tool may run long.
+            # request, 2026-10-30); a subagent or an MCP tool may run long. Counted from when
+            # the agent started working, too, so a permission prompt's wait doesn't count (code review, 2026-10-30).
             open_tool_name = preview_fields["open_tool_name"]
-            if open_tool_name in TOOLS_THAT_FINISH_IN_SECONDS and now - open_tool_started_at >= stuck_threshold_seconds:
-                return "stuck", f"waiting on {open_tool_name} for {max(1, round((now - open_tool_started_at) / 60))} min"
+            seconds_waited_on_the_tool = now - max(open_tool_started_at, working_since)
+            if open_tool_name in TOOLS_THAT_FINISH_IN_SECONDS and seconds_waited_on_the_tool >= stuck_threshold_seconds:
+                return "stuck", f"waiting on {open_tool_name} for {max(1, round(seconds_waited_on_the_tool / 60))} min"
             return "working", f"running {open_tool_name}"
         # Stuck means thinking with nothing new on screen, so the clock also restarts when a command ends.
         quiet_since = max(screen_reading.get("fingerprint_changed_at", working_since), working_since,
