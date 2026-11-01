@@ -18,7 +18,6 @@ dependencies = [
 ]
 keywords = ["iterm2", "claude-code", "codex", "ai-agents", "macos", "menu-bar", "dashboard"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
     "Environment :: MacOS X :: Cocoa",
     "Intended Audience :: Developers",
     "Operating System :: MacOS :: MacOS X",
