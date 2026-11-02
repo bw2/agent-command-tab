@@ -48,7 +48,7 @@ class ReduceHookPayloadTests(unittest.TestCase):
         event = reduce(TURN_ENDED)
         self.assertEqual(set(event), {"agent_tool_name", "hook_event_name", "reason", "source", "agent_id",
                                       "background_task_launched_id", "background_tasks", "ancestor_processes", "sent_at"})
-        self.assertEqual(event["background_tasks"], [{"id": "bs6f2whbf", "status": "running"}])
+        self.assertEqual(event["background_tasks"], [{"id": "bs6f2whbf", "type": "shell", "status": "running"}])
         self.assertEqual((event["hook_event_name"], event["agent_tool_name"], event["ancestor_processes"], event["sent_at"]),
                          ("Stop", "Claude Code", [[27904, "sh"]], 100.0))
         self.assertIsNone(reduce({"hook_event_name": "SessionEnd", "reason": "other"})["background_tasks"])  # not a list: not known

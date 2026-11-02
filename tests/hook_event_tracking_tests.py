@@ -80,6 +80,15 @@ class ApplyHookEventTests(unittest.TestCase):
         hook_state = apply_hook_event(hook_state, make_event("Stop", 5.0, background_tasks=[{"id": "bs6", "status": "completed"}]))
         self.assertEqual(hook_state["background_task_ids"], set())
 
+    def test_teammates_are_left_out_of_the_background_tasks(self):  # user request, 2026-11-02
+        # As Claude Code 2.1.316 listed them on 2026-11-02: teammates that had finished their work
+        # and waited for messages were still "running", next to a running shell and subagent.
+        hook_state = apply_events(make_event("SessionStart", 1.0, source="startup"), make_event("Stop", 2.0, background_tasks=[
+            {"id": "t42fbo1j9", "type": "teammate", "status": "running"},
+            {"id": "a38b5b409", "type": "subagent", "status": "running"},
+            {"id": "bh911cra4", "type": "shell", "status": "running"}]))
+        self.assertEqual(hook_state["background_task_ids"], {"a38b5b409", "bh911cra4"})
+
     def test_background_tasks_are_unknown_until_a_new_start_or_a_list(self):
         # The app started while the session already ran: what it runs isn't known yet.
         hook_state = apply_events(make_event("SessionStart", 1.0, source="clear"))

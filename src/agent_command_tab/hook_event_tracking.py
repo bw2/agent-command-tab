@@ -22,6 +22,10 @@ SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS = frozenset({"
 AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS = frozenset({"Claude Code"})
 # A background task Claude Code lists counts while it runs (its list also holds finished ones until it reports them).
 STATUSES_OF_A_RUNNING_BACKGROUND_TASK = frozenset({"running", "pending", None})
+# A teammate (a helper agent started with a name, which other agents can send messages to) isn't
+# counted: Claude Code lists it as "running" for as long as it exists, idle or not, so a row kept
+# its lights and its "running" state for days after the teammates' work was done (user request, 2026-11-02).
+TYPES_OF_A_BACKGROUND_TASK_LEFT_UNCOUNTED = frozenset({"teammate"})
 # The hook events of a tool call starting and finishing (hooks_installer registers both for Claude Code's
 # Bash, Agent and Task); the main agent's, after a Stop, show its turn going on (code review, 2026-10-28).
 TOOL_EVENT_NAMES = frozenset({"PreToolUse", "PostToolUse"})
@@ -48,8 +52,11 @@ def find_agent_process_id_of_hook_event(ancestor_processes):
 
 
 def list_running_background_task_ids(background_tasks):
-    """Returns the IDs of the tasks in a Claude Code list that still run."""
-    return {task["id"] for task in background_tasks if task.get("id") and task.get("status") in STATUSES_OF_A_RUNNING_BACKGROUND_TASK}
+    """Returns the IDs of the tasks in a Claude Code list that still run, other than teammates
+    (TYPES_OF_A_BACKGROUND_TASK_LEFT_UNCOUNTED)."""
+    return {task["id"] for task in background_tasks
+            if task.get("id") and task.get("status") in STATUSES_OF_A_RUNNING_BACKGROUND_TASK
+            and task.get("type") not in TYPES_OF_A_BACKGROUND_TASK_LEFT_UNCOUNTED}
 
 
 def apply_hook_event(hook_state, event):

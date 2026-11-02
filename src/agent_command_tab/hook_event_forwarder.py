@@ -87,8 +87,9 @@ def reduce_hook_payload(payload, agent_tool_name, ancestors, now):
         "source": shorten(payload.get("source")),
         "agent_id": shorten(payload.get("agent_id")),
         "background_task_launched_id": find_background_task_launched(payload),
-        # Claude Code lists the session's background tasks (shells and agents) when a turn or an agent ends.
-        "background_tasks": [{"id": shorten(task.get("id")), "status": shorten(task.get("status"))}
+        # Claude Code lists the session's background tasks when a turn or an agent ends, each with its
+        # type ("shell", "subagent", "teammate", "monitor", "workflow" and others).
+        "background_tasks": [{"id": shorten(task.get("id")), "type": shorten(task.get("type")), "status": shorten(task.get("status"))}
                              for task in background_tasks[:MOST_BACKGROUND_TASKS_KEPT] if isinstance(task, dict)]
         if isinstance(background_tasks, list) else None,
         "ancestor_processes": ancestors,
