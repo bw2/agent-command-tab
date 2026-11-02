@@ -15,6 +15,7 @@ from agent_command_tab import __version__
 RECONNECT_EXIT_STATUS = 75
 LONGEST_RESTART_DELAY_SECONDS = 30
 SECONDS_TO_WAIT_FOR_AGENT_NAMES = 2
+SECONDS_TO_WAIT_FOR_THE_TERMINALS_TO_CONNECT = 30  # dump-snapshot
 # Before it exits, the app waits at most this long for docked windows to get their room back
 # (app_controller); after Ctrl+C the supervisor gives it that and more before killing it.
 SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING = 3
@@ -26,13 +27,14 @@ RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE = "AGENT_COMMAND_TAB_RUNNING_LOCK_FILE_DES
 
 
 def dump_snapshot(verbose):
-    """Connects to iTerm2, prints the current snapshot as JSON, and exits (for tests and bug reports).
+    """Reads the terminals (iTerm2 and tmux), prints the current snapshot as JSON, and exits (for
+    tests and bug reports).
 
-    Waits a few seconds after the first snapshot, so that names from `claude agents --json`
-    (read in the background) are included.
+    Waits a few seconds after the first snapshot, so that iTerm2's windows (it connects in the
+    background) and names from `claude agents --json` (read in the background) are included.
     """
     from agent_command_tab.hook_states_store import HOOK_STATES_FILE_PATH, load_hook_states
-    from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+    from agent_command_tab.dashboard_core import DashboardCoreThread
     from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH, load_pause_records
     from agent_command_tab.settings_store import build_core_settings, load_settings
     from agent_command_tab.snapshot_data_classes import convert_snapshot_to_json_ready_dict
@@ -52,7 +54,7 @@ def dump_snapshot(verbose):
     # The app's pause records, so paused sessions are listed, and its hook states, so a turn the
     # hooks saw end shows as the app shows it (code review, 2026-10-29), kept in memory only: this
     # run never changes the app's files.
-    connection_thread = Iterm2ConnectionThread(
+    connection_thread = DashboardCoreThread(
         publish_snapshot, report_connection_lost, verbose,
         pause_record_by_tab_and_agent_to_start_with=load_pause_records(PAUSE_RECORDS_FILE_PATH),
         started_at_and_hook_state_by_agent_process_id_to_start_with=load_hook_states(HOOK_STATES_FILE_PATH))
@@ -66,6 +68,14 @@ def dump_snapshot(verbose):
     if "snapshot" not in received:
         print(received["problem"], file=sys.stderr)
         return 1
+    # The first snapshot may come before a terminal that runs is connected (iTerm2 connects in the
+    # background); one that refused to connect (a problem it reported) isn't waited for.
+    deadline = time.time() + SECONDS_TO_WAIT_FOR_THE_TERMINALS_TO_CONNECT
+    while time.time() < deadline and any(
+            terminal_backend.terminal_runs() and not terminal_backend.is_connected()
+            and terminal_backend.terminal_name not in connection_thread.core.terminal_problem_by_terminal_name
+            for terminal_backend in connection_thread.core.terminal_backends):
+        time.sleep(0.1)
     time.sleep(SECONDS_TO_WAIT_FOR_AGENT_NAMES)
     print(json.dumps(convert_snapshot_to_json_ready_dict(received["snapshot"]), indent=1))
     return 0

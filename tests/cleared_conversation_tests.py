@@ -7,11 +7,11 @@ import time
 import unittest
 import unittest.mock
 
-from agent_command_tab import iterm2_actions, iterm2_connection_thread
+from agent_command_tab import dashboard_core
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
-from agent_command_tab.iterm2_connection_thread import DashboardCore
-from agent_command_tab.iterm2_snapshot_builder import DisplayedState
+from agent_command_tab.dashboard_core import DashboardCore
+from agent_command_tab.snapshot_builder import DisplayedState
 
 
 class StandInAdapter:
@@ -101,15 +101,16 @@ class ClearedConversationTests(unittest.TestCase):
 
     def duplicate(self):
         """Returns the launch command a Duplicate of the tab would run."""
-        self.core.gathered_windows = [{"window_id": "w1", "tabs": [{"tab_id": "t1", "first_session": {"session_id": "s1"}}]}]
+        self.core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2",
+                                       "tabs": [{"tab_id": "t1", "first_session": {"session_id": "s1"}}]}]
         launch_commands = []
 
-        async def record_duplicate(connection, app, tab_id, folder, launch_command):
+        async def record_duplicate(window_id, folder, launch_command, after_tab_id=None):
             launch_commands.append(launch_command)
             return ActionResult(True)
-        with unittest.mock.patch.object(iterm2_actions, "duplicate_agent_session", record_duplicate):
+        with unittest.mock.patch.object(self.core.terminal_backend_by_name["iTerm2"], "start_agent_session", record_duplicate):
             asyncio.run(self.core.handle_duplicate_agent_session(
-                ActionRequest("duplicate_agent_session", {"tab_id": "t1"}, {"folder": "/x", "launch_command": "codex"})))
+                ActionRequest("duplicate_agent_session", {"tab_id": "t1"}, {"folder": "/","launch_command": "codex"})))
         return launch_commands[-1]
 
     def test_duplicating_a_cleared_tab_starts_a_new_conversation(self):
@@ -177,7 +178,7 @@ class OpenToolCallSnapshotTests(unittest.TestCase):  # code review, 2026-10-29
             is_asked_for_before_the_tool_shows_as_running = core.snapshot_needed.is_set()
             await asyncio.sleep(0.5)
             return is_asked_for_before_the_tool_shows_as_running, core.snapshot_needed.is_set()
-        with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING", 0.3):
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING", 0.3):
             self.assertEqual(asyncio.run(read_the_file_then_wait()), (False, True))
 
 

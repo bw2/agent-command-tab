@@ -26,14 +26,13 @@ import collections
 import os
 import signal
 
-import iterm2
-
 from agent_command_tab.agent_process_tree import (find_the_shell_running_the_agent,
                                                   list_descendant_processes_and_other_users_process_ids,
                                                   list_other_stopped_jobs_of_the_agents_shell,
                                                   list_the_process_and_its_ancestor_ids, process_has_its_terminal,
                                                   process_is_stopped, read_name_of_any_process, read_process_info)
 from agent_command_tab.dashboard_core_api import ActionResult
+from agent_command_tab.terminal_backends.base import TerminalRequestFailed
 
 CONTROL_Z = "\x1a"
 CONTROL_U = "\x15"  # clears the shell's input line (bash, zsh, fish)
@@ -98,35 +97,7 @@ async def wait_until(condition, seconds):
     return condition()
 
 
-async def read_text_around_the_cursor(session):
-    """Returns (text before the cursor, text after it) on the cursor's line, joining the screen
-    rows a long line wraps over and leaving out empty cells, or None when the cursor isn't on screen."""
-    contents = await session.async_get_screen_contents()
-    cursor = contents.cursor_coord
-    cursor_row = cursor.y - contents.windowed_coord_range.coordRange.start.y
-    if not 0 <= cursor_row < contents.number_of_lines:
-        return None
-    first_row = cursor_row
-    while first_row > 0 and not contents.line(first_row - 1).hard_eol:
-        first_row -= 1
-    cursor_line = contents.line(cursor_row)
-    cells_before_the_cursor = []
-    for x in range(cursor.x):
-        try:
-            cells_before_the_cursor.append(cursor_line.string_at(x))
-        except IndexError:  # past the cells written on this row
-            break
-    text_on_the_row_before_the_cursor = "".join(cells_before_the_cursor)
-    text_before = "".join(contents.line(row).string for row in range(first_row, cursor_row)) + text_on_the_row_before_the_cursor
-    text_after = cursor_line.string[len(text_on_the_row_before_the_cursor):]
-    row = cursor_row
-    while not contents.line(row).hard_eol and row + 1 < contents.number_of_lines:
-        row += 1
-        text_after += contents.line(row).string
-    return text_before.replace("\x00", ""), text_after.replace("\x00", "")
-
-
-async def read_the_shell_prompt(session, agent_process_id):
+async def read_the_shell_prompt(terminal_session, agent_process_id):
     """Returns the cursor line once the shell has drawn its prompt, waiting up to
     SECONDS_TO_WAIT_FOR_THE_SHELL_PROMPT for a slow prompt, or None. The prompt counts as drawn
     once the shell has taken the terminal back from the agent and the cursor line, not empty,
@@ -137,8 +108,8 @@ async def read_the_shell_prompt(session, agent_process_id):
         if process_has_its_terminal(agent_process_id):
             continue
         try:
-            text_around_the_cursor = await read_text_around_the_cursor(session)
-        except iterm2.RPCException:
+            text_around_the_cursor = await terminal_session.read_text_around_the_cursor()
+        except TerminalRequestFailed:
             return None  # the tab closed meanwhile; the pause's record still lists what it stopped
         if (text_around_the_cursor is not None and text_around_the_cursor[0].strip()
                 and text_around_the_cursor == previous_text_around_the_cursor):
@@ -174,7 +145,7 @@ def list_processes_below_the_agent_to_stop(agent_process_id, detached_processes=
             other_users_process_ids_below)
 
 
-async def pause_agent_session(session, agent_process_id, agent_tool_name, detached_processes=()):
+async def pause_agent_session(terminal_session, agent_process_id, agent_tool_name, detached_processes=()):
     """Suspends the agent like Ctrl+Z, then stops every process below it, the detached processes
     its conversation started included (list_processes_below_the_agent_to_stop).
 
@@ -185,7 +156,7 @@ async def pause_agent_session(session, agent_process_id, agent_tool_name, detach
     record then holds no prompt, since something may have been typed at the shell meanwhile.
 
     Args:
-        session: The tab's iterm2.Session.
+        terminal_session: The tab's TerminalSession (terminal_backends.base).
         agent_process_id: The agent's process.
         agent_tool_name: The agent's tool, as its row names it.
         detached_processes: The ProcessInfo of each detached process its conversation started.
@@ -201,7 +172,7 @@ async def pause_agent_session(session, agent_process_id, agent_tool_name, detach
     was_suspended_by_hand = process_is_stopped(agent_process_id)
     processes_below, other_users_process_ids_below = list_processes_below_the_agent_to_stop(agent_process_id, detached_processes)
     if not was_suspended_by_hand:
-        await session.async_send_text(CONTROL_Z, suppress_broadcast=True)
+        await terminal_session.send_text(CONTROL_Z)
         if not await wait_until(lambda: process_is_stopped(agent_process_id), SECONDS_TO_WAIT_FOR_CONTROL_Z):
             send_signal_to_processes([agent_process_id], signal.SIGTSTP)
             if not await wait_until(lambda: process_is_stopped(agent_process_id), SECONDS_TO_WAIT_FOR_SIGTSTP):
@@ -215,7 +186,7 @@ async def pause_agent_session(session, agent_process_id, agent_tool_name, detach
         [process.name for process_id, process in processes_below.items()
          if process_id not in stopped_process_ids and read_process_info(process_id) is not None]
         + [name for name in map(read_name_of_any_process, other_users_process_ids_below) if name])
-    text_around_the_cursor = None if was_suspended_by_hand else await read_the_shell_prompt(session, agent_process_id)
+    text_around_the_cursor = None if was_suspended_by_hand else await read_the_shell_prompt(terminal_session, agent_process_id)
     pause_record = PauseRecord((agent_process_id, agent.started_at), agent_tool_name, text_around_the_cursor, sorted(
         (process_id, process.started_at) for process_id, process in processes_below.items() if process_id in stopped_process_ids))
     if names_of_processes_left_running:
@@ -224,7 +195,7 @@ async def pause_agent_session(session, agent_process_id, agent_tool_name, detach
     return ActionResult(True), pause_record
 
 
-async def find_reason_not_to_type_fg(session, agent_process_id, pause_record):
+async def find_reason_not_to_type_fg(terminal_session, agent_process_id, pause_record):
     """Returns why typing `fg` into the tab isn't safe now, or "" when it is (module docstring).
     Checked while everything is still stopped, so no output moves the prompt meanwhile."""
     if pause_record is None or pause_record.text_around_the_cursor is None:
@@ -236,19 +207,19 @@ async def find_reason_not_to_type_fg(session, agent_process_id, pause_record):
                 "so fg would go to it; leave that program and resume again")
     if list_other_stopped_jobs_of_the_agents_shell(agent_process_id):
         return "another job is suspended in the tab's shell, so fg might bring back that one; type jobs, then fg %N, in the tab"
-    if await read_text_around_the_cursor(session) != pause_record.text_around_the_cursor:
+    if await terminal_session.read_text_around_the_cursor() != pause_record.text_around_the_cursor:
         return ("the tab's shell line has changed since the pause (something typed there, or the prompt redrawn), "
                 "so typing fg could run something else; check the line and type fg there")
     return ""
 
 
-async def resume_agent_session(session, agent_process_id, pause_record):
+async def resume_agent_session(terminal_session, agent_process_id, pause_record):
     """Types `fg` at the shell's prompt, after Ctrl+U (module docstring), which continues the
     agent with the terminal back, then continues the processes the pause stopped below it. Types
     nothing unless that is safe (find_reason_not_to_type_fg).
 
     Args:
-        session: The tab's iterm2.Session.
+        terminal_session: The tab's TerminalSession (terminal_backends.base).
         agent_process_id: The agent's process.
         pause_record: The PauseRecord of the agent's pause (kept across dashboard restarts), or
             None for an agent suspended with Ctrl+Z by hand and never paused from the list.
@@ -258,10 +229,10 @@ async def resume_agent_session(session, agent_process_id, pause_record):
             # The shell didn't take the terminal back (a SIGSTOP it didn't notice): a SIGCONT is enough.
             send_signal_to_processes([agent_process_id], signal.SIGCONT)
         else:
-            reason_not_to_type_fg = await find_reason_not_to_type_fg(session, agent_process_id, pause_record)
+            reason_not_to_type_fg = await find_reason_not_to_type_fg(terminal_session, agent_process_id, pause_record)
             if reason_not_to_type_fg:
                 return ActionResult(False, reason_not_to_type_fg)
-            await session.async_send_text(CONTROL_U + "fg\r", suppress_broadcast=True)
+            await terminal_session.send_text(CONTROL_U + "fg\r")
             if not await wait_until(lambda: not process_is_stopped(agent_process_id), SECONDS_TO_WAIT_FOR_FG):
                 return ActionResult(False, "fg didn't bring the agent back; type jobs, then fg %N, in the tab")
     if pause_record is not None:

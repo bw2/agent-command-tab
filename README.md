@@ -2,11 +2,11 @@
 
 # AgentCommandTab
 
-A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agents run (Claude Code, OpenAI Codex CLI, and others), shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents.
+A macOS menu bar app that lists the iTerm2 windows and tabs, and the tmux sessions and windows, where AI coding agents run (Claude Code, OpenAI Codex CLI, and others), shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents.
 
 ## What it does
 
-- **One tree of your agents:** every iTerm2 window with at least one agent tab, with its tabs below it, grouped by monitor when you have several. Tabs without an agent are left out.
+- **One tree of your agents:** every iTerm2 window and tmux session with at least one agent tab, with its tabs below it, grouped by monitor when you have several. Tabs without an agent are left out.
 - **What each agent is doing:** a status dot and word per tab (asking a question or for permission, thinking, running a tool, stuck, running in the background, done, new, idle, paused, error), how long it has been so, the context size in tokens and its share of the context window, and optionally when it started, how long it has run, its memory and CPU use. "Done" stays until you look at the tab, and a Claude Code session is "new" until you send it its first message. The menu bar icon counts the agents waiting for your answer.
 - **A preview per tab:** what the agent is asking or running, what it said since your last prompt, or that prompt. The tab's arrow opens it, along with a row for each process the agent started (right-click one for Info or Kill).
 - **Control:** double-click to bring a window or tab to the front; press and hold to peek at a tab; rename in place; drag tabs between windows and windows between monitors; start a new agent window or tab; duplicate a tab; type `/compact` or `/clear` into an agent waiting at its prompt; end an agent's process; pause agents (with every process they started) before going offline and resume them later, per tab, window, monitor or all at once. Select several rows (Command-click, Shift-click) to act on all their agents at once (a busy agent gets `/compact` or `/clear` when its turn ends), or to ask them to talk to each other: each gets your note and how to message the others.
@@ -17,8 +17,20 @@ A macOS menu bar app that lists the iTerm2 windows and tabs where AI coding agen
 
 ## Requirements
 
-- macOS, with iTerm2 3.7 or later and iTerm2's Python API turned on: iTerm2 > Settings > General > Magic > Enable Python API.
+- macOS, with iTerm2 3.7 or later and iTerm2's Python API turned on (iTerm2 > Settings > General > Magic > Enable Python API), or tmux 3.2 or later, or both.
 - Python 3.10 or later (for an install with pip or pipx).
+
+## tmux
+
+Agents running inside tmux, in any terminal app, are listed next to iTerm2's. Each tmux session is a window row, labeled "tmux:", and each of its tmux windows a tab row, judged by its first pane (as an iTerm2 tab is). The app reads the default tmux server (the one a plain `tmux` command uses) once a second.
+
+Almost everything works as in iTerm2: the states, previews, process rows, /compact and /clear, Talk to Each Other, pause and resume, rename, new tabs and windows, Duplicate, moving a tab within a session or into another session, and Close. Some differences:
+
+- tmux doesn't report agent states, so the app takes Claude Code's own report of each session, and for Codex the turn timer on its screen (a Codex approval request doesn't show as asking). Agent tools other than Claude Code and Codex aren't recognized in tmux.
+- A tmux session has no window of its own, so it is listed with the menu-bar monitor and can't be moved to another monitor, and a tab can't move between iTerm2 and tmux.
+- Showing a tab selects it in tmux and switches an attached client to its session, then brings that client's terminal to the front (its iTerm2 tab, or any other terminal app). With no client attached, the app says how to attach one.
+- The app can't tell which tab of a terminal app other than iTerm2 is in front, so a "done" tab whose tmux client runs there stays "done" until you show it from the list.
+- Typing into an agent (/compact, /clear, Talk to Each Other, pause and resume) is refused in a tmux window with `synchronize-panes` on, since the keys would reach its other panes too, and while its pane is in copy mode, which would take the keys.
 
 ## Install
 

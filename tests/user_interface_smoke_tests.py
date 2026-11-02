@@ -35,8 +35,10 @@ from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMA
 from agent_command_tab.snapshot_data_classes import (AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry,
                                                      build_window_title_shown_in_the_list)
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
-                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH, SMALLEST_POPOVER_WIDTH,
-                                                                SMALLEST_SORT_POPUP_WIDTH, TOP_BAR_HEIGHT, ListPanelController)
+                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH,
+                                                                SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS,
+                                                                SMALLEST_POPOVER_WIDTH, SMALLEST_SORT_POPUP_WIDTH,
+                                                                TOP_BAR_HEIGHT, ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
                                                                          DIM_DOT_ALPHA,
@@ -124,8 +126,9 @@ class RecordingOwner:
         self.confirmation_action_names.append(action_name)
         return self.answer_to_confirmation
 
-    def submit_action_and_report_failure(self, action_request, failure_title):
+    def submit_action_and_report_failure(self, action_request, failure_title, after_success=None, after_failure=None):
         self.submitted_actions.append(action_request)
+        self.after_failure_of_the_last_action = after_failure
 
     def list_sort_order_chosen(self, list_sort_order, list_sort_order_is_reversed):
         self.chosen_list_sort_orders.append((list_sort_order, list_sort_order_is_reversed))
@@ -670,6 +673,22 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel.show_message("")
         self.assertFalse(panel.list_sort_order_popup.isHidden())
         self.assertFalse(panel.idle_tabs_button.isHidden())
+        # A terminal that can't be reached while another's rows stay listed: in a wide panel the controls stay,
+        self.window.setContentSize_((560, 260))
+        panel.show_message("iTerm2: could not connect", sort_control_and_hide_idle_step_aside=False)
+        self.assertFalse(panel.list_sort_order_popup.isHidden())
+        self.assertFalse(panel.idle_tabs_button.isHidden())
+        message_frame = panel.message_text_field.frame()
+        self.assertLessEqual(message_frame.origin.x + message_frame.size.width + 8, panel.idle_tabs_button.frame().origin.x)
+        self.assertGreaterEqual(message_frame.origin.x, panel.list_sort_order_popup.frame().origin.x
+                                + panel.list_sort_order_popup.frame().size.width)
+        self.assertGreaterEqual(message_frame.size.width, SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS)
+        # and in a narrow one, where the message would get too little room beside them, they step aside.
+        self.window.setContentSize_((200, 260))
+        panel.fit_top_bar_to_width()
+        self.assertTrue(panel.list_sort_order_popup.isHidden())
+        self.assertTrue(panel.idle_tabs_button.isHidden())
+        self.assertGreaterEqual(panel.message_text_field.frame().size.width, SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS)
 
     def test_hide_idle_hides_idle_tabs_and_windows_left_without_tabs_until_show_idle(self):
         panel = self.dropdown_panel_controller
@@ -1298,6 +1317,36 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(tab_item.entry.tab_title, "new name")
         self.assertEqual(self.submitted_actions[-1].action, "rename_tab")
 
+    def test_a_refused_rename_puts_the_old_name_back(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        tab_item = self.list_controller.outline_view.itemAtRow_(1)
+        old_title = tab_item.entry.tab_title
+        self.list_controller.begin_rename(tab_item)
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False)
+        row_view.name_text_field.setStringValue_("new name")
+        notification = type("NotificationStandIn", (), {"object": lambda self: row_view.name_text_field})()
+        self.list_controller.controlTextDidEndEditing_(notification)
+        self.owner.after_failure_of_the_last_action()  # the terminal refused it
+        self.assertEqual(self.list_controller.outline_view.itemAtRow_(1).entry.tab_title, old_title)
+
+    def test_an_emptied_tmux_window_name_is_not_sent(self):  # a tmux session has no default name to go back to
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two._replace(terminal_name="tmux"))),)))
+        self.window.contentView().layoutSubtreeIfNeeded()
+        window_row = 4
+        window_item = self.list_controller.outline_view.itemAtRow_(window_row)
+        self.list_controller.begin_rename(window_item)
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, window_row, False)
+        row_view.name_text_field.setStringValue_("")
+        notification = type("NotificationStandIn", (), {"object": lambda self: row_view.name_text_field})()
+        actions_before = len(self.submitted_actions)
+        self.list_controller.controlTextDidEndEditing_(notification)
+        self.assertEqual(len(self.submitted_actions), actions_before)
+        self.assertEqual(window_item.entry.title, "tandem-repeats")
+
     def test_a_renamed_window_shows_no_number_until_the_core_numbers_it_again(self):  # code review, 2026-10-30
         # "proj (2)" renamed "other" showed "other (2)".
         snapshot = make_sample_snapshot()
@@ -1336,6 +1385,32 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.row_released()
         self.assertEqual(self.list_controller.items_by_key[("tab", "1")].entry.tab_title, "new name")
         self.assertEqual(self.list_controller.items_by_key[("tab", "2")].entry.status, "idle")  # the held snapshot shows too
+
+    def check_a_refused_rename_ended_by_a_click_on_another_row_puts_the_old_name_back(self, refused_before_the_release):
+        # The held snapshot got the new name.
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        tab_item = self.list_controller.outline_view.itemAtRow_(1)
+        old_title = tab_item.entry.tab_title
+        self.list_controller.begin_rename(tab_item)
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # arrives during the rename: held
+        row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False)
+        row_view.name_text_field.setStringValue_("new name")
+        self.list_controller.row_pressed(3)  # the click on another row that ends the rename
+        notification = type("NotificationStandIn", (), {"object": lambda self: row_view.name_text_field})()
+        self.list_controller.controlTextDidEndEditing_(notification)
+        if refused_before_the_release:
+            self.owner.after_failure_of_the_last_action()
+        self.list_controller.row_released()
+        if not refused_before_the_release:
+            self.owner.after_failure_of_the_last_action()
+        self.assertEqual(self.list_controller.items_by_key[("tab", "1")].entry.tab_title, old_title)
+
+    def test_a_rename_refused_after_the_release_of_the_click_that_ended_it_puts_the_old_name_back(self):
+        self.check_a_refused_rename_ended_by_a_click_on_another_row_puts_the_old_name_back(False)
+
+    def test_a_rename_refused_before_the_release_of_the_click_that_ended_it_puts_the_old_name_back(self):
+        self.check_a_refused_rename_ended_by_a_click_on_another_row_puts_the_old_name_back(True)
 
     def test_holding_a_tab_row_peeks_and_releasing_ends_it_but_a_click_does_not(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -2174,6 +2249,19 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                                                        agent_sessions=(make_entry("30", "new-session", "idle"),)))),)))
         submenu = self.build_right_click_menu_items_by_title(1)["Move to window"].submenu()
         self.assertEqual([menu_item.title() for menu_item in submenu.itemArray()], ["tandem-repeats", "tandem-repeats (2)"])
+
+    def test_a_tmux_session_has_no_monitor_to_move_to_and_takes_no_iterm2_tab(self):  # user request, 2026-11-01
+        snapshot = make_two_monitor_snapshot(make_sample_snapshot())
+        tmux_window = snapshot.monitors[1].windows[0]._replace(terminal_name="tmux", can_move_to_another_monitor=False)
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(
+            snapshot.monitors[0], snapshot.monitors[1]._replace(windows=(tmux_window,)))))
+        outline_view = self.list_controller.outline_view
+        row_by_item_id = {outline_view.itemAtRow_(row).item_id: row for row in range(outline_view.numberOfRows())}
+        self.assertIn("Move to monitor", self.build_right_click_menu_titles(row_by_item_id["w1"]))
+        self.assertNotIn("Move to monitor", self.build_right_click_menu_titles(row_by_item_id["w2"]))
+        self.assertNotIn("Move to window", self.build_right_click_menu_titles(row_by_item_id["1"]))  # the only other window is tmux's
+        self.assertEqual(self.list_controller.build_row_text_parts(outline_view.itemAtRow_(row_by_item_id["w2"])).name_text,
+                         "tmux: tandem-repeats")
 
     def test_r_and_command_r_rename_the_one_selected_tab_or_window_row(self):  # user request, 2026-10-29
         self.list_controller.apply_snapshot(make_sample_snapshot())

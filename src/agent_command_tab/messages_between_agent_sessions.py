@@ -21,12 +21,13 @@ DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER = (
 
 AgentSessionForMessages = collections.namedtuple(
     "AgentSessionForMessages",
-    ["agent_tool_name", "how_other_agent_sessions_send_it_messages", "address", "process_id", "working_folder", "tab_title"])
+    ["agent_tool_name", "how_other_agent_sessions_send_it_messages", "address", "process_id", "working_folder", "tab_title",
+     "tab_kind_name"])
 AgentSessionForMessages.__doc__ = (
     "What the messages say about one agent session: its tool (\"Codex\"), how other sessions send it messages "
     "(agent_adapters.base: MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL or MESSAGES_THROUGH_CODEX_QUEUE), its address "
     "for that (a Claude Code session's name, a Codex session's conversation ID), its agent's process ID, its "
-    "working folder and its iTerm2 tab's title.")
+    "working folder, its tab's title, and what its terminal calls the tab (\"iTerm2 tab\", \"tmux window\").")
 
 
 def describe_agent_session_for_messages(agent_session):
@@ -35,7 +36,7 @@ def describe_agent_session_for_messages(agent_session):
     name = (f'"{agent_session.address}"' if agent_session.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
             else agent_session.address)
     return (f"the {agent_session.agent_tool_name} session {name} (process ID {agent_session.process_id}, "
-            f'folder {agent_session.working_folder or "unknown"}, iTerm2 tab "{agent_session.tab_title}")')
+            f'folder {agent_session.working_folder or "unknown"}, {agent_session.tab_kind_name} "{agent_session.tab_title}")')
 
 
 def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_too):

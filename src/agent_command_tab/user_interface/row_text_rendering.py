@@ -88,7 +88,7 @@ STATE_TEXT_COLOR_NAME_BY_STATE = {
 STATES_WHOSE_TEXT_IS_IN_THE_REGULAR_WEIGHT = frozenset({"idle"})
 
 # What each state means, the dot's hover text (user request, 2026-10-27). The 10 and 5 minutes are
-# iterm2_connection_thread's STUCK_THRESHOLD_SECONDS and EXITED_ROW_SECONDS.
+# dashboard_core's STUCK_THRESHOLD_SECONDS and EXITED_ROW_SECONDS.
 MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2026-10-28
     "asking": "the agent is waiting for your answer to a question, or for permission to use a tool",
     "error": "the agent reported an error",
@@ -107,7 +107,7 @@ MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2
 }
 # A tab row names a working agent's state for what it does: "running" while it waits on a tool,
 # a command at once and any other tool after 5 seconds, otherwise "thinking" (user requests,
-# 2026-10-28; iterm2_snapshot_builder.choose_tool_the_agent_is_waiting_on). Window rows, whose
+# 2026-10-28; snapshot_builder.choose_tool_the_agent_is_waiting_on). Window rows, whose
 # counts sum up their tabs, still say "working" for both.
 MEANING_BY_WORKING_STATE_NAME = {
     "thinking": "the agent is thinking or briefly running tools",  # the user's wording, 2026-10-28

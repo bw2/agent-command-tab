@@ -1,8 +1,9 @@
-"""The core's background thread: the iTerm2 connection, its subscriptions, and snapshot publishing.
+"""The core's background thread: the terminals' windows and tabs (through the terminal layer,
+terminal_backends), the agents in them, and snapshot publishing.
 
 Everything here runs on one asyncio event loop in a background thread; the
 AppKit main thread only receives snapshots (through publish_snapshot) and sends messages and
-action requests (through the thread-safe methods of Iterm2ConnectionThread).
+action requests (through the thread-safe methods of DashboardCoreThread).
 """
 
 import asyncio
@@ -10,21 +11,16 @@ import json
 import os
 import signal
 import socket
+import sys
 import threading
 import time
 
-import iterm2
-import iterm2.auth
-import iterm2.rpc
-from iterm2 import api_pb2
-from iterm2.notifications import async_subscribe_to_variable_change_notification
-
-from agent_command_tab import iterm2_actions
+from agent_command_tab import agent_input_box_typing
 from agent_command_tab.agent_process_tree import (an_agent_program_runs_through_a_shell_below,
                                                   choose_command_the_agent_is_waiting_on,
                                                   choose_detached_processes_of_the_conversation, choose_helper_process_ids,
                                                   compute_cpu_percent, list_descendant_processes, list_detached_processes,
-                                                  process_has_its_terminal, process_is_alive,
+                                                  list_the_process_and_its_ancestor_ids, process_has_its_terminal, process_is_alive,
                                                   process_is_stopped, read_child_processes,
                                                   read_name_the_process_was_started_as, read_process_arguments_and_environment,
                                                   read_process_current_folder, read_process_details, read_process_info,
@@ -48,8 +44,8 @@ from agent_command_tab.dashboard_core_api import ActionRegistry, ActionResult
 from agent_command_tab.messages_between_agent_sessions import (SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT,
                                                                AgentSessionForMessages,
                                                                build_message_asking_agent_session_to_talk_to_the_others)
-from agent_command_tab.iterm2_snapshot_builder import (SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING, DisplayedState,
-                                                       build_computer_snapshot, resolve_agent_sessions)
+from agent_command_tab.snapshot_builder import (SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING, DisplayedState,
+                                                build_computer_snapshot, resolve_agent_sessions)
 from agent_command_tab.docked_window_frames_store import (adopt_records_of_restored_windows,
                                                           load_docked_window_frames, save_docked_window_frames)
 from agent_command_tab.monitor_assignment import compute_frame_clear_of_area, frames_are_within_tolerance
@@ -63,6 +59,10 @@ from agent_command_tab.session_status_computation import (CLAUDE_CODE_SESSION_ST
                                                           track_status_value,
                                                           update_permission_dialog_reading)
 from agent_command_tab.snapshot_data_classes import ChildProcessEntry, iterate_agent_session_entries
+from agent_command_tab.terminal_backends.base import TerminalConnectionLost, TerminalRequestFailed, TerminalTypingRefused
+from agent_command_tab.terminal_backends.iterm2_terminal_backend import Iterm2TerminalBackend
+from agent_command_tab.terminal_backends.tmux_terminal_backend import TmuxTerminalBackend
+from agent_command_tab.unix_socket_listeners import another_process_listens_at
 from agent_command_tab.window_list_ordering import move_window_in_window_list_order, update_window_list_order
 
 FRAME_POLL_INTERVAL_SECONDS = 2
@@ -97,8 +97,9 @@ CLAUDE_AGENTS_TIMEOUT_SECONDS = 5
 CLAUDE_AGENTS_RETRIES_FOR_A_NEW_PROCESS = 3
 CLAUDE_AGENTS_RETRY_DELAY_SECONDS = 3
 SNAPSHOT_COALESCING_DELAY_SECONDS = 0.1
-SESSION_VARIABLES_TO_WATCH = ("commandLine", "status")
-SECONDS_TO_WAIT_FOR_THE_STATUS_IN_ITERM2S_TAB_BAR = 2
+# How often the own report of each agent in a terminal that reports no agent status (tmux) is read,
+# since nothing tells the core when it changes (Claude Code's session file).
+SECONDS_BETWEEN_OWN_STATUS_READINGS = 1
 CODEX_QUEUE_TIMEOUT_SECONDS = 30
 # How often "Talk to Each Other" checks whether a held message can be pasted (user request, 2026-10-21).
 SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT = 3
@@ -109,7 +110,6 @@ CHILD_PROCESS_CHECK_INTERVAL_SECONDS = 3  # an open tab row's sub rows and the b
 LONGEST_COMMAND_TEXT = 500  # characters of a sub row's command kept in the snapshot
 HOOKS_CHECK_INTERVAL_SECONDS = 10  # whether the agent tools' settings hold the app's hooks
 LONGEST_HOOK_EVENT_LINE = 1024 ** 2
-SECONDS_TO_REACH_ANOTHER_HOOK_EVENTS_LISTENER = 0.5
 # How often a copy that left the hook events socket to another copy checks whether that one has ended.
 SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER = 5
 
@@ -193,18 +193,6 @@ async def queue_message_for_codex_session(codex_command_path, conversation_id, m
     return ActionResult(True)
 
 
-def another_process_listens_at(socket_path):
-    """Returns whether a process accepts connections on this Unix socket (not just a file left by
-    a process that ended)."""
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(SECONDS_TO_REACH_ANOTHER_HOOK_EVENTS_LISTENER)
-            connection.connect(socket_path)
-        return True
-    except OSError:  # no file, or no one listening (ConnectionRefusedError)
-        return False
-
-
 def round_memory_and_cpu_use(memory_bytes, cpu_percent):
     """Returns the memory to the megabyte and the CPU use to a whole percent, 0 below
     CPU_PERCENT_SHOWN_AS_IDLE (None stays None), so an idle session's rows and the snapshot don't
@@ -230,48 +218,14 @@ def build_conversation_file_record(conversation_key, path, looked_up_at, cleared
             "cleared_path": cleared_path}
 
 
-def parse_job_process_id(job_pid_value):
-    """Returns iTerm2's `jobPid` variable as an int, or None."""
-    try:
-        return int(job_pid_value)
-    except (TypeError, ValueError):
-        return None
-
-
-async def read_iterm2_variables(connection, names, session_id=None, tab_id=None, window_id=None):
-    """Returns the values of several variables of one session, tab or window, read in a single
-    request (the iterm2 package's async_get_variable sends one request per variable).
-
-    Raises:
-        iterm2.RPCException: The session, tab or window is gone.
-    """
-    response = await iterm2.rpc.async_variable(connection, session_id, [], names, tab_id=tab_id, window_id=window_id)
-    status = response.variable_response.status
-    if status != api_pb2.VariableResponse.Status.Value("OK"):
-        raise iterm2.RPCException(api_pb2.VariableResponse.Status.Name(status))
-    return [json.loads(value) for value in response.variable_response.values]
-
-
-async def read_status_shown_in_iterm2s_tab_bar(session):
-    """Returns the status iTerm2 shows for a session in its tab bar ("idle", "working", ...), from
-    its built-in function iterm2.get_session_status (not in iTerm2's documentation), or None.
-
-    After iTerm2 restarts, its tab bar still shows each tab's status, and this function returns
-    it, but the session's `status` variable stays empty until the agent's next hook event (seen
-    with iTerm2 3.7.6; user request, 2026-10-21).
-    """
-    try:
-        result = await session.async_invoke_function(f'iterm2.get_session_status(session_id: "{session.session_id}")',
-                                                     timeout=SECONDS_TO_WAIT_FOR_THE_STATUS_IN_ITERM2S_TAB_BAR)
-    except iterm2.RPCException:
-        return None
-    return result.get("status") if isinstance(result, dict) else None
-
-
-async def read_window_frame(window):
-    """Returns an iTerm2 window's frame as (x, y, width, height)."""
-    frame = await window.async_get_frame()
-    return (frame.origin.x, frame.origin.y, frame.size.width, frame.size.height)
+def explain_why_an_agent_session_cant_start(folder, launch_command):
+    """Returns why an agent session can't start in folder ("~" expanded already) with
+    launch_command, or "" when it can (checked before any terminal opens a tab for it)."""
+    if not os.path.isdir(folder):
+        return f"the folder {folder} doesn't exist"
+    if not launch_command.strip():
+        return "the agent tool has no launch command (see Settings)"
+    return ""
 
 
 def keep_the_hook_states_of_the_processes_still_running(started_at_and_hook_state_by_process_id):
@@ -291,8 +245,9 @@ class DashboardCore:
 
     Args:
         publish_snapshot: Called on the background thread with each new ComputerSnapshot.
-        report_connection_lost: Called on the background thread with a message when the
-            iTerm2 connection fails or closes; the app then exits so its supervisor restarts it.
+        report_connection_lost: Called on the background thread with a message when an
+            established iTerm2 connection closes, or the core stops; the app then exits so its
+            supervisor restarts it.
         verbose: Print diagnostics.
         docked_window_frames_file_path: Where the frames windows had before a docked sidebar
             narrowed them are kept across restarts; None keeps them in memory only.
@@ -308,14 +263,27 @@ class DashboardCore:
         started_at_and_hook_state_by_agent_process_id_to_start_with: The saved hook states
             (hook_states_store.load_hook_states) to start with when hook_states_file_path is None
             (dump-snapshot reads the app's file but never writes it).
+        report_terminal_problem: Called on the background thread with a message while a
+            terminal runs but can't be reached (iTerm2 with its Python API off), and with None
+            once every terminal can; the other terminals' agents are listed meanwhile.
     """
 
     def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None,
                  pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None, hook_events_socket_path=None,
-                 hook_states_file_path=None, started_at_and_hook_state_by_agent_process_id_to_start_with=None):
+                 hook_states_file_path=None, started_at_and_hook_state_by_agent_process_id_to_start_with=None,
+                 report_terminal_problem=None):
         self.publish_snapshot = publish_snapshot
         self.report_connection_lost = report_connection_lost
+        self.report_terminal_problem = report_terminal_problem or (lambda message: None)
         self.verbose = verbose
+        # The terminals, in the order their windows are listed (user request, 2026-11-01).
+        self.terminal_backends = [
+            terminal_backend_class(lambda: self.regather_needed.set(), lambda: self.snapshot_needed.set(),
+                                   self.note_terminal_problem)
+            for terminal_backend_class in (Iterm2TerminalBackend, TmuxTerminalBackend)]
+        self.terminal_backend_by_name = {terminal_backend.terminal_name: terminal_backend
+                                         for terminal_backend in self.terminal_backends}
+        self.terminal_problem_by_terminal_name = {}  # note_terminal_problem's messages
         self.docked_window_frames_file_path = docked_window_frames_file_path
         self.pause_records_file_path = pause_records_file_path
         self.hook_events_socket_path = hook_events_socket_path
@@ -335,8 +303,6 @@ class DashboardCore:
         self.process_ids_ended_from_the_list = set()  # "Kill Session": their end is no crash
         self.hooks_status_per_agent_tool = ()  # ComputerSnapshot.hooks_status_per_agent_tool
         self.hooks_check_needed = asyncio.Event()
-        self.connection = None
-        self.app = None
         self.specific_adapters, self.generic_adapter = build_built_in_agent_tool_adapters()
         self.process_ids_asked_about_in_claude_agents = set()
         self.claude_agents_retry_count_by_process_id = {}
@@ -348,9 +314,11 @@ class DashboardCore:
         # For `codex queue`; the app's settings then name it (set_core_settings).
         self.codex_command_path = find_program_on_path_or_in_the_usual_folders("codex")
         self.message_typing_lock_by_session_id = {}  # two held messages are never pasted into one tab at once
-        self.gathered_windows = []
-        self.windows_were_gathered = False  # till the first gather, saved frames can't be matched to windows
-        self.gather_is_in_progress = False
+        self.gathered_windows = []  # every terminal's, in the order of terminal_backends
+        self.gathered_windows_by_terminal_name = {}  # each terminal's last gather, kept when a regather of it fails
+        # Till the first gather of a terminal whose windows have frames (iTerm2), saved frames can't
+        # be matched to windows.
+        self.windows_were_gathered = False
         self.monitors = []
         self.window_order = []
         self.session_tracking_by_session_id = {}
@@ -367,9 +335,9 @@ class DashboardCore:
         # the app wasn't running, so that one is -inf: after each restart of the app, a row whose agent
         # had ended its turn with a background task running showed "stuck" (user report, 2026-10-29).
         self.status_set_in_iterm2_and_since_by_session_id = {}
-        # {session ID: when iTerm2 last reported a change of the session's status variable}; a value
-        # already set when the dashboard connected has none (find_status_set_in_iterm2_since_the_job_started).
-        self.status_set_in_iterm2_at_by_session_id = {}
+        # {session ID: the agent's own report as a status value (read_status_value_of_the_tabs_own_agent)}
+        # at the last reading, for the tabs of a terminal that reports no agent status (tmux).
+        self.own_status_value_by_session_id = {}
         self.displayed_state_by_session_id = {}
         self.screen_readings_by_session_id = {}
         # {(session ID, agent process ID): agent_session_pausing.PauseRecord}, until the agent runs
@@ -389,18 +357,59 @@ class DashboardCore:
         self.resource_usage_is_read = False  # while the Memory or CPU column is shown, or the list is sorted by one
         self.resource_usage_reading_needed = asyncio.Event()  # set when resource_usage_is_read turns on
         self.claude_agents_by_process_id = {}
-        self.key_terminal_window_id = None  # None while no terminal window (for example iTerm2's Settings) has keyboard focus
         self.last_seen_session_id = None
         self.dashboard_is_active = False
+        # The last app other than the dashboard to be active (the main thread's), whose windows may
+        # show a tmux client (find_session_id_in_front).
+        self.last_other_active_application_process_id = None
         self.last_published_snapshot_without_time = None
         self.snapshot_needed = asyncio.Event()
         self.regather_needed = asyncio.Event()
         self.screen_check_needed = asyncio.Event()
         self.conversation_files_by_session_id = {}  # build_conversation_file_record's records
         self.peek_lock = asyncio.Lock()  # a quick release must not undo a peek that hasn't happened yet
-        self.iterm2_state_before_peek = None
+        self.what_was_in_front_before_peek_by_terminal_name = None  # each terminal's remember_what_is_in_front
         self.action_registry = ActionRegistry()
         self.register_actions()
+
+    # ----- the terminals -----
+
+    def note_terminal_problem(self, terminal_name, message):
+        """Receives a terminal backend's problem (a message) or its end (None), and reports the
+        problems of every terminal together, when they changed."""
+        problems_before = dict(self.terminal_problem_by_terminal_name)
+        if message is None:
+            self.terminal_problem_by_terminal_name.pop(terminal_name, None)
+        else:
+            print(f"{terminal_name}: {message}", file=sys.stderr)  # dump-snapshot's standard output holds only its JSON
+            self.terminal_problem_by_terminal_name[terminal_name] = message
+        if self.terminal_problem_by_terminal_name != problems_before:
+            self.report_terminal_problem("; ".join(self.terminal_problem_by_terminal_name.values()) or None)
+
+    def find_terminal_backend_and_gathered_window(self, window_id=None, tab_id=None, session_id=None):
+        """Returns (the terminal backend, the gathered window) holding a window, a tab or a
+        session, from the last gather, or (None, None)."""
+        for gathered_window in self.gathered_windows:
+            if gathered_window["window_id"] == window_id or any(
+                    gathered_tab["tab_id"] == tab_id
+                    or (gathered_tab["first_session"] is not None and gathered_tab["first_session"]["session_id"] == session_id)
+                    for gathered_tab in gathered_window["tabs"]):
+                return self.terminal_backend_by_name[gathered_window["terminal_name"]], gathered_window
+        return None, None
+
+    def find_terminal_backend_of(self, window_id=None, tab_id=None, session_id=None):
+        """Returns the terminal backend whose last gather holds a window, a tab or a session, or None."""
+        return self.find_terminal_backend_and_gathered_window(window_id, tab_id, session_id)[0]
+
+    def find_terminal_session(self, session_id):
+        """Returns the TerminalSession of a session, or None when it is gone."""
+        terminal_backend = self.find_terminal_backend_of(session_id=session_id)
+        return terminal_backend.find_session(session_id) if terminal_backend is not None else None
+
+    def list_gathered_windows_with_frames(self):
+        """Returns the gathered windows of the terminals whose windows have frames (iTerm2's)."""
+        return [gathered_window for gathered_window in self.gathered_windows
+                if self.terminal_backend_by_name[gathered_window["terminal_name"]].windows_have_frames]
 
     # ----- actions -----
 
@@ -436,45 +445,132 @@ class DashboardCore:
         The gather itself runs in publish_when_needed, so gathers never overlap and their
         errors are handled in one place.
         """
-        if self.app is None:
-            return ActionResult(False, "not connected to iTerm2")
         action_result = await self.action_registry.perform_action(action_request)
         if self.verbose or not action_result.succeeded:
             print(f"action {action_request.action}: {action_result}")
         self.regather_needed.set()
         return action_result
 
+    async def bring_forward_the_terminal_tab_running_the_client(self, action_result):
+        """After a terminal that shows its windows through clients (tmux) brought a tab to the
+        front in its client (details {"terminal_client_process_id"}): brings the tab of another
+        terminal running that client (an iTerm2 tab) to the front too. Returns the ActionResult
+        to report; with the details kept when no such tab is listed, so the app brings that
+        client's terminal app to the front itself."""
+        client_process_id = (action_result.details or {}).get("terminal_client_process_id")
+        if not action_result.succeeded or client_process_id is None:
+            return action_result
+        for gathered_window in self.gathered_windows:
+            terminal_backend = self.terminal_backend_by_name[gathered_window["terminal_name"]]
+            if terminal_backend.shows_windows_through_clients:
+                continue
+            for gathered_tab in gathered_window["tabs"]:
+                first_session = gathered_tab["first_session"]
+                if first_session is not None and first_session["job_pid"] == client_process_id:
+                    focus_result = await terminal_backend.focus_session(first_session["session_id"])
+                    if not focus_result.succeeded:
+                        return focus_result
+                    other_details = {key: value for key, value in action_result.details.items()
+                                     if key != "terminal_client_process_id"}
+                    return action_result._replace(details=other_details or None)
+        return action_result
+
+    def note_the_tab_shown_as_seen(self, session_id):
+        """Stamps a tab brought to the front from the list as seen: also one whose tmux client runs
+        in a terminal app other than iTerm2, which find_seen_session_id can't tell."""
+        if session_id in self.session_tracking_by_session_id:
+            self.session_tracking_by_session_id[session_id]["last_time_tab_was_seen"] = time.time()
+            self.snapshot_needed.set()
+
     async def handle_focus_agent_session(self, action_request):
-        return await iterm2_actions.focus_agent_session(self.app, action_request.target["session_id"])
+        """Brings a tab to the front (a peek too); it then counts as seen (note_the_tab_shown_as_seen)."""
+        session_id = action_request.target["session_id"]
+        terminal_backend = self.find_terminal_backend_of(session_id=session_id)
+        if terminal_backend is None:
+            return ActionResult(False, "that tab no longer exists")
+        action_result = await self.bring_forward_the_terminal_tab_running_the_client(await terminal_backend.focus_session(session_id))
+        if action_result.succeeded:
+            self.note_the_tab_shown_as_seen(session_id)
+        return action_result
 
     async def handle_focus_window(self, action_request):
-        return await iterm2_actions.focus_window(self.app, action_request.target["window_id"])
+        """Brings a window to the front with the tab it shows, which then counts as seen (note_the_tab_shown_as_seen)."""
+        window_id = action_request.target["window_id"]
+        terminal_backend = self.find_terminal_backend_of(window_id=window_id)
+        if terminal_backend is None:
+            return ActionResult(False, "that window no longer exists")
+        action_result = await self.bring_forward_the_terminal_tab_running_the_client(await terminal_backend.focus_window(window_id))
+        selected_session_id = self.find_first_session_id_of_tab(terminal_backend.find_selected_tab_id(window_id))
+        if action_result.succeeded and selected_session_id is not None:
+            self.note_the_tab_shown_as_seen(selected_session_id)
+        return action_result
 
     async def handle_rename_tab(self, action_request):
-        return await iterm2_actions.rename_tab(self.app, action_request.target["tab_id"], action_request.arguments["new_title"])
+        terminal_backend = self.find_terminal_backend_of(tab_id=action_request.target["tab_id"])
+        if terminal_backend is None:
+            return ActionResult(False, "that tab no longer exists")
+        return await terminal_backend.rename_tab(action_request.target["tab_id"], action_request.arguments["new_title"])
 
     async def handle_rename_window(self, action_request):
-        return await iterm2_actions.rename_window(self.app, action_request.target["window_id"],
-                                                  action_request.arguments["new_title"])
+        terminal_backend = self.find_terminal_backend_of(window_id=action_request.target["window_id"])
+        if terminal_backend is None:
+            return ActionResult(False, "that window no longer exists")
+        return await terminal_backend.rename_window(action_request.target["window_id"], action_request.arguments["new_title"])
 
     async def handle_move_tab(self, action_request):
-        return await iterm2_actions.move_tab_to_window_position(
-            self.app, action_request.target["tab_id"], action_request.arguments["target_window_id"],
-            action_request.arguments.get("drop_before_tab_id"))
+        """Moves a tab within its window or into another window of the same terminal (an iTerm2
+        tab can't go into a tmux session, nor the other way)."""
+        terminal_backend = self.find_terminal_backend_of(tab_id=action_request.target["tab_id"])
+        target_window_id = action_request.arguments["target_window_id"]
+        target_terminal_backend = self.find_terminal_backend_of(window_id=target_window_id)
+        if terminal_backend is None or target_terminal_backend is None:
+            return ActionResult(False, "that tab or window no longer exists")
+        if target_terminal_backend is not terminal_backend:
+            return ActionResult(False, f"a {terminal_backend.terminal_name} tab can't move into a "
+                                       f"{target_terminal_backend.terminal_name} window")
+        return await terminal_backend.move_tab(action_request.target["tab_id"], target_window_id,
+                                               action_request.arguments.get("drop_before_tab_id"))
 
     async def handle_move_tab_to_new_window(self, action_request):
-        return await iterm2_actions.move_tab_to_new_window(self.app, action_request.target["tab_id"])
+        terminal_backend = self.find_terminal_backend_of(tab_id=action_request.target["tab_id"])
+        if terminal_backend is None:
+            return ActionResult(False, "that tab no longer exists")
+        return await terminal_backend.move_tab_to_new_window(action_request.target["tab_id"])
+
+    def choose_terminal_backend_for_a_new_window(self):
+        """Returns the terminal a new window opens in: the first one connected, in the order of
+        terminal_backends (iTerm2, then tmux), or None."""
+        return next((terminal_backend for terminal_backend in self.terminal_backends if terminal_backend.is_connected()), None)
+
+    def explain_why_no_terminal_can_open_a_window(self):
+        """Returns why no terminal is connected for a new window: one runs but can't be reached
+        (iTerm2 with its Python API off), or none runs."""
+        terminal_names_that_run = [terminal_backend.terminal_name for terminal_backend in self.terminal_backends
+                                   if terminal_backend.terminal_runs()]
+        if terminal_names_that_run:
+            return f"{' and '.join(terminal_names_that_run)} can't be reached yet (see the line at the top of the list)"
+        return "no terminal runs: start iTerm2, or a tmux session"
 
     async def handle_start_agent_session(self, action_request):
-        """Target {"window_id": ...} opens a tab there; an empty target opens a new window."""
-        return await iterm2_actions.start_agent_session(
-            self.connection, self.app, action_request.target.get("window_id"), action_request.arguments["folder"],
-            action_request.arguments["launch_command"])
+        """Target {"window_id": ...} opens a tab there; an empty target opens a new window
+        (choose_terminal_backend_for_a_new_window)."""
+        window_id = action_request.target.get("window_id")
+        terminal_backend = (self.find_terminal_backend_of(window_id=window_id) if window_id is not None
+                            else self.choose_terminal_backend_for_a_new_window())
+        if terminal_backend is None:
+            return ActionResult(False, "that window no longer exists" if window_id is not None
+                                else self.explain_why_no_terminal_can_open_a_window())
+        folder = os.path.expanduser(action_request.arguments["folder"])
+        reason_it_cant_start = explain_why_an_agent_session_cant_start(folder, action_request.arguments["launch_command"])
+        if reason_it_cant_start:
+            return ActionResult(False, reason_it_cant_start)
+        return await self.bring_forward_the_terminal_tab_running_the_client(await terminal_backend.start_agent_session(
+            window_id, folder, action_request.arguments["launch_command"]))
 
     async def handle_send_slash_command(self, action_request):
         """Types /compact or /clear into an agent session that waits at its prompt, idle, done,
         background or new as its row shows it (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT;
-        iterm2_actions.type_slash_command checks its input box)."""
+        agent_input_box_typing.type_slash_command checks its input box)."""
         session_id = action_request.target["session_id"]
         # Checked and typed holding the tab's lock, as every typing into a tab is: a held message may be being pasted.
         async with self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock()):
@@ -495,17 +591,20 @@ class DashboardCore:
                 False, "the tab has unsent text in its input box, the input box isn't on screen, or the agent refused it during a turn")
 
     async def type_slash_command_into_agent_session(self, session_id, agent_session, command, waits_at_its_prompt):
-        """Types the command (iterm2_actions.type_slash_command: None when nothing was typed, the
-        input box holding unsent text or being off screen). A /clear typed at the prompt forgets
-        the cleared conversation at once; one the agent queues during its turn runs only when the
-        turn ends, so its new conversation is found as after a /clear typed by hand (the
-        `claude agents` refresh)."""
+        """Types the command (agent_input_box_typing.type_slash_command: None when nothing was
+        typed, the input box holding unsent text or being off screen). A /clear typed at the
+        prompt forgets the cleared conversation at once; one the agent queues during its turn runs
+        only when the turn ends, so its new conversation is found as after a /clear typed by hand
+        (the `claude agents` refresh)."""
+        terminal_session = self.find_terminal_session(session_id)
+        if terminal_session is None:
+            return ActionResult(False, "that tab no longer exists")
         clears_at_once = command == COMMAND_THAT_STARTS_A_NEW_CONVERSATION and waits_at_its_prompt
         # Known before the conversation ends, since a lookup after /clear can't tell old from new.
         path_of_conversation_to_clear = await self.find_current_conversation_file(session_id, agent_session) \
             if clears_at_once else None
-        action_result = await iterm2_actions.type_slash_command(
-            self.app, session_id, command, agent_session["adapter"], agent_is_in_the_middle_of_a_turn=not waits_at_its_prompt)
+        action_result = await agent_input_box_typing.type_slash_command(
+            terminal_session, command, agent_session["adapter"], agent_is_in_the_middle_of_a_turn=not waits_at_its_prompt)
         if action_result is not None and action_result.succeeded and clears_at_once:
             self.forget_the_cleared_conversation(session_id, agent_session, path_of_conversation_to_clear)
         return action_result
@@ -567,7 +666,9 @@ class DashboardCore:
                     return ActionResult(False, f"its agent ended before {what_is_typed} could be {how_it_is_typed}")
                 try:
                     action_result = await try_once(agent_session)
-                except iterm2.RPCException:
+                except TerminalTypingRefused as error:
+                    return ActionResult(False, str(error))
+                except TerminalRequestFailed:
                     return ActionResult(False, "the tab closed meanwhile")
                 if action_result is not None:
                     return action_result
@@ -616,11 +717,11 @@ class DashboardCore:
         the adapter no such pattern."""
         displayed_state = self.displayed_state_by_session_id.get(session_id)
         working_screen_pattern = agent_session["adapter"].working_screen_pattern
-        session = self.app.get_session_by_id(session_id)
-        if working_screen_pattern is None or session is None or (displayed_state is not None and displayed_state.state != "unknown"):
+        terminal_session = self.find_terminal_session(session_id)
+        if working_screen_pattern is None or terminal_session is None or (
+                displayed_state is not None and displayed_state.state != "unknown"):
             return False
-        return count_lines_matching([text for text, _ in await iterm2_actions.read_screen_lines_with_faint_flags(session)],
-                                    working_screen_pattern) == 0
+        return count_lines_matching(await terminal_session.read_screen_lines(), working_screen_pattern) == 0
 
     def claude_code_reports_the_session_busy(self, session_id, agent_session):
         """Whether Claude Code itself reports the agent session as anything but idle right now
@@ -828,7 +929,7 @@ class DashboardCore:
         """Pauses the agent sessions of target {"session_ids": [...]}: each agent as Ctrl+Z does,
         and every process below it (agent_session_pausing; user request, 2026-10-20)."""
 
-        async def pause_one(session_id, agent_session, session):
+        async def pause_one(session_id, agent_session, terminal_session):
             agent_process_id = agent_session["process_id"]
             # Ctrl+Z goes to the agent only while its group has the terminal (asked of the kernel)
             # and no other program, such as the editor Claude Code's Ctrl+G opens in the agent's
@@ -842,7 +943,7 @@ class DashboardCore:
             if (session_id, agent_process_id) in self.pause_record_by_tab_and_agent:
                 return ActionResult(True)  # paused already (a new record would lose the prompt seen then)
             action_result, pause_record = await pause_agent_session(
-                session, agent_process_id, agent_session["agent_tool_name"],
+                terminal_session, agent_process_id, agent_session["agent_tool_name"],
                 detached_processes=self.list_detached_processes_of_the_agent_session(agent_session))
             if pause_record is not None:
                 self.pause_record_by_tab_and_agent[(session_id, agent_process_id)] = pause_record
@@ -854,9 +955,9 @@ class DashboardCore:
         """Resumes the paused agent sessions of target {"session_ids": [...]}; one suspended with
         Ctrl+Z by hand gets an explanation instead, since no pause recorded its prompt."""
 
-        async def resume_one(session_id, agent_session, session):
+        async def resume_one(session_id, agent_session, terminal_session):
             tab_and_agent = (session_id, agent_session["process_id"])
-            action_result = await resume_agent_session(session, agent_session["process_id"],
+            action_result = await resume_agent_session(terminal_session, agent_session["process_id"],
                                                        self.pause_record_by_tab_and_agent.get(tab_and_agent))
             if action_result.succeeded and self.pause_record_by_tab_and_agent.pop(tab_and_agent, None) is not None:
                 self.save_pause_records()
@@ -864,15 +965,15 @@ class DashboardCore:
         return await self.pause_or_resume_each_agent_session(action_request.target["session_ids"], resume_one)
 
     async def pause_or_resume_each_agent_session(self, session_ids, pause_or_resume_one):
-        """Runs pause_or_resume_one(session_id, agent_session, session) for every session at once,
-        each holding its tab's typing lock, as every typing into a tab does: its Ctrl+Z or fg can't
-        come between a held message's paste and its Enter (code review, 2026-10-28). Returns one
-        ActionResult whose message names each tab that failed and why."""
+        """Runs pause_or_resume_one(session_id, agent_session, terminal_session) for every session
+        at once, each holding its tab's typing lock, as every typing into a tab does: its Ctrl+Z or
+        fg can't come between a held message's paste and its Enter (code review, 2026-10-28).
+        Returns one ActionResult whose message names each tab that failed and why."""
 
         async def run_for(session_id):
             agent_session = self.agent_sessions.get(session_id)
-            session = self.app.get_session_by_id(session_id)
-            if agent_session is None or not agent_session["process_id"] or session is None:
+            terminal_session = self.find_terminal_session(session_id)
+            if agent_session is None or not agent_session["process_id"] or terminal_session is None:
                 return ActionResult(False, "that tab no longer runs an agent")
             if session_id in self.session_ids_being_paused_or_resumed:
                 # A second click while the first is under way (both could see the same empty prompt and type fg twice).
@@ -880,8 +981,10 @@ class DashboardCore:
             self.session_ids_being_paused_or_resumed.add(session_id)
             try:
                 async with self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock()):
-                    return await pause_or_resume_one(session_id, agent_session, session)
-            except iterm2.RPCException:
+                    return await pause_or_resume_one(session_id, agent_session, terminal_session)
+            except TerminalTypingRefused as error:
+                return ActionResult(False, str(error))
+            except TerminalRequestFailed:
                 return ActionResult(False, "the tab closed meanwhile")
             finally:
                 self.session_ids_being_paused_or_resumed.discard(session_id)
@@ -957,9 +1060,11 @@ class DashboardCore:
             return None, f"{agent_session['agent_tool_name']} sessions can't take messages from other sessions"
         if not address:
             return None, reason_without_address
+        terminal_backend = self.find_terminal_backend_of(session_id=session_id)
         return AgentSessionForMessages(agent_session["agent_tool_name"], how_other_agent_sessions_send_it_messages, address,
                                        process_id, agent_session["working_folder"],
-                                       self.find_tab_title_of_agent_session(session_id)), None
+                                       self.find_tab_title_of_agent_session(session_id),
+                                       terminal_backend.tab_kind_name if terminal_backend is not None else "tab"), None
 
     async def deliver_message_to_agent_session(self, session_id, agent_session_for_messages, message):
         """Queues the message for a Codex session, or pastes it into a Claude Code session once it waits at its prompt."""
@@ -976,14 +1081,17 @@ class DashboardCore:
         async def paste_it_if_the_agent_waits_at_its_prompt(agent_session):
             if agent_session["is_in_background"] or not self.agent_waits_at_its_prompt(session_id, agent_session):
                 return None
-            return await iterm2_actions.paste_message_into_empty_input_box(self.app, session_id, message, agent_session["adapter"])
+            terminal_session = self.find_terminal_session(session_id)
+            if terminal_session is None:
+                return ActionResult(False, "the tab closed meanwhile")
+            return await agent_input_box_typing.paste_message_into_empty_input_box(terminal_session, message, agent_session["adapter"])
         return await self.keep_trying_until_the_agent_takes_it(
             session_id, agent_process_id, paste_it_if_the_agent_waits_at_its_prompt, "the message", "pasted")
 
     def set_reserved_screen_area(self, reserved_area):
         """Receives the docked sidebar's area, {"frame": (x, y, width, height), "edge": "right" or
-        "left", "monitor_visible_frame": (...)}, or None when docking ends; kept until iTerm2 is
-        connected if it arrives earlier."""
+        "left", "monitor_visible_frame": (...)}, or None when docking ends; kept until the windows
+        with frames (iTerm2's) are gathered if it arrives earlier."""
         asyncio.ensure_future(self.change_reserved_screen_area(reserved_area))
 
     async def change_reserved_screen_area(self, new_reserved_area):
@@ -1009,11 +1117,13 @@ class DashboardCore:
         reserved area; while not, retries restores still pending (after a restart with docking
         off, or a window that was full screen when docking ended). Pending restores wait until
         the main thread has said whether the sidebar is docked, so a docked start doesn't widen
-        windows only to narrow them again."""
+        windows only to narrow them again, and until the windows with frames (iTerm2's) were
+        gathered: a gather before iTerm2 is connected (tmux's) would take its windows for closed
+        and drop their records."""
         async with self.window_room_lock:
             if self.reserved_screen_area is not None:
                 await self.make_room_while_holding_the_lock()
-            elif self.reserved_area_was_received and self.frames_before_making_room_by_window_id:
+            elif self.windows_were_gathered and self.reserved_area_was_received and self.frames_before_making_room_by_window_id:
                 await self.give_room_back_while_holding_the_lock()
 
     async def make_room_while_holding_the_lock(self):
@@ -1027,29 +1137,27 @@ class DashboardCore:
         if self.reserved_screen_area is None:
             return
         self.adopt_records_of_restored_windows()
-        for gathered_window in self.gathered_windows:
-            window = self.app.get_window_by_id(gathered_window["window_id"])
-            if window is None:
-                continue
+        for gathered_window in self.list_gathered_windows_with_frames():
+            terminal_backend = self.terminal_backend_by_name[gathered_window["terminal_name"]]
+            window_id = gathered_window["window_id"]
             try:
-                current_frame = await read_window_frame(window)
+                current_frame = await terminal_backend.read_window_frame(window_id)
                 gathered_window["frame"] = current_frame
                 new_frame = compute_frame_clear_of_area(
                     current_frame, self.reserved_screen_area["frame"], self.reserved_screen_area["edge"],
                     self.reserved_screen_area["monitor_visible_frame"], SMALLEST_WINDOW_WIDTH)
-                if new_frame is None or await window.async_get_fullscreen():
+                if new_frame is None or await terminal_backend.window_is_full_screen(window_id):
                     continue
                 original_frame, frame_that_was_set = self.frames_before_making_room_by_window_id.get(
-                    window.window_id, (current_frame, None))
+                    window_id, (current_frame, None))
                 if frame_that_was_set is not None and not frames_are_within_tolerance(
                         current_frame, frame_that_was_set, FRAME_TOLERANCE_POINTS):
                     original_frame = current_frame  # moved or resized by hand since
-                await window.async_set_frame(iterm2.Frame(iterm2.Point(new_frame[0], new_frame[1]),
-                                                          iterm2.Size(new_frame[2], new_frame[3])))
-                self.frames_before_making_room_by_window_id[window.window_id] = (original_frame, new_frame)
+                await terminal_backend.set_window_frame(window_id, new_frame)
+                self.frames_before_making_room_by_window_id[window_id] = (original_frame, new_frame)
                 gathered_window["frame"] = new_frame
-            except (iterm2.RPCException, iterm2.GetPropertyException, iterm2.SetPropertyException) as error:
-                print(f"could not make room for the docked sidebar in window {gathered_window['window_id']}: {error!r}")
+            except TerminalRequestFailed as error:
+                print(f"could not make room for the docked sidebar in window {window_id}: {error}")
         self.save_docked_window_frames()
 
     async def give_room_back_while_holding_the_lock(self):
@@ -1060,26 +1168,25 @@ class DashboardCore:
         be restored when a later docking ends. Records of windows that are gone are dropped.
         """
         self.adopt_records_of_restored_windows()
-        gathered_windows_by_window_id = {gathered_window["window_id"]: gathered_window for gathered_window in self.gathered_windows}
+        gathered_windows_by_window_id = {gathered_window["window_id"]: gathered_window
+                                         for gathered_window in self.list_gathered_windows_with_frames()}
         for window_id, (original_frame, frame_that_was_set) in list(self.frames_before_making_room_by_window_id.items()):
-            window = self.app.get_window_by_id(window_id)
-            if window is None:
+            if window_id not in gathered_windows_by_window_id:
                 del self.frames_before_making_room_by_window_id[window_id]
                 continue
+            terminal_backend = self.terminal_backend_by_name[gathered_windows_by_window_id[window_id]["terminal_name"]]
             try:
-                if await window.async_get_fullscreen():
+                if await terminal_backend.window_is_full_screen(window_id):
                     continue  # its own desktop shows a full-screen frame; it returns to the narrowed one later
-                current_frame = await read_window_frame(window)
+                current_frame = await terminal_backend.read_window_frame(window_id)
                 if frames_are_within_tolerance(current_frame, frame_that_was_set, FRAME_TOLERANCE_POINTS):
-                    await window.async_set_frame(iterm2.Frame(iterm2.Point(original_frame[0], original_frame[1]),
-                                                              iterm2.Size(original_frame[2], original_frame[3])))
+                    await terminal_backend.set_window_frame(window_id, original_frame)
                     current_frame = original_frame
-            except (iterm2.RPCException, iterm2.GetPropertyException, iterm2.SetPropertyException) as error:
-                print(f"could not give window {window_id} its room back: {error!r}")
+            except TerminalRequestFailed as error:
+                print(f"could not give window {window_id} its room back: {error}")
                 continue
             del self.frames_before_making_room_by_window_id[window_id]
-            if window_id in gathered_windows_by_window_id:
-                gathered_windows_by_window_id[window_id]["frame"] = current_frame
+            gathered_windows_by_window_id[window_id]["frame"] = current_frame
         self.save_docked_window_frames()
 
     def adopt_records_of_restored_windows(self):
@@ -1087,18 +1194,18 @@ class DashboardCore:
         that are gone to windows iTerm2 restored after a restart, which get new IDs but keep the
         narrowed frame. Later, the records of windows that closed are dropped instead, so a new
         window of the same size never takes over a closed window's record."""
-        if not self.gathered_windows:
+        frame_by_window_id = {gathered_window["window_id"]: gathered_window["frame"]
+                              for gathered_window in self.list_gathered_windows_with_frames()}
+        if not frame_by_window_id:
             return
         if self.records_loaded_from_file_await_adoption:
             self.records_loaded_from_file_await_adoption = False
             self.frames_before_making_room_by_window_id = adopt_records_of_restored_windows(
-                self.frames_before_making_room_by_window_id,
-                {gathered_window["window_id"]: gathered_window["frame"] for gathered_window in self.gathered_windows},
-                FRAME_TOLERANCE_POINTS)
+                self.frames_before_making_room_by_window_id, frame_by_window_id, FRAME_TOLERANCE_POINTS)
         else:
             self.frames_before_making_room_by_window_id = {
                 window_id: frames for window_id, frames in self.frames_before_making_room_by_window_id.items()
-                if self.app.get_window_by_id(window_id) is not None}
+                if window_id in frame_by_window_id}
 
     def save_docked_window_frames(self):
         """Writes the remembered frames to their file when they changed since the last write."""
@@ -1111,35 +1218,36 @@ class DashboardCore:
             print(f"could not save the docked windows' frames: {error!r}")
 
     async def handle_peek_agent_session(self, action_request):
-        """Press and hold on a tab row: shows the tab, first remembering what to put back."""
+        """Press and hold on a tab row: shows the tab, first remembering, in every terminal, what to put back."""
         async with self.peek_lock:
-            current_window = self.app.current_terminal_window
-            self.iterm2_state_before_peek = {
-                # The App's current window, not the key window: while the dropdown is open the
-                # dashboard is active and no iTerm2 window is key.
-                "key_window_id": current_window.window_id if current_window is not None else None,
-                "selected_tab_id_by_window_id": {window.window_id: window.current_tab.tab_id
-                                                 for window in self.app.terminal_windows if window.current_tab is not None},
-            }
-            return await iterm2_actions.focus_agent_session(self.app, action_request.target["session_id"])
+            self.what_was_in_front_before_peek_by_terminal_name = {
+                terminal_backend.terminal_name: terminal_backend.remember_what_is_in_front()
+                for terminal_backend in self.terminal_backends if terminal_backend.is_connected()}
+            return await self.handle_focus_agent_session(action_request)
 
     async def handle_end_peek(self, action_request):
         """The button was released: arguments {"bring_back_iterm2_window": bool}, true when iTerm2
-        was in front before the peek (otherwise the main thread brings back the app that was)."""
+        was in front before the peek (otherwise the main thread brings back the app that was).
+        Every terminal puts back what it showed before."""
         async with self.peek_lock:
-            state, self.iterm2_state_before_peek = self.iterm2_state_before_peek, None
-            if state is None:
+            what_was_in_front_by_terminal_name, self.what_was_in_front_before_peek_by_terminal_name = (
+                self.what_was_in_front_before_peek_by_terminal_name, None)
+            if what_was_in_front_by_terminal_name is None:
                 return ActionResult(False, "no peek to end")
-            return await iterm2_actions.put_back_tabs_and_window_after_peek(
-                self.app, state["selected_tab_id_by_window_id"],
-                state["key_window_id"] if action_request.arguments["bring_back_iterm2_window"] else None)
+            action_results = [await self.terminal_backend_by_name[terminal_name].put_back_what_was_in_front(
+                                  what_was_in_front, action_request.arguments["bring_back_iterm2_window"])
+                              for terminal_name, what_was_in_front in what_was_in_front_by_terminal_name.items()]
+            return next((action_result for action_result in action_results if not action_result.succeeded), ActionResult(True))
 
     async def handle_duplicate_agent_session(self, action_request):
-        """Target {"tab_id": ...}; arguments {"folder": ..., "launch_command": ...}. The copy continues
-        a copy of the conversation when the agent tool can fork it, else it starts fresh."""
-        session_id = self.find_first_session_id_of_tab(action_request.target["tab_id"])
+        """Target {"tab_id": ...}; arguments {"folder": ..., "launch_command": ...}. The copy, in a
+        tab right after this one (like Chrome's Duplicate), continues a copy of the conversation
+        when the agent tool can fork it, else it starts fresh."""
+        tab_id = action_request.target["tab_id"]
+        session_id = self.find_first_session_id_of_tab(tab_id)
         agent_session = self.agent_sessions.get(session_id)
-        if agent_session is None:
+        terminal_backend, gathered_window = self.find_terminal_backend_and_gathered_window(tab_id=tab_id)
+        if agent_session is None or terminal_backend is None:
             return ActionResult(False, "that tab no longer runs an agent session")
         process_id = agent_session["process_id"]
         claude_agent_record = self.claude_agents_by_process_id.get(process_id)
@@ -1153,16 +1261,25 @@ class DashboardCore:
             action_request.arguments["launch_command"], conversation_id, claude_agent_record)
         # Without the conversation's ID, the copy starts a new conversation, silently: nothing showed
         # the notices a successful result carried (user's choice, 2026-10-30).
-        return await iterm2_actions.duplicate_agent_session(
-            self.connection, self.app, action_request.target["tab_id"], action_request.arguments["folder"],
-            launch_command_for_the_copy)
+        folder = os.path.expanduser(action_request.arguments["folder"])
+        reason_it_cant_start = explain_why_an_agent_session_cant_start(folder, launch_command_for_the_copy)
+        if reason_it_cant_start:
+            return ActionResult(False, reason_it_cant_start)
+        return await terminal_backend.start_agent_session(gathered_window["window_id"], folder, launch_command_for_the_copy,
+                                                          after_tab_id=tab_id)
 
     async def handle_close_window(self, action_request):
-        return await iterm2_actions.close_window(self.app, action_request.target["window_id"])
+        terminal_backend = self.find_terminal_backend_of(window_id=action_request.target["window_id"])
+        if terminal_backend is None:
+            return ActionResult(False, "that window no longer exists")
+        return await terminal_backend.close_window(action_request.target["window_id"])
 
     async def handle_move_window_to_monitor(self, action_request):
-        return await iterm2_actions.move_window_to_monitor(
-            self.app, action_request.target["window_id"], self.monitors, action_request.arguments["monitor_id"])
+        terminal_backend = self.find_terminal_backend_of(window_id=action_request.target["window_id"])
+        if terminal_backend is None:
+            return ActionResult(False, "that window no longer exists")
+        return await terminal_backend.move_window_to_monitor(action_request.target["window_id"], self.monitors,
+                                                             action_request.arguments["monitor_id"])
 
     async def handle_reorder_window_list(self, action_request):
         self.window_order = move_window_in_window_list_order(
@@ -1193,83 +1310,34 @@ class DashboardCore:
         self.record_seen_time_for_the_seen_session()
         self.snapshot_needed.set()
 
+    def set_last_other_active_application_process_id(self, process_id):
+        """Receives the process ID of the last app other than the dashboard to be active."""
+        self.last_other_active_application_process_id = process_id
+        self.record_seen_time_for_the_seen_session()
+        self.snapshot_needed.set()
+
     # ----- gathering -----
 
-    async def gather_iterm2_tab(self, tab):
-        """Reads one tab and its first-pane session into a plain dict, one request for each."""
-        first_session = tab.sessions[0] if tab.sessions else None
-        tab_variables_reading = read_iterm2_variables(self.connection, ["title", "titleOverrideFormat"], tab_id=tab.tab_id)
-        gathered_session = None
-        if first_session is None:
-            title, title_override_format = await tab_variables_reading
-        else:
-            (title, title_override_format), (job_pid, command_line, status, path) = await asyncio.gather(
-                tab_variables_reading, read_iterm2_variables(self.connection, ["jobPid", "commandLine", "status", "path"],
-                                                             session_id=first_session.session_id))
-            if not status and command_line and not command_line_runs_a_shell(command_line):
-                # As after iTerm2 restarts: the status its tab bar shows (the variable then takes over).
-                status = await read_status_shown_in_iterm2s_tab_bar(first_session)
-            job_process_id = parse_job_process_id(job_pid)
-            job_process = read_process_info(job_process_id) if job_process_id else None
-            gathered_session = {
-                "session_id": first_session.session_id,
-                "command_line": command_line,
-                "job_pid": job_process_id,
-                "job_folder": read_process_current_folder(job_process_id),
-                "job_started_at": job_process.started_at if job_process is not None else None,
-                "status_set_in_iterm2": status,
-                "status_set_in_iterm2_at": self.status_set_in_iterm2_at_by_session_id.get(first_session.session_id),
-                "status": status,  # the one the row goes by (update_session_tracking)
-                "path": path or "",
-            }
-        return {
-            "tab_id": tab.tab_id,
-            "title": title or "",
-            "title_override_format": title_override_format,
-            "first_session": gathered_session,
-        }
-
-    async def gather_iterm2_window(self, window):
-        """Reads one window and its tabs into a plain dict; a tab that closes meanwhile is left
-        out (and another gather is requested). Raises if the window itself is gone."""
-
-        async def gather_tab_unless_it_closed(tab):
+    async def gather_every_terminals_windows(self):
+        """Gathers the windows of every terminal that runs, in the order of terminal_backends.
+        A terminal whose gather fails keeps its windows from before, and another gather follows
+        RETRY_DELAY_SECONDS later; one that doesn't run has none."""
+        gathered_windows = []
+        for terminal_backend in self.terminal_backends:
+            terminal_name = terminal_backend.terminal_name
+            if not terminal_backend.is_connected():
+                self.gathered_windows_by_terminal_name[terminal_name] = []
+                continue
             try:
-                return await self.gather_iterm2_tab(tab)
-            except iterm2.RPCException:
-                self.regather_needed.set()
-                return None
-
-        frame, (title, title_override_format), *gathered_tabs = await asyncio.gather(
-            read_window_frame(window),
-            read_iterm2_variables(self.connection, ["title", "titleOverrideFormat"], window_id=window.window_id),
-            *(gather_tab_unless_it_closed(tab) for tab in window.tabs))
-        return {
-            "window_id": window.window_id,
-            "frame": frame,
-            "title": title or "",
-            "title_override_format": title_override_format,
-            "tabs": [gathered_tab for gathered_tab in gathered_tabs if gathered_tab is not None],
-        }
-
-    async def gather_iterm2_windows(self):
-        """Reads every window, tab and first-pane session that the snapshot needs into plain dicts.
-
-        All windows and tabs are read at the same time, so a gather takes about as long as one
-        round trip to iTerm2 rather than one per tab (20 windows with 100 tabs stay quick). A
-        window or tab that closes while it is being read makes iTerm2 answer with an error; it
-        is skipped, and another gather is requested so the list catches up.
-        """
-
-        async def gather_window_unless_it_closed(window):
-            try:
-                return await self.gather_iterm2_window(window)
-            except (iterm2.RPCException, iterm2.GetPropertyException):
-                self.regather_needed.set()
-                return None
-
-        gathered_windows = await asyncio.gather(*(gather_window_unless_it_closed(window) for window in self.app.terminal_windows))
-        return [gathered_window for gathered_window in gathered_windows if gathered_window is not None]
+                self.gathered_windows_by_terminal_name[terminal_name] = await terminal_backend.gather_windows()
+                if terminal_backend.windows_have_frames:
+                    self.windows_were_gathered = True
+            except TerminalRequestFailed as error:
+                # For example iTerm2's app list changed under the refresh, or the tmux server ended.
+                print(f"{terminal_name}'s windows couldn't be read, trying again: {error}", file=sys.stderr)
+                asyncio.get_running_loop().call_later(RETRY_DELAY_SECONDS, self.regather_needed.set)
+            gathered_windows += self.gathered_windows_by_terminal_name.get(terminal_name, [])
+        return gathered_windows
 
     def update_session_tracking(self, now):
         """Records when each session's status value changed and when its turns start and end, and
@@ -1277,9 +1345,11 @@ class DashboardCore:
         iTerm2's value still says working (find_when_the_hooks_ended_the_turn), unless Claude
         Code's own report says the turn goes on (claude_code_reports_the_turn_going_on), and so
         does Claude Code's own idle (claude_code_reports_the_turn_over), which ends no turn
-        unless the hooks reported one."""
+        unless the hooks reported one. In a terminal that reports no agent status (tmux), the
+        agent's own report stands in for the status (read_own_status_value_of_the_tabs_agent)."""
         live_session_ids = set()
         for gathered_window in self.gathered_windows:
+            terminal_reports_agent_status = self.terminal_backend_by_name[gathered_window["terminal_name"]].reports_agent_status
             for gathered_tab in gathered_window["tabs"]:
                 first_session = gathered_tab["first_session"]
                 if first_session is None:
@@ -1302,8 +1372,9 @@ class DashboardCore:
                     status_set_in_iterm2_and_since = (first_session["status_set_in_iterm2"], now,
                                                       now if status_set_in_iterm2_and_since is not None else float("-inf"))
                     self.status_set_in_iterm2_and_since_by_session_id[session_id] = status_set_in_iterm2_and_since
-                first_session["status"] = self.choose_status_value_of_the_tabs_own_agent(
-                    session_id, first_session, previous_tracking, status_set_in_iterm2_changed)
+                first_session["status"] = (self.choose_status_value_of_the_tabs_own_agent(
+                    session_id, first_session, previous_tracking, status_set_in_iterm2_changed) if terminal_reports_agent_status
+                    else self.read_own_status_value_of_the_tabs_agent(session_id))
                 ends_no_turn = False
                 if agent_session is not None and map_iterm2_status_value_to_state(first_session["status"]) == "working":
                     hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
@@ -1328,8 +1399,18 @@ class DashboardCore:
             del self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id[session_id]
         for session_id in set(self.status_set_in_iterm2_and_since_by_session_id) - live_session_ids:
             del self.status_set_in_iterm2_and_since_by_session_id[session_id]
-        for session_id in set(self.status_set_in_iterm2_at_by_session_id) - live_session_ids:
-            del self.status_set_in_iterm2_at_by_session_id[session_id]
+        for session_id in set(self.own_status_value_by_session_id) - live_session_ids:
+            del self.own_status_value_by_session_id[session_id]
+
+    def read_own_status_value_of_the_tabs_agent(self, session_id):
+        """Returns the status value of a tab in a terminal that reports no agent status (tmux),
+        from its agent's own report (read_status_value_of_the_tabs_own_agent), or None for a tab
+        without an agent; remembered for watch_the_own_status_of_agents_in_terminals_without_status_reports."""
+        agent_session = self.agent_sessions.get(session_id)
+        status_value = (self.read_status_value_of_the_tabs_own_agent(session_id, agent_session)
+                        if agent_session is not None and agent_session["process_id"] else None)
+        self.own_status_value_by_session_id[session_id] = status_value
+        return status_value
 
     def choose_status_value_of_the_tabs_own_agent(self, session_id, first_session, previous_tracking, status_set_in_iterm2_changed):
         """Returns the status value a tab's row goes by: the one set in iTerm2, except while an agent
@@ -1403,28 +1484,67 @@ class DashboardCore:
                     return gathered_tab["first_session"]["session_id"]
         return None
 
-    def find_front_tab_id(self):
-        """Returns the selected tab of iTerm2's current terminal window, as the iterm2 App object
-        tracks it from focus notifications (it ignores windows resigning focus), or None."""
-        current_window = self.app.current_terminal_window
-        if current_window is None or current_window.current_tab is None:
-            return None
-        return current_window.current_tab.tab_id
+    def find_session_id_in_front(self, the_terminal_must_have_keyboard_focus, a_client_inside_another_terminal_app_counts):
+        """Returns the session of the tab in front, or None.
+
+        That is the selected tab of the front window of a terminal with windows of its own
+        (iTerm2), once that terminal has keyboard focus when the_terminal_must_have_keyboard_focus,
+        unless a client of a terminal that shows its windows through clients (tmux) is in front:
+        when a_client_inside_another_terminal_app_counts, one running inside the last app other
+        than the dashboard to be active, when that is another terminal app (such as Terminal);
+        else the client running in that iTerm2 tab (`tmux attach` there). Such a client's tab is
+        the one in front then, the most recently used client's when several qualify. A client
+        inside another terminal app is found by the app alone, though it may run in one of its
+        tabs that isn't shown, so it is good enough for the highlight but not for "seen".
+        """
+        tab_id_in_front = None
+        terminal_application_process_ids = set()  # those of the terminals with windows of their own
+        for terminal_backend in self.terminal_backends:
+            if terminal_backend.shows_windows_through_clients or not terminal_backend.is_connected():
+                continue
+            terminal_application_process_ids |= set(terminal_backend.list_application_process_ids())
+            if tab_id_in_front is None and (not the_terminal_must_have_keyboard_focus
+                                            or terminal_backend.a_terminal_window_has_keyboard_focus()):
+                tab_id_in_front = terminal_backend.find_front_tab_id()
+        first_session_in_front = next((gathered_tab["first_session"] for gathered_window in self.gathered_windows
+                                       for gathered_tab in gathered_window["tabs"] if gathered_tab["tab_id"] == tab_id_in_front), None)
+        job_process_id_in_front = first_session_in_front["job_pid"] if first_session_in_front is not None else None
+        terminal_clients = [terminal_client for terminal_backend in self.terminal_backends
+                            if terminal_backend.shows_windows_through_clients and terminal_backend.is_connected()
+                            for terminal_client in terminal_backend.list_clients()]
+        # First a client inside the last other app, when that is another terminal app: while the
+        # dashboard is active, iTerm2's front tab may be one the user didn't come from. iTerm2's
+        # own clients are matched through its tab in front instead.
+        other_application_process_id = self.last_other_active_application_process_id
+        terminal_client_in_front = None
+        if (a_client_inside_another_terminal_app_counts and other_application_process_id is not None
+                and other_application_process_id not in terminal_application_process_ids):
+            terminal_client_in_front = next((terminal_client for terminal_client in terminal_clients if other_application_process_id
+                                             in list_the_process_and_its_ancestor_ids(terminal_client.process_id)), None)
+        if terminal_client_in_front is None and job_process_id_in_front is not None:
+            terminal_client_in_front = next((terminal_client for terminal_client in terminal_clients
+                                             if terminal_client.process_id == job_process_id_in_front), None)
+        if terminal_client_in_front is not None:
+            return self.find_first_session_id_of_tab(terminal_client_in_front.front_tab_id)
+        return first_session_in_front["session_id"] if first_session_in_front is not None else None
 
     def find_seen_session_id(self):
-        """Returns the session being seen: the front tab's, while iTerm2 (not the dashboard) is active
-        and a terminal window (not, for example, iTerm2's Settings) has keyboard focus."""
-        if self.app is None or not self.app.app_active or self.key_terminal_window_id is None or self.dashboard_is_active:
-            return None  # (the main thread can report the dashboard's activity before iTerm2 is connected)
-        return self.find_first_session_id_of_tab(self.find_front_tab_id())
+        """Returns the session being seen: the one in front (find_session_id_in_front) while its
+        terminal, not the dashboard, is active, and for iTerm2, while a terminal window (not, for
+        example, iTerm2's Settings) has keyboard focus. A tmux client inside another terminal app
+        doesn't count (that app's tab in front may be another); showing its tab from the list does
+        (handle_focus_agent_session)."""
+        if self.dashboard_is_active:
+            return None
+        return self.find_session_id_in_front(the_terminal_must_have_keyboard_focus=True,
+                                             a_client_inside_another_terminal_app_counts=False)
 
     def find_highlighted_session_id(self):
-        """Returns the session shown as in front: the front tab's while it is seen, and also
-        while the dashboard itself is active (so the highlight doesn't vanish while you use the
-        list); None while another app is active."""
-        if self.dashboard_is_active or self.find_seen_session_id() is not None:
-            return self.find_first_session_id_of_tab(self.find_front_tab_id())
-        return None
+        """Returns the session shown as in front: the one in front while its terminal is active,
+        and also while the dashboard itself is active (so the highlight doesn't vanish while you
+        use the list); None while another app is active."""
+        return self.find_session_id_in_front(the_terminal_must_have_keyboard_focus=not self.dashboard_is_active,
+                                             a_client_inside_another_terminal_app_counts=True)
 
     def record_seen_time_for_the_seen_session(self):
         """Stamps "seen until now" on the session that was seen at the last check and on the one
@@ -1438,14 +1558,8 @@ class DashboardCore:
         self.last_seen_session_id = seen_session_id
 
     async def regather_and_publish(self):
-        """Re-reads iTerm2 and publishes a snapshot if anything changed."""
-        await self.app.async_refresh()
-        self.gather_is_in_progress = True
-        try:
-            self.gathered_windows = await self.gather_iterm2_windows()
-            self.windows_were_gathered = True
-        finally:
-            self.gather_is_in_progress = False
+        """Re-reads the terminals and publishes a snapshot if anything changed."""
+        self.gathered_windows = await self.gather_every_terminals_windows()
         await self.make_room_for_reserved_area()  # a new or moved window may reach under a docked sidebar
         self.publish_snapshot_if_changed()
         process_ids_not_asked_about = self.list_claude_code_process_ids() - self.process_ids_asked_about_in_claude_agents
@@ -1608,7 +1722,7 @@ class DashboardCore:
         otherwise the background shells seen below the agent and its detached jobs
         (read_child_processes_periodically). Also whether the hooks report the turn over with
         background tasks running, as Claude Code's "shell" in `claude agents --json` then means
-        (iterm2_snapshot_builder; code review, 2026-10-29), and whether they report no prompt since
+        (snapshot_builder; code review, 2026-10-29), and whether they report no prompt since
         the agent started, which makes its idle row "new" (user request, 2026-10-30)."""
         for session_id, agent_session in self.agent_sessions.items():
             reading = self.screen_readings_by_session_id.setdefault(session_id, {})
@@ -1656,9 +1770,9 @@ class DashboardCore:
         self.record_seen_time_for_the_seen_session()
         self.window_order = update_window_list_order(
             self.window_order, [gathered_window["window_id"] for gathered_window in self.gathered_windows])
-        for gathered_window in self.gathered_windows:  # the App object follows tab switches itself, without a regather
-            window = self.app.get_window_by_id(gathered_window["window_id"])
-            gathered_window["selected_tab_id"] = window.current_tab.tab_id if window and window.current_tab else None
+        for gathered_window in self.gathered_windows:  # iTerm2's App object follows tab switches itself, without a regather
+            gathered_window["selected_tab_id"] = self.terminal_backend_by_name[gathered_window["terminal_name"]].find_selected_tab_id(
+                gathered_window["window_id"])
         self.remember_codex_sessions_that_share_a_folder()
         self.continue_the_processes_of_agents_no_longer_paused()
         self.note_agents_that_ended_without_a_session_end(agent_sessions_before, now)
@@ -1703,32 +1817,7 @@ class DashboardCore:
             self.last_published_snapshot_without_time = snapshot_without_time
             self.publish_snapshot(snapshot)
 
-    # ----- subscriptions -----
-
-    async def handle_session_variable_change(self, connection, notification):
-        """Updates the cached commandLine or status of one session, then asks for a snapshot.
-
-        A change that arrives during a gather would be written into the list that the gather
-        is about to replace, so it asks for another gather instead. The time of a status change
-        is recorded either way, since a gather reads only the value.
-        """
-        if notification.name == "status":
-            self.status_set_in_iterm2_at_by_session_id[notification.identifier] = time.time()
-        if self.gather_is_in_progress:
-            self.regather_needed.set()
-            return
-        new_value = json.loads(notification.json_new_value) if notification.json_new_value else None
-        field_name = {"commandLine": "command_line", "status": "status_set_in_iterm2"}[notification.name]
-        for gathered_window in self.gathered_windows:
-            for gathered_tab in gathered_window["tabs"]:
-                first_session = gathered_tab["first_session"]
-                if first_session and first_session["session_id"] == notification.identifier:
-                    first_session[field_name] = new_value
-                    if field_name == "command_line":
-                        self.regather_needed.set()  # the job process ID and folder change with the job
-                    else:
-                        first_session["status_set_in_iterm2_at"] = self.status_set_in_iterm2_at_by_session_id[notification.identifier]
-        self.snapshot_needed.set()
+    # ----- background tasks -----
 
     async def listen_for_hook_events(self):
         """Receives the app's hook events (hook_event_forwarder), one line per connection, on the
@@ -1815,55 +1904,14 @@ class DashboardCore:
                 pass
             self.hooks_check_needed.clear()
 
-    async def watch_layout_changes(self):
-        async with iterm2.LayoutChangeMonitor(self.connection) as monitor:
-            while True:
-                await monitor.async_get()
-                self.regather_needed.set()
-
-    async def watch_new_sessions(self):
-        async with iterm2.NewSessionMonitor(self.connection) as monitor:
-            while True:
-                await monitor.async_get()
-                self.regather_needed.set()
-
-    async def watch_session_terminations(self):
-        async with iterm2.SessionTerminationMonitor(self.connection) as monitor:
-            while True:
-                await monitor.async_get()
-                self.regather_needed.set()
-
-    async def watch_focus_changes(self):
-        """Tracks which terminal window has keyboard focus, and asks for a snapshot on any focus change.
-
-        The front tab and whether iTerm2 is active come from the iterm2 App object, which handles
-        the same notifications itself; the snapshot is built after the coalescing delay, by which
-        time it has.
-        """
-        async with iterm2.FocusMonitor(self.connection) as monitor:
-            while True:
-                focus_update = await monitor.async_get_next_update()
-                if focus_update.window_changed is not None:
-                    self.update_key_terminal_window(focus_update.window_changed)
-                self.snapshot_needed.set()
-
-    def update_key_terminal_window(self, window_changed):
-        """Tracks which terminal window has keyboard focus, whatever order iTerm2 reports the
-        old window resigning and the new one becoming key in."""
-        reasons = iterm2.FocusUpdateWindowChanged.Reason
-        if window_changed.event == reasons.TERMINAL_WINDOW_BECAME_KEY:
-            self.key_terminal_window_id = window_changed.window_id
-        elif window_changed.event == reasons.TERMINAL_WINDOW_IS_CURRENT:
-            self.key_terminal_window_id = None  # a non-terminal window such as Settings has keyboard focus
-        elif window_changed.event == reasons.TERMINAL_WINDOW_RESIGNED_KEY and self.key_terminal_window_id == window_changed.window_id:
-            self.key_terminal_window_id = None
-
     async def read_agent_screens_periodically(self):
         """Reads the screens the status rules need: the permission dialog of an
         asking session whose tool needs the check (every SCREEN_CHECK_INTERVAL_SECONDS), and a
         fingerprint of each working session (every FINGERPRINT_INTERVAL_SECONDS) for "stuck".
         One screen read serves both. A session that starts asking is read at once, so the count of
-        "Interrupted" lines from before the user could answer is known."""
+        "Interrupted" lines from before the user could answer is known. A session in a terminal
+        that reports no agent status (tmux) whose tool shows a turn on screen (Codex) is read
+        every time too, since its status comes from there (read_status_value_of_the_tabs_own_agent)."""
         while True:
             try:
                 await asyncio.wait_for(self.screen_check_needed.wait(), SCREEN_CHECK_INTERVAL_SECONDS)
@@ -1873,6 +1921,10 @@ class DashboardCore:
             status_by_session_id = {gathered_tab["first_session"]["session_id"]: gathered_tab["first_session"]["status"]
                                     for gathered_window in self.gathered_windows for gathered_tab in gathered_window["tabs"]
                                     if gathered_tab["first_session"]}
+            session_ids_whose_terminal_reports_no_agent_status = {
+                gathered_tab["first_session"]["session_id"] for gathered_window in self.gathered_windows
+                if not self.terminal_backend_by_name[gathered_window["terminal_name"]].reports_agent_status
+                for gathered_tab in gathered_window["tabs"] if gathered_tab["first_session"]}
             for session_id in set(self.screen_readings_by_session_id) - set(self.agent_sessions):
                 del self.screen_readings_by_session_id[session_id]
             for session_id, agent_session in list(self.agent_sessions.items()):
@@ -1888,19 +1940,20 @@ class DashboardCore:
                 is_effectively_working = state == "working" or permission_dialog_was_answered(state, status_change_time, reading)
                 await self.note_command_the_agent_is_waiting_on(session_id, agent_session, reading, state, is_effectively_working, now)
                 needs_fingerprint = is_effectively_working and now - reading.get("fingerprint_checked_at", 0) >= FINGERPRINT_INTERVAL_SECONDS
-                # A row that goes by its own agent while an agent runs inside it (choose_status_value_of_the_tabs_own_agent).
-                needs_turn_check = (session_id in self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id
+                # A row that goes by its own agent: while an agent runs inside it (choose_status_value_of_the_tabs_own_agent),
+                # and always in a terminal that reports no agent status.
+                needs_turn_check = ((session_id in self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id
+                                     or session_id in session_ids_whose_terminal_reports_no_agent_status)
                                     and adapter.working_screen_pattern is not None)
                 if not (needs_dialog_check or needs_fingerprint or needs_turn_check):
                     continue
-                session = self.app.get_session_by_id(session_id)
-                if session is None:
+                terminal_session = self.find_terminal_session(session_id)
+                if terminal_session is None:
                     continue
                 try:
-                    contents = await session.async_get_screen_contents()
-                except iterm2.RPCException:
+                    screen_lines = await terminal_session.read_screen_lines()
+                except TerminalRequestFailed:
                     continue  # the tab closed meanwhile
-                screen_lines = [contents.line(index).string for index in range(contents.number_of_lines)]
                 if needs_dialog_check:
                     reading = update_permission_dialog_reading(
                         reading, screen_shows_permission_dialog(screen_lines, adapter.permission_dialog_screen_patterns),
@@ -2214,10 +2267,6 @@ class DashboardCore:
         agent_process = read_process_info(agent_session["process_id"])
         return agent_process.started_at + SECONDS_AN_AGENT_TAKES_TO_START_ITS_HELPERS if agent_process is not None else now
 
-    async def handle_title_change(self, connection, notification):
-        """A tab or window title changed (here, in iTerm2's own dialogs, or by a program): re-read."""
-        self.regather_needed.set()
-
     async def poll_window_frames_when_they_matter(self):
         """Notices windows moved by hand, which iTerm2 sends no notification for:
         with several monitors, to regroup them; while a sidebar is docked, to keep them out of its
@@ -2226,13 +2275,11 @@ class DashboardCore:
             await asyncio.sleep(FRAME_POLL_INTERVAL_SECONDS)
             if len(self.monitors) < 2 and self.reserved_screen_area is None:
                 continue
-            for gathered_window in list(self.gathered_windows):
-                window = self.app.get_window_by_id(gathered_window["window_id"])
-                if window is None:
-                    continue
+            for gathered_window in self.list_gathered_windows_with_frames():
                 try:
-                    new_frame = await read_window_frame(window)
-                except iterm2.GetPropertyException:
+                    new_frame = await self.terminal_backend_by_name[gathered_window["terminal_name"]].read_window_frame(
+                        gathered_window["window_id"])
+                except TerminalRequestFailed:
                     continue  # closed meanwhile; the layout change handles it
                 if new_frame != gathered_window["frame"]:
                     gathered_window["frame"] = new_frame
@@ -2264,105 +2311,70 @@ class DashboardCore:
             regather_is_needed = self.regather_needed.is_set()
             self.regather_needed.clear()
             self.snapshot_needed.clear()
-            try:
-                if regather_is_needed:
-                    await self.regather_and_publish()
-                else:
-                    self.publish_snapshot_if_changed()
-            except (iterm2.RPCException, iterm2.GetPropertyException) as error:
-                # For example the app list changed under the refresh; a lost connection is caught elsewhere.
-                print(f"regather failed, trying again: {error!r}")
-                asyncio.get_running_loop().call_later(RETRY_DELAY_SECONDS, self.regather_needed.set)
+            if regather_is_needed:
+                await self.regather_and_publish()
+            else:
+                self.publish_snapshot_if_changed()
 
-    async def watch_for_connection_loss(self):
-        """Returns when the websocket closes or the package's dispatch task ends."""
-        dispatch_future = getattr(self.connection, "_Connection__dispatch_forever_future", None)
-        waiters = [asyncio.ensure_future(self.connection.websocket.wait_closed())]
-        if dispatch_future is not None:
-            waiters.append(dispatch_future)
-        await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-
-    async def start_up_after_connecting(self):
-        """Reads the App object, subscribes to session variable changes, and publishes the first snapshot."""
-        self.app = await iterm2.async_get_app(self.connection)
-        # FocusMonitor reports only later changes, so read the current focus once. Its window
-        # entry says whether that terminal window has keyboard focus or only is current (for
-        # example while iTerm2's Settings window has focus).
-        focus_info = await iterm2.rpc.async_get_focus_info(self.connection)
-        for notification in focus_info.focus_response.notifications:
-            if notification.HasField("window"):
-                self.update_key_terminal_window(iterm2.FocusUpdateWindowChanged(
-                    notification.window.window_id, iterm2.FocusUpdateWindowChanged.Reason(notification.window.window_status)))
-        session_scope, window_scope = api_pb2.VariableScope.Value("SESSION"), api_pb2.VariableScope.Value("WINDOW")
-        for variable_name in SESSION_VARIABLES_TO_WATCH:
-            await async_subscribe_to_variable_change_notification(
-                self.connection, self.handle_session_variable_change, session_scope, variable_name, "all")
-        # Titles set by the user. iTerm2 rejects "all" for the tab scope, but a session's
-        # tab.titleOverrideFormat reports its tab's title (checked against iTerm2 3.7.6).
-        await async_subscribe_to_variable_change_notification(
-            self.connection, self.handle_title_change, session_scope, "tab.titleOverrideFormat", "all")
-        await async_subscribe_to_variable_change_notification(
-            self.connection, self.handle_title_change, window_scope, "titleOverrideFormat", "all")
-        await self.regather_and_publish()
+    async def watch_the_own_status_of_agents_in_terminals_without_status_reports(self):
+        """Asks for a snapshot when the own report of an agent in a terminal that reports no agent
+        status (tmux) changes (read_status_value_of_the_tabs_own_agent): nothing else tells the
+        core when Claude Code's session file changes. Read every SECONDS_BETWEEN_OWN_STATUS_READINGS."""
+        while True:
+            await asyncio.sleep(SECONDS_BETWEEN_OWN_STATUS_READINGS)
+            for session_id, own_status_value in list(self.own_status_value_by_session_id.items()):
+                agent_session = self.agent_sessions.get(session_id)
+                if agent_session is not None and agent_session["process_id"] and (
+                        self.read_status_value_of_the_tabs_own_agent(session_id, agent_session) != own_status_value):
+                    self.snapshot_needed.set()
+                    break
 
     async def run(self):
-        """Connects, gathers, subscribes, and runs until the connection is lost.
-
-        Every way this ends calls report_connection_lost, so the app exits and its supervisor
-        restarts it.
+        """Runs every terminal backend (each connects when its terminal runs) and the core's own
+        tasks until one ends: an established iTerm2 connection that is lost, or a task that
+        fails. Every way this ends calls report_connection_lost, so the app exits and its
+        supervisor restarts it (the iterm2 package can't reconnect within one process).
         """
         # Before connecting: once iTerm2 quits, its paused agents are gone, and what their pauses
         # stopped below them (in sessions of their own, which closing the tabs doesn't reach) is
         # continued even while no connection can be made.
         self.continue_the_processes_of_agents_no_longer_paused()
-        iterm2.auth.gAppKitAvailable = False  # fetch the token with osascript, never NSAppleScript
-        try:
-            self.connection = await iterm2.Connection.async_create()
-        except Exception as error:
-            self.report_connection_lost(f"could not connect to iTerm2: {error}")
-            return
-        # The watchdog starts at once: a request whose answer never comes (iTerm2 quit meanwhile)
-        # would otherwise hang the start-up forever.
-        connection_loss_task = asyncio.ensure_future(self.watch_for_connection_loss())
-        start_up_task = asyncio.ensure_future(self.start_up_after_connecting())
-        await asyncio.wait([start_up_task, connection_loss_task], return_when=asyncio.FIRST_COMPLETED)
-        if not start_up_task.done():
-            start_up_task.cancel()
-            self.report_connection_lost("the iTerm2 connection closed during start-up")
-            return
-        if start_up_task.exception() is not None:
-            self.report_connection_lost(f"the core could not start: {start_up_task.exception()!r}")
-            return
-        coroutines = [self.watch_layout_changes(), self.watch_new_sessions(), self.watch_session_terminations(),
-                      self.watch_focus_changes(), self.poll_window_frames_when_they_matter(),
-                      self.read_agent_screens_periodically(), self.read_context_window_usage_periodically(),
-                      self.read_resource_usage_periodically(), self.read_child_processes_periodically(),
-                      self.check_hooks_periodically(), self.publish_when_needed()]
+        coroutines = [terminal_backend.run() for terminal_backend in self.terminal_backends] + [
+            self.poll_window_frames_when_they_matter(), self.read_agent_screens_periodically(),
+            self.read_context_window_usage_periodically(), self.read_resource_usage_periodically(),
+            self.read_child_processes_periodically(), self.check_hooks_periodically(),
+            self.watch_the_own_status_of_agents_in_terminals_without_status_reports(), self.publish_when_needed()]
         if self.claude_command_path:
             coroutines.append(self.refresh_claude_agents_periodically())
         if self.hook_events_socket_path:
             coroutines.append(self.listen_for_hook_events())
+        self.regather_needed.set()  # the first snapshot, with whatever terminals run by then
         background_tasks = [asyncio.ensure_future(coroutine) for coroutine in coroutines]
-        done_tasks, _ = await asyncio.wait(background_tasks + [connection_loss_task], return_when=asyncio.FIRST_COMPLETED)
-        failure_message = "the iTerm2 connection closed"
+        done_tasks, _ = await asyncio.wait(background_tasks, return_when=asyncio.FIRST_COMPLETED)
+        failure_message = "the core stopped"
         for done_task in done_tasks:
-            if done_task is not connection_loss_task and not done_task.cancelled() and done_task.exception():
-                failure_message = f"the core stopped: {done_task.exception()!r}"
+            exception = None if done_task.cancelled() else done_task.exception()
+            if isinstance(exception, TerminalConnectionLost):
+                failure_message = str(exception)
+            elif exception is not None:
+                failure_message = f"the core stopped: {exception!r}"
         self.report_connection_lost(failure_message)
 
 
-class Iterm2ConnectionThread(threading.Thread):
+class DashboardCoreThread(threading.Thread):
     """Runs DashboardCore on its own asyncio event loop, and offers thread-safe entry points."""
 
     def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None,
                  pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None, hook_events_socket_path=None,
-                 hook_states_file_path=None, started_at_and_hook_state_by_agent_process_id_to_start_with=None):
-        super().__init__(name="iterm2-connection", daemon=True)
+                 hook_states_file_path=None, started_at_and_hook_state_by_agent_process_id_to_start_with=None,
+                 report_terminal_problem=None):
+        super().__init__(name="dashboard-core", daemon=True)
         self.core_ready = threading.Event()
         self.core = None
         self.event_loop = None
         self.publish_snapshot = publish_snapshot
         self.report_connection_lost = report_connection_lost
+        self.report_terminal_problem = report_terminal_problem
         self.verbose = verbose
         self.docked_window_frames_file_path = docked_window_frames_file_path
         self.pause_records_file_path = pause_records_file_path
@@ -2377,13 +2389,14 @@ class Iterm2ConnectionThread(threading.Thread):
         self.core = DashboardCore(self.publish_snapshot, self.report_connection_lost, self.verbose,
                                   self.docked_window_frames_file_path, self.pause_records_file_path,
                                   self.pause_record_by_tab_and_agent_to_start_with, self.hook_events_socket_path,
-                                  self.hook_states_file_path, self.started_at_and_hook_state_by_agent_process_id_to_start_with)
+                                  self.hook_states_file_path, self.started_at_and_hook_state_by_agent_process_id_to_start_with,
+                                  self.report_terminal_problem)
         self.core_ready.set()
         self.event_loop.run_until_complete(self.core.run())
 
     def give_room_back_and_wait(self, timeout_seconds):
         """Thread-safe: ends docking and waits, at most timeout_seconds, until the iTerm2 windows
-        have their room back; called just before the app exits."""
+        (the only ones with frames) have their room back; called just before the app exits."""
         if not self.core_ready.is_set():
             return
         future = asyncio.run_coroutine_threadsafe(self.core.change_reserved_screen_area(None), self.event_loop)
@@ -2417,6 +2430,11 @@ class Iterm2ConnectionThread(threading.Thread):
         """Thread-safe: tells the core whether the dashboard is the active app."""
         self.core_ready.wait()
         self.event_loop.call_soon_threadsafe(self.core.set_dashboard_is_active, dashboard_is_active)
+
+    def send_last_other_active_application_process_id(self, process_id):
+        """Thread-safe: tells the core the process ID of the last app other than the dashboard to be active."""
+        self.core_ready.wait()
+        self.event_loop.call_soon_threadsafe(self.core.set_last_other_active_application_process_id, process_id)
 
     def send_hooks_changed(self):
         """Thread-safe: has the core check the agent tools' hooks again now (after the app installed them)."""

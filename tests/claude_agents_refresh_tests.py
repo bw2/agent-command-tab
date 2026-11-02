@@ -5,7 +5,7 @@ import unittest
 import unittest.mock
 
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
-from agent_command_tab.iterm2_connection_thread import DashboardCore
+from agent_command_tab.dashboard_core import DashboardCore
 
 
 class ClaudeAgentsRefreshTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class ClaudeAgentsRefreshTests(unittest.TestCase):
 
         async def read_with_one_config_folder_timing_out(claude_command_path, config_folders):
             return {43: {"sessionId": "b-after-clear"}}
-        with unittest.mock.patch("agent_command_tab.iterm2_connection_thread.read_claude_agents_by_process_id",
+        with unittest.mock.patch("agent_command_tab.dashboard_core.read_claude_agents_by_process_id",
                                  read_with_one_config_folder_timing_out):
             asyncio.run(core.refresh_claude_agents())
         # 42 still runs, so its record stays (its conversation would look new without it); 99's process is gone.
@@ -35,7 +35,7 @@ class ClaudeAgentsRefreshTests(unittest.TestCase):
                                   "ancestor_processes": [[1042, "sh"], [42, "2.1.311"]], "sent_at": 5.0})
             core.regather_needed.clear()  # the gather it asks for finds this run under way
             return {42: {"sessionId": "before-the-clear"}}
-        with unittest.mock.patch("agent_command_tab.iterm2_connection_thread.read_claude_agents_by_process_id",
+        with unittest.mock.patch("agent_command_tab.dashboard_core.read_claude_agents_by_process_id",
                                  read_while_a_clear_is_typed):
             asyncio.run(core.refresh_claude_agents())
         self.assertTrue(core.regather_needed.is_set())  # so 42 is asked about again

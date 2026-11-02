@@ -5,8 +5,8 @@ import time
 import unittest
 import unittest.mock
 
-from agent_command_tab import iterm2_connection_thread
-from agent_command_tab.iterm2_connection_thread import DashboardCore
+from agent_command_tab import dashboard_core
+from agent_command_tab.dashboard_core import DashboardCore
 
 
 class ResourceUsageReadingTests(unittest.TestCase):  # code review, 2026-10-29
@@ -27,9 +27,9 @@ class ResourceUsageReadingTests(unittest.TestCase):  # code review, 2026-10-29
                 await asyncio.sleep(0.01)
             reading_task.cancel()
 
-        with unittest.mock.patch.object(iterm2_connection_thread, "RESOURCE_USAGE_CHECK_INTERVAL_SECONDS", 30), \
-                unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_BETWEEN_THE_FIRST_TWO_CPU_READINGS", 0.05), \
-                unittest.mock.patch.object(iterm2_connection_thread, "read_process_tree_resource_usage", read_process_tree_resource_usage):
+        with unittest.mock.patch.object(dashboard_core, "RESOURCE_USAGE_CHECK_INTERVAL_SECONDS", 30), \
+                unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_THE_FIRST_TWO_CPU_READINGS", 0.05), \
+                unittest.mock.patch.object(dashboard_core, "read_process_tree_resource_usage", read_process_tree_resource_usage):
             asyncio.run(turn_the_readings_on_then_wait_for_cpu_use())
         self.assertLess(time.monotonic() - started_at, 2)  # not the 30-second interval
         self.assertEqual(core.screen_readings_by_session_id["s1"]["memory_bytes"], 512 * 1024 ** 2)

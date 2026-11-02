@@ -5,11 +5,12 @@ import collections
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 import iterm2
 
 from agent_command_tab.docked_window_frames_store import load_docked_window_frames
-from agent_command_tab.iterm2_connection_thread import DashboardCore
+from agent_command_tab.dashboard_core import DashboardCore
 
 Point = collections.namedtuple("Point", ["x", "y"])
 Size = collections.namedtuple("Size", ["width", "height"])
@@ -47,14 +48,18 @@ class StandInApp:
         return self.windows_by_id.get(window_id)
 
 
+def make_gathered_window(window_id, frame):
+    return {"window_id": window_id, "terminal_name": "iTerm2", "frame": frame, "tabs": []}
+
+
 class DockedSidebarWindowRoomTests(unittest.TestCase):
     def make_core(self, windows, cached_frames=None, docked_window_frames_file_path=None):
         core = DashboardCore(lambda snapshot: None, lambda message: None,
                              docked_window_frames_file_path=docked_window_frames_file_path)
-        core.app = StandInApp(windows)
+        core.terminal_backend_by_name["iTerm2"].app = StandInApp(windows)
         cached_frames = cached_frames or {}
-        core.gathered_windows = [{"window_id": window.window_id, "frame": cached_frames.get(window.window_id, window.frame),
-                                  "tabs": []} for window in windows]
+        core.gathered_windows = [make_gathered_window(window.window_id, cached_frames.get(window.window_id, window.frame))
+                                 for window in windows]
         core.windows_were_gathered = True  # as after the first gather
         return core
 
@@ -122,7 +127,7 @@ class DockedSidebarWindowRoomTests(unittest.TestCase):
             core_after_restart.gathered_windows, core_after_restart.windows_were_gathered = [], False
             asyncio.run(core_after_restart.change_reserved_screen_area(None))
             self.assertEqual(len(load_docked_window_frames(file_path)), 1)  # kept for the restored window
-            core_after_restart.gathered_windows = [{"window_id": "w1-after-restart", "frame": restored_window.frame, "tabs": []}]
+            core_after_restart.gathered_windows = [make_gathered_window("w1-after-restart", restored_window.frame)]
             core_after_restart.windows_were_gathered = True
             asyncio.run(core_after_restart.make_room_for_reserved_area())  # as after the first gather
             self.assertEqual(restored_window.frame, (100, 50, 1800, 1000))
@@ -140,13 +145,32 @@ class DockedSidebarWindowRoomTests(unittest.TestCase):
             self.assertEqual(window.frame, (100, 50, 1800, 1000))
             self.assertEqual(load_docked_window_frames(file_path), {})
 
+    def test_a_gather_before_iterm2_is_connected_keeps_the_saved_frames(self):
+        # The core gathers tmux's windows before iTerm2 connects; iTerm2's windows aren't closed then.
+        with tempfile.TemporaryDirectory() as folder:
+            file_path = os.path.join(folder, "docked_window_frames.json")
+            window = StandInWindow("w1", (100, 50, 1800, 1000))
+            asyncio.run(self.make_core([window], docked_window_frames_file_path=file_path)
+                        .change_reserved_screen_area(RESERVED_AREA))
+            core_after_restart = DashboardCore(lambda snapshot: None, lambda message: None,
+                                               docked_window_frames_file_path=file_path)
+            asyncio.run(core_after_restart.change_reserved_screen_area(None))  # the app: not docked
+            tmux = core_after_restart.terminal_backend_by_name["tmux"]  # iTerm2's isn't connected
+            tmux.server_is_running = True
+            tmux.gather_windows = unittest.mock.AsyncMock(
+                return_value=[{"window_id": "$1", "terminal_name": "tmux", "frame": None, "tabs": []}])
+            core_after_restart.gathered_windows = asyncio.run(core_after_restart.gather_every_terminals_windows())
+            asyncio.run(core_after_restart.make_room_for_reserved_area())  # as after that gather
+            self.assertFalse(core_after_restart.windows_were_gathered)
+            self.assertEqual(len(load_docked_window_frames(file_path)), 1)
+
     def test_a_new_window_never_takes_over_the_record_of_a_window_closed_meanwhile(self):
         closed_window = StandInWindow("w1", (100, 50, 1800, 1000))
         core = self.make_core([closed_window])
         asyncio.run(core.change_reserved_screen_area(RESERVED_AREA))
         new_window = StandInWindow("w2", (100, 50, 1500, 1000))  # the same size, for example a tab moved out
-        core.app = StandInApp([new_window])
-        core.gathered_windows = [{"window_id": "w2", "frame": new_window.frame, "tabs": []}]
+        core.terminal_backend_by_name["iTerm2"].app = StandInApp([new_window])
+        core.gathered_windows = [make_gathered_window("w2", new_window.frame)]
         asyncio.run(core.make_room_for_reserved_area())
         asyncio.run(core.change_reserved_screen_area(None))
         self.assertEqual(new_window.frame, (100, 50, 1500, 1000))

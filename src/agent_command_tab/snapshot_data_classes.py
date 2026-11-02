@@ -27,10 +27,11 @@ AgentSessionEntry = collections.namedtuple(
      "working_folder", "status"] + list(AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD),
     defaults=list(AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD.values()),
 )
-AgentSessionEntry.__doc__ = ("One iTerm2 tab whose first pane runs an agent session. last_time_tab_was_seen is when "
-                             "the tab was last selected in the key iTerm2 window while iTerm2 was active, or None. "
+AgentSessionEntry.__doc__ = ("One terminal tab (an iTerm2 tab, or a tmux window) whose first pane runs an agent "
+                             "session. last_time_tab_was_seen is when the tab was last seen in front in its terminal "
+                             "(dashboard_core.DashboardCore.find_seen_session_id), or None. "
                              "running_tool_name is the tool a working agent waits on, and running_tool_started_at "
-                             "when it started (iterm2_snapshot_builder.choose_tool_the_agent_is_waiting_on): a "
+                             "when it started (snapshot_builder.choose_tool_the_agent_is_waiting_on): a "
                              "command it started in this turn (for example \"python3\"), or another tool open for "
                              "5 seconds or more (for example \"Agent\"), or \"\" while it thinks (\"running_command_"
                              "name\" until 2026-10-28, when other tools began to count). context_tokens is how many "
@@ -60,14 +61,19 @@ ChildProcessEntry.__doc__ = ("One process an agent started, a sub row of its ope
 WindowEntry = collections.namedtuple(
     "WindowEntry",
     ["window_id", "title", "window_title_set_by_user", "frame", "total_tab_count", "agent_sessions", "selected_tab_id",
-     "number_among_windows_with_the_same_title"],
-    defaults=[None, 1],
+     "number_among_windows_with_the_same_title", "terminal_name", "can_move_to_another_monitor"],
+    defaults=[None, 1, "iTerm2", True],
 )
-WindowEntry.__doc__ = ("One iTerm2 window with at least one agent session tab. total_tab_count includes the tabs "
+WindowEntry.__doc__ = ("One terminal window with at least one agent session tab: an iTerm2 window, or a tmux "
+                       "session (whose tabs are its tmux windows). total_tab_count includes the tabs "
                        "that are hidden because they run no agent. selected_tab_id is the window's own selected "
                        "tab, which may run no agent (unlike is_in_front, which marks only the key window's tab). "
-                       "number_among_windows_with_the_same_title is 1 for the first window in iTerm2's order with "
-                       "its title, 2 for the next one, and so on (build_window_title_shown_in_the_list).")
+                       "number_among_windows_with_the_same_title is 1 for the first window of its terminal with its "
+                       "title (in the terminals' order), 2 for the next one of that terminal, and so on "
+                       "(build_window_title_shown_in_the_list). "
+                       "terminal_name is the terminal it belongs to (\"iTerm2\", \"tmux\"); a tab moves only "
+                       "between windows of the same terminal. can_move_to_another_monitor is False for a window "
+                       "without a frame of its own (a tmux session), listed with the menu-bar monitor.")
 
 MonitorEntry = collections.namedtuple("MonitorEntry", ["monitor_id", "name", "frame", "visible_frame", "windows"])
 MonitorEntry.__doc__ = "One monitor and the windows assigned to it, in the core's window list order."
@@ -121,9 +127,12 @@ def replace_title_in_snapshot(snapshot, kind, item_id, new_title):
 def build_window_title_shown_in_the_list(window_entry):
     """Returns the window's title, with its number after it for the second and later windows
     with that title ("tandem-repeat-catalogs (2)"): a window opened in the same folder as
-    another otherwise looks like the same window (user request, 2026-10-30)."""
+    another otherwise looks like the same window (user request, 2026-10-30). A window of a
+    terminal other than iTerm2 has its terminal's name before it ("tmux: research"), so a tmux
+    session can't be taken for an iTerm2 window (user request, 2026-11-01)."""
     number = window_entry.number_among_windows_with_the_same_title
-    return window_entry.title if number == 1 else f"{window_entry.title} ({number})"
+    title = window_entry.title if number == 1 else f"{window_entry.title} ({number})"
+    return title if window_entry.terminal_name == "iTerm2" else f"{window_entry.terminal_name}: {title}"
 
 
 def iterate_agent_session_entries(snapshot):

@@ -45,6 +45,9 @@ CLAUDE_CODE_SHELL_TOOL_COMMAND = re.compile(r"""&& eval '((?:[^']|'"'"')*)'(?: <
 # which a process row calls just "scratchpad" (user request, 2026-10-28), so the end of the command shows.
 CLAUDE_CODE_SCRATCHPAD_PATH = re.compile(r"(?:/private)?/tmp/claude-\d+/[^/\s'\"]+/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/scratchpad")
 LAUNCHD_PROCESS_ID = 1  # adopts a process whose parent ended
+# Text editors that run in a terminal, which an agent may open in its own process group (Claude
+# Code's Ctrl+G does), besides the one its VISUAL or EDITOR setting names.
+TERMINAL_TEXT_EDITOR_NAMES = frozenset({"vi", "vim", "nvim", "nano", "pico", "emacs", "micro", "hx", "kak", "mg", "joe"})
 
 RUSAGE_INFO_V2 = 2  # proc_pid_rusage flavor that returns struct rusage_info_v2
 
@@ -243,6 +246,41 @@ def list_other_stopped_jobs_of_the_agents_shell(agent_process_id):
         if child is not None and child.pbi_pgid != agent.pbi_pgid and child.pbi_status == STOPPED_PROCESS_STATUS:
             other_stopped_job_process_ids.append(child_process_id)
     return other_stopped_job_process_ids
+
+
+def find_foreground_job_process_id(process_id):
+    """Returns the ID of the job in front on the process's terminal (the leader of the terminal's
+    foreground process group, as iTerm2's jobPid names it), or process_id itself when the
+    process has no terminal or the leader is gone; None when the process is gone. For a tmux
+    pane's shell, the program the pane runs in front (user request, 2026-11-01)."""
+    bsd_info = read_process_bsd_info(process_id)
+    if bsd_info is None:
+        return None
+    if bsd_info.e_tpgid == 0 or read_process_bsd_info(bsd_info.e_tpgid) is None:
+        return process_id
+    return bsd_info.e_tpgid
+
+
+def find_text_editor_opened_by_the_job(job_process_id):
+    """Returns the ID of a text editor below the job in the job's own process group, or None.
+    Claude Code's Ctrl+G opens one so: the editor gets the keys, while the terminal's foreground
+    group, and so find_foreground_job_process_id, still names the agent (iTerm2's jobPid names
+    the editor). Other programs in the group, such as a caffeinate the agent started, don't count."""
+    processes_in_the_jobs_group = []
+    # Three levels: the agent may run below a wrapper the job started, and the editor in a shell.
+    for descendant in list_descendant_processes(job_process_id, maximum_depth=3):
+        bsd_info = read_process_bsd_info(descendant.process_id)
+        if bsd_info is not None and bsd_info.pbi_pgid == job_process_id:
+            processes_in_the_jobs_group.append(descendant)
+    if not processes_in_the_jobs_group:
+        return None
+    editor_names = set(TERMINAL_TEXT_EDITOR_NAMES)
+    environment = read_process_arguments_and_environment(job_process_id)[1]
+    for setting_name in ("VISUAL", "EDITOR"):
+        words = environment.get(setting_name, "").split()
+        if words:
+            editor_names.add(os.path.basename(words[0]))
+    return next((process.process_id for process in processes_in_the_jobs_group if process.name in editor_names), None)
 
 
 def process_has_its_terminal(process_id):

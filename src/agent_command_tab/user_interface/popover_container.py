@@ -60,6 +60,9 @@ IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle (â
                           True: ("Show Idle", "Show tabs whose agent is idle (âŒ˜-i)")}
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
+# A message line narrower than this beside the sort control and Hide Idle shows too little to
+# read, so they step aside for it (fit_top_bar_to_width).
+SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS = 120
 HOOKS_NOTE_TOOL_TIP = ("These hooks provide AgentCommandTab more details about agent status, including whether it "
                        "launched background processes, etc.")  # the user's wording, 2026-10-28
 
@@ -225,6 +228,7 @@ class ListPanelController(NSViewController):
         self.message_text_field.setTextColor_(NSColor.secondaryLabelColor())
         self.message_text_field.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.message_text_field)
+        self.sort_control_and_hide_idle_step_aside_for_the_message = True  # show_message's
 
         # Bottom bar: a Settings button with its name, easier to see than an icon, at the left, a
         # gray pill like the top bar's controls (user request, 2026-10-28; in the middle of the top bar
@@ -307,12 +311,22 @@ class ListPanelController(NSViewController):
         macOS draws the controls: on macOS 27 the label goes below 267 points and the pop-up
         narrows below 235; it would hide below 171, narrower than the sidebar's smallest width
         (200). The message line takes the room left before the buttons, so it never covers them;
-        while it shows a message (iTerm2 can't be reached, so there are no rows to sort or hide)
-        the sort control and the Hide Idle button step aside for it."""
+        while it shows a message that asks for it (the app restarts, so there are no rows to sort
+        or hide; show_message), or one that would get less than SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS
+        beside them (a narrow sidebar), the sort control and the Hide Idle button step aside for it."""
+        has_a_message = bool(self.message_text_field.stringValue())
+        message_width = self.lay_out_top_bar(has_a_message and self.sort_control_and_hide_idle_step_aside_for_the_message)
+        if has_a_message and message_width < SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS:
+            self.lay_out_top_bar(True)
+
+    @objc.python_method
+    def lay_out_top_bar(self, controls_step_aside_for_a_message):
+        """Lays out the top bar as fit_top_bar_to_width describes, with the sort control and the
+        Hide Idle button stepping aside for the message when controls_step_aside_for_a_message;
+        returns the message line's width."""
         label_x, label_width = self.sort_label.frame().origin.x, self.sort_label.frame().size.width
         popup_frame = self.list_sort_order_popup.frame()
-        is_showing_a_message = bool(self.message_text_field.stringValue())
-        self.idle_tabs_button.setHidden_(is_showing_a_message)
+        self.idle_tabs_button.setHidden_(controls_step_aside_for_a_message)
         right_end_x = self.view().bounds().size.width - PANEL_SIDE_MARGIN  # then the left end of the leftmost button placed
         gap_before_the_buttons_placed = 0
         for button in (self.expand_or_collapse_all_button, self.idle_tabs_button):  # side by side from the right end
@@ -322,17 +336,18 @@ class ListPanelController(NSViewController):
                 gap_before_the_buttons_placed = GAP_BETWEEN_TOP_BAR_BUTTONS
         room_right_edge = right_end_x - gap_before_the_buttons_placed
         popup_x_after_label = label_x + label_width + 2
-        label_fits = not is_showing_a_message and popup_x_after_label + self.sort_popup_width_for_its_widest_title <= room_right_edge
+        label_fits = not controls_step_aside_for_a_message and popup_x_after_label + self.sort_popup_width_for_its_widest_title <= room_right_edge
         popup_x = popup_x_after_label if label_fits else label_x
         popup_width = max(min(self.sort_popup_width_for_its_widest_title, room_right_edge - popup_x), 0)
-        popup_fits = not is_showing_a_message and popup_width >= SMALLEST_SORT_POPUP_WIDTH
+        popup_fits = not controls_step_aside_for_a_message and popup_width >= SMALLEST_SORT_POPUP_WIDTH
         self.sort_label.setHidden_(not label_fits)
         self.list_sort_order_popup.setHidden_(not popup_fits)
         self.list_sort_order_popup.setFrame_(NSMakeRect(popup_x, popup_frame.origin.y, popup_width, popup_frame.size.height))
         message_x = popup_x + popup_width + 8 if popup_fits else label_x
         message_frame = self.message_text_field.frame()
-        self.message_text_field.setFrame_(NSMakeRect(message_x, message_frame.origin.y,
-                                                     max(right_end_x - message_x - 8, 0), message_frame.size.height))
+        message_width = max(right_end_x - message_x - 8, 0)
+        self.message_text_field.setFrame_(NSMakeRect(message_x, message_frame.origin.y, message_width, message_frame.size.height))
+        return message_width
 
     def expandOrCollapseAllClicked_(self, sender):
         """Collapses all monitor and window rows when the list is fully expanded, and otherwise
@@ -447,9 +462,14 @@ class ListPanelController(NSViewController):
         self.list_controller.owner.open_settings()
 
     @objc.python_method
-    def show_message(self, message):
-        """Shows one gray line at the top; the app controller uses it when iTerm2 can't be reached."""
+    def show_message(self, message, sort_control_and_hide_idle_step_aside=True):
+        """Shows one gray line at the top (an empty message hides it); the app controller uses it
+        when the app is about to restart, with no rows to sort or hide, and when a terminal can't
+        be reached while another's rows stay listed, where the sort control and the Hide Idle
+        button keep their places (sort_control_and_hide_idle_step_aside False) and the message
+        takes the room left, its tooltip holding all of it."""
         self.view()
+        self.sort_control_and_hide_idle_step_aside_for_the_message = sort_control_and_hide_idle_step_aside
         self.message_text_field.setStringValue_(message)
         self.message_text_field.setToolTip_(message)
         self.fit_top_bar_to_width()

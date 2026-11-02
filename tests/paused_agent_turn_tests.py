@@ -4,9 +4,9 @@ the shell in front of it while it is paused has no status, which must not end or
 import unittest
 import unittest.mock
 
-from agent_command_tab import iterm2_connection_thread
+from agent_command_tab import dashboard_core
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
-from agent_command_tab.iterm2_connection_thread import DashboardCore
+from agent_command_tab.dashboard_core import DashboardCore
 
 
 class PausedAgentTurnTests(unittest.TestCase):
@@ -14,9 +14,9 @@ class PausedAgentTurnTests(unittest.TestCase):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
         core.agent_sessions = {"s1": {"adapter": ClaudeCodeAdapter(), "process_id": 101, "is_in_background": False}}
         first_session = {"session_id": "s1", "status_set_in_iterm2": "idle", "status": "idle", "job_pid": 101}
-        core.gathered_windows = [{"window_id": "w1", "tabs": [{"tab_id": "t1", "first_session": first_session}]}]
+        core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [{"tab_id": "t1", "first_session": first_session}]}]
         agent_is_stopped = []
-        patch = unittest.mock.patch.object(iterm2_connection_thread, "process_is_stopped", lambda process_id: bool(agent_is_stopped))
+        patch = unittest.mock.patch.object(dashboard_core, "process_is_stopped", lambda process_id: bool(agent_is_stopped))
         patch.start()
         self.addCleanup(patch.stop)
         for now, status_set_in_iterm2, is_stopped, job_pid in ((1.0, "idle", False, 101), (2.0, "working", False, 101),  # a turn starts

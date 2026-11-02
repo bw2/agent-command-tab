@@ -22,6 +22,7 @@ from Foundation import NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommo
 from PyObjCTools import AppHelper
 import objc
 
+from agent_command_tab.agent_process_tree import list_the_process_and_its_ancestor_ids
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS, SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
@@ -29,13 +30,14 @@ from agent_command_tab.global_shortcut_key_filter import GlobalShortcutKeyFilter
 from agent_command_tab.hook_event_forwarder import HOOK_EVENTS_SOCKET_PATH
 from agent_command_tab.hook_states_store import HOOK_STATES_FILE_PATH
 from agent_command_tab.hooks_installer import BACKUP_FILE_SUFFIX, install_hooks, list_settings_file_paths
-from agent_command_tab.iterm2_connection_thread import Iterm2ConnectionThread
+from agent_command_tab.dashboard_core import DashboardCoreThread
 from agent_command_tab.monitor_assignment import compute_frame_clear_of_area
 from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
 from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
                                               load_settings_resolving_paths_at_first_run,
                                               move_the_settings_folder_of_the_old_name, save_settings)
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list, choose_folder_for_new_agent_window
+from agent_command_tab.terminal_backends.iterm2_terminal_backend import ITERM2_BUNDLE_IDENTIFIER, list_running_iterm2_applications
 from agent_command_tab.start_with_iterm2 import (AUTOLAUNCH_SCRIPT_FILE_NAME, build_command_that_starts_this_copy_of_the_app,
                                                  find_iterm2_autolaunch_folder, update_autolaunch_script_to_match_setting)
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
@@ -51,7 +53,6 @@ from agent_command_tab.user_interface.settings_window import SettingsWindowContr
 from agent_command_tab.user_interface.sidebar_panel import SidebarController
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
 
-ITERM2_BUNDLE_IDENTIFIER = "com.googlecode.iterm2"
 SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING = 10
 SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
 # The settings' Appearance (settings_store.APPEARANCE_CHOICES; user request, 2026-10-27): the
@@ -142,9 +143,9 @@ class AppController(NSObject):
         # The last app other than the dashboard to be active: hiding the list window with the
         # shortcut gives the keyboard back to it. Noted at the start (the app that started the
         # dashboard sends no activation notification), when the window is shown, and whenever
-        # another app becomes active (anotherApplicationBecameActive_).
+        # another app becomes active (anotherApplicationBecameActive_). The core hears of it too
+        # (note_application_unless_it_is_the_dashboard), so it is noted once the core's thread exists.
         self.last_other_active_application = None
-        self.note_application_unless_it_is_the_dashboard(NSWorkspace.sharedWorkspace().frontmostApplication())
         self.peek_in_progress = None  # {"application_in_front"} while a tab row is held
         self.settings_save_is_scheduled = False  # a moved window's frame waits to be written (window_frame_changed)
         self.core_settings_sent_last = None  # apply_settings_to_the_core_and_every_list's
@@ -167,11 +168,13 @@ class AppController(NSObject):
         self.settings_window_controller = SettingsWindowController.alloc().initWithOwner_(self)
         # Calls back on the key filter's own thread.
         self.global_shortcut_key_filter = GlobalShortcutKeyFilter(lambda: AppHelper.callAfter(self.global_shortcut_pressed))
-        self.connection_thread = Iterm2ConnectionThread(self.receive_snapshot_on_background_thread,
-                                                        self.receive_connection_lost_on_background_thread, verbose,
-                                                        DOCKED_WINDOW_FRAMES_FILE_PATH, PAUSE_RECORDS_FILE_PATH,
-                                                        hook_events_socket_path=HOOK_EVENTS_SOCKET_PATH,
-                                                        hook_states_file_path=HOOK_STATES_FILE_PATH)
+        self.connection_thread = DashboardCoreThread(self.receive_snapshot_on_background_thread,
+                                                     self.receive_connection_lost_on_background_thread, verbose,
+                                                     DOCKED_WINDOW_FRAMES_FILE_PATH, PAUSE_RECORDS_FILE_PATH,
+                                                     hook_events_socket_path=HOOK_EVENTS_SOCKET_PATH,
+                                                     hook_states_file_path=HOOK_STATES_FILE_PATH,
+                                                     report_terminal_problem=self.receive_terminal_problem_on_background_thread)
+        self.note_application_unless_it_is_the_dashboard(NSWorkspace.sharedWorkspace().frontmostApplication())
         notification_center = NSNotificationCenter.defaultCenter()
         for notification_name, selector_name in (
                 (NSApplicationDidChangeScreenParametersNotification, "screenParametersChanged:"),
@@ -187,6 +190,9 @@ class AppController(NSObject):
     def start(self):
         self.connection_thread.start()
         self.connection_thread.send_monitors(read_monitors_from_screens())
+        if self.last_other_active_application is not None:
+            self.connection_thread.send_last_other_active_application_process_id(
+                self.last_other_active_application.processIdentifier())
         self.apply_settings_to_the_core_and_every_list(self.settings)
         self.apply_appearance(self.settings["appearance"])
         self.apply_start_with_iterm2_setting(self.settings["app_starts_with_iterm2"])
@@ -227,14 +233,27 @@ class AppController(NSObject):
         AppHelper.callAfter(self.exit_to_reconnect, message)
 
     @objc.python_method
+    def receive_terminal_problem_on_background_thread(self, message):
+        AppHelper.callAfter(self.show_terminal_problem, message)
+
+    @objc.python_method
+    def show_terminal_problem(self, message):
+        """Shows a terminal that runs but can't be reached (message), or clears that line (None);
+        the other terminals' agents stay listed meanwhile, so the sort control and Hide Idle keep their places."""
+        for list_panel_controller in self.list_all_list_panel_controllers():
+            list_panel_controller.show_message(message or "", sort_control_and_hide_idle_step_aside=False)
+
+    @objc.python_method
     def exit_to_reconnect(self, message):
         """Shows the problem for a while, then exits so the supervisor reconnects.
 
-        The `iterm2` package can't reconnect within one process.
+        The `iterm2` package can't reconnect within one process. The app also runs without iTerm2
+        (with tmux), so the message doesn't ask for iTerm2; a connection refused while iTerm2 runs
+        shows its own hint (show_terminal_problem).
         """
         print(f"agent-command-tab: {message}; exiting so the supervisor reconnects", flush=True)
-        # The user's wording, 2026-10-28.
-        explanation = f"{message}. Retrying soon. Make sure iTerm2 is running, with Settings > General > Magic > Enable Python API on."
+        # "Retrying soon." is the user's wording, 2026-10-28.
+        explanation = f"{message}. Retrying soon."
         for list_panel_controller in self.list_all_list_panel_controllers():
             list_panel_controller.show_message(explanation)
         self.status_item_controller.show_connection_problem()
@@ -529,9 +548,32 @@ class AppController(NSObject):
         """Sends an action to the core; returns a future that completes with its ActionResult."""
         if action_request.action in ("focus_agent_session", "focus_window", "peek_agent_session"):
             # macOS may refuse another app's activation while the dashboard is active, so hand it over first.
-            for iterm2_application in NSRunningApplication.runningApplicationsWithBundleIdentifier_(ITERM2_BUNDLE_IDENTIFIER):
+            for iterm2_application in list_running_iterm2_applications():
                 yield_activation_to(iterm2_application)
-        return self.connection_thread.submit_action(action_request)
+        future = self.connection_thread.submit_action(action_request)
+        future.add_done_callback(self.bring_forward_the_app_running_the_terminal_client_of_the_result)
+        return future
+
+    @objc.python_method
+    def bring_forward_the_app_running_the_terminal_client_of_the_result(self, future):
+        """After an action that showed a tab in a tmux client running inside a terminal app other
+        than iTerm2 (its result's details {"terminal_client_process_id"}; the core brings an iTerm2
+        tab running the client to the front itself): brings that app to the front, the nearest app
+        above the client's process. Runs on the core's thread, so it hands the work to the main thread."""
+        action_result = None if future.cancelled() or future.exception() else future.result()
+        client_process_id = ((action_result.details or {}).get("terminal_client_process_id")
+                             if action_result is not None and action_result.succeeded else None)
+        if client_process_id is not None:
+            AppHelper.callAfter(self.bring_forward_the_app_running_the_process, client_process_id)
+
+    @objc.python_method
+    def bring_forward_the_app_running_the_process(self, process_id):
+        """Brings the nearest app above a process (the terminal app running a tmux client) to the front."""
+        for ancestor_process_id in list_the_process_and_its_ancestor_ids(process_id):
+            application = NSRunningApplication.runningApplicationWithProcessIdentifier_(ancestor_process_id)
+            if application is not None and ancestor_process_id != os.getpid():
+                self.give_activation_to(application)
+                return
 
     def popoverDidShow_(self, notification):
         self.place_the_settings_window_above_the_lists(dropdown_is_open=True)  # an open settings window stays above it
@@ -729,13 +771,16 @@ class AppController(NSObject):
             sidebar_window.setLevel_(sidebar_window_level)
 
     @objc.python_method
-    def submit_action_and_report_failure(self, action_request, failure_title, after_success=None):
+    def submit_action_and_report_failure(self, action_request, failure_title, after_success=None, after_failure=None):
         """Sends an action the user chose from a menu to the core and, should it fail, says why
         in an alert, since the list alone wouldn't show it (a command not typed, say). Once it
-        succeeds, after_success(action_result), if given, runs on the main thread."""
+        succeeds, after_success(action_result), if given, runs on the main thread; once it
+        fails, after_failure(), if given, does."""
 
         def handle_action_result(action_result):
             if not action_result.succeeded:
+                if after_failure is not None:
+                    after_failure()
                 self.report_action_failure(action_result, failure_title)
             elif after_success is not None:
                 after_success(action_result)
@@ -981,9 +1026,13 @@ class AppController(NSObject):
 
     @objc.python_method
     def note_application_unless_it_is_the_dashboard(self, application):
-        """Notes an active app (an NSRunningApplication, or None) as last_other_active_application, unless it is the dashboard itself."""
+        """Notes an active app (an NSRunningApplication, or None) as last_other_active_application,
+        unless it is the dashboard itself, and tells the core once it runs (the core looks for a
+        tmux client inside it)."""
         if application is not None and application.processIdentifier() != os.getpid():
             self.last_other_active_application = application
+            if self.connection_thread.is_alive():
+                self.connection_thread.send_last_other_active_application_process_id(application.processIdentifier())
 
     def dashboardBecameActive_(self, notification):
         self.connection_thread.send_dashboard_is_active(True)

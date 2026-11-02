@@ -13,10 +13,10 @@ import unittest.mock
 
 from AppKit import NSApplication
 
-from agent_command_tab import iterm2_connection_thread
+from agent_command_tab import dashboard_core
 from agent_command_tab.agent_process_tree import list_descendant_processes, process_is_alive, read_process_details
 from agent_command_tab.dashboard_core_api import ActionRequest
-from agent_command_tab.iterm2_connection_thread import DashboardCore
+from agent_command_tab.dashboard_core import DashboardCore
 from agent_command_tab.snapshot_data_classes import ChildProcessEntry
 from agent_command_tab.user_interface.process_info_alert import (LARGEST_ACCESSORY_HEIGHT, LONGEST_COMMAND_IN_AN_ALERT,
                                                                  build_process_info_alert, list_process_info_lines,
@@ -102,14 +102,14 @@ class KillProcessTests(unittest.TestCase):
             wait_until(lambda: shell.returncode is not None)
         self.assertTrue(action_result.succeeded)
         self.assertEqual(shell.returncode, -signal.SIGTERM)  # SIGTERM was enough: no SIGKILL
-        self.assertLess(time.time() - started_at, iterm2_connection_thread.SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED)
+        self.assertLess(time.time() - started_at, dashboard_core.SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED)
         wait_until(lambda: not process_is_alive(command_process_id))  # launchd reaps the orphaned sleep
 
     def test_what_ignores_sigterm_gets_sigkill(self):
         with tempfile.TemporaryDirectory() as folder:
             shell = start_claude_code_style_shell(folder, agent_command="trap \"\" TERM; sleep 60")
             core = make_core_listing("s1", shell.pid)
-            with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED", 0.5):
+            with unittest.mock.patch.object(dashboard_core, "SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED", 0.5):
                 asyncio.run(core.handle_end_child_process(
                     ActionRequest("end_child_process", {"session_id": "s1"}, {"process_id": shell.pid})))
             wait_until(lambda: shell.returncode is not None)

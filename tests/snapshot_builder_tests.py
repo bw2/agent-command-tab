@@ -2,7 +2,7 @@ import json
 import unittest
 
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
-from agent_command_tab.iterm2_snapshot_builder import (DisplayedState, build_computer_snapshot,
+from agent_command_tab.snapshot_builder import (DisplayedState, build_computer_snapshot,
                                                        build_folder_display_name, compute_context_fill_percent,
                                                        compute_displayed_state_since, resolve_agent_sessions)
 from agent_command_tab.snapshot_data_classes import (ChildProcessEntry, build_window_title_shown_in_the_list,
@@ -21,8 +21,8 @@ def make_tab(tab_id, command_line, status=None, path="/Users/someone/code/projec
 
 
 def make_window(window_id, tabs, title="claude", title_override_format=None, frame=(10, 10, 800, 600)):
-    return {"window_id": window_id, "frame": frame, "title": title, "title_override_format": title_override_format,
-            "tabs": tabs}
+    return {"window_id": window_id, "terminal_name": "iTerm2", "frame": frame, "title": title,
+            "title_override_format": title_override_format, "tabs": tabs}
 
 
 def resolve(gathered_windows, previous_agent_sessions=None, alive_process_ids=(), stopped_process_ids=()):

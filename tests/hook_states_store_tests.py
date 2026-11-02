@@ -4,11 +4,11 @@ import tempfile
 import unittest
 import unittest.mock
 
-from agent_command_tab import iterm2_connection_thread
+from agent_command_tab import dashboard_core
 from agent_command_tab.agent_process_tree import ProcessInfo
 from agent_command_tab.hook_event_tracking import apply_hook_event, find_when_the_hooks_ended_the_turn
 from agent_command_tab.hook_states_store import load_hook_states, save_hook_states
-from agent_command_tab.iterm2_connection_thread import DashboardCore
+from agent_command_tab.dashboard_core import DashboardCore
 
 
 def make_event(hook_event_name, agent_process_id, **fields):
@@ -67,7 +67,7 @@ class HookStatesAcrossRestartsTests(unittest.TestCase):
         self.file_path = os.path.join(self.folder.name, "agent_hook_states.json")
         self.started_at_by_process_id = {101: 1000.25, 102: 2000.5}
         process_info_patch = unittest.mock.patch.object(
-            iterm2_connection_thread, "read_process_info",
+            dashboard_core, "read_process_info",
             side_effect=lambda process_id: (ProcessInfo(process_id, 1, "2.1.311", self.started_at_by_process_id[process_id])
                                             if process_id in self.started_at_by_process_id else None))
         process_info_patch.start()
@@ -116,7 +116,7 @@ class HookStatesAcrossRestartsTests(unittest.TestCase):
         core.note_hook_event(make_event("Stop", 101, sent_at=6.0, background_tasks=[]))
         core.note_hook_event(make_event("Stop", 102, sent_at=7.0, background_tasks=[]))
         del self.started_at_by_process_id[102]
-        with unittest.mock.patch.object(iterm2_connection_thread, "process_is_alive", side_effect=lambda process_id: process_id == 101):
+        with unittest.mock.patch.object(dashboard_core, "process_is_alive", side_effect=lambda process_id: process_id == 101):
             core.forget_agent_processes_that_are_gone()
         self.assertEqual(list(load_hook_states(self.file_path)), [101])
 

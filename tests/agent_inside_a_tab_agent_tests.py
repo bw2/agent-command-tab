@@ -5,11 +5,11 @@ such an agent sets the tab's status too."""
 import unittest
 import unittest.mock
 
-from agent_command_tab import iterm2_connection_thread
+from agent_command_tab import dashboard_core
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.agent_adapters.generic import GenericAdapter
-from agent_command_tab.iterm2_connection_thread import DashboardCore
+from agent_command_tab.dashboard_core import DashboardCore
 
 
 class AgentInsideATabAgentTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class AgentInsideATabAgentTests(unittest.TestCase):
                                     "s3": {"adapter": GenericAdapter(), "process_id": 301, "is_in_background": False}}
         self.first_sessions = {session_id: {"session_id": session_id, "status_set_in_iterm2": "working", "status": "working"}
                                for session_id in ("s1", "s2", "s3")}
-        self.core.gathered_windows = [{"window_id": "w1", "tabs": [
+        self.core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [
             {"tab_id": f"t{index}", "first_session": first_session} for index, first_session in enumerate(self.first_sessions.values())]}]
         self.an_agent_runs_inside = False
         self.claude_code_status = "busy"
@@ -30,7 +30,7 @@ class AgentInsideATabAgentTests(unittest.TestCase):
                 ("list_descendant_processes", self.list_descendant_processes),
                 ("an_agent_program_runs_through_a_shell_below", lambda processes, read_name: self.an_agent_runs_inside),
                 ("read_claude_code_session_status", lambda config_folder, process_id: self.claude_code_status)):
-            patch = unittest.mock.patch.object(iterm2_connection_thread, name, replacement)
+            patch = unittest.mock.patch.object(dashboard_core, name, replacement)
             patch.start()
             self.addCleanup(patch.stop)
         self.core.update_session_tracking(1.0)

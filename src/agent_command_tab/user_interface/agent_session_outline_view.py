@@ -717,8 +717,9 @@ class AgentSessionListController(NSObject):
         ask_for_confirmation(explanation, action_name): asks "Are you sure?" before the action
             (one of settings_store.ACTIONS_THAT_ASK_FOR_CONFIRMATION), unless a remembered Yes
             lets it run; returns True for yes.
-        submit_action_and_report_failure(action_request, failure_title): like submit_action,
-            and tells the user if the action failed.
+        submit_action_and_report_failure(action_request, failure_title, after_success=None,
+            after_failure=None): like submit_action, and tells the user if the action failed;
+            after_success(action_result) or after_failure() then runs on the main thread.
         duplicate_agent_session(tab_id, folder, agent_tool_name): opens a copy of the tab's agent
             session right after it.
         find_launch_command(agent_tool_name): the tool's launch command from the settings, or "".
@@ -762,8 +763,11 @@ class AgentSessionListController(NSObject):
         self.outer_row_views_by_item_key = {}
         self.snapshot = None
         self.held_snapshot = None
+        # As the core sent it: self.snapshot and the held snapshot can show a rename the core
+        # hasn't confirmed yet, which a refused rename takes back (put_back_the_names_of_the_latest_snapshot).
+        self.latest_snapshot_from_the_core = None
         # Set by the app for its three lists (the dropdown's, the sidebar's and the list window's):
-        # one that isn't on screen then rebuilds its rows only when it appears (apply_snapshot,
+        # one that isn't on screen then rebuilds its rows only when it appears (show_snapshot,
         # prepare_to_appear), and rows_wait_for_the_list_to_appear says it has a rebuild to do.
         self.defers_rebuilding_while_hidden = False
         self.rows_wait_for_the_list_to_appear = False
@@ -916,7 +920,13 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def apply_snapshot(self, snapshot):
-        """Shows a new snapshot (held while a rename or drag is in progress, or the button is down
+        """Takes a new snapshot from the core: keeps it as latest_snapshot_from_the_core and shows it (show_snapshot)."""
+        self.latest_snapshot_from_the_core = snapshot
+        self.show_snapshot(snapshot)
+
+    @objc.python_method
+    def show_snapshot(self, snapshot):
+        """Shows a snapshot (held while a rename or drag is in progress, or the button is down
         on a row: a sorted list could reorder its rows under the held button). A list that defers
         rebuilding while hidden and isn't on screen (the closed dropdown, a hidden sidebar or list
         window) only keeps it: rebuilding the rows nobody sees took most of the time of a click on
@@ -1017,7 +1027,7 @@ class AgentSessionListController(NSObject):
         self.list_sort_order_is_reversed = is_reversed
         self.fill_column_titles()
         if self.held_snapshot is None and self.snapshot is not None:
-            self.apply_snapshot(self.snapshot)  # (a held snapshot is sorted when it is applied)
+            self.show_snapshot(self.snapshot)  # (a held snapshot is sorted when it is applied)
 
     @objc.python_method
     def column_title_clicked(self, title_name):
@@ -1038,7 +1048,7 @@ class AgentSessionListController(NSObject):
             return
         self.idle_tabs_are_hidden = idle_tabs_are_hidden
         if self.held_snapshot is None and self.snapshot is not None:
-            self.apply_snapshot(self.snapshot)  # (a held snapshot is filtered when it is applied)
+            self.show_snapshot(self.snapshot)  # (a held snapshot is filtered when it is applied)
             self.on_row_count_changed()  # the dropdown fits its size to the rows again
 
     @objc.python_method
@@ -1272,7 +1282,7 @@ class AgentSessionListController(NSObject):
     def prepare_to_appear(self):
         """Brings the rows up to date just before the dropdown, the sidebar or the list window is
         shown: rebuilds them when a snapshot or a setting changed them while the list was hidden
-        (apply_snapshot), then refills them."""
+        (show_snapshot), then refills them."""
         if self.rows_wait_for_the_list_to_appear:
             self.rows_wait_for_the_list_to_appear = False
             self.rebuild_rows_from_the_snapshot()
@@ -2116,7 +2126,7 @@ class AgentSessionListController(NSObject):
         if any(tab_item.entry.child_processes for tab_item in tab_items):
             # Their process rows come or go: the rows are built again (when the click's button
             # comes up, should a snapshot be held while it is down).
-            self.apply_snapshot(self.held_snapshot or self.snapshot)
+            self.show_snapshot(self.held_snapshot or self.snapshot)
         else:
             self.apply_row_heights()
             self.redraw_visible_rows()
@@ -2206,6 +2216,8 @@ class AgentSessionListController(NSObject):
         new_title = name_text_field.stringValue()
         if new_title.strip() == self.title_before_rename.strip():
             item = None  # unchanged: don't turn a default name into a fixed title
+        elif item is not None and item.kind == "window" and not new_title.strip() and item.entry.terminal_name == "tmux":
+            item = None  # a tmux session has no default name to go back to, so it keeps its name
         name_text_field.setEditable_(False)
         name_text_field.setSelectable_(False)
         name_text_field.setDrawsBackground_(False)
@@ -2214,9 +2226,13 @@ class AgentSessionListController(NSObject):
         self.item_being_renamed = None
         if item is not None and item.entry is not None:
             if item.kind == "tab":
-                self.submit_action(ActionRequest("rename_tab", {"tab_id": item.item_id}, {"new_title": new_title}))
+                self.owner.submit_action_and_report_failure(
+                    ActionRequest("rename_tab", {"tab_id": item.item_id}, {"new_title": new_title}),
+                    "The tab couldn't be renamed", after_failure=self.put_back_the_names_of_the_latest_snapshot)
             else:
-                self.submit_action(ActionRequest("rename_window", {"window_id": item.item_id}, {"new_title": new_title}))
+                self.owner.submit_action_and_report_failure(
+                    ActionRequest("rename_window", {"window_id": item.item_id}, {"new_title": new_title}),
+                    "The window couldn't be renamed", after_failure=self.put_back_the_names_of_the_latest_snapshot)
         name_text_field.superview().look = None
         self.apply_held_snapshot()  # first, so a snapshot held during the rename doesn't bring the old name back
         if item is not None and self.held_snapshot is not None and new_title.strip():
@@ -2227,16 +2243,25 @@ class AgentSessionListController(NSObject):
             self.held_snapshot = replace_title_in_snapshot(self.held_snapshot, item.kind, item.item_id, new_title.strip())
         renamed_item = self.items_by_key.get(item.key) if item is not None else None
         if renamed_item is not None and renamed_item.entry is not None and new_title.strip():
-            # Shown at once; the next snapshot confirms it (or puts the old name back if iTerm2 refused).
+            # Shown at once; the next snapshot confirms it, and a refused rename puts the old name back.
             renamed_item.entry = (renamed_item.entry._replace(tab_title=new_title.strip()) if renamed_item.kind == "tab"
                                   else rename_window_entry(renamed_item.entry, new_title.strip()))
         self.redraw_visible_rows()
 
     @objc.python_method
+    def put_back_the_names_of_the_latest_snapshot(self):
+        """Shows the core's latest snapshot again, as the core sent it, after a refused rename:
+        the new name shown at once (or written into a held snapshot) would otherwise stay, since
+        the core sends a snapshot only when something changes. While a snapshot is held, this
+        one is held in its place."""
+        if self.latest_snapshot_from_the_core is not None:
+            self.show_snapshot(self.latest_snapshot_from_the_core)
+
+    @objc.python_method
     def apply_held_snapshot(self):
         held_snapshot, self.held_snapshot = self.held_snapshot, None
         if held_snapshot is not None:
-            self.apply_snapshot(held_snapshot)
+            self.show_snapshot(held_snapshot)
             self.on_row_count_changed()  # the dropdown didn't refit while the snapshot was held
         elif self.snapshot is not None:
             self.redraw_visible_rows()
@@ -2296,7 +2321,7 @@ class AgentSessionListController(NSObject):
                                    ).setRepresentedObject_(agent_tool_name)
             menu.addItem_(NSMenuItem.separatorItem())
             self.add_pause_and_resume_menu_items(menu, self.list_agent_session_entries_below(item))
-            if item.parent_item is not None:
+            if item.parent_item is not None and item.entry.can_move_to_another_monitor:  # not a tmux session
                 menu.addItem_(NSMenuItem.separatorItem())
                 other_monitor_items = [monitor_item for monitor_item in self.top_level_items if monitor_item is not item.parent_item]
                 submenu = NSMenu.alloc().initWithTitle_("Move to monitor")
@@ -2319,7 +2344,9 @@ class AgentSessionListController(NSObject):
             elif not self.owner.find_launch_command(item.entry.agent_tool_name):
                 duplicate_item.setEnabled_(False)
                 duplicate_item.setToolTip_(f"Settings has no launch command for {item.entry.agent_tool_name}")
-            other_window_items = [window_item for window_item in self.list_window_items() if window_item is not item.parent_item]
+            # A tab moves only between windows of its own terminal (an iTerm2 tab can't go into a tmux session).
+            other_window_items = [window_item for window_item in self.list_window_items() if window_item is not item.parent_item
+                                  and window_item.entry.terminal_name == item.parent_item.entry.terminal_name]
             if other_window_items:
                 submenu = NSMenu.alloc().initWithTitle_("Move to window")
                 for window_item in other_window_items:
@@ -2497,7 +2524,8 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def add_new_window_menu_items(self, menu):
         """Adds "New Claude Code window" and the like, one per agent tool the settings include:
-        each starts that tool in a new iTerm2 window."""
+        each starts that tool in a new window of the first terminal that runs (iTerm2, else a new
+        tmux session; DashboardCore.choose_terminal_backend_for_a_new_window)."""
         for agent_tool_name in self.owner.list_agent_tool_names():
             self.add_menu_item(menu, f"New {agent_tool_name} window", "menuNewWindowWithAgentSession:"
                                ).setRepresentedObject_(agent_tool_name)
@@ -2537,11 +2565,15 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def show_item(self, item):
-        """Brings a tab to the front, or a window with the tab it already shows (even one without an agent)."""
+        """Brings a tab to the front, or a window with the tab it already shows (even one without an
+        agent). A failure is shown in an alert: a tmux session no terminal shows, say, whose result
+        says how to attach one."""
         if item.kind == "tab":
-            self.submit_action(ActionRequest("focus_agent_session", {"session_id": item.entry.session_id}))
+            self.owner.submit_action_and_report_failure(ActionRequest("focus_agent_session", {"session_id": item.entry.session_id}),
+                                                        "The tab couldn't be shown")
         else:
-            self.submit_action(ActionRequest("focus_window", {"window_id": item.item_id}))
+            self.owner.submit_action_and_report_failure(ActionRequest("focus_window", {"window_id": item.item_id}),
+                                                        "The window couldn't be shown")
         self.on_tab_focused()
 
     def menuNewAgentSessionInWindow_(self, sender):
@@ -2663,24 +2695,26 @@ class AgentSessionListController(NSObject):
             return NSDragOperationNone
         if proposed_item is not None and proposed_item.kind == "process":
             proposed_item, child_index = proposed_item.parent_item, -1  # a drop on a process row is one on its tab row
-        if dragged_item.kind == "tab" and self.list_sort_order != "manual":
-            # Sorted rows aren't in iTerm2's tab order, so a tab can only go to the end of another window.
-            window_item = proposed_item.parent_item if proposed_item is not None and proposed_item.kind == "tab" else proposed_item
-            if window_item is None or window_item.kind != "window" or window_item is dragged_item.parent_item:
-                return NSDragOperationNone
-            outline_view.setDropItem_dropChildIndex_(window_item, -1)
-            return NSDragOperationMove
         if dragged_item.kind == "tab":
+            # The window the tab would go into: the one it is dropped on, or that of the tab it is dropped on.
+            window_item = proposed_item.parent_item if proposed_item is not None and proposed_item.kind == "tab" else proposed_item
+            if window_item is None or window_item.kind != "window":
+                return NSDragOperationNone
+            # A tab moves only between windows of its own terminal (an iTerm2 tab can't go into a tmux session).
+            if window_item.entry.terminal_name != dragged_item.parent_item.entry.terminal_name:
+                return NSDragOperationNone
+            if self.list_sort_order != "manual":
+                # Sorted rows aren't in iTerm2's tab order, so a tab can only go to the end of another window.
+                if window_item is dragged_item.parent_item:
+                    return NSDragOperationNone
+                outline_view.setDropItem_dropChildIndex_(window_item, -1)
+                return NSDragOperationMove
             # Tabs drop between the tabs of a window: retarget drops on a tab to its window.
-            if proposed_item is not None and proposed_item.kind == "tab":
-                window_item = proposed_item.parent_item
+            if proposed_item.kind == "tab":
                 outline_view.setDropItem_dropChildIndex_(window_item, window_item.child_items.index(proposed_item))
-                return NSDragOperationMove
-            if proposed_item is not None and proposed_item.kind == "window":
-                if child_index < 0:
-                    outline_view.setDropItem_dropChildIndex_(proposed_item, len(proposed_item.child_items))
-                return NSDragOperationMove
-            return NSDragOperationNone
+            elif child_index < 0:
+                outline_view.setDropItem_dropChildIndex_(window_item, len(window_item.child_items))
+            return NSDragOperationMove
         # Windows reorder among the windows of the same group, in the manual order only...
         parent_item = dragged_item.parent_item
         if self.list_sort_order == "manual":
@@ -2690,7 +2724,10 @@ class AgentSessionListController(NSObject):
                 sibling_items = parent_item.child_items if parent_item is not None else self.top_level_items
                 outline_view.setDropItem_dropChildIndex_(parent_item, sibling_items.index(proposed_item))
                 return NSDragOperationMove
-        # ...or move to another monitor when dropped into that monitor's group.
+        # ...or move to another monitor when dropped into that monitor's group (not a tmux session,
+        # which has no window of its own).
+        if not dragged_item.entry.can_move_to_another_monitor:
+            return NSDragOperationNone
         target_monitor_item = None
         if proposed_item is not None and proposed_item.kind == "monitor":
             target_monitor_item = proposed_item

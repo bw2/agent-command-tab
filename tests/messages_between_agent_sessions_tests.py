@@ -7,13 +7,13 @@ from agent_command_tab.messages_between_agent_sessions import (AgentSessionForMe
                                                                build_message_asking_agent_session_to_talk_to_the_others)
 
 PLANNING = AgentSessionForMessages("Claude Code", MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, "planning-3a", 101,
-                                   "/Users/me/project", "planning")
+                                   "/Users/me/project", "planning", "iTerm2 tab")
 REVIEWS = AgentSessionForMessages("Claude Code", MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, "reviews-7f", 102,
-                                  "/Users/me/project", "reviews")
+                                  "/Users/me/project", "reviews", "tmux window")
 CODEX_TESTS = AgentSessionForMessages("Codex", MESSAGES_THROUGH_CODEX_QUEUE, "01a15e4e-de92-7f31-af6e-877571d0444b", 103,
-                                      "/Users/me/project/tests", "codex tests")
+                                      "/Users/me/project/tests", "codex tests", "iTerm2 tab")
 CODEX_DOCS = AgentSessionForMessages("Codex", MESSAGES_THROUGH_CODEX_QUEUE, "01a15e4e-facd-7073-85e7-90d8392b1d54", 104,
-                                     "/Users/me/project/docs", "codex docs")
+                                     "/Users/me/project/docs", "codex docs", "iTerm2 tab")
 
 
 class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
@@ -26,7 +26,7 @@ class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
             'You are the Claude Code session "planning-3a" (process ID 101, folder /Users/me/project, iTerm2 tab "planning").',
             "",
             "The other sessions:",
-            '- the Claude Code session "reviews-7f" (process ID 102, folder /Users/me/project, iTerm2 tab "reviews"). '
+            '- the Claude Code session "reviews-7f" (process ID 102, folder /Users/me/project, tmux window "reviews"). '
             'To message it, use your SendMessage tool with to: "reviews-7f".',
             "- the Codex session 01a15e4e-de92-7f31-af6e-877571d0444b (process ID 103, folder /Users/me/project/tests, "
             'iTerm2 tab "codex tests"). To message it, run: codex queue --thread 01a15e4e-de92-7f31-af6e-877571d0444b '

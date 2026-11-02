@@ -1,16 +1,18 @@
-"""Builds the published snapshot from plain data gathered from iTerm2.
+"""Builds the published snapshot from plain data gathered from the terminals.
 
-Everything here is pure: the connection thread gathers iTerm2's windows, tabs and session
-variables into plain dicts (the same shape the test fixtures use), and this module turns them
+Everything here is pure: the terminal backends (terminal_backends) gather their windows, tabs and
+sessions into plain dicts (the same shape the test fixtures use), and this module turns them
 into a ComputerSnapshot.
 
-Shape of a gathered window (see DashboardCore.gather_iterm2_windows and DashboardCore.gather_iterm2_tab):
-    {"window_id": str, "frame": (x, y, width, height), "title": str, "title_override_format": str or None,
+Shape of a gathered window (see Iterm2TerminalBackend.gather_windows and tmux_terminal_backend.build_gathered_windows):
+    {"window_id": str, "terminal_name": "iTerm2" or "tmux",
+     "frame": (x, y, width, height), or None for a terminal whose windows have no frame of their own (tmux),
+     "title": str, "title_override_format": str or None (the title its user gave it),
      "tabs": [{"tab_id": str, "title": str, "title_override_format": str or None,
                "first_session": {"session_id": str, "command_line": str, "job_pid": int or None,
                                  "job_folder": str (the job process's current folder, or ""),
                                  "job_started_at": float or None (when the job process started),
-                                 "status_set_in_iterm2": str or None,
+                                 "status_set_in_iterm2": str or None (always None in tmux),
                                  "status_set_in_iterm2_at": float or None (when iTerm2 last reported
                                      changing it, since the dashboard connected),
                                  "status": str or None (the one the row goes by), "path": str}}]}
@@ -199,9 +201,9 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
             snapshot, or None.
         screen_reading: The core's latest screen reading for the session, or None (see
             session_status_computation.compute_session_status_from_sources).
-        stuck_threshold_seconds: The stuck time limit (iterm2_connection_thread.STUCK_THRESHOLD_SECONDS).
-        seen_session_id: The session being seen right now (selected in the key iTerm2 window
-            while iTerm2 is active), or None.
+        stuck_threshold_seconds: The stuck time limit (dashboard_core.STUCK_THRESHOLD_SECONDS).
+        seen_session_id: The session being seen right now, in front in its terminal while that
+            terminal is active (dashboard_core.DashboardCore.find_seen_session_id), or None.
         highlighted_session_id: The session shown as in front, or None.
         now: The current time.
     """
@@ -343,6 +345,8 @@ def build_window_entry(gathered_window, agent_session_entries):
         total_tab_count=len(gathered_window["tabs"]),
         agent_sessions=tuple(agent_session_entries),
         selected_tab_id=gathered_window.get("selected_tab_id"),
+        terminal_name=gathered_window["terminal_name"],
+        can_move_to_another_monitor=gathered_window.get("frame") is not None,
     )
 
 
@@ -350,10 +354,10 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
                             displayed_state_by_session_id, screen_readings_by_session_id, stuck_threshold_seconds,
                             claude_agents_by_process_id, seen_session_id, highlighted_session_id, computer_id,
                             computer_name, now, exited_agent_sessions_by_session_id=None, hooks_status_per_agent_tool=()):
-    """Returns the ComputerSnapshot for the gathered iTerm2 state.
+    """Returns the ComputerSnapshot for the gathered terminals' state.
 
     Args:
-        gathered_windows: Gathered window dicts in iTerm2's order (module docstring).
+        gathered_windows: Gathered window dicts in the terminals' order (module docstring).
         agent_sessions: The tabs that run an agent, from resolve_agent_sessions.
         monitors: Monitor dicts {"monitor_id", "name", "frame", "visible_frame"} from the main
             thread, in NSScreen's order (menu-bar monitor first); empty before the first screen
@@ -379,7 +383,8 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
     """
     exited_agent_sessions_by_session_id = exited_agent_sessions_by_session_id or {}
     window_entries_by_window_id = {}
-    window_count_by_title = collections.Counter()  # numbers the windows with the same title, in iTerm2's order
+    # Numbers the windows of one terminal with the same title, in the terminals' order.
+    window_count_by_terminal_and_title = collections.Counter()
     for gathered_window in gathered_windows:
         agent_session_entries = []
         for gathered_tab in gathered_window["tabs"]:
@@ -398,25 +403,29 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
                 seen_session_id, highlighted_session_id, now))
         if agent_session_entries:
             window_entry = build_window_entry(gathered_window, agent_session_entries)
-            window_count_by_title[window_entry.title] += 1
+            terminal_and_title = (window_entry.terminal_name, window_entry.title)
+            window_count_by_terminal_and_title[terminal_and_title] += 1
             window_entries_by_window_id[gathered_window["window_id"]] = window_entry._replace(
-                number_among_windows_with_the_same_title=window_count_by_title[window_entry.title])
+                number_among_windows_with_the_same_title=window_count_by_terminal_and_title[terminal_and_title])
 
-    monitors = sorted(monitors, key=lambda monitor: (monitor["frame"][0], monitor["frame"][1])) or [PLACEHOLDER_MONITOR]
+    monitors_left_to_right = sorted(monitors, key=lambda monitor: (monitor["frame"][0], monitor["frame"][1])) or [PLACEHOLDER_MONITOR]
+    # A window without a frame of its own (a tmux session) goes with the menu-bar monitor.
+    menu_bar_monitor_index = monitors_left_to_right.index(monitors[0]) if monitors else 0
     monitor_index_by_window_id = assign_windows_to_monitors_by_largest_overlap(
-        {window_id: window_entry.frame for window_id, window_entry in window_entries_by_window_id.items()},
-        [monitor["frame"] for monitor in monitors])
+        {window_id: window_entry.frame for window_id, window_entry in window_entries_by_window_id.items()
+         if window_entry.can_move_to_another_monitor},
+        [monitor["frame"] for monitor in monitors_left_to_right])
     ordered_window_ids = [window_id for window_id in window_order if window_id in window_entries_by_window_id]
     ordered_window_ids += [window_id for window_id in window_entries_by_window_id if window_id not in set(window_order)]
     monitor_entries = []
-    for monitor_index, monitor in enumerate(monitors):
+    for monitor_index, monitor in enumerate(monitors_left_to_right):
         monitor_entries.append(MonitorEntry(
             monitor_id=monitor["monitor_id"],
             name=monitor["name"],
             frame=tuple(monitor["frame"]),
             visible_frame=tuple(monitor["visible_frame"]),
             windows=tuple(window_entries_by_window_id[window_id] for window_id in ordered_window_ids
-                          if monitor_index_by_window_id.get(window_id, 0) == monitor_index),
+                          if monitor_index_by_window_id.get(window_id, menu_bar_monitor_index) == monitor_index),
         ))
     return ComputerSnapshot(computer_id=computer_id, computer_name=computer_name, taken_at=now,
                             monitors=tuple(monitor_entries), hooks_status_per_agent_tool=tuple(hooks_status_per_agent_tool))

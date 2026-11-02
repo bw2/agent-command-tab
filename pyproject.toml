@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-command-tab"
 dynamic = ["version"]  # agent_command_tab.__version__
-description = "macOS menu bar list, window or screen-edge sidebar of the iTerm2 tabs where AI coding agents run"
+description = "macOS menu bar list, window or screen-edge sidebar of the iTerm2 tabs and tmux windows where AI coding agents run"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

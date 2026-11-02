@@ -9,18 +9,43 @@ import tempfile
 import unittest
 import unittest.mock
 
-from agent_command_tab import iterm2_actions, iterm2_connection_thread
+from agent_command_tab import agent_input_box_typing, dashboard_core
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.agent_adapters.generic import GenericAdapter
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
-from agent_command_tab.iterm2_connection_thread import DashboardCore, queue_message_for_codex_session
-from agent_command_tab.iterm2_snapshot_builder import DisplayedState
+from agent_command_tab.dashboard_core import DashboardCore, queue_message_for_codex_session
+from agent_command_tab.snapshot_builder import DisplayedState
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
+from agent_command_tab.terminal_backends.base import TerminalSession
+from agent_command_tab.terminal_backends.iterm2_terminal_backend import Iterm2TerminalSession
 
 NOTE = "Please sync up."
 TAB_TITLE_BY_SESSION_ID = {"s1": "planning", "s2": "reviews", "s3": "codex tests", "s4": "aider tab", "s5": "new claude"}
 EMPTY_CLAUDE_CODE_INPUT_BOX = [("❯ ", [False, False]), ("─" * 20, [False] * 20)]
+
+
+class StandInTerminalSession(TerminalSession):
+    """Records what is typed (a paste as ("paste", text)), and shows read_screen(the number of
+    typings so far) as its screen."""
+
+    def __init__(self, read_screen):
+        self.read_screen = read_screen
+        self.sent = []
+
+    async def send_text(self, text):
+        self.sent.append(text)
+
+    async def paste_text(self, text):
+        self.sent.append(("paste", text))
+
+    async def read_screen_lines_with_faint_flags(self):
+        return self.read_screen(len(self.sent))
+
+
+def find_session_id(terminal_session):
+    """The session ID of the stand-in iterm2 session (make_core) behind an Iterm2TerminalSession."""
+    return terminal_session.session.session_id
 
 
 class StandInCodexAdapter(CodexAdapter):
@@ -39,7 +64,10 @@ def make_core():
     """s1 and s2: Claude Code (s1 idle, s2 working); s3: Codex; s4: an agent tool without messages;
     s5: Claude Code whose name `claude agents --json` hasn't reported yet."""
     core = DashboardCore(lambda snapshot: None, lambda message: None)
-    core.app = unittest.mock.Mock()
+    core.terminal_backend_by_name["iTerm2"].app = unittest.mock.Mock(
+        get_session_by_id=lambda session_id: unittest.mock.Mock(session_id=session_id))
+    core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [
+        {"tab_id": session_id, "first_session": {"session_id": session_id}} for session_id in TAB_TITLE_BY_SESSION_ID]}]
     core.codex_command_path = "/stand-in/codex"
     core.agent_sessions = {
         "s1": make_agent_session(ClaudeCodeAdapter(), 101, "Claude Code"),
@@ -75,20 +103,20 @@ class TalkToEachOtherTests(unittest.TestCase):
         self.claude_code_status_by_process_id = {}  # what Claude Code's session files say right now; none by default
         self.claude_code_statuses_at_each_paste = []
 
-        async def paste(app, session_id, message, adapter):
+        async def paste(terminal_session, message, adapter):
             self.claude_code_statuses_at_each_paste.append(dict(self.claude_code_status_by_process_id))
             if self.paste_result is not None:
-                self.pasted.append((session_id, message))
+                self.pasted.append((find_session_id(terminal_session), message))
             return self.paste_result
 
         async def queue(codex_command_path, conversation_id, message):
             self.queued.append((conversation_id, message))
             return ActionResult(True)
-        for patcher in (unittest.mock.patch.object(iterm2_actions, "paste_message_into_empty_input_box", paste),
-                        unittest.mock.patch.object(iterm2_connection_thread, "queue_message_for_codex_session", queue),
-                        unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+        for patcher in (unittest.mock.patch.object(agent_input_box_typing, "paste_message_into_empty_input_box", paste),
+                        unittest.mock.patch.object(dashboard_core, "queue_message_for_codex_session", queue),
+                        unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                                    lambda config_folder, process_id: self.claude_code_status_by_process_id.get(process_id)),
-                        unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.01)):
+                        unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.01)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -144,7 +172,8 @@ class TalkToEachOtherTests(unittest.TestCase):
     def test_a_second_message_held_for_the_same_session_waits_for_the_turn_the_first_one_starts(self):
         core = make_core()
 
-        async def paste_starting_a_turn(app, session_id, message, adapter):
+        async def paste_starting_a_turn(terminal_session, message, adapter):
+            session_id = find_session_id(terminal_session)
             self.pasted.append((session_id, message))
             await asyncio.sleep(0.02)  # pasting takes a moment, holding the session's typing lock
             core.displayed_state_by_session_id[session_id] = DisplayedState("working", 0, 0)  # the turn starts after Enter
@@ -152,8 +181,8 @@ class TalkToEachOtherTests(unittest.TestCase):
 
         async def run():
             return await asyncio.gather(ask_to_talk(core, ["s1", "s3"]), ask_to_talk(core, ["s1", "s3"]))
-        with unittest.mock.patch.object(iterm2_actions, "paste_message_into_empty_input_box", paste_starting_a_turn), \
-                unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.2):
+        with unittest.mock.patch.object(agent_input_box_typing, "paste_message_into_empty_input_box", paste_starting_a_turn), \
+                unittest.mock.patch.object(dashboard_core, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.2):
             first_result, second_result = asyncio.run(run())
         self.assertEqual([session_id for session_id, _ in self.pasted], ["s1"])  # never pasted into the turn under way
         self.assertTrue(first_result.succeeded)
@@ -162,7 +191,7 @@ class TalkToEachOtherTests(unittest.TestCase):
     def test_a_row_whose_state_is_unknown_is_never_typed_into(self):
         core = make_core()
         core.displayed_state_by_session_id["s2"] = DisplayedState("unknown", 0, 0)
-        with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.05):
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.05):
             action_result = asyncio.run(ask_to_talk(core, ["s1", "s2"]))
         self.assertIn("\"reviews\": it didn't wait at its prompt", action_result.message)
         self.assertEqual([session_id for session_id, _ in self.pasted], ["s1"])
@@ -204,7 +233,7 @@ class TalkToEachOtherTests(unittest.TestCase):
 
     def test_a_message_held_too_long_is_given_up_on(self):
         self.paste_result = None  # the input box keeps holding a draft
-        with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.05):
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.05):
             action_result = asyncio.run(ask_to_talk(make_core(), ["s1", "s3"]))
         self.assertIn("\"planning\": it didn't wait at its prompt with an empty input box", action_result.message)
         self.assertEqual(self.pasted, [])
@@ -241,15 +270,15 @@ class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
         self.typed = []  # (session ID, command), in order
         self.input_box_is_ready = True
 
-        async def type_command(app, session_id, command, adapter, agent_is_in_the_middle_of_a_turn=False):
+        async def type_command(terminal_session, command, adapter, agent_is_in_the_middle_of_a_turn=False):
             if not self.input_box_is_ready:
                 return None
-            self.typed.append((session_id, command))
+            self.typed.append((find_session_id(terminal_session), command))
             return ActionResult(True)
-        for patcher in (unittest.mock.patch.object(iterm2_actions, "type_slash_command", type_command),
-                        unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+        for patcher in (unittest.mock.patch.object(agent_input_box_typing, "type_slash_command", type_command),
+                        unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                                    lambda config_folder, process_id: None),
-                        unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.01)):
+                        unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.01)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -283,7 +312,7 @@ class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
         self.assertEqual(asyncio.run(run()), ActionResult(True))
         self.assertEqual(self.typed, [("s2", "/compact")])
         self.input_box_is_ready = False
-        with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.05):
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.05):
             action_result = asyncio.run(self.send(core, ["s2"], "/compact"))
         self.assertIn("\"reviews\": it didn't wait at its prompt with an empty input box", action_result.message)
 
@@ -292,16 +321,16 @@ class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
         core.displayed_state_by_session_id["s3"] = DisplayedState("unknown", 0, 0)  # Codex 0.155.1 reports no state
         screen_lines = [("• Working (12s • esc to interrupt)", []), ("› ", [])]
 
-        async def read_screen_lines(session):
-            return screen_lines
+        async def read_screen_lines(terminal_session):
+            return [text for text, _ in screen_lines]
 
         async def run():
             asyncio.get_running_loop().call_later(0.05, lambda: screen_lines.pop(0))  # the turn ends
             return await self.send(core, ["s3"], "/compact")
-        with unittest.mock.patch.object(iterm2_actions, "read_screen_lines_with_faint_flags", read_screen_lines):
+        with unittest.mock.patch.object(Iterm2TerminalSession, "read_screen_lines", read_screen_lines):
             self.assertEqual(asyncio.run(run()), ActionResult(True))
         self.assertEqual(self.typed, [("s3", "/compact")])
-        with unittest.mock.patch.object(iterm2_actions, "read_screen_lines_with_faint_flags", read_screen_lines):
+        with unittest.mock.patch.object(Iterm2TerminalSession, "read_screen_lines", read_screen_lines):
             self.assertTrue(asyncio.run(core.agent_whose_state_is_unknown_shows_no_turn_on_screen("s3", core.agent_sessions["s3"])))
             screen_lines.insert(0, ("•\x00Working\x00(3s\x00•\x00esc\x00to\x00interrupt)", []))  # iTerm2's empty cells are NULs
             self.assertFalse(asyncio.run(core.agent_whose_state_is_unknown_shows_no_turn_on_screen("s3", core.agent_sessions["s3"])))
@@ -325,9 +354,9 @@ class ReadClaudeCodeSessionStatusTests(unittest.TestCase):
                 session_file.write('{"pid": 4242, "status": "busy"}')
             with open(os.path.join(config_folder, "sessions", "4343.json"), "w") as session_file:
                 session_file.write("{not json")
-            self.assertEqual(iterm2_connection_thread.read_claude_code_session_status(config_folder, 4242), "busy")
-            self.assertIsNone(iterm2_connection_thread.read_claude_code_session_status(config_folder, 4343))
-            self.assertIsNone(iterm2_connection_thread.read_claude_code_session_status(config_folder, 4444))  # no file
+            self.assertEqual(dashboard_core.read_claude_code_session_status(config_folder, 4242), "busy")
+            self.assertIsNone(dashboard_core.read_claude_code_session_status(config_folder, 4343))
+            self.assertIsNone(dashboard_core.read_claude_code_session_status(config_folder, 4444))  # no file
 
 
 class QueueMessageForCodexSessionTests(unittest.TestCase):
@@ -359,26 +388,19 @@ class QueueMessageForCodexSessionTests(unittest.TestCase):
 
 
 class PasteMessageIntoEmptyInputBoxTests(unittest.TestCase):
-    """iterm2_actions.paste_message_into_empty_input_box, with screens read from a list."""
+    """agent_input_box_typing.paste_message_into_empty_input_box, with screens read from a list."""
 
     def paste(self, screens):
-        typed_texts = []
-
-        class StandInSession:
-            async def async_send_text(self, text, suppress_broadcast=False):
-                typed_texts.append(text)
-        app = unittest.mock.Mock(get_session_by_id=lambda session_id: StandInSession())
-        with unittest.mock.patch.object(iterm2_actions, "read_screen_lines_with_faint_flags",
-                                        unittest.mock.AsyncMock(side_effect=screens)), \
-                unittest.mock.patch.object(iterm2_actions, "SECONDS_BETWEEN_A_PASTE_AND_ITS_ENTER", 0), \
-                unittest.mock.patch.object(iterm2_actions, "SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED", 0):
-            return asyncio.run(iterm2_actions.paste_message_into_empty_input_box(
-                app, "s1", "line one\nline two", ClaudeCodeAdapter())), typed_texts
+        terminal_session = StandInTerminalSession(lambda typing_count: screens[min(typing_count, 1)])
+        with unittest.mock.patch.object(agent_input_box_typing, "SECONDS_BETWEEN_A_PASTE_AND_ITS_ENTER", 0), \
+                unittest.mock.patch.object(agent_input_box_typing, "SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED", 0):
+            return asyncio.run(agent_input_box_typing.paste_message_into_empty_input_box(
+                terminal_session, "line one\nline two", ClaudeCodeAdapter())), terminal_session.sent
 
     def test_the_message_is_one_bracketed_paste_then_enter(self):
         action_result, typed_texts = self.paste([EMPTY_CLAUDE_CODE_INPUT_BOX, EMPTY_CLAUDE_CODE_INPUT_BOX])
         self.assertEqual(action_result, ActionResult(True))
-        self.assertEqual(typed_texts, ["\x1b[200~line one\nline two\x1b[201~", "\r"])
+        self.assertEqual(typed_texts, [("paste", "line one\nline two"), "\r"])
 
     def test_a_draft_in_the_box_means_nothing_is_typed_yet(self):
         draft = [("❯ half a thought", [False] * 16), ("─" * 20, [False] * 20)]
@@ -392,8 +414,8 @@ class PasteMessageIntoEmptyInputBoxTests(unittest.TestCase):
 
 
 class TypeSlashCommandTests(unittest.TestCase):
-    """iterm2_actions.type_slash_command presses Enter into an agent in the middle of a turn only
-    while the command is still in the input box (Claude Code may open a permission prompt
+    """agent_input_box_typing.type_slash_command presses Enter into an agent in the middle of a turn
+    only while the command is still in the input box (Claude Code may open a permission prompt
     meanwhile), and leaves a command Codex refused during a turn for a later try."""
 
     def type_compact(self, screen_after_typing, agent_is_in_the_middle_of_a_turn=True, adapter=None,
@@ -401,19 +423,11 @@ class TypeSlashCommandTests(unittest.TestCase):
         """Types /compact into a stand-in tab whose empty box (empty_input_box) shows
         screen_after_typing once the command is typed and screen_after_enter (by default the empty
         box again) after Enter; returns (ActionResult or None, sent texts)."""
-        sent_texts = []
-
-        class StandInSession:
-            async def async_send_text(self, text, suppress_broadcast=False):
-                sent_texts.append(text)
-
-        async def read_screen_lines(session):
-            return [empty_input_box, screen_after_typing, screen_after_enter or empty_input_box][len(sent_texts)]
-        app = unittest.mock.Mock(get_session_by_id=lambda session_id: StandInSession())
-        with unittest.mock.patch.object(iterm2_actions, "read_screen_lines_with_faint_flags", read_screen_lines), \
-                unittest.mock.patch.object(iterm2_actions, "SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED", 0):
-            return asyncio.run(iterm2_actions.type_slash_command(
-                app, "s1", "/compact", adapter or ClaudeCodeAdapter(), agent_is_in_the_middle_of_a_turn)), sent_texts
+        terminal_session = StandInTerminalSession(
+            lambda typing_count: [empty_input_box, screen_after_typing, screen_after_enter or empty_input_box][typing_count])
+        with unittest.mock.patch.object(agent_input_box_typing, "SECONDS_BEFORE_CHECKING_THAT_A_COMMAND_WAS_SUBMITTED", 0):
+            return asyncio.run(agent_input_box_typing.type_slash_command(
+                terminal_session, "/compact", adapter or ClaudeCodeAdapter(), agent_is_in_the_middle_of_a_turn)), terminal_session.sent
 
     def test_enter_follows_the_command_while_it_is_in_the_box(self):
         self.assertEqual(self.type_compact([("❯ /compact", [False] * 10), ("─" * 20, [False] * 20)]),

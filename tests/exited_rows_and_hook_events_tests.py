@@ -12,12 +12,12 @@ import time
 import unittest
 import unittest.mock
 
-from agent_command_tab import hook_event_forwarder, iterm2_connection_thread
+from agent_command_tab import hook_event_forwarder, dashboard_core
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_process_tree import ProcessInfo
-from agent_command_tab.iterm2_connection_thread import (EXITED_ROW_SECONDS, SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING,
+from agent_command_tab.dashboard_core import (EXITED_ROW_SECONDS, SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING,
                                                         DashboardCore, another_process_listens_at)
-from agent_command_tab.iterm2_snapshot_builder import DisplayedState
+from agent_command_tab.snapshot_builder import DisplayedState
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry
 
 
@@ -41,12 +41,12 @@ class ExitedRowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         # Two tabs run Claude Code: s1's agent is process 101, s2's 102.
         self.core = DashboardCore(lambda snapshot: None, lambda message: None)
-        self.core.gathered_windows = [{"window_id": "w1", "tabs": [
+        self.core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [
             {"tab_id": f"t-{session_id}", "first_session": {"session_id": session_id}} for session_id in ("s1", "s2")]}]
         self.agent_sessions_before = {"s1": make_agent_session(101), "s2": make_agent_session(102)}
         self.core.last_agent_session_entry_by_session_id = {"s1": make_entry("s1", "planning"), "s2": make_entry("s2", "api")}
         self.alive_process_ids = {102}  # 101 is gone
-        patch = unittest.mock.patch.object(iterm2_connection_thread, "process_is_alive",
+        patch = unittest.mock.patch.object(dashboard_core, "process_is_alive",
                                            lambda process_id: process_id in self.alive_process_ids)
         patch.start()
         self.addCleanup(patch.stop)
@@ -165,7 +165,7 @@ class HookEventTests(unittest.IsolatedAsyncioTestCase):
             while not os.path.exists(socket_path):
                 await asyncio.sleep(0.01)
             inode_of_the_first = os.stat(socket_path).st_ino
-            with unittest.mock.patch.object(iterm2_connection_thread, "SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER", 0.05):
+            with unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER", 0.05):
                 second_listening_task = asyncio.ensure_future(second_core.listen_for_hook_events())
                 await asyncio.sleep(0.3)
                 self.assertEqual(os.stat(socket_path).st_ino, inode_of_the_first)  # not taken over
@@ -191,11 +191,12 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         self.core = DashboardCore(lambda snapshot: None, lambda message: None)
         self.core.agent_sessions = {"s1": make_agent_session(101)}
         self.first_session = {"session_id": "s1", "status_set_in_iterm2": "working", "status": "working", "job_pid": 101}
-        self.core.gathered_windows = [{"window_id": "w1", "tabs": [{"tab_id": "t1", "first_session": self.first_session}]}]
+        self.core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2",
+                                       "tabs": [{"tab_id": "t1", "first_session": self.first_session}]}]
         self.list_descendant_processes = unittest.mock.Mock(return_value=[])
         for name, replacement in (("list_descendant_processes", self.list_descendant_processes),
                                   ("process_is_stopped", lambda process_id: False)):
-            patch = unittest.mock.patch.object(iterm2_connection_thread, name, replacement)
+            patch = unittest.mock.patch.object(dashboard_core, name, replacement)
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -219,7 +220,7 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         # Claude Code says "shell" while its background task runs; its input box takes text then.
         self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
         agent_session = self.core.agent_sessions["s1"]
-        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+        with unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                         lambda config_folder, process_id: "shell"):
             self.track(1.0)
             self.assertTrue(self.core.claude_code_reports_the_session_busy("s1", agent_session))  # a command in the turn
@@ -234,7 +235,7 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         # the dashboard first sees iTerm2's working after it, and Claude Code says "shell" rather than idle.
         self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
         self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0, background_tasks=[{"id": "b1", "status": "running"}]))
-        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+        with unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                         lambda config_folder, process_id: "shell"):
             self.assertEqual(self.track(10.0), "idle")
             self.assertFalse(self.core.claude_code_reports_the_session_busy("s1", self.core.agent_sessions["s1"]))
@@ -245,7 +246,6 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         # Tracking first found no agent on the first pass after a restart, missed the saved Stop
         # above, and the next pass took the turn as one ending then: "done" for a turn long over.
         core = DashboardCore(lambda snapshot: None, lambda message: None)
-        core.app = unittest.mock.Mock()
         agent_sessions_seen_by_the_tracking = []
 
         class StopAfterTheTracking(Exception):
@@ -253,7 +253,7 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         core.update_session_tracking = lambda now: agent_sessions_seen_by_the_tracking.append(
             {session_id: agent_session["process_id"] for session_id, agent_session in core.agent_sessions.items()})
         core.record_seen_time_for_the_seen_session = unittest.mock.Mock(side_effect=StopAfterTheTracking)
-        with unittest.mock.patch.object(iterm2_connection_thread, "resolve_agent_sessions",
+        with unittest.mock.patch.object(dashboard_core, "resolve_agent_sessions",
                                         return_value={"s1": make_agent_session(101)}), \
                 self.assertRaises(StopAfterTheTracking):
             core.publish_snapshot_if_changed()
@@ -268,7 +268,7 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
     def test_claude_codes_own_idle_counts_over_a_working_iterm2_set_after_the_turn(self):  # user report, 2026-10-28
         self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
         claude_code_status = {"value": "busy"}
-        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+        with unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                         lambda config_folder, process_id: claude_code_status["value"]):
             self.assertEqual(self.track(1.0), "working")
             self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0))
@@ -284,7 +284,7 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
     def test_claude_codes_own_idle_counts_over_a_working_that_held_without_hook_events(self):
         # As after the app restarted: no hook events since the turn ended.
         self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
-        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+        with unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                         lambda config_folder, process_id: "idle"):
             self.assertEqual(self.track(1.0), "working")  # may be a turn's start, before Claude Code's own report says busy
             self.assertEqual(self.track(1.0 + SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING), "idle")
@@ -293,7 +293,7 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
 
     def test_a_new_prompt_gets_the_wait_before_claude_codes_own_idle_counts(self):  # code review, 2026-10-28
         self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
-        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+        with unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                         lambda config_folder, process_id: "idle"):  # its own report lags the new turn
             self.track(1.0)  # a working that iTerm2 set with no turn
             self.assertEqual(self.track(1.0 + SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING), "idle")
@@ -305,7 +305,7 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         # Claude Code's goal feature blocks the Stop, and the turn goes on with iTerm2 at working all along.
         self.core.claude_agents_by_process_id = {101: {"config_folder": None}}
         claude_code_status = {"value": "busy"}
-        with unittest.mock.patch.object(iterm2_connection_thread, "read_claude_code_session_status",
+        with unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                         lambda config_folder, process_id: claude_code_status["value"]):
             self.assertEqual(self.track(1.0), "working")
             self.core.note_hook_event(make_event("Stop", 101, sent_at=5.0, background_tasks=[]))
