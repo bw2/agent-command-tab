@@ -22,10 +22,11 @@ from agent_command_tab.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_N
 from agent_command_tab.user_interface.named_colors import appearance_is_dark
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 
-# The Sort pop-up's titles for settings_store.LIST_SORT_ORDERS.
-LIST_SORT_ORDER_TITLES = {"manual": "Manual", "activity": "Activity", "alphabet": "Alphabetically", "context_percent": "Tokens",
-                          "created_time": "Created Time", "memory_usage": "Memory Usage",
-                          "cpu_usage": "CPU Usage", "state_duration": "Status Change"}
+# The Sort pop-up's titles for settings_store.LIST_SORT_ORDERS: each the title of a column whose
+# title chooses that order when clicked (user request, 2026-11-02; Age of the two that sort by when
+# the agent started). Tab Order, the terminal's own order, has no column.
+LIST_SORT_ORDER_TITLES = {"manual": "Tab Order", "activity": "Status", "alphabet": "Name", "context_percent": "Tokens",
+                          "created_time": "Age", "memory_usage": "Memory", "cpu_usage": "CPU"}
 POPOVER_WIDTH = 460  # before the first fit
 SMALLEST_POPOVER_WIDTH = 320
 LARGEST_SHARE_OF_SCREEN_WIDTH = 0.9
@@ -308,8 +309,8 @@ class ListPanelController(NSViewController):
         room, without it in a narrower one, and then with the pop-up narrowed, cutting its title
         short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar or a list window,
         where the column titles still sort the list). Where each step happens depends on how wide
-        macOS draws the controls: on macOS 27 the label goes below 267 points and the pop-up
-        narrows below 235; it would hide below 171, narrower than the sidebar's smallest width
+        macOS draws the controls: on macOS 27 the label goes below 241 points and the pop-up
+        narrows below 209; it would hide below 171, narrower than the sidebar's smallest width
         (200). The message line takes the room left before the buttons, so it never covers them;
         while it shows a message that asks for it (the app restarts, so there are no rows to sort
         or hide; show_message), or one that would get less than SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS

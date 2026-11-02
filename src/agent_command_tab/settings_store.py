@@ -59,9 +59,13 @@ SMALLEST_SIDEBAR_WIDTH = 200
 LARGEST_SIDEBAR_WIDTH = 1200
 # A tab row's information columns that the settings can show or hide, in their left-to-right
 # order (the tool icon column, right before state, shows by itself when two or more agent tools
-# run). Memory and CPU usage count the agent and every process below it. The state and its
-# duration come first, right after the name, and CPU before memory, since 2026-10-28 (user requests).
-LIST_COLUMNS = ["state", "state_duration", "context_tokens", "created_time", "existence_duration", "cpu_usage", "memory_usage"]
+# run). Memory and CPU usage count the agent and every process below it. The state comes first,
+# right after the name, and CPU before memory, since 2026-10-28 (user requests).
+LIST_COLUMNS = ["state", "context_tokens", "created_time", "existence_duration", "cpu_usage", "memory_usage"]
+# Columns the app no longer has, which a saved shown_columns setting may still name: they are left
+# out of it, so the other columns it names stay shown. The time since the last status change
+# ("Status Changed") was removed on 2026-11-02 (user request).
+REMOVED_LIST_COLUMNS = ["state_duration"]
 
 DEFAULT_SETTINGS = {
     "show_as": "popup",
@@ -84,7 +88,7 @@ DEFAULT_SETTINGS = {
     ],
     "list_sort_order": "manual",
     "list_sort_order_is_reversed": False,  # a second click on a sorted column's title (user request, 2026-10-26)
-    "shown_columns": ["context_tokens", "state", "state_duration"],
+    "shown_columns": ["context_tokens", "state"],
     "idle_tabs_are_hidden": False,  # the Hide Idle / Show Idle button at the top of the list (user request, 2026-10-21)
 }
 
@@ -127,11 +131,15 @@ def is_valid_setting_value(name, value):
 
 def merge_settings_with_defaults(stored_settings):
     """Returns the defaults overlaid with every valid stored value (invalid or unknown values are
-    dropped). A file from before "Show as" with the old sidebar checkbox on shows the sidebar."""
+    dropped). A file from before "Show as" with the old sidebar checkbox on shows the sidebar, and
+    the columns a file names that the app no longer has (REMOVED_LIST_COLUMNS) are left out."""
     settings = json.loads(json.dumps(DEFAULT_SETTINGS))  # a deep copy
     if isinstance(stored_settings, dict):
         if "show_as" not in stored_settings and stored_settings.get("sidebar_is_on") is True:
             settings["show_as"] = "sidebar"
+        if isinstance(stored_settings.get("shown_columns"), list):
+            stored_settings = dict(stored_settings, shown_columns=[
+                column_name for column_name in stored_settings["shown_columns"] if column_name not in REMOVED_LIST_COLUMNS])
         for name, value in stored_settings.items():
             if name in DEFAULT_SETTINGS and is_valid_setting_value(name, value):
                 settings[name] = value

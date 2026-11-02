@@ -23,7 +23,7 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSRightArrowFunctionKey,
                     NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone,
                     NSImageScaleProportionallyUpOrDown, NSImageView, NSMenu,
-                    NSNormalWindowLevel, NSPopover,
+                    NSNormalWindowLevel, NSPopover, NSPopoverBehaviorApplicationDefined, NSPopoverBehaviorTransient,
                     NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSView, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
 from Foundation import NSContainsRect, NSIndexSet
@@ -116,6 +116,9 @@ class RecordingOwner:
 
     def end_peek(self):
         self.peeks.append(("end",))
+
+    def row_drag_began_or_ended(self):
+        pass
 
     def confirm_closing_window(self, window_entry):
         self.windows_asked_about_closing.append(window_entry.window_id)
@@ -335,7 +338,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ("move_tab", {"target_window_id": "w2", "drop_before_tab_id": None}))  # to its end
         self.list_controller.dragged_item = second_window_item
         self.assertEqual(self.list_controller.outlineView_validateDrop_proposedItem_proposedChildIndex_(
-            outline_view, None, None, 0), NSDragOperationNone)  # windows keep the order set in Manual
+            outline_view, None, None, 0), NSDragOperationNone)  # windows keep the order set in Tab Order
         # With two monitors, a window still moves to the other monitor while sorted, but not within its own.
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))
         first_monitor_item, second_monitor_item = self.list_controller.top_level_items
@@ -355,15 +358,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.window.contentView().layoutSubtreeIfNeeded()
         row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
         self.assertEqual(self.list_controller.column_widths["created_time"], 0)  # off by default
-        self.list_controller.set_shown_columns(["created_time", "existence_duration", "state_duration"])
+        self.list_controller.set_shown_columns(["created_time", "existence_duration"])
         row_view.layoutSubtreeIfNeeded()
         self.assertEqual([not row_view.column_views[column_name].isHidden()
-                          for column_name in ("created_time", "existence_duration", "state", "state_duration")],
-                         [True, True, False, True])
+                          for column_name in ("created_time", "existence_duration", "state")],
+                         [True, True, False])
         self.assertEqual(row_view.column_views["existence_duration"].stringValue(), "1h 1m")
         self.list_controller.set_shown_columns([])
         row_view.layoutSubtreeIfNeeded()
-        self.assertTrue(row_view.column_views["state_duration"].isHidden())
+        self.assertTrue(row_view.column_views["existence_duration"].isHidden())
         # Only the tool icon column is left: it shows by itself, since Claude Code and Codex both run.
         self.assertEqual(self.list_controller.measure_right_columns_width(), self.list_controller.column_widths["agent_tool_icon"])
 
@@ -476,8 +479,6 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             state_color = state_text.attribute_atIndex_effectiveRange_(NSForegroundColorAttributeName, 0, None)[0]
             self.assertEqual((resolve_color(state_color, NSAppearanceNameAqua), resolve_color(state_color, NSAppearanceNameDarkAqua)),
                              expected_light_and_dark_mode_colors)
-            self.assertEqual(row_view.column_views["state_duration"].attributedStringValue().attribute_atIndex_effectiveRange_(
-                NSForegroundColorAttributeName, 0, None)[0], names_color)  # only the status is colored
 
     def test_column_titles_sit_over_their_columns_between_the_top_bar_and_the_list(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())  # no context sizes known: no token columns
@@ -495,19 +496,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(scroll_view_frame.origin.y + scroll_view_frame.size.height, titles_row_frame.origin.y)
         title_fields = titles_row_view.column_title_text_fields
         self.assertEqual(titles_row_view.name_title_text_field.stringValue(), "Name")
-        self.assertEqual(title_fields["state_duration"].stringValue(), "Status Changed")
-        for column_name in ("state", "state_duration"):  # in the row's x, which is the panel's
-            self.assertFalse(title_fields[column_name].isHidden())
-            self.assertEqual((title_fields[column_name].frame().origin.x, title_fields[column_name].frame().size.width),
-                             (row_view.column_views[column_name].frame().origin.x, row_view.column_views[column_name].frame().size.width))
+        self.assertEqual(title_fields["state"].stringValue(), "Status")
+        self.assertFalse(title_fields["state"].isHidden())
+        self.assertEqual((title_fields["state"].frame().origin.x, title_fields["state"].frame().size.width),  # in the row's x, which is the panel's
+                         (row_view.column_views["state"].frame().origin.x, row_view.column_views["state"].frame().size.width))
         self.assertTrue(title_fields["context_tokens"].isHidden())
         # "Name" is centered over the names' room, which ends before the leftmost column (here the tool icon's).
         name_title_frame = titles_row_view.name_title_text_field.frame()
         self.assertEqual(name_title_frame.origin.x + name_title_frame.size.width,
                          row_view.column_views["agent_tool_icon"].frame().origin.x - GAP_BEFORE_DETAILS)
-        # The column is as wide as its title, much wider than "23h 59m".
-        self.assertGreaterEqual(self.list_controller.column_widths["state_duration"], TEXT_FIELD_INSETS
-                                + self.list_controller.measure_text_width("Status Changed", self.list_controller.column_title_font))
 
     def click_column_title(self, title_name):
         """Clicks the middle of a title, as AppKit delivers the click: to the row of titles, whatever label is under it."""
@@ -569,9 +566,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                         **{column_name: text_field.frame() for column_name, text_field in titles_row_view.column_title_text_fields.items()}}
         for x, expected_cursor in ((title_frames["name"].origin.x + 1, NSCursor.pointingHandCursor()),
                                    (title_frames["agent_tool_icon"].origin.x + 1, NSCursor.arrowCursor()),  # no title, no sorting
-                                   (title_frames["state"].origin.x + 1, NSCursor.pointingHandCursor()),
-                                   (title_frames["state_duration"].origin.x - 1, NSCursor.arrowCursor()),  # between two columns
-                                   (title_frames["state_duration"].origin.x + 1, NSCursor.pointingHandCursor())):
+                                   (title_frames["state"].origin.x - 1, NSCursor.arrowCursor()),  # between two columns
+                                   (title_frames["state"].origin.x + 1, NSCursor.pointingHandCursor())):
             titles_row_view.show_the_pointer_at(NSMakePoint(x, 1))  # near the bottom: the whole height above a column sorts
             self.assertEqual(NSCursor.currentCursor(), expected_cursor)
 
@@ -596,25 +592,27 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             window_one._replace(agent_sessions=(measured_entry,) + window_one.agent_sessions[1:]),
             snapshot.monitors[0].windows[1])),))
         self.list_controller.apply_snapshot(snapshot)
-        self.list_controller.set_shown_columns(["memory_usage", "cpu_usage", "state", "state_duration"])
+        self.list_controller.set_shown_columns(["memory_usage", "cpu_usage", "state"])
         self.window.setContentSize_((POPOVER_WIDTH + 200, 260))
         self.window.contentView().layoutSubtreeIfNeeded()
         row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
         row_view.layoutSubtreeIfNeeded()
-        state_view, state_duration_view, cpu_view, memory_view = (
-            row_view.column_views[column_name] for column_name in ("state", "state_duration", "cpu_usage", "memory_usage"))
+        state_view, cpu_view, memory_view = (
+            row_view.column_views[column_name] for column_name in ("state", "cpu_usage", "memory_usage"))
         self.assertEqual((memory_view.stringValue(), cpu_view.stringValue()), ("512M", "12%"))
-        # Left to right: the state and its duration right after the name, then CPU, then memory.
-        self.assertLess(state_view.frame().origin.x, state_duration_view.frame().origin.x)
-        self.assertLess(state_duration_view.frame().origin.x, cpu_view.frame().origin.x)
+        # Left to right: the state right after the name, then CPU, then memory.
+        self.assertLess(state_view.frame().origin.x, cpu_view.frame().origin.x)
         self.assertLess(cpu_view.frame().origin.x, memory_view.frame().origin.x)
+        # A column is as wide as its title with a sort arrow, here wider than "1024M".
+        self.assertGreaterEqual(self.list_controller.column_widths["memory_usage"], TEXT_FIELD_INSETS
+                                + self.list_controller.measure_text_width("Memory ▾", self.list_controller.column_title_font))
 
     def test_top_bar_drops_the_sort_label_then_narrows_the_sort_popup_when_narrow(self):
         panel = self.dropdown_panel_controller
         # Two windows with running agents: the expand or collapse and the pause or resume buttons show.
         self.list_controller.apply_snapshot(make_sample_snapshot())
         # The widths where each step happens follow from the controls' measured widths, which differ
-        # between macOS versions and Python builds: on macOS 27 the label drops below 267 points and
+        # between macOS versions and Python builds: on macOS 27 the label drops below 241 points and
         # the pop-up would hide below 171, while GitHub's macOS 26 runners measure the controls a few
         # points wider or narrower (2026-10-28).
         label_frame = panel.sort_label.frame()
@@ -883,7 +881,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         titles_row_view.layoutSubtreeIfNeeded()
         self.list_controller.measure_right_columns()  # as the 0.6-second refresh does
         self.assertFalse(titles_row_view.needsLayout())
-        self.list_controller.set_shown_columns(["state"])
+        self.list_controller.set_shown_columns(["context_tokens"])  # the sample has no context sizes: no column left but the icon's
         self.assertTrue(titles_row_view.needsLayout())
 
     def test_the_bars_controls_are_set_only_when_what_they_show_changes(self):  # code review, 2026-10-29
@@ -936,11 +934,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ["monitor", "monitor", "new_window"])
 
     def test_sort_popup_reports_the_choice_to_the_owner(self):
-        self.dropdown_panel_controller.list_sort_order_popup.selectItemWithTitle_("Activity")
+        self.dropdown_panel_controller.list_sort_order_popup.selectItemWithTitle_("Status")
         self.dropdown_panel_controller.listSortOrderChosen_(self.dropdown_panel_controller.list_sort_order_popup)
         self.assertEqual(self.owner.chosen_list_sort_orders, [("activity", False)])  # the pop-up's orders start in their first direction
         self.dropdown_panel_controller.show_list_sort_order("alphabet", False)
-        self.assertEqual(self.dropdown_panel_controller.list_sort_order_popup.titleOfSelectedItem(), "Alphabetically")
+        self.assertEqual(self.dropdown_panel_controller.list_sort_order_popup.titleOfSelectedItem(), "Name")
         self.assertEqual(self.list_controller.list_sort_order, "alphabet")
 
     def test_window_menu_offers_new_agent_sessions_in_the_window_folder(self):
@@ -1425,6 +1423,21 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertIsNone(self.list_controller.peek_timer)
         self.list_controller.row_released()
 
+    def test_a_row_drag_that_starts_as_a_hold_ends_the_peek_and_tells_the_owner_when_it_begins_and_ends(self):
+        # The owner keeps the dropdown open while a row is dragged in it (user request, 2026-11-02).
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        drag_states_seen_by_the_owner = []
+        self.owner.row_drag_began_or_ended = lambda: drag_states_seen_by_the_owner.append(self.list_controller.drag_in_progress)
+        self.list_controller.row_pressed(1)
+        self.list_controller.peekTimerFired_(self.list_controller.peek_timer)  # held long enough to peek
+        self.list_controller.row_released()  # the outline view's mouseDown_ returns as the drag begins
+        self.list_controller.outlineView_draggingSession_willBeginAtPoint_forItems_(
+            outline_view, None, (0, 0), [outline_view.itemAtRow_(1)])
+        self.list_controller.outlineView_draggingSession_endedAtPoint_operation_(outline_view, None, (0, 0), 0)
+        self.assertEqual(self.owner.peeks, [("start", "s1"), ("end",)])
+        self.assertEqual(drag_states_seen_by_the_owner, [True, False])
+
     def test_a_double_click_shows_the_tab_under_its_first_click_even_if_the_rows_moved(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         outline_view = self.list_controller.outline_view
@@ -1437,7 +1450,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ("focus_agent_session", {"session_id": first_click_item.entry.session_id}))
 
     def test_rows_dont_reorder_under_a_held_button(self):
-        # Activity order: a peek marks a "done" tab as seen ("idle"), which would move its row.
+        # Status order: a peek marks a "done" tab as seen ("idle"), which would move its row.
         self.list_controller.set_list_sort_order("activity", False)
         self.list_controller.apply_snapshot(make_sample_snapshot())
         outline_view = self.list_controller.outline_view
@@ -1467,12 +1480,12 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.window.contentView().layoutSubtreeIfNeeded()
         self.assertEqual((self.list_controller.column_widths["context_tokens"], self.list_controller.column_widths["agent_tool_icon"]),
                          (0, 0))
-        # The rest go too, the time since the last status change last, so the names stay readable.
+        # The rest go too, the state last, so the names stay readable.
         self.assertEqual(sum(self.list_controller.column_widths.values()), 0)
         self.assertGreaterEqual(self.list_controller.measure_room_left_for_tab_names(), SMALLEST_TAB_NAME_WIDTH)
         self.window.setContentSize_((300, 260))
         self.window.contentView().layoutSubtreeIfNeeded()
-        self.assertGreater(self.list_controller.column_widths["state_duration"], 0)  # kept while there is room for it
+        self.assertGreater(self.list_controller.column_widths["state"], 0)  # kept while there is room for it
 
     def test_a_column_keeps_spare_room_so_a_digit_more_or_less_doesnt_move_it(self):  # user request, 2026-10-28
         character = 7.0
@@ -1626,9 +1639,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # "99k (9%)", "9M", "0%", "done" and "5s" grow to "100k (100%)", "1024M", "100%", "working" and "23h 59m".
         self.assertEqual(
             measure_dropdown_width(context_tokens=99_000, context_fill_percent=9, memory_bytes=9 * 1024 ** 2, cpu_percent=0,
-                                   started_at=now - 5, status="done", status_since=now - 5),
+                                   started_at=now - 5, status="done"),
             measure_dropdown_width(context_tokens=100_000, context_fill_percent=100, memory_bytes=1024 ** 3 - 1, cpu_percent=100,
-                                   started_at=now - 86399, status="working", status_since=now - 86399))
+                                   started_at=now - 86399, status="working"))
 
     def test_dropdown_fits_its_size_to_all_rows(self):
         long_name_snapshot = make_sample_snapshot()
@@ -1668,16 +1681,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.apply_snapshot_with_previews()
         self.window.contentView().layoutSubtreeIfNeeded()
         button_frame = self.lay_out_row_view(0).preview_toggle_button.frame()  # the first window's row
-        last_column_frame = self.lay_out_row_view(1).column_views["state_duration"].frame()  # its first tab's
+        last_column_frame = self.lay_out_row_view(1).column_views["state"].frame()  # its first tab's
         # The tab rows' columns and their titles end a gap before the button, which has no title.
         self.assertEqual(last_column_frame.origin.x + last_column_frame.size.width + GAP_BETWEEN_COLUMNS, button_frame.origin.x)
         titles_row_view = self.list_controller.column_titles_row_view
         titles_row_view.layoutSubtreeIfNeeded()
-        last_title_frame = titles_row_view.column_title_text_fields["state_duration"].frame()
+        last_title_frame = titles_row_view.column_title_text_fields["state"].frame()
         self.assertEqual(last_title_frame.origin.x + last_title_frame.size.width, last_column_frame.origin.x + last_column_frame.size.width)
         self.list_controller.apply_snapshot(make_sample_snapshot())  # no previews, so no button: the columns end at the right margin
         self.window.contentView().layoutSubtreeIfNeeded()
-        last_column_frame = self.lay_out_row_view(1).column_views["state_duration"].frame()
+        last_column_frame = self.lay_out_row_view(1).column_views["state"].frame()
         self.assertEqual(last_column_frame.origin.x + last_column_frame.size.width, button_frame.origin.x + button_frame.size.width)
 
     def click_row_arrow(self, row):
@@ -1879,10 +1892,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ["Claude Code", "Claude Code", "OpenAI Codex", "Claude Code", "Claude Code"])
 
     def test_tool_icon_state_and_time_columns_line_up_when_two_tools_run(self):
-        row_views = self.lay_out_tab_row_views(make_sample_snapshot())  # Claude Code and Codex
+        snapshot = make_sample_snapshot()  # Claude Code and Codex
+        snapshot = snapshot._replace(monitors=tuple(monitor._replace(windows=tuple(
+            window._replace(agent_sessions=tuple(entry._replace(started_at=time.time() - 3700) for entry in window.agent_sessions))
+            for window in monitor.windows)) for monitor in snapshot.monitors))
+        self.list_controller.set_shown_columns(["state", "existence_duration"])  # Age, a time column
+        row_views = self.lay_out_tab_row_views(snapshot)
         column_views_by_name = {"icon": [row_view.column_views["agent_tool_icon"] for row_view in row_views],
                                 "state": [row_view.column_views["state"] for row_view in row_views],
-                                "time": [row_view.column_views["state_duration"] for row_view in row_views]}
+                                "time": [row_view.column_views["existence_duration"] for row_view in row_views]}
         for column_name, views in column_views_by_name.items():
             self.assertEqual(len({(view.frame().origin.x, view.frame().size.width) for view in views}), 1, column_name)
             self.assertTrue(all(not view.isHidden() for view in views), column_name)
@@ -1898,7 +1916,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             attributed_text = text_field.attributedStringValue()
             paragraph_style = attributed_text.attribute_atIndex_effectiveRange_(NSParagraphStyleAttributeName, 0, None)[0]
             return paragraph_style.alignment() if paragraph_style is not None else None
-        self.assertEqual(read_text_alignment(row_views[0].column_views["state_duration"]), NSTextAlignmentRight)
+        self.assertEqual(read_text_alignment(row_views[0].column_views["existence_duration"]), NSTextAlignmentRight)
         self.assertNotEqual(read_text_alignment(row_views[0].column_views["state"]), NSTextAlignmentRight)
         self.list_controller.toggle_expansion(self.list_controller.outline_view.itemAtRow_(0))  # only a collapsed window has counts
         window_row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 0, True)
@@ -1974,14 +1992,14 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ["Not a background task", "Running in the background"])
         self.assertEqual(process_rows[0].name_text_field.stringValue(), "caffeinate -i -t 300")
         self.assertTrue(process_rows[1].disclosure_button.isHidden())
-        self.assertFalse(process_rows[1].column_views["state_duration"].isHidden())  # the columns line up with the tabs'
+        self.assertFalse(process_rows[1].column_views["state"].isHidden())  # the columns line up with the tabs'
         self.assertEqual(process_rows[1].column_views["state"].stringValue(), "")
         self.assertEqual(self.list_controller.measure_widest_row_width(), closed_width)  # a long command doesn't widen the dropdown
         # The command runs on over the columns a process row leaves empty (the default ones), up to the first with text.
         name_frame = process_rows[1].name_text_field.frame()
         self.assertGreater(name_frame.origin.x + name_frame.size.width, process_rows[1].column_views["state"].frame().origin.x)
         self.assertLessEqual(name_frame.origin.x + name_frame.size.width, process_rows[1].frame().size.width)
-        self.list_controller.set_shown_columns(["context_tokens", "memory_usage", "state", "state_duration"])
+        self.list_controller.set_shown_columns(["context_tokens", "memory_usage", "state"])
         name_frame = self.lay_out_row_view(3).name_text_field.frame()
         self.assertLessEqual(name_frame.origin.x + name_frame.size.width, self.lay_out_row_view(3).column_views["memory_usage"].frame().origin.x)
         # Selectable alone or together, but not with a window or tab row: then its tab is selected
@@ -2511,6 +2529,25 @@ class AutomaticIconColorTests(unittest.TestCase):
         # The sidebar it shows has the first agent asking a question selected (user request, 2026-10-29).
         stand_in_app_controller.sidebar_controller.list_controller.select_the_first_asking_tab.assert_called_once_with()
 
+    def test_a_row_dragged_in_the_dropdown_keeps_it_open_when_the_dashboard_stops_being_the_active_app(self):
+        # A drag usually starts as a hold, so it ends a peek right away, and macOS told the
+        # dashboard that the peek had made it inactive only after that peek was over, which closed
+        # the dropdown in the middle of the drag (user request, 2026-11-02).
+        for drag_in_progress, settings_window_is_open, expected_behavior, closes_the_dropdown in (
+                (True, False, NSPopoverBehaviorApplicationDefined, False),
+                (False, False, NSPopoverBehaviorTransient, True),
+                (False, True, NSPopoverBehaviorApplicationDefined, True)):  # Settings keeps it open only for clicks in the dashboard
+            stand_in_app_controller = unittest.mock.Mock(peek_in_progress=None, peek_waiting_for_put_back=None)
+            stand_in_app_controller.dropdown_list_controller.drag_in_progress = drag_in_progress
+            stand_in_app_controller.settings_window_controller.is_open.return_value = settings_window_is_open
+            stand_in_app_controller.a_peek_or_a_drag_keeps_the_dropdown_open = (
+                lambda: AppController.a_peek_or_a_drag_keeps_the_dropdown_open(stand_in_app_controller))
+            AppController.update_dropdown_closing_behavior(stand_in_app_controller)
+            stand_in_app_controller.popover.setBehavior_.assert_called_once_with(expected_behavior)
+            # .callable: the Python function behind the AppKit method, which won't take a stand-in as self.
+            AppController.dashboardResignedActive_.callable(stand_in_app_controller, None)
+            self.assertEqual(stand_in_app_controller.close_dropdown.called, closes_the_dropdown)
+
     def test_esc_hides_a_sidebar_that_hides_by_itself_and_gives_the_keyboard_back(self):  # user request, 2026-10-29
         for sidebar_hides_by_itself in (True, False):  # True also for one the menu's Show sidebar slid in (code review, 2026-10-29)
             stand_in_app_controller = unittest.mock.Mock()
@@ -2988,6 +3025,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_the_start_with_iterm2_switch_shows_and_saves_the_setting(self):  # user request, 2026-10-28
         self.assertEqual(self.controller.start_with_iterm2_switch.state(), 1)  # on by default
         self.assertIn(self.controller.start_with_iterm2_switch, self.controller.rows_view.subviews())  # in the General section
+        self.assertEqual(self.find_label_of_control(self.controller.start_with_iterm2_switch),
+                         "Launch AgentCommandTab whenever iTerm2 is started")  # "Start with iTerm2" until 2026-11-02 (user request)
         self.controller.start_with_iterm2_switch.setState_(0)
         self.controller.controlChanged_(self.controller.start_with_iterm2_switch)
         self.assertFalse(self.owner.settings["app_starts_with_iterm2"])
@@ -3109,13 +3148,13 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_column_switches_choose_the_shown_columns_in_their_left_to_right_order(self):
         switches = self.controller.column_switches
         self.assertEqual([self.find_label_of_control(column_switch) for column_switch in switches.values()],
-                         ["Status", "Status Changed", "Tokens", "Created", "Age", "Memory", "CPU"])  # as over the list's columns
-        self.assertEqual([column_switch.state() for column_switch in switches.values()], [1, 1, 1, 0, 0, 0, 0])  # the defaults
+                         ["Status", "Tokens", "Created", "Age", "Memory", "CPU"])  # as over the list's columns
+        self.assertEqual([column_switch.state() for column_switch in switches.values()], [1, 1, 0, 0, 0, 0])  # the defaults
         switches["state"].setState_(0)
         self.controller.controlChanged_(switches["state"])
         switches["created_time"].setState_(1)
         self.controller.controlChanged_(switches["created_time"])
-        self.assertEqual(self.owner.settings["shown_columns"], ["state_duration", "context_tokens", "created_time"])
+        self.assertEqual(self.owner.settings["shown_columns"], ["context_tokens", "created_time"])
 
     def test_text_fields_save_when_they_lose_focus_too(self):
         self.assertTrue(self.controller.sidebar_width_field.cell().sendsActionOnEndEditing())

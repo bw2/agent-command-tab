@@ -9,7 +9,7 @@ that permission, and macOS listed it in Login Items as "python". iTerm2 runs a .
 only with its own Python runtime, a separate download, so this one is an AppleScript, which iTerm2 runs
 as it is (checked with iTerm2 3.7.6, and in its source: iTermScriptsMenuController.m).
 
-The app adds the script when it starts while the settings' "Start with iTerm2" is on (the default), and
+The app adds the script when it starts while the setting (START_WITH_ITERM2_SETTING_TITLE) is on (the default), and
 takes it out when that is turned off. A script already there is kept while the program it starts
 exists, so the copy that added it keeps starting; one whose program is gone (that copy was uninstalled)
 is written again for this copy. A copy started while another runs exits at once (command_line's running
@@ -24,6 +24,8 @@ import subprocess
 from agent_command_tab.installed_copy_paths import find_python_of_this_copy, replace_homebrew_version_folder_with_its_stable_link
 
 AUTOLAUNCH_SCRIPT_FILE_NAME = "AgentCommandTab.scpt"
+# The setting's label in the settings window ("Start with iTerm2" until 2026-11-02, user request).
+START_WITH_ITERM2_SETTING_TITLE = "Launch AgentCommandTab whenever iTerm2 is started"
 ITERM2_PREFERENCES_FILE_PATH = os.path.expanduser("~/Library/Preferences/com.googlecode.iterm2.plist")
 # iTerm2's scripts folder, unless its settings name another (find_iterm2_autolaunch_folder). iTerm2
 # reaches it through ~/.config/iterm2/AppSupport, a link to ~/Library/Application Support/iTerm2.
@@ -71,7 +73,7 @@ def build_autolaunch_script_source(program_arguments, log_file_path=LOG_FILE_PAT
     shell_command = (" ".join(shlex.quote(argument) for argument in program_arguments)
                      + f" >> {shlex.quote(log_file_path)} 2>&1 &")
     return ("-- Added by AgentCommandTab, which iTerm2 starts with this script whenever iTerm2 starts.\n"
-            "-- AgentCommandTab's Settings > Start with iTerm2 removes it.\n"
+            f"-- Turning off AgentCommandTab's Settings > {START_WITH_ITERM2_SETTING_TITLE} removes it.\n"
             f"{PROGRAM_COMMENT_PREFIX}{program_arguments[0]}\n"
             f'do shell script "{escape_for_applescript_string(shell_command)}"\n')
 
@@ -114,7 +116,7 @@ def write_autolaunch_script(source, autolaunch_script_path):
 
 def update_autolaunch_script_to_match_setting(app_starts_with_iterm2, program_arguments, autolaunch_script_path,
                                               log_file_path=LOG_FILE_PATH):
-    """Adds, keeps or removes the AutoLaunch script so that it matches the "Start with iTerm2" setting.
+    """Adds, keeps or removes the AutoLaunch script so that it matches the setting (START_WITH_ITERM2_SETTING_TITLE).
 
     Args:
         app_starts_with_iterm2: The setting.

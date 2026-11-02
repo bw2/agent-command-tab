@@ -51,10 +51,11 @@ class AgentCommandTab < Formula
       iTerm2 > Settings > General > Magic > Enable Python API, then start the app:
         agent-command-tab
       From then on iTerm2 starts it whenever iTerm2 starts, through a script in
-      iTerm2's AutoLaunch folder (Settings > Start with iTerm2 turns that off).
+      iTerm2's AutoLaunch folder (turning off Settings > Launch AgentCommandTab
+      whenever iTerm2 is started removes it).
 
       That script and the hooks it adds to Claude Code's and Codex's settings stay
-      after an uninstall. To take them out first, turn off Start with iTerm2, then:
+      after an uninstall. To take them out first, turn that setting off, then:
         agent-command-tab remove-hooks
     EOS
   end

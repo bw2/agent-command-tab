@@ -46,6 +46,12 @@ class MergeSettingsTests(unittest.TestCase):
                          (DEFAULT_SETTINGS["list_sort_order"], DEFAULT_SETTINGS["shown_columns"]))
         self.assertEqual(merge_settings_with_defaults({"shown_columns": []})["shown_columns"], [])  # every column off
 
+    def test_a_removed_column_leaves_the_other_shown_columns_and_its_sort_order_goes_back_to_tab_order(self):
+        # The time since the last status change ("Status Changed") was removed (user request, 2026-11-02).
+        settings = merge_settings_with_defaults({"list_sort_order": "state_duration",
+                                                 "shown_columns": ["state", "state_duration", "cpu_usage"]})
+        self.assertEqual((settings["list_sort_order"], settings["shown_columns"]), ("manual", ["state", "cpu_usage"]))
+
     def test_the_old_sidebar_checkbox_becomes_show_as(self):
         self.assertEqual(merge_settings_with_defaults({"sidebar_is_on": True})["show_as"], "sidebar")
         self.assertEqual(merge_settings_with_defaults({"sidebar_is_on": False})["show_as"], "popup")

@@ -18,10 +18,10 @@ from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_C
                                                                  format_elapsed_time, format_memory_size)
 
 
-def make_entry(status, tab_title="reviews", status_since=0.0):
+def make_entry(status, tab_title="reviews"):
     return AgentSessionEntry(tab_id="1", session_id="s1", tab_title=tab_title, tab_title_set_by_user=False,
                              agent_session_name="", agent_tool_name="Claude Code", working_folder="/x",
-                             status=status, status_since=status_since)
+                             status=status)
 
 
 def make_window(statuses):
@@ -48,7 +48,7 @@ class LongestColumnTextTests(unittest.TestCase):
         longest_length = {field_name: len(text) for field_name, text in LONGEST_TEXT_BY_COLUMN_FIELD_NAME.items()}
         elapsed_seconds_samples = list(range(0, 2 * 86400, 7)) + [999 * 86400 + 5]
         self.assertLessEqual(max(len(format_elapsed_time(seconds)) for seconds in elapsed_seconds_samples),
-                             min(longest_length["elapsed_time_text"], longest_length["existence_duration_text"]))
+                             longest_length["existence_duration_text"])
         self.assertLessEqual(max(len(format_context_text(context_tokens, context_fill_percent))
                                  for context_tokens in range(0, 2_000_000, 37)  # context windows hold up to 1M
                                  for context_fill_percent in (None, 9, 100)),
@@ -82,15 +82,15 @@ class TreeConnectorTests(unittest.TestCase):
 
 class RowTextPartsTests(unittest.TestCase):
     def test_session_row(self):
-        parts = build_agent_session_row_text_parts(make_entry("working", status_since=100.0), [True], 280.0)
+        parts = build_agent_session_row_text_parts(make_entry("working"), [True], 280.0)
         self.assertEqual(parts.connector_text, "└─ ")
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "green", True))
         self.assertEqual(parts.name_text, "reviews")
-        self.assertEqual((parts.agent_tool_name, parts.details_text, parts.state_text, parts.elapsed_time_text),
-                         ("Claude Code", "", "thinking", "3m"))  # "working" until 2026-10-28 (user request)
+        self.assertEqual((parts.agent_tool_name, parts.details_text, parts.state_text),
+                         ("Claude Code", "", "thinking"))  # "working" until 2026-10-28 (user request)
         self.assertEqual(parts.dot_tool_tip, "Thinking: the agent is thinking or briefly running tools")
         self.assertEqual(parts.context_text, "")  # the context's size isn't known yet
-        filled_entry = make_entry("working", status_since=100.0)._replace(context_tokens=84_000)
+        filled_entry = make_entry("working")._replace(context_tokens=84_000)
         self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_text, "84k")  # nor the window's
         filled_entry = filled_entry._replace(context_fill_percent=42)
         self.assertEqual(build_agent_session_row_text_parts(filled_entry, [True], 280.0).context_text, "84k (42%)")
@@ -103,17 +103,17 @@ class RowTextPartsTests(unittest.TestCase):
                           for context_fill_percent in (None, 0, 49, 50, 74, 75, 100, 130)],
                          ["", "", "", "amber", "amber", "red", "red", "red"])
 
-    def test_a_session_waiting_on_its_command_shows_running_and_the_commands_time(self):
-        entry = make_entry("working", status_since=100.0)._replace(running_tool_name="python3", running_tool_started_at=220.0)
+    def test_a_session_waiting_on_its_command_shows_running(self):
+        entry = make_entry("working")._replace(running_tool_name="python3")
         parts = build_agent_session_row_text_parts(entry, [True], 280.0)
-        self.assertEqual((parts.state_text, parts.elapsed_time_text, parts.state_color_name), ("running", "1m", "green_text"))
+        self.assertEqual((parts.state_text, parts.state_color_name), ("running", "green_text"))
         self.assertEqual(parts.dot_tool_tip,
                          "Running: the agent is waiting on a tool it started, such as a command, a subagent or a web fetch")
 
     def test_a_background_session_says_running_in_yellow(self):  # user request, 2026-10-28
-        parts = build_agent_session_row_text_parts(make_entry("background", status_since=100.0), [True], 280.0)
+        parts = build_agent_session_row_text_parts(make_entry("background"), [True], 280.0)
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "yellow", False))
-        self.assertEqual((parts.state_text, parts.state_color_name, parts.elapsed_time_text), ("running", "amber", "3m"))
+        self.assertEqual((parts.state_text, parts.state_color_name), ("running", "amber"))
         self.assertEqual(parts.dot_tool_tip, "Running in the background: the agent is at its prompt, and processes it "
                                              "started keep running in the background")
         window_parts = build_window_row_text_parts(make_window(["background", "idle"]), [], False)
@@ -186,9 +186,8 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual(build_agent_session_row_text_parts(make_entry("idle"), [True], 1.0).details_tool_tip, "")
 
     def test_an_exited_row_is_gray(self):
-        parts = build_agent_session_row_text_parts(make_entry("exited", status_since=100.0), [True], 160.0)
-        self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.state_text, parts.elapsed_time_text),
-                         ("⊘", "gray", "exited", "1m"))
+        parts = build_agent_session_row_text_parts(make_entry("exited"), [True], 160.0)
+        self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.state_text), ("⊘", "gray", "exited"))
 
     def test_child_process_row(self):
         now = time.mktime((2026, 10, 27, 9, 30, 0, 0, 0, -1))

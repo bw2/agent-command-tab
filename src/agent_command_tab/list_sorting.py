@@ -15,8 +15,8 @@ from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_
 
 
 def find_when_the_shown_state_started(agent_session_entry):
-    """Returns when the state an agent session's row shows started, which its time counts from:
-    while it waits on a tool ("running"), when the tool started; otherwise its last state change."""
+    """Returns when the state an agent session's row shows started: while it waits on a tool
+    ("running"), when the tool started; otherwise its last state change."""
     if agent_session_entry.running_tool_name:
         return agent_session_entry.running_tool_started_at
     return agent_session_entry.status_since
@@ -63,12 +63,6 @@ def rank_agent_session_by_context_percent(agent_session_entry):
     return None if context_fill_percent is None else -context_fill_percent
 
 
-def rank_agent_session_by_last_state_change(agent_session_entry):
-    """Sort key: the agent session whose state changed last first (user request, 2026-10-26), by
-    the time its row shows (find_when_the_shown_state_started)."""
-    return -find_when_the_shown_state_started(agent_session_entry)
-
-
 # How each sort order but "manual" (iTerm2's tab order, and the window order set by dragging)
 # ranks agent sessions; settings_store takes its choices from here.
 AGENT_SESSION_RANK_BY_LIST_SORT_ORDER = {
@@ -78,7 +72,6 @@ AGENT_SESSION_RANK_BY_LIST_SORT_ORDER = {
     "created_time": rank_agent_session_by_created_time,
     "memory_usage": rank_agent_session_by_memory_usage,
     "cpu_usage": rank_agent_session_by_cpu_usage,
-    "state_duration": rank_agent_session_by_last_state_change,
 }
 LIST_SORT_ORDERS = ["manual"] + list(AGENT_SESSION_RANK_BY_LIST_SORT_ORDER)
 

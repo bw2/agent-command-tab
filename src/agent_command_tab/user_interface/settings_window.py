@@ -18,6 +18,7 @@ from PyObjCTools import AppHelper
 
 from agent_command_tab.settings_store import (LIST_COLUMNS, SMALLEST_WINDOW_SIZES, find_launch_command_problem,
                                               is_valid_setting_value, replace_agent_tool_field)
+from agent_command_tab.start_with_iterm2 import START_WITH_ITERM2_SETTING_TITLE
 from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_TITLES, ESCAPE_CHARACTER
 from agent_command_tab.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
 from agent_command_tab.user_interface.named_colors import make_light_and_dark_mode_color_maker
@@ -68,7 +69,7 @@ SIDEBAR_EDGE_TITLES = {"right": "Right", "left": "Left"}
 # The tab rows' information columns, in the order the user listed them (user request, 2026-10-19).
 # Each is labeled with the title over its column in the list (COLUMN_TITLES; user request, 2026-10-28:
 # "Time Since Last Status Change", "Tokens Used" and the like until then).
-LIST_COLUMN_NAMES_IN_SETTINGS_ORDER = ["state", "state_duration", "context_tokens", "created_time", "existence_duration",
+LIST_COLUMN_NAMES_IN_SETTINGS_ORDER = ["state", "context_tokens", "created_time", "existence_duration",
                                        "memory_usage", "cpu_usage"]
 # One row in a section's box: its label at the left, its control at the right, and the units after the
 # control. A row that continues the one above it (a harness's command; the accessibility button under
@@ -223,11 +224,13 @@ class SettingsWindowController(WindowFrameSavingController):
         self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
         # A General section first: "Show as", the keyboard shortcut with its accessibility button
         # under it, then Appearance (user requests, 2026-10-25 to 2026-10-27; Appearance last, the
-        # user's choice over after "Show as"), then Start with iTerm2 (user request, 2026-10-28).
+        # user's choice over after "Show as"), then whether iTerm2 starts the app (user requests,
+        # 2026-10-28; "Start with iTerm2" until 2026-11-02).
         general_section = SettingsSection("General", [
             SettingsRow("Show as", self.show_as_popup), SettingsRow("Keyboard shortcut", self.global_shortcut_popup),
             SettingsRow(None, self.accessibility_settings_button, continues_the_row_above=True),
-            SettingsRow("Appearance", self.appearance_popup), SettingsRow("Start with iTerm2", self.start_with_iterm2_switch)])
+            SettingsRow("Appearance", self.appearance_popup),
+            SettingsRow(START_WITH_ITERM2_SETTING_TITLE, self.start_with_iterm2_switch)])
         self.list_window_always_on_top_switch = self.make_switch(self.settings["list_window_is_always_on_top"])
         window_section = SettingsSection("Window", [SettingsRow("Always on top", self.list_window_always_on_top_switch)])
         sidebar_section = SettingsSection("Sidebar", [

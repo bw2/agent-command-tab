@@ -54,14 +54,10 @@ class SortAgentSessionEntriesTests(unittest.TestCase):
                    ENTRIES[3]._replace(context_tokens=30_000, context_fill_percent=3)]
         self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "context_percent")], ["1", "3", "4", "2"])
 
-    def test_status_change_puts_the_latest_change_first(self):
-        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(ENTRIES, "state_duration")], ["1", "4", "2", "3"])
-
-    def test_status_change_goes_by_a_running_commands_start_as_the_row_shows(self):
-        # Reviews has worked since 50 and runs pytest since 120, so its row shows the shortest time.
+    def test_activity_goes_by_a_running_commands_start_among_agents_in_the_same_state(self):
+        # Reviews has worked since 50 and runs pytest since 120: among the two working, its change
+        # (120) is now later than docs's (80), so it moves ahead of docs.
         entries = [ENTRIES[0], ENTRIES[1]._replace(running_tool_name="pytest", running_tool_started_at=120.0), *ENTRIES[2:]]
-        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "state_duration")], ["2", "1", "4", "3"])
-        # Activity too: among the two working, Reviews's shown change (120) is now later than docs's (80).
         self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "activity")], ["3", "2", "4", "1"])
 
     def test_reversed_orders_keep_unknown_values_last_and_equal_ones_in_tab_order(self):

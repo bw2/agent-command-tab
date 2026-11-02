@@ -37,8 +37,8 @@ PLACEHOLDER_MONITOR = {"monitor_id": "unknown", "name": "", "frame": (0, 0, 0, 0
 SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING = 5
 
 DisplayedState = collections.namedtuple("DisplayedState", ["state", "since", "status_change_time"])
-DisplayedState.__doc__ = ("What a session's row showed in a snapshot: its state, since when, and when iTerm2's status "
-                          "value had last changed then (compute_displayed_state_since).")
+DisplayedState.__doc__ = ("The state a session's row showed in a snapshot, since when that state had held, and when "
+                          "iTerm2's status value had last changed then (compute_displayed_state_since).")
 
 
 def session_has_background_work(screen_reading):
@@ -161,7 +161,8 @@ def compute_context_fill_percent(context_tokens, context_window_tokens):
 
 
 def compute_displayed_state_since(state, raw_status_change_time, previous_displayed_state, now):
-    """Returns since when the shown state holds, for the elapsed time in the row.
+    """Returns since when the shown state holds, which the Status sort orders agents in the same
+    state by (list_sorting.find_when_the_shown_state_started).
 
     Args:
         state: The state shown now.

@@ -114,12 +114,11 @@ CHARACTERS_A_COLUMN_MAY_LOSE = 2
 # settings can show or hide, and the agent tool's icon, which shows by itself when two or more
 # agent tools run. Each comes with the RowTextParts field it shows (the icon column shows the
 # tool's icon instead). The state is left-aligned in its column; the others are right-aligned.
-# The icon, the state and its duration come first, right after the name, and CPU before memory
-# (user requests, 2026-10-28).
+# The icon and the state come first, right after the name, and CPU before memory (user requests,
+# 2026-10-28).
 TAB_ROW_COLUMNS = [
     ("agent_tool_icon", None),
     ("state", "state_text"),
-    ("state_duration", "elapsed_time_text"),
     ("context_tokens", "context_text"),
     ("created_time", "created_time_text"),
     ("existence_duration", "existence_duration_text"),
@@ -134,7 +133,6 @@ LEFT_ALIGNED_COLUMN_NAMES = {"state"}
 COLUMN_TITLES = {
     "context_tokens": "Tokens", "created_time": "Created", "existence_duration": "Age",  # "Time Since\nCreated" until 2026-10-28
     "memory_usage": "Memory", "cpu_usage": "CPU", "agent_tool_icon": "", "state": "Status",
-    "state_duration": "Status Changed",  # "Time Since Last\nStatus Change" until 2026-10-28 (user request)
 }
 NAME_COLUMN_TITLE = "Name"
 # The sort order (list_sorting.py) a click on a title chooses, by the title's column ("name" for
@@ -142,21 +140,20 @@ NAME_COLUMN_TITLE = "Name"
 # request, 2026-10-26); Created and Age both sort by when the agent started.
 LIST_SORT_ORDER_BY_TITLE_NAME = {
     "name": "alphabet", "context_tokens": "context_percent", "created_time": "created_time", "existence_duration": "created_time", "memory_usage": "memory_usage",
-    "cpu_usage": "cpu_usage", "state": "activity", "state_duration": "state_duration",
+    "cpu_usage": "cpu_usage", "state": "activity",
 }
 # The sorted column's title ends in an arrow, as in Finder: up while its values go from the
 # smallest at the top (A, the shortest time) to the largest, down while they go from the largest
 # (the fullest context window, the newest start, the most urgent state). These titles' orders start smallest first.
-TITLE_NAMES_WHOSE_ORDER_STARTS_ASCENDING = {"name", "existence_duration", "state_duration"}
+TITLE_NAMES_WHOSE_ORDER_STARTS_ASCENDING = {"name", "existence_duration"}
 SORT_ARROWS_BY_IS_ASCENDING = {True: " ▴", False: " ▾"}  # a space before the arrow (user request, 2026-10-26)
 COLUMN_TITLE_FONT_SIZE = 11
 COLUMN_TITLE_LINE_HEIGHT = 14
 COLUMN_TITLES_ROW_PADDING = 2  # above and below the titles
 # A narrow sidebar or window drops columns in this order to keep room for names (the dot's color
-# still shows the state). The time since the last status change goes last, since its title makes
-# its column about 114 points wide, which would leave a 200-point sidebar's names unreadable.
+# still shows the state).
 COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usage", "cpu_usage", "context_tokens",
-                              "agent_tool_icon", "state", "state_duration"]
+                              "agent_tool_icon", "state"]
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
 AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER = list_agent_tool_names_whose_sessions_can_talk_to_each_other()
 # Not monitor rows or the "+" row (user request, 2026-10-21); process rows only alone or with
@@ -724,6 +721,7 @@ class AgentSessionListController(NSObject):
             session right after it.
         find_launch_command(agent_tool_name): the tool's launch command from the settings, or "".
         start_peek(session_id), end_peek(): a tab row is held (shown for a moment), then released.
+        row_drag_began_or_ended(): a row's drag began or ended (drag_in_progress).
         list_sort_order_chosen(list_sort_order, list_sort_order_is_reversed): a column's title
             was clicked; the owner shows the order in every list (set_list_sort_order).
         ask_for_note_asking_agent_sessions_to_talk_to_each_other(agent_session_entries,
@@ -2683,10 +2681,12 @@ class AgentSessionListController(NSObject):
         if self.peek_in_progress:  # the drag began after the hold had already shown the tab
             self.peek_in_progress = False
             self.owner.end_peek()
+        self.owner.row_drag_began_or_ended()
 
     def outlineView_draggingSession_endedAtPoint_operation_(self, outline_view, session, point, operation):
         self.drag_in_progress = False
         self.dragged_item = None
+        self.owner.row_drag_began_or_ended()
         self.apply_held_snapshot()
 
     def outlineView_validateDrop_proposedItem_proposedChildIndex_(self, outline_view, drag_info, proposed_item, child_index):

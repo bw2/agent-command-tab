@@ -10,26 +10,24 @@ import collections
 import time
 
 from agent_command_tab.context_window_usage import format_token_count
-from agent_command_tab.list_sorting import find_when_the_shown_state_started
 from agent_command_tab.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list
 
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
-                     "agent_tool_name", "state_text", "elapsed_time_text", "context_text",
+                     "agent_tool_name", "state_text", "context_text",
                      "created_time_text", "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text",
                      "preview_text", "details_color_name", "dot_tool_tip", "details_tool_tip",
                      "context_fill_percent_color_name", "state_color_name", "state_text_is_semibold"],
-    defaults=["", "", "", "", "", "", "", "", "", "", "gray", "", "", "", "", False])
+    defaults=["", "", "", "", "", "", "", "", "", "gray", "", "", "", "", False])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot. A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
                         "context_text (the context's size and its share of the context window, "
                         "\"425k (42%)\", the share in parentheses in context_fill_percent_color_name, or in the "
                         "column's color for \"\"), created_time_text (when the agent session "
                         "started) and existence_duration_text (how long ago), memory_text and cpu_text (what the "
-                        "agent and the processes it started use), the icon for agent_tool_name, state_text "
-                        "(in state_color_name, semibold for state_text_is_semibold) and elapsed_time_text (the "
-                        "state's duration). Under it, a tab "
+                        "agent and the processes it started use), the icon for agent_tool_name and state_text "
+                        "(in state_color_name, semibold for state_text_is_semibold). Under it, a tab "
                         "row has a gray preview line: "
                         "preview_connector_text continues the tree's lines, and preview_text starts under "
                         "the name. A tab row's details are its background task lights, in details_color_name. "
@@ -127,7 +125,6 @@ LONGEST_TEXT_BY_COLUMN_FIELD_NAME = {
     "memory_text": "1024M",  # format_memory_size: "1024M" just under a gigabyte, then "1.4G" up to "99.9G"
     "cpu_text": "100%",  # an agent using ten cores or more gets a wider column
     "state_text": "thinking",  # the longest state, then running and unknown
-    "elapsed_time_text": "23h 59m",  # format_elapsed_time
 }
 
 
@@ -249,7 +246,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
     Args:
         agent_session_entry: An AgentSessionEntry.
         is_last_child_at_each_level: See build_tree_connector_text.
-        now: The current time, for the elapsed time since the status changed and since the agent session started.
+        now: The current time, for the elapsed time since the agent session started.
     """
     state = agent_session_entry.status if agent_session_entry.status in DOT_GLYPH_AND_COLOR_BY_STATE else "unknown"
     dot_glyph, dot_color_name = DOT_GLYPH_AND_COLOR_BY_STATE[state]
@@ -267,12 +264,10 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         dot_tool_tip=dot_tool_tip,
         details_tool_tip=describe_background_task_lights(agent_session_entry.background_task_count),
         agent_tool_name=agent_session_entry.agent_tool_name,
-        # While it waits on a tool, a working agent shows "running" and the tool's time.
+        # While it waits on a tool, a working agent shows "running".
         state_text=state_text,
         state_color_name=STATE_TEXT_COLOR_NAME_BY_STATE[state],
         state_text_is_semibold=state not in STATES_WHOSE_TEXT_IS_IN_THE_REGULAR_WEIGHT,
-        # The same start the Status Changed sort goes by (code review, 2026-10-29).
-        elapsed_time_text=format_elapsed_time(now - find_when_the_shown_state_started(agent_session_entry)),
         context_text=format_context_text(agent_session_entry.context_tokens, agent_session_entry.context_fill_percent),
         context_fill_percent_color_name=choose_context_fill_percent_color_name(agent_session_entry.context_fill_percent),
         created_time_text=format_clock_time(started_at, now) if started_at is not None else "",

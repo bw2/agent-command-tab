@@ -38,7 +38,8 @@ from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_
                                               move_the_settings_folder_of_the_old_name, save_settings)
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list, choose_folder_for_new_agent_window
 from agent_command_tab.terminal_backends.iterm2_terminal_backend import ITERM2_BUNDLE_IDENTIFIER, list_running_iterm2_applications
-from agent_command_tab.start_with_iterm2 import (AUTOLAUNCH_SCRIPT_FILE_NAME, build_command_that_starts_this_copy_of_the_app,
+from agent_command_tab.start_with_iterm2 import (AUTOLAUNCH_SCRIPT_FILE_NAME, START_WITH_ITERM2_SETTING_TITLE,
+                                                 build_command_that_starts_this_copy_of_the_app,
                                                  find_iterm2_autolaunch_folder, update_autolaunch_script_to_match_setting)
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
 from agent_command_tab.user_interface.app_icon import build_app_icon
@@ -584,12 +585,18 @@ class AppController(NSObject):
         self.place_the_settings_window_above_the_lists(dropdown_is_open=False)
 
     @objc.python_method
+    def a_peek_or_a_drag_keeps_the_dropdown_open(self):
+        """Whether a tab shown for a moment (a peek brings iTerm2 forward) or a row being dragged in
+        the dropdown keeps the dropdown open, though the dashboard may not be the active app meanwhile."""
+        return (self.peek_in_progress is not None or self.peek_waiting_for_put_back is not None
+                or self.dropdown_list_controller.drag_in_progress)
+
+    @objc.python_method
     def update_dropdown_closing_behavior(self):
-        """The dropdown closes when you click elsewhere, except while a tab is shown for a moment
-        (a peek brings iTerm2 forward) and while the settings window is open (user request,
-        2026-10-19: changing settings mustn't close it)."""
-        keeps_the_dropdown_open = (self.peek_in_progress is not None or self.peek_waiting_for_put_back is not None
-                                   or self.settings_window_controller.is_open())
+        """The dropdown closes when you click elsewhere, except while a tab is shown for a moment,
+        while a row is dragged in it (user request, 2026-11-02) and while the settings window is
+        open (user request, 2026-10-19: changing settings mustn't close it)."""
+        keeps_the_dropdown_open = self.a_peek_or_a_drag_keeps_the_dropdown_open() or self.settings_window_controller.is_open()
         self.popover.setBehavior_(NSPopoverBehaviorApplicationDefined if keeps_the_dropdown_open else NSPopoverBehaviorTransient)
 
     @objc.python_method
@@ -665,6 +672,10 @@ class AppController(NSObject):
         """The dropdown closes after a tab is focused; the sidebar stays until the pointer leaves."""
         if list_controller is self.dropdown_list_controller and self.popover.isShown():
             self.popover.performClose_(None)
+
+    @objc.python_method
+    def row_drag_began_or_ended(self):
+        self.update_dropdown_closing_behavior()
 
     @objc.python_method
     def rows_changed(self, list_controller):
@@ -953,7 +964,7 @@ class AppController(NSObject):
             return
         if what_was_done == "added":
             print(f"agent-command-tab: added {autolaunch_script_path}, so iTerm2 starts the app whenever iTerm2 starts "
-                  "(Settings > Start with iTerm2 turns it off)", flush=True)
+                  f"(turning off Settings > {START_WITH_ITERM2_SETTING_TITLE} removes it)", flush=True)
         elif what_was_done == "removed":
             print(f"agent-command-tab: removed {autolaunch_script_path}; iTerm2 no longer starts the app", flush=True)
 
@@ -1042,8 +1053,10 @@ class AppController(NSObject):
         self.connection_thread.send_dashboard_is_active(False)
         # An open settings window keeps the dropdown open while you click elsewhere in the dashboard
         # (update_dropdown_closing_behavior); a click in another app still closes it, unless a peek
-        # brought iTerm2 forward on purpose.
-        if self.peek_in_progress is None and self.peek_waiting_for_put_back is None:
+        # brought iTerm2 forward on purpose or a row is dragged in the dropdown. A drag usually
+        # starts as a hold, so it ends a peek right away, and macOS can tell the dashboard it is no
+        # longer active only after that peek is over (it closed the dropdown, 2026-11-02).
+        if not self.a_peek_or_a_drag_keeps_the_dropdown_open():
             self.close_dropdown()
 
     @objc.python_method
