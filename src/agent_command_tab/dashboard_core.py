@@ -28,7 +28,9 @@ from agent_command_tab.agent_process_tree import (an_agent_program_runs_through_
 from agent_command_tab.hook_event_tracking import (SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS,
                                                    apply_hook_event, find_agent_process_id_of_hook_event,
                                                    find_when_the_hooks_ended_the_turn,
-                                                   hooks_report_no_prompt_since_the_agent_started)
+                                                   hooks_report_no_prompt_since_the_agent_started,
+                                                   list_reported_background_task_ids_still_running,
+                                                   list_reported_shells_a_reading_can_check)
 from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, check_hooks
 from agent_command_tab.hook_states_store import load_hook_states, save_hook_states
 from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
@@ -301,6 +303,8 @@ class DashboardCore:
         self.exited_agent_sessions_by_session_id = {}
         self.last_agent_session_entry_by_session_id = {}  # from the last snapshot, for an "exited" row
         self.process_ids_ended_from_the_list = set()  # "Kill Session": their end is no crash
+        # Agent processes the log already said run a shell whose Claude Code task isn't known (note_child_processes).
+        self.agent_process_ids_with_shells_of_unknown_tasks = set()
         self.hooks_status_per_agent_tool = ()  # ComputerSnapshot.hooks_status_per_agent_tool
         self.hooks_check_needed = asyncio.Event()
         self.specific_adapters, self.generic_adapter = build_built_in_agent_tool_adapters()
@@ -1717,9 +1721,11 @@ class DashboardCore:
 
     def note_background_task_counts(self):
         """Sets each agent session's background task count: Claude Code's own list of its
-        background shells and agents while its hooks have reported it (hook_event_tracking), plus
-        the detached jobs it started, which that list doesn't hold (user request, 2026-10-28),
-        otherwise the background shells seen below the agent and its detached jobs
+        background shells and agents while its hooks have reported it (hook_event_tracking), less
+        the shells no process below the agent runs any more
+        (list_reported_background_task_ids_still_running), plus the detached jobs it started,
+        which that list doesn't hold (user request, 2026-10-28), otherwise the background shells
+        seen below the agent and its detached jobs
         (read_child_processes_periodically). Also whether the hooks report the turn over with
         background tasks running, as Claude Code's "shell" in `claude agents --json` then means
         (snapshot_builder; code review, 2026-10-29), and whether they report no prompt since
@@ -1727,7 +1733,10 @@ class DashboardCore:
         for session_id, agent_session in self.agent_sessions.items():
             reading = self.screen_readings_by_session_id.setdefault(session_id, {})
             hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
-            reported_background_task_ids = hook_state["background_task_ids"] if hook_state is not None else None
+            reported_background_task_ids = (
+                list_reported_background_task_ids_still_running(hook_state, reading.get("running_claude_code_task_ids"),
+                                                                reading.get("running_claude_code_task_ids_read_at"))
+                if hook_state is not None and hook_state["background_task_ids"] is not None else None)
             reading["background_task_count"] = (
                 len(reported_background_task_ids) + reading.get("detached_process_count", 0)
                 if reported_background_task_ids is not None else reading.get("background_shell_count", 0))
@@ -2168,6 +2177,9 @@ class DashboardCore:
         while True:  # read at once, then every CHILD_PROCESS_CHECK_INTERVAL_SECONDS (dump-snapshot shows them too)
             reads_resource_usage = self.resource_usage_is_read
             agent_process_and_turn_by_session_id = self.list_agent_processes_and_their_turns()
+            # Taken before any process is read, so a shell old enough at this time to be read
+            # (SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS) is read if it runs, as note_child_processes takes it.
+            read_at = time.time()
 
             def read_every_agents_child_processes():
                 # launchd's children are read once for all the agents, only when a conversation's ID is known.
@@ -2175,14 +2187,14 @@ class DashboardCore:
                                 in agent_process_and_turn_by_session_id.values() if conversation_id and agent_started_at is not None]
                 detached_processes = list_detached_processes(min(agent_starts)) if agent_starts else []
                 return {session_id: read_child_processes(
-                            agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, time.time(),
+                            agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, read_at,
                             choose_detached_processes_of_the_conversation(detached_processes, conversation_id, agent_started_at)
                             if agent_started_at is not None else ())
                         for session_id, (agent_process_id, turn_is_under_way, turn_started_at, conversation_id, agent_started_at)
                         in agent_process_and_turn_by_session_id.items()}
             child_processes_by_session_id = await asyncio.to_thread(read_every_agents_child_processes)
             cpu_time_readings_by_child = self.note_child_processes(child_processes_by_session_id, cpu_time_readings_by_child,
-                                                                   time.time())
+                                                                   read_at)
             await asyncio.sleep(CHILD_PROCESS_CHECK_INTERVAL_SECONDS)
 
     def note_child_processes(self, child_processes_by_session_id, cpu_time_readings_by_child, now):
@@ -2217,6 +2229,29 @@ class DashboardCore:
                                     sum(child_process["is_background_shell"] for child_process in child_processes))
             self.note_reading_value(session_id, "detached_process_count",
                                     sum(child_process["is_detached"] for child_process in child_processes))
+            agent_process_id = self.agent_sessions[session_id]["process_id"]
+            hook_state = self.hook_state_by_agent_process_id.get(agent_process_id)
+            # A shell writing to a file of no task (a Claude Code update that names its output files
+            # otherwise, say) might be any reported one, so then none is taken for ended.
+            shells_of_unknown_tasks = [child_process for child_process in child_processes
+                                       if child_process["is_a_shell_writing_to_a_file_of_no_claude_code_task"]]
+            self.note_reading_value(session_id, "running_claude_code_task_ids", None if shells_of_unknown_tasks else tuple(sorted(
+                child_process["claude_code_task_id"] for child_process in child_processes if child_process["claude_code_task_id"])))
+            if (shells_of_unknown_tasks and (hook_state or {}).get("background_task_ids") is not None
+                    and agent_process_id not in self.agent_process_ids_with_shells_of_unknown_tasks):
+                self.agent_process_ids_with_shells_of_unknown_tasks.add(agent_process_id)
+                print(f"agent process {agent_process_id} runs a shell that writes to a file of no Claude Code task "
+                      f"({shells_of_unknown_tasks[0]['command_text']}), so its background tasks are counted as its hooks "
+                      "listed them, also those that ended since", file=sys.stderr, flush=True)
+            # Kept apart, since it changes at every reading. A reading that can tell whether more of
+            # the reported shells still run (list_reported_shells_a_reading_can_check) may change
+            # the count with nothing it reads changing, so it asks for a snapshot.
+            reading = self.screen_readings_by_session_id[session_id]
+            previous_reading_time = reading.get("running_claude_code_task_ids_read_at")
+            reading["running_claude_code_task_ids_read_at"] = now
+            if list_reported_shells_a_reading_can_check(hook_state, now) != list_reported_shells_a_reading_can_check(
+                    hook_state, previous_reading_time):
+                self.snapshot_needed.set()
         return new_cpu_time_readings_by_child
 
     async def note_command_the_agent_is_waiting_on(self, session_id, agent_session, reading, state, is_effectively_working, now):

@@ -23,7 +23,20 @@ PROC_PIDT_SHORTBSDINFO = 13  # proc_pidinfo flavor that returns struct proc_bsds
 STOPPED_PROCESS_STATUS = 4  # SSTOP in <sys/proc.h>, proc_bsdinfo's pbi_status of a stopped process
 PROC_PIDVNODEPATHINFO = 9  # proc_pidinfo flavor that returns struct proc_vnodepathinfo
 VNODE_INFO_SIZE = 152  # sizeof(struct vnode_info); the current folder's path follows it
+PROC_PIDLISTFDS = 1  # proc_pidinfo flavor that returns a struct proc_fdinfo for each open file descriptor
+PROC_FD_INFO_SIZE = 8  # sizeof(struct proc_fdinfo): the descriptor and its type, two 32-bit integers
+PROX_FDTYPE_VNODE = 1  # proc_fdinfo's type of a file or device (not a pipe or a socket)
+PROC_PIDFDVNODEPATHINFO = 2  # proc_pidfdinfo flavor that returns struct vnode_fdinfowithpath
+# sizeof(struct proc_fileinfo), which starts a vnode_fdinfowithpath (its first field, fi_openflags,
+# holds FWRITE when the descriptor was opened for writing); a vnode_info and the path follow.
+PROC_FILE_INFO_SIZE = 24
+FWRITE = 0x0002
+STANDARD_OUTPUT_FILE_DESCRIPTOR = 1
 MAXIMUM_PATH_LENGTH = 1024
+# The file a Claude Code shell writes its output to, named after its task: the ID its hooks list
+# a background shell by (its tool result names the file too, "Output is being written to: ...").
+CLAUDE_CODE_TASK_OUTPUT_FILE = re.compile(r"/tasks/([A-Za-z0-9]+)\.output\Z")
+DEVICES_FOLDER = "/dev/"  # a process writing to a terminal or /dev/null writes to a device here, not to a file
 MAXIMUM_CHILD_PROCESSES = 1024
 # Shells and wrappers that agents run commands in: the command's name is the first process
 # below them (python3 rather than the zsh that Claude Code runs it in).
@@ -158,6 +171,36 @@ def read_process_current_folder(process_id):
     if LIBPROC.proc_pidinfo(process_id, PROC_PIDVNODEPATHINFO, ctypes.c_uint64(0), buffer, buffer_size) <= 0:
         return ""
     return buffer.raw[VNODE_INFO_SIZE:VNODE_INFO_SIZE + MAXIMUM_PATH_LENGTH].split(b"\0", 1)[0].decode(errors="replace")
+
+
+def list_the_files_a_process_writes_to(process_id):
+    """Returns {file descriptor: path} for the files and devices a process has open for writing
+    (a terminal or /dev/null gives its device's path; pipes and sockets aren't listed), or {} for
+    a process that can't be read."""
+    needed_size = LIBPROC.proc_pidinfo(process_id, PROC_PIDLISTFDS, ctypes.c_uint64(0), None, 0)
+    if needed_size <= 0:
+        return {}
+    file_descriptor_infos = (ctypes.c_int32 * (2 * (needed_size // PROC_FD_INFO_SIZE)))()  # (descriptor, type) pairs
+    listed_size = LIBPROC.proc_pidinfo(process_id, PROC_PIDLISTFDS, ctypes.c_uint64(0), file_descriptor_infos,
+                                       ctypes.sizeof(file_descriptor_infos))
+    path_info = ctypes.create_string_buffer(PROC_FILE_INFO_SIZE + VNODE_INFO_SIZE + MAXIMUM_PATH_LENGTH)
+    paths_by_file_descriptor = {}
+    for index in range(max(listed_size, 0) // PROC_FD_INFO_SIZE):
+        file_descriptor, file_descriptor_type = file_descriptor_infos[2 * index], file_descriptor_infos[2 * index + 1]
+        if (file_descriptor_type == PROX_FDTYPE_VNODE
+                and LIBPROC.proc_pidfdinfo(process_id, file_descriptor, PROC_PIDFDVNODEPATHINFO, path_info,
+                                           len(path_info)) == len(path_info)
+                and ctypes.c_uint32.from_buffer_copy(path_info.raw[:4]).value & FWRITE):
+            paths_by_file_descriptor[file_descriptor] = (
+                path_info.raw[PROC_FILE_INFO_SIZE + VNODE_INFO_SIZE:].split(b"\0", 1)[0].decode(errors="replace"))
+    return paths_by_file_descriptor
+
+
+def find_the_claude_code_task_of_an_output_file(output_file_path):
+    """Returns the ID of the Claude Code task an output file is named after
+    (CLAUDE_CODE_TASK_OUTPUT_FILE), as the file a shell Claude Code's shell tool runs writes to is, or None."""
+    match = CLAUDE_CODE_TASK_OUTPUT_FILE.search(output_file_path)
+    return match.group(1) if match else None
 
 
 def process_is_alive(process_id):
@@ -475,9 +518,14 @@ def choose_detached_processes_of_the_conversation(detached_processes, conversati
 def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, reads_resource_usage, now,
                          detached_processes_of_the_conversation=()):
     """Returns [{"child": ProcessInfo, "command_text", "command_started_at", "is_background_shell",
-    "is_detached", "resource_usage": (memory in bytes, CPU seconds) of the child and the processes
-    below it, or None}] for each process the agent started (list_child_processes_of_the_agent),
-    then for each detached one (choose_detached_processes_of_the_conversation), which runs in the background.
+    "is_detached", "claude_code_task_id": the ID of the Claude Code task whose output file it writes
+    to (find_the_claude_code_task_of_an_output_file), or None,
+    "is_a_shell_writing_to_a_file_of_no_claude_code_task": whether it is a shell or wrapper with a
+    process running in it, writing to no Claude Code task's file, whose standard output goes to a
+    file (not to a pipe, a socket or a device, as Claude Code's Monitor tool's shells write to sockets),
+    "resource_usage": (memory in bytes, CPU seconds) of the child and the processes below it, or
+    None}] for each process the agent started (list_child_processes_of_the_agent), then for each
+    detached one (choose_detached_processes_of_the_conversation), which runs in the background.
     A Claude Code shell is named by its command and dated by its own start; another child by the
     command shown and that command's start (a shell Codex keeps between turns is older).
 
@@ -492,6 +540,12 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
     for child, shown_process in list_child_processes_of_the_agent(agent_process_id, list_descendant_processes(agent_process_id), now):
         claude_code_shell_command = find_the_command_a_claude_code_shell_runs(read_process_arguments_and_environment(child.process_id)[0])
         command_started_at = child.started_at if claude_code_shell_command else shown_process.started_at
+        # Any file it writes to, not only its standard output: a shell that runs a loop or a { }
+        # block with its output sent elsewhere (`done > /dev/null`) keeps its own on another descriptor meanwhile.
+        paths_written_to_by_file_descriptor = list_the_files_a_process_writes_to(child.process_id)
+        claude_code_task_id = next(filter(None, (find_the_claude_code_task_of_an_output_file(path)
+                                                 for _, path in sorted(paths_written_to_by_file_descriptor.items()))), None)
+        output_file_path = paths_written_to_by_file_descriptor.get(STANDARD_OUTPUT_FILE_DESCRIPTOR, "")
         child_processes.append({
             "child": child,
             "command_text": (shorten_scratchpad_paths(" ".join(claude_code_shell_command.split())) if claude_code_shell_command
@@ -501,11 +555,16 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
             "is_background_shell": child_process_is_a_background_shell(child, shown_process, command_started_at,
                                                                        turn_is_under_way, turn_started_at),
             "is_detached": False,
+            "claude_code_task_id": claude_code_task_id,
+            "is_a_shell_writing_to_a_file_of_no_claude_code_task": (
+                child.name in SHELL_AND_WRAPPER_PROCESS_NAMES and shown_process is not child and claude_code_task_id is None
+                and output_file_path != "" and not output_file_path.startswith(DEVICES_FOLDER)),
             "resource_usage": read_process_tree_resource_usage(child.process_id) if reads_resource_usage else None})
     for process, arguments in detached_processes_of_the_conversation:
         child_processes.append({
             "child": process, "command_text": build_command_text(arguments, process.name), "command_started_at": process.started_at,
-            "is_background_shell": True, "is_detached": True,
+            "is_background_shell": True, "is_detached": True, "claude_code_task_id": None,
+            "is_a_shell_writing_to_a_file_of_no_claude_code_task": False,
             "resource_usage": read_process_tree_resource_usage(process.process_id) if reads_resource_usage else None})
     return sorted(child_processes, key=lambda child_process: child_process["child"].started_at)  # oldest first, detached ones too
 

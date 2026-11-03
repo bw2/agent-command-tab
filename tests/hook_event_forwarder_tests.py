@@ -43,11 +43,16 @@ class ReduceHookPayloadTests(unittest.TestCase):
         self.assertEqual(reduce(BACKGROUND_SHELL_LAUNCHED)["background_task_launched_id"], "bs6f2whbf")
         self.assertEqual(reduce(BACKGROUND_AGENT_LAUNCHED)["background_task_launched_id"], "a3494730375529fee")
         self.assertIsNone(reduce(dict(BACKGROUND_SHELL_LAUNCHED, tool_response={"stdout": "ok"}))["background_task_launched_id"])
+        # With its type, as Claude Code's list of background tasks names it.
+        self.assertEqual([reduce(payload)["background_task_launched_type"] for payload in (
+            BACKGROUND_SHELL_LAUNCHED, BACKGROUND_AGENT_LAUNCHED, dict(BACKGROUND_SHELL_LAUNCHED, tool_response={"stdout": "ok"}))],
+            ["shell", "subagent", None])
 
     def test_only_the_fields_the_app_uses_are_kept_with_where_the_event_came_from(self):
         event = reduce(TURN_ENDED)
         self.assertEqual(set(event), {"agent_tool_name", "hook_event_name", "reason", "source", "agent_id",
-                                      "background_task_launched_id", "background_tasks", "ancestor_processes", "sent_at"})
+                                      "background_task_launched_id", "background_task_launched_type", "background_tasks",
+                                      "ancestor_processes", "sent_at"})
         self.assertEqual(event["background_tasks"], [{"id": "bs6f2whbf", "type": "shell", "status": "running"}])
         self.assertEqual((event["hook_event_name"], event["agent_tool_name"], event["ancestor_processes"], event["sent_at"]),
                          ("Stop", "Claude Code", [[27904, "sh"]], 100.0))

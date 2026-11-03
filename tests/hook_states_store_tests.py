@@ -35,6 +35,16 @@ class HookStatesFileTests(unittest.TestCase):
         self.assertEqual(turn_ended["background_task_ids"], {"b1", "b2"})
         self.assertIsNone(unknown_tasks["background_task_ids"])
 
+    def test_when_the_shells_were_reported_loads_back_and_a_malformed_time_drops_its_state(self):  # user request, 2026-11-02
+        shells_listed = apply_hook_event(None, make_event("Stop", 101, background_tasks=[{"id": "b1", "type": "shell", "status": "running"}]))
+        self.assertEqual(shells_listed["background_shells_reported_at_by_task_id"], {"b1": 50.0})
+        save_hook_states(self.file_path, {101: (1000.25, shells_listed)})
+        self.assertEqual(load_hook_states(self.file_path), {101: (1000.25, shells_listed)})
+        with open(self.file_path, "w") as file:
+            json.dump([{"process_id": 101, "started_at": 1.0, "hook_state": dict(
+                shells_listed, background_task_ids=["b1"], background_shells_reported_at_by_task_id={"b1": "soon"})}], file)
+        self.assertEqual(load_hook_states(self.file_path), {})
+
     def test_a_started_state_and_one_saved_before_starts_were_recorded_both_load(self):  # user request, 2026-10-30
         started = apply_hook_event(None, make_event("SessionStart", 101, source="startup"))
         self.assertEqual(started["startup_reported_at"], 50.0)

@@ -6,7 +6,8 @@ normal session end, it crashed or was killed. Claude Code's events also list its
 background shells and agents.
 """
 
-from agent_command_tab.agent_process_tree import NAMES_OF_AGENT_PROGRAMS, SHELL_AND_WRAPPER_PROCESS_NAMES
+from agent_command_tab.agent_process_tree import (NAMES_OF_AGENT_PROGRAMS, SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS,
+                                                  SHELL_AND_WRAPPER_PROCESS_NAMES)
 
 # A session end that leaves the process running: Claude Code's /clear ends one conversation and
 # starts the next in the same process, and so does /resume (its "resume", one
@@ -26,6 +27,8 @@ STATUSES_OF_A_RUNNING_BACKGROUND_TASK = frozenset({"running", "pending", None})
 # counted: Claude Code lists it as "running" for as long as it exists, idle or not, so a row kept
 # its lights and its "running" state for days after the teammates' work was done (user request, 2026-11-02).
 TYPES_OF_A_BACKGROUND_TASK_LEFT_UNCOUNTED = frozenset({"teammate"})
+# The type Claude Code's list gives a command its shell tool runs in the background.
+BACKGROUND_SHELL_TASK_TYPE = "shell"
 # The hook events of a tool call starting and finishing (hooks_installer registers both for Claude Code's
 # Bash, Agent and Task); the main agent's, after a Stop, show its turn going on (code review, 2026-10-28).
 TOOL_EVENT_NAMES = frozenset({"PreToolUse", "PostToolUse"})
@@ -59,6 +62,49 @@ def list_running_background_task_ids(background_tasks):
             and task.get("type") not in TYPES_OF_A_BACKGROUND_TASK_LEFT_UNCOUNTED}
 
 
+def list_running_background_shell_ids(background_tasks):
+    """Returns the IDs of the shells in a Claude Code list that still run."""
+    running_task_ids = list_running_background_task_ids(background_tasks)
+    return {task["id"] for task in background_tasks if task.get("id") in running_task_ids and task.get("type") == BACKGROUND_SHELL_TASK_TYPE}
+
+
+def list_reported_shells_a_reading_can_check(hook_state, read_at):
+    """Returns the IDs of the background shells the hooks reported ("background_shells_reported_at_by_task_id")
+    that a reading of the agent's processes taken at read_at (None: none taken) can tell running
+    or not: those reported SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS before it, since a shell
+    younger than that isn't read.
+
+    Args:
+        hook_state: The agent process's hook state (apply_hook_event), or None.
+        read_at: When the reading was taken, or None.
+    """
+    if read_at is None or hook_state is None or hook_state["background_task_ids"] is None:
+        return set()
+    return {task_id for task_id, reported_at in hook_state.get("background_shells_reported_at_by_task_id", {}).items()
+            if task_id in hook_state["background_task_ids"] and read_at >= reported_at + SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS}
+
+
+def list_reported_background_task_ids_still_running(hook_state, running_claude_code_task_ids, read_at):
+    """Returns the background task IDs the hooks reported for an agent process, without the
+    shells no process below the agent runs any more: Claude Code sends its list only when a turn
+    or an agent ends, so a shell that ended after the last one stayed on it as running, and its
+    row kept a light for days (user request, 2026-11-02). A shell is known by the task output
+    file its shell writes to (agent_process_tree.find_the_claude_code_task_of_an_output_file). Each
+    shell the reading can't tell yet (list_reported_shells_a_reading_can_check) counts.
+
+    Args:
+        hook_state: The agent process's hook state (apply_hook_event), its background task IDs known.
+        running_claude_code_task_ids: The task IDs of the shells running below the agent, or None
+            before they were read or while a shell runs whose task isn't known, which might be
+            any of them.
+        read_at: When they were read, or None.
+    """
+    if running_claude_code_task_ids is None:
+        return set(hook_state["background_task_ids"])
+    shells_no_longer_running = list_reported_shells_a_reading_can_check(hook_state, read_at) - set(running_claude_code_task_ids)
+    return hook_state["background_task_ids"] - shells_no_longer_running
+
+
 def apply_hook_event(hook_state, event):
     """Returns an agent process's hook state after one more event from it.
 
@@ -69,8 +115,10 @@ def apply_hook_event(hook_state, event):
     was submitted and the last turn ended, or None, "last_main_agent_tool_event_at": when the
     main agent last started or finished a tool call the hooks report (PreToolUse, PostToolUse;
     a subagent's carry its agent_id), or None}, and once its SessionStart for a new process arrived,
-    "startup_reported_at": when it did (a key only then, so the states hook_states_store saved
-    before there was one still load).
+    "startup_reported_at": when it did, and once a list of background tasks or a background shell's
+    start arrived, "background_shells_reported_at_by_task_id": {task ID: when the event that
+    reported it was sent} for the shells the last list held and those started since (keys only
+    then, so the states hook_states_store saved before there were any still load).
 
     Args:
         hook_state: The state before, or None for the process's first event.
@@ -96,8 +144,13 @@ def apply_hook_event(hook_state, event):
         hook_state["session_ended_at"] = None  # a new session in the same process
     if event.get("background_tasks") is not None:  # Claude Code's Stop and SubagentStop
         background_task_ids = list_running_background_task_ids(event["background_tasks"])
+        hook_state["background_shells_reported_at_by_task_id"] = {
+            task_id: event.get("sent_at") for task_id in list_running_background_shell_ids(event["background_tasks"])}
     if event.get("background_task_launched_id") and background_task_ids is not None:  # (unknown stays unknown: others may run)
         background_task_ids.add(event["background_task_launched_id"])
+        if event.get("background_task_launched_type") == BACKGROUND_SHELL_TASK_TYPE:
+            hook_state["background_shells_reported_at_by_task_id"] = dict(
+                hook_state.get("background_shells_reported_at_by_task_id", {}), **{event["background_task_launched_id"]: event.get("sent_at")})
     if event_name == "SubagentStop" and background_task_ids is not None:
         background_task_ids.discard(event.get("agent_id"))  # its own list still has it running
     hook_state["background_task_ids"] = background_task_ids

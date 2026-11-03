@@ -355,7 +355,8 @@ class ChildProcessReadingTests(unittest.TestCase):
         def read_once(cpu_seconds, now, cpu_time_readings_by_child):
             return core.note_child_processes({"s1": [
                 {"child": child, "command_text": "python3 -m unittest", "command_started_at": 50.0, "is_background_shell": True,
-                 "is_detached": False, "resource_usage": (300 * 1024 ** 2 + 12345, cpu_seconds)}],
+                 "is_detached": False, "claude_code_task_id": "b1", "is_a_shell_writing_to_a_file_of_no_claude_code_task": False,
+                 "resource_usage": (300 * 1024 ** 2 + 12345, cpu_seconds)}],
                 "s-closed": []}, cpu_time_readings_by_child, now)
         cpu_time_readings_by_child = read_once(10.0, 100.0, {})
         self.assertEqual(core.screen_readings_by_session_id["s1"]["child_processes"],
@@ -363,6 +364,8 @@ class ChildProcessReadingTests(unittest.TestCase):
         read_once(11.5, 103.0, cpu_time_readings_by_child)  # 1.5 CPU seconds in 3 seconds
         self.assertEqual(core.screen_readings_by_session_id["s1"]["child_processes"][0].cpu_percent, 50)
         self.assertEqual(core.screen_readings_by_session_id["s1"]["background_shell_count"], 1)
+        self.assertEqual(core.screen_readings_by_session_id["s1"]["running_claude_code_task_ids"], ("b1",))
+        self.assertEqual(core.screen_readings_by_session_id["s1"]["running_claude_code_task_ids_read_at"], 103.0)
         self.assertNotIn("s-closed", core.screen_readings_by_session_id)
 
     def test_detached_jobs_add_to_claude_codes_own_count_of_background_tasks(self):  # user request, 2026-10-28
@@ -371,7 +374,8 @@ class ChildProcessReadingTests(unittest.TestCase):
         background_shell, detached_job = ProcessInfo(201, 101, "bash", 5.0), ProcessInfo(202, 1, "bash", 6.0)
         core.note_child_processes({"s1": [
             {"child": child, "command_text": "sleep 30", "command_started_at": 5.0, "is_background_shell": True,
-             "is_detached": is_detached, "resource_usage": None}
+             "is_detached": is_detached, "claude_code_task_id": None if is_detached else "shell-1",
+             "is_a_shell_writing_to_a_file_of_no_claude_code_task": False, "resource_usage": None}
             for child, is_detached in ((background_shell, False), (detached_job, True))]}, {}, 100.0)
         core.note_background_task_counts()  # no hooks: the background shells seen, detached jobs included
         self.assertEqual(core.screen_readings_by_session_id["s1"]["background_task_count"], 2)
@@ -379,6 +383,48 @@ class ChildProcessReadingTests(unittest.TestCase):
         core.hook_state_by_agent_process_id = {101: {"background_task_ids": {"shell-1"}}}
         core.note_background_task_counts()
         self.assertEqual(core.screen_readings_by_session_id["s1"]["background_task_count"], 2)
+
+    def test_a_listed_shell_counts_only_while_a_shell_below_the_agent_writes_to_its_task_file(self):  # user request, 2026-11-02
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.agent_sessions = {"s1": make_agent_session(101)}
+        core.note_hook_event(make_event("SessionStart", 101, source="startup"))
+        core.note_hook_event(make_event("Stop", 101, sent_at=10.0, background_tasks=[
+            {"id": "b1", "type": "shell", "status": "running"}, {"id": "a1", "type": "subagent", "status": "running"}]))
+
+        def count_with_the_shells_running(read_at, *task_ids):
+            """Each shell runs the task with that ID, or for "monitor" writes to a socket (as a Claude
+            Code Monitor's does), or for "renamed" writes to a file of no task."""
+            core.snapshot_needed.clear()
+            core.note_child_processes({"s1": [
+                {"child": ProcessInfo(201 + index, 101, "bash", 5.0), "command_text": "sleep 600", "command_started_at": 5.0,
+                 "is_background_shell": True, "is_detached": False,
+                 "claude_code_task_id": None if task_id in ("monitor", "renamed") else task_id,
+                 "is_a_shell_writing_to_a_file_of_no_claude_code_task": task_id == "renamed", "resource_usage": None}
+                for index, task_id in enumerate(task_ids)]}, {}, read_at)
+            core.note_background_task_counts()
+            reading = core.screen_readings_by_session_id["s1"]
+            return reading["background_task_count"], reading["hooks_report_background_tasks_after_the_turn"]
+        # Readings taken before the list's shells could all show (a shell younger than
+        # SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS isn't read) leave them counted.
+        self.assertEqual(count_with_the_shells_running(11.0), (2, True))
+        self.assertEqual(count_with_the_shells_running(11.5), (2, True))
+        self.assertFalse(core.snapshot_needed.is_set())  # nothing read changed
+        # The first reading that tells shows the shell ended: it asks for a snapshot though nothing it read changed.
+        self.assertEqual(count_with_the_shells_running(12.0), (1, True))
+        self.assertTrue(core.snapshot_needed.is_set())
+        self.assertEqual(count_with_the_shells_running(100.0), (1, True))
+        self.assertFalse(core.snapshot_needed.is_set())
+        self.assertEqual(count_with_the_shells_running(101.0, "b7", "monitor"), (1, True))  # another task's shell, and a Monitor's
+        self.assertEqual(count_with_the_shells_running(102.0, "b1"), (2, True))
+        # A shell that writes to a file of no task might be b1's (Claude Code named its files
+        # otherwise, say), so b1 counts, and the log says why, once.
+        with unittest.mock.patch("builtins.print") as printed:
+            self.assertEqual(count_with_the_shells_running(103.0, "renamed"), (2, True))
+            self.assertEqual(count_with_the_shells_running(104.0, "renamed"), (2, True))
+        self.assertEqual(printed.call_count, 1)
+        self.assertIs(printed.call_args.kwargs["file"], sys.stderr)  # dump-snapshot's standard output holds only its JSON
+        core.note_hook_event(make_event("Stop", 101, sent_at=110.0, background_tasks=[{"id": "b1", "type": "shell", "status": "running"}]))
+        self.assertEqual(count_with_the_shells_running(120.0), (0, False))  # nothing runs after the turn
 
 
 if __name__ == "__main__":

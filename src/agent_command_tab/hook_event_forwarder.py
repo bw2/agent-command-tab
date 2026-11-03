@@ -57,17 +57,18 @@ def shorten(value):
 
 
 def find_background_task_launched(payload):
-    """Returns the ID of the background task a PostToolUse event's tool call started in Claude
-    Code (a Bash command run in the background returns a backgroundTaskId, a background agent
-    isAsync and its agentId), or None."""
+    """Returns (ID, type) of the background task a PostToolUse event's tool call started in
+    Claude Code, the type as Claude Code's list of background tasks names it (a Bash command run
+    in the background returns a backgroundTaskId: a "shell"; a background agent isAsync and its
+    agentId: a "subagent"), or (None, None)."""
     tool_response = payload.get("tool_response")
     if not isinstance(tool_response, dict):
-        return None
+        return None, None
     if tool_response.get("backgroundTaskId"):
-        return shorten(tool_response["backgroundTaskId"])
+        return shorten(tool_response["backgroundTaskId"]), "shell"
     if tool_response.get("isAsync") and tool_response.get("agentId"):
-        return shorten(tool_response["agentId"])
-    return None
+        return shorten(tool_response["agentId"]), "subagent"
+    return None, None
 
 
 def reduce_hook_payload(payload, agent_tool_name, ancestors, now):
@@ -80,13 +81,15 @@ def reduce_hook_payload(payload, agent_tool_name, ancestors, now):
         now: When the hook started.
     """
     background_tasks = payload.get("background_tasks")
+    background_task_launched_id, background_task_launched_type = find_background_task_launched(payload)
     return {
         "agent_tool_name": agent_tool_name,
         "hook_event_name": shorten(payload.get("hook_event_name")),
         "reason": shorten(payload.get("reason")),
         "source": shorten(payload.get("source")),
         "agent_id": shorten(payload.get("agent_id")),
-        "background_task_launched_id": find_background_task_launched(payload),
+        "background_task_launched_id": background_task_launched_id,
+        "background_task_launched_type": background_task_launched_type,
         # Claude Code lists the session's background tasks when a turn or an agent ends, each with its
         # type ("shell", "subagent", "teammate", "monitor", "workflow" and others).
         "background_tasks": [{"id": shorten(task.get("id")), "type": shorten(task.get("type")), "status": shorten(task.get("status"))}

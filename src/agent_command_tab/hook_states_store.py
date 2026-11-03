@@ -17,12 +17,20 @@ from agent_command_tab.settings_store import SETTINGS_FOLDER, write_json_file_at
 HOOK_STATES_FILE_PATH = os.path.join(SETTINGS_FOLDER, "agent_hook_states.json")
 
 
+def is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def is_stored_hook_state(value):
-    """Whether value has a hook state's keys, each holding None, a number, a string or (the background task IDs) a list of strings."""
+    """Whether value has a hook state's keys, each holding None, a number, a string, or (the
+    background task IDs) a list of strings, or (when the background shells were reported) a dict
+    of numbers by string."""
     if not isinstance(value, dict) or not set(apply_hook_event(None, {})) <= set(value):  # the keys a first event gives
         return False
-    return all(item is None or (isinstance(item, (int, float, str)) and not isinstance(item, bool))
+    return all(item is None or is_number(item) or isinstance(item, str)
                or (key == "background_task_ids" and isinstance(item, list) and all(isinstance(task_id, str) for task_id in item))
+               or (key == "background_shells_reported_at_by_task_id" and isinstance(item, dict)
+                   and all(isinstance(task_id, str) and is_number(reported_at) for task_id, reported_at in item.items()))
                for key, item in value.items())
 
 

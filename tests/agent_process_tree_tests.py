@@ -21,7 +21,7 @@ from agent_command_tab.agent_process_tree import (ProcessInfo, an_agent_program_
                                                   list_detached_processes, read_child_processes,
                                                   read_name_the_process_was_started_as,
                                                   read_process_info, read_process_resource_usage,
-                                                  read_process_tree_resource_usage)
+                                                  read_process_tree_resource_usage, list_the_files_a_process_writes_to)
 
 TURN_STARTED_AT = 1000.0
 NOW = 1100.0
@@ -217,6 +217,49 @@ class ChildProcessTests(unittest.TestCase):
         finally:
             os.kill(detached_process_id, signal.SIGKILL)
 
+    def test_a_shell_is_known_by_the_claude_code_task_file_it_writes_to(self):  # user request, 2026-11-02
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "tasks"))
+            shells = {}
+
+            def start_shell(standard_output, command="sleep 30; true"):
+                # Its input read only (a terminal this process reads is open for writing too), its
+                # errors where its output goes, not to this process's (in Claude Code, a task file
+                # too), and in a process group of its own, so the sleep in it is killed with it.
+                with open(os.devnull) as nothing_to_read:
+                    return subprocess.Popen(["/bin/bash", "-c", command], stdin=nothing_to_read, stdout=standard_output,
+                                            stderr=subprocess.STDOUT, start_new_session=True)
+            for name, output_file_name, command in (
+                    ("task", os.path.join("tasks", "b3jvsqvs2.output"), "sleep 30; true"),
+                    # Bash sends the loop's output to /dev/null and keeps its own on another descriptor.
+                    ("loop sent to /dev/null", os.path.join("tasks", "b5loop.output"), "while true; do sleep 30; done > /dev/null 2>&1"),
+                    ("other file", "notes.txt", "sleep 30; true")):
+                with open(os.path.join(folder, output_file_name), "w") as output_file:
+                    shells[name] = start_shell(output_file, command)
+            shells["pipe"] = start_shell(subprocess.PIPE)  # as a Monitor's socket
+            shells["device"] = start_shell(subprocess.DEVNULL)
+            try:
+                self.assertEqual(list_the_files_a_process_writes_to(shells["device"].pid), {1: "/dev/null", 2: "/dev/null"})
+                self.assertEqual(list_the_files_a_process_writes_to(shells["pipe"].pid), {})
+                until = time.time() + 10
+                entries_by_process_id = {}
+                # Until each shell runs its sleep, which then names it (a shell counts once it has run 2 s).
+                while time.time() < until and not (len(entries_by_process_id) == len(shells) and all(
+                        not entry["command_text"].startswith(("sh ", "bash ")) for entry in entries_by_process_id.values())):
+                    entries_by_process_id = {entry["child"].process_id: entry for entry in read_child_processes(
+                        os.getpid(), False, None, False, time.time() + 60) if entry["child"].process_id in {
+                            shell.pid for shell in shells.values()}}
+                self.assertEqual(
+                    {name: (entries_by_process_id[shell.pid]["claude_code_task_id"],
+                            entries_by_process_id[shell.pid]["is_a_shell_writing_to_a_file_of_no_claude_code_task"])
+                     for name, shell in shells.items()},
+                    {"task": ("b3jvsqvs2", False), "loop sent to /dev/null": ("b5loop", False), "other file": (None, True),
+                     "pipe": (None, False), "device": (None, False)})
+            finally:
+                for shell in shells.values():
+                    os.killpg(shell.pid, signal.SIGKILL)
+                    shell.wait()
+
     def test_a_real_child_of_this_process(self):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
@@ -228,6 +271,7 @@ class ChildProcessTests(unittest.TestCase):
             self.assertIn("import time; time.sleep(30)", entry["command_text"])
             self.assertEqual(entry["command_started_at"], entry["child"].started_at)  # not a shell: the command itself
             self.assertFalse(entry["is_background_shell"])  # not a shell
+            self.assertFalse(entry["is_a_shell_writing_to_a_file_of_no_claude_code_task"])
             self.assertGreater(entry["resource_usage"][0], 0)  # its memory
         finally:
             child.kill()
