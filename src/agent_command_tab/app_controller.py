@@ -34,8 +34,7 @@ from agent_command_tab.dashboard_core import DashboardCoreThread
 from agent_command_tab.monitor_assignment import compute_frame_clear_of_area
 from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
 from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
-                                              load_settings_resolving_paths_at_first_run,
-                                              move_the_settings_folder_of_the_old_name, save_settings)
+                                              load_settings, move_the_settings_folder_of_the_old_name, save_settings)
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list, choose_folder_for_new_agent_window
 from agent_command_tab.terminal_backends.iterm2_terminal_backend import ITERM2_BUNDLE_IDENTIFIER, list_running_iterm2_applications
 from agent_command_tab.start_with_iterm2 import (AUTOLAUNCH_SCRIPT_FILE_NAME, START_WITH_ITERM2_SETTING_TITLE,
@@ -138,7 +137,7 @@ class AppController(NSObject):
         if self is None:
             return None
         move_the_settings_folder_of_the_old_name()  # before the settings and the docked window frames are read
-        self.settings = load_settings_resolving_paths_at_first_run()
+        self.settings = load_settings()
         self.reserved_screen_area = None
         self.application_in_front_before_dropdown = None
         # The last app other than the dashboard to be active: hiding the list window with the

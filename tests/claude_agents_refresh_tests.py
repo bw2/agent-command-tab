@@ -1,11 +1,16 @@
-"""How the core takes in a run of `claude agents --json` (DashboardCore.refresh_claude_agents)."""
+"""How the core runs `claude agents --json` (read_claude_agents_by_process_id) and takes in a run
+(DashboardCore.refresh_claude_agents)."""
 
 import asyncio
+import contextlib
+import io
+import os
+import tempfile
 import unittest
 import unittest.mock
 
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
-from agent_command_tab.dashboard_core import DashboardCore
+from agent_command_tab.dashboard_core import DashboardCore, read_claude_agents_by_process_id
 
 
 class ClaudeAgentsRefreshTests(unittest.TestCase):
@@ -39,6 +44,34 @@ class ClaudeAgentsRefreshTests(unittest.TestCase):
                                  read_while_a_clear_is_typed):
             asyncio.run(core.refresh_claude_agents())
         self.assertTrue(core.regather_needed.is_set())  # so 42 is asked about again
+
+
+class ReadClaudeAgentsTests(unittest.TestCase):
+    def write_program(self, folder, name, text):
+        path = os.path.join(folder, name)
+        with open(path, "w") as program_file:
+            program_file.write(text)
+        os.chmod(path, 0o755)
+        return path
+
+    def test_a_claude_installed_with_npm_runs_with_the_node_next_to_it_on_a_bare_path(self):
+        # npm's claude is a `#!/usr/bin/env node` script, and an app started by iTerm2 has launchd's PATH.
+        with tempfile.TemporaryDirectory() as npm_folder:
+            self.write_program(npm_folder, "node", '#!/bin/sh\necho \'[{"pid": 42, "sessionId": "s"}]\'\n')
+            claude_path = self.write_program(npm_folder, "claude", "#!/usr/bin/env node\n")
+            with unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}):
+                self.assertEqual(asyncio.run(read_claude_agents_by_process_id(claude_path, [None])),
+                                 {42: {"pid": 42, "sessionId": "s", "config_folder": None}})
+
+    def test_a_failed_run_is_printed_on_standard_error_and_gives_no_records(self):
+        # Standard output stays clean for dump-snapshot, which prints only its JSON there.
+        with tempfile.TemporaryDirectory() as folder:
+            claude_path = self.write_program(folder, "claude", "#!/bin/sh\necho '[]'\necho 'unknown command agents' >&2\nexit 1\n")
+            printed_on_standard_output, printed_on_standard_error = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(printed_on_standard_output), contextlib.redirect_stderr(printed_on_standard_error):
+                self.assertEqual(asyncio.run(read_claude_agents_by_process_id(claude_path, [None])), {})
+        self.assertIn("exit status 1: unknown command agents", printed_on_standard_error.getvalue())
+        self.assertEqual(printed_on_standard_output.getvalue(), "")
 
 
 if __name__ == "__main__":

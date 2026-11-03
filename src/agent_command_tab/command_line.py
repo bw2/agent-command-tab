@@ -184,9 +184,11 @@ def run_with_restarts(verbose):
     left running after its supervisor ended still keeps a second copy out (code review, 2026-10-30).
     """
     from agent_command_tab.installed_copy_paths import find_python_of_this_copy
+    from agent_command_tab.login_shell_environment import add_the_login_shells_environment_when_started_without_it
     running_lock_file = take_the_running_lock_or_name_the_copy_holding_it()  # held, open, until this supervisor returns
     if running_lock_file is None:
         return 0
+    add_the_login_shells_environment_when_started_without_it(os.environ)  # once; each app it starts inherits it
     restart_delay_seconds = 1
     while True:
         started_at = time.time()
@@ -232,6 +234,8 @@ def main(arguments=None):
             running_lock_file = take_the_running_lock_or_name_the_copy_holding_it()  # held, open, until the app ends
             if running_lock_file is None:
                 return 0
+            from agent_command_tab.login_shell_environment import add_the_login_shells_environment_when_started_without_it
+            add_the_login_shells_environment_when_started_without_it(os.environ)  # the supervisor did it for an app it started
         return run_app_process(parsed_arguments.verbose)
     return run_with_restarts(parsed_arguments.verbose)
 

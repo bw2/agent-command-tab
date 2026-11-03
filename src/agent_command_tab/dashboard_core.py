@@ -36,7 +36,8 @@ from agent_command_tab.hook_states_store import load_hook_states, save_hook_stat
 from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
                                                      pause_has_ended, resume_agent_session, send_signal_to_processes)
 from agent_command_tab.pause_records_store import load_pause_records, save_pause_records
-from agent_command_tab.settings_store import find_program_on_path_or_in_the_usual_folders
+from agent_command_tab.settings_store import (build_environment_with_the_programs_folder_first_on_path,
+                                              find_program_on_path_or_in_the_usual_folders)
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
 from agent_command_tab.agent_adapters.base import (COMMAND_THAT_STARTS_A_NEW_CONVERSATION, MESSAGES_THROUGH_CODEX_QUEUE,
                                                    MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, command_line_runs_a_shell)
@@ -126,11 +127,12 @@ async def read_claude_agents_by_process_id(claude_command_path, config_folders):
     """Runs `claude agents --json` once per config folder; returns {process ID: record}, each
     record with "config_folder" added (None for the default folder).
 
-    Failures (no command, a timeout, unreadable output) give an empty result for that folder.
+    Failures (no command, a failed run, a timeout, unreadable output) give an empty result for
+    that folder, and are printed.
     """
     claude_agents_by_process_id = {}
     for config_folder in config_folders:
-        environment = dict(os.environ)
+        environment = build_environment_with_the_programs_folder_first_on_path(claude_command_path, os.environ)
         environment.pop("CLAUDE_CONFIG_DIR", None)
         if config_folder:
             environment["CLAUDE_CONFIG_DIR"] = config_folder
@@ -138,13 +140,17 @@ async def read_claude_agents_by_process_id(claude_command_path, config_folders):
         try:
             process = await asyncio.create_subprocess_exec(
                 claude_command_path, "agents", "--json", env=environment,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-            standard_output, _ = await asyncio.wait_for(process.communicate(), timeout=CLAUDE_AGENTS_TIMEOUT_SECONDS)
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            standard_output, standard_error = await asyncio.wait_for(process.communicate(), timeout=CLAUDE_AGENTS_TIMEOUT_SECONDS)
+            if process.returncode != 0:  # on standard error: dump-snapshot's standard output holds only its JSON
+                print(f"claude agents --json failed for config folder {config_folder or '(default)'} with exit status "
+                      f"{process.returncode}: {standard_error.decode(errors='replace').strip()[-300:]}", file=sys.stderr)
+                continue
             for record in json.loads(standard_output or b"[]"):
                 if isinstance(record, dict) and record.get("pid"):
                     claude_agents_by_process_id[int(record["pid"])] = dict(record, config_folder=config_folder)
         except (OSError, ValueError, asyncio.TimeoutError) as error:
-            print(f"claude agents --json failed for config folder {config_folder or '(default)'}: {error!r}")
+            print(f"claude agents --json failed for config folder {config_folder or '(default)'}: {error!r}", file=sys.stderr)
             if process is not None and process.returncode is None:
                 process.kill()
                 await process.wait()
@@ -183,6 +189,7 @@ async def queue_message_for_codex_session(codex_command_path, conversation_id, m
         # that begins with a bullet) would be read as an unknown option.
         process = await asyncio.create_subprocess_exec(
             codex_command_path, "queue", "--thread", conversation_id, f"--message={message}",
+            env=build_environment_with_the_programs_folder_first_on_path(codex_command_path, os.environ),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         _, standard_error = await asyncio.wait_for(process.communicate(), timeout=CODEX_QUEUE_TIMEOUT_SECONDS)
     except (OSError, asyncio.TimeoutError) as error:

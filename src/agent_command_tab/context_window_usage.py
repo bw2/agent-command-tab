@@ -200,6 +200,15 @@ def find_claude_code_transcript(claude_config_folders, claude_session_id):
     return None
 
 
+def codex_session_header_comes_from_a_terminal_session(header):
+    """Returns whether a Codex conversation file's session_meta header is that of a session run in
+    a terminal: source "cli", or, since Codex 0.165 runs its terminal sessions through its shared
+    background server, source "vscode" with originator "codex-tui". Not the header of `codex exec`
+    (source "exec"), of a subagent such as the auto-review helper (source {"subagent": ...}, whose
+    originator is "codex-tui" too when a terminal session started it), or of the VS Code extension."""
+    return header.get("source") == "cli" or (header.get("source") == "vscode" and header.get("originator") == "codex-tui")
+
+
 def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent_working_folder, now,
                                   agent_resumed_a_conversation=False):
     """Returns the files that may be a Codex session's conversation, most recently written first;
@@ -207,8 +216,8 @@ def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent
     can't find it).
 
     They are the rollout-*.jsonl files in the day folders (YYYY/MM/DD, local time) from the
-    agent's start to today whose first line, the session_meta header, is an interactive
-    session's (source "cli", not the auto-review helper's or `codex exec`'s), names the
+    agent's start to today whose first line, the session_meta header, is a terminal session's
+    (codex_session_header_comes_from_a_terminal_session), names the
     agent's folder, and starts no earlier than the agent process. The first is the current
     conversation (Codex's /new starts another). Two Codex sessions in one folder can't be
     told apart (a known limit), so callers that must be sure check that there is only one.
@@ -244,7 +253,7 @@ def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent
     conversation_files = []
     for _, path in sorted(candidates, reverse=True):
         header = read_codex_session_header(path)
-        if (header.get("source") == "cli" and header.get("cwd") == agent_working_folder
+        if (codex_session_header_comes_from_a_terminal_session(header) and header.get("cwd") == agent_working_folder
                 and (agent_resumed_a_conversation or parse_iso_time(header.get("timestamp")) >= agent_started_at - 5)):
             conversation_files.append(path)
     return conversation_files

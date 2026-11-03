@@ -1,8 +1,11 @@
 """Settings, stored as JSON in ~/Library/Application Support/agent-command-tab/settings.json.
 
-Settings are added here as the features that use them are built. Command paths are resolved
-once, at first run, and saved, because an app started at login gets a minimal PATH, so the
-folders programs are usually installed in are looked in too (USUAL_PROGRAM_FOLDERS).
+Settings are added here as the features that use them are built. Launch commands are kept as
+written ("claude", not the full path found at first run, which a Node version switch can make
+stale): they are typed into the user's own shell, which finds the program. A program the app
+runs itself is looked for on PATH and, since an app started without a shell's PATH may still
+lack the user's folders (login_shell_environment), in the folders programs are usually
+installed in (USUAL_PROGRAM_FOLDERS).
 """
 
 import json
@@ -171,11 +174,20 @@ def find_program_on_path_or_in_the_usual_folders(program_name):
         program_name, path=os.pathsep.join(os.path.expanduser(folder) for folder in USUAL_PROGRAM_FOLDERS))
 
 
+def build_environment_with_the_programs_folder_first_on_path(program_path, environment):
+    """Returns a copy of environment for running program_path, with the program's folder first on
+    PATH, so that a script finds the interpreter installed next to it: npm puts `node` in the
+    folder of the `codex` it installs, a script that starts with `#!/usr/bin/env node`, which
+    fails with "env: node: No such file or directory" on a PATH without that folder."""
+    return dict(environment, PATH=os.pathsep.join(folder for folder in (os.path.dirname(program_path), environment.get("PATH"))
+                                                  if folder))
+
+
 def find_codex_command_path(settings, find_command_path=find_program_on_path_or_in_the_usual_folders):
     """Returns the codex program that "Talk to Each Other" runs `codex queue` with: the first word
-    of the Codex tool's launch command (resolved to a full path at first run), looked up on PATH
-    and in the usual folders when it is a bare name, or None when it isn't found. A launch
-    command that starts with another program (a wrapper) gives the codex found that way."""
+    of the Codex tool's launch command, looked up on PATH and in the usual folders when it is a
+    bare name, or None when it isn't found. A launch command that starts with another program (a
+    wrapper) gives the codex found that way."""
     launch_command = next((agent_tool["launch_command"] for agent_tool in settings["agent_tools"]
                            if agent_tool["agent_tool_name"] == "Codex"), "")
     first_word = os.path.expanduser((launch_command.split() or [""])[0])  # "~/bin/codex" too, as Settings accepts
@@ -223,23 +235,24 @@ def save_settings(settings, settings_file_path=SETTINGS_FILE_PATH):
     write_json_file_atomically(settings, settings_file_path)
 
 
-def resolve_launch_command_paths(settings, find_command_path=find_program_on_path_or_in_the_usual_folders):
-    """Returns settings whose bare launch commands ("claude") are replaced by full paths found on
-    PATH or in the usual folders.
+def run_script_in_the_login_shell(script, arguments=(), shell=None, keeps_the_output=False):
+    """Runs script in the user's login shell (or in shell) as an interactive login shell, after
+    it has read its start-up files, with arguments as $1, $2, ...
 
-    Only the first word is resolved, and only when it is a bare name that is found, so a
-    command the user typed with a path or extra arguments is kept as written.
+    Returns:
+        The finished process (its stdout as bytes when keeps_the_output, else None), or None when
+        the shell isn't one of LOGIN_SHELLS_THAT_CAN_BE_ASKED, can't be started, or takes longer
+        than SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL.
     """
-    resolved_settings = dict(settings)
-    resolved_settings["agent_tools"] = []
-    for agent_tool in settings["agent_tools"]:
-        words = agent_tool["launch_command"].split(" ", 1)
-        if "/" not in words[0]:
-            full_path = find_command_path(words[0])
-            if full_path:
-                words[0] = full_path
-        resolved_settings["agent_tools"].append(dict(agent_tool, launch_command=" ".join(words)))
-    return resolved_settings
+    shell = shell or os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
+    if os.path.basename(shell) not in LOGIN_SHELLS_THAT_CAN_BE_ASKED:
+        return None
+    try:
+        return subprocess.run([shell, "-i", "-l", "-c", script, shell, *arguments], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE if keeps_the_output else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def ask_the_login_shell_whether_it_knows_command(command_name):
@@ -249,17 +262,8 @@ def ask_the_login_shell_whether_it_knows_command(command_name):
     `yc` works there although it is on no PATH. Takes a moment (it reads the shell's start-up
     files), so the settings window calls it off the main thread. A shell not in
     LOGIN_SHELLS_THAT_CAN_BE_ASKED (fish, tcsh) isn't asked."""
-    shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
-    if os.path.basename(shell) not in LOGIN_SHELLS_THAT_CAN_BE_ASKED:
-        return None
-    try:
-        completed_process = subprocess.run(
-            [shell, "-i", "-l", "-c", 'command -v -- "$1" > /dev/null', shell, command_name],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=SECONDS_TO_WAIT_FOR_THE_LOGIN_SHELL)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return completed_process.returncode == 0
+    completed_process = run_script_in_the_login_shell('command -v -- "$1" > /dev/null', [command_name])
+    return None if completed_process is None else completed_process.returncode == 0
 
 
 def find_launch_command_problem(launch_command, find_command_path=find_program_on_path_or_in_the_usual_folders,
@@ -296,13 +300,3 @@ def move_the_settings_folder_of_the_old_name(old_folder=SETTINGS_FOLDER_OF_THE_O
     to the new one, once: only while the old one exists and the new one doesn't yet."""
     if os.path.isdir(old_folder) and not os.path.exists(new_folder):
         os.rename(old_folder, new_folder)
-
-
-def load_settings_resolving_paths_at_first_run(settings_file_path=SETTINGS_FILE_PATH):
-    """Returns the settings; at first run (no file yet) resolves the launch commands' paths and saves them."""
-    is_first_run = not os.path.exists(settings_file_path)
-    settings = load_settings(settings_file_path)
-    if is_first_run:
-        settings = resolve_launch_command_paths(settings)
-        save_settings(settings, settings_file_path)
-    return settings

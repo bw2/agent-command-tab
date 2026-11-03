@@ -1,17 +1,16 @@
-import json
 import os
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
 
 from agent_command_tab import settings_store
 from agent_command_tab.settings_store import (DEFAULT_SETTINGS, ask_the_login_shell_whether_it_knows_command,
-                                              build_core_settings, find_codex_command_path,
-                                              find_launch_command_problem,
+                                              build_core_settings, build_environment_with_the_programs_folder_first_on_path,
+                                              find_codex_command_path, find_launch_command_problem,
                                               list_included_agent_tool_names, list_left_out_agent_tool_names,
                                               load_settings, merge_settings_with_defaults,
-                                              move_the_settings_folder_of_the_old_name, resolve_launch_command_paths,
-                                              save_settings)
+                                              move_the_settings_folder_of_the_old_name, save_settings)
 
 
 class MergeSettingsTests(unittest.TestCase):
@@ -129,19 +128,24 @@ class LoadAndSaveTests(unittest.TestCase):
             self.assertEqual([name for name in os.listdir(os.path.dirname(path)) if name.endswith(".tmp")], [])
 
 
-class ResolveLaunchCommandPathsTests(unittest.TestCase):
-    def test_bare_commands_are_resolved_and_others_kept(self):
-        settings = dict(DEFAULT_SETTINGS, agent_tools=[
-            {"agent_tool_name": "Claude Code", "launch_command": "claude --model opus"},
-            {"agent_tool_name": "Codex", "launch_command": "/opt/codex/bin/codex"},
-            {"agent_tool_name": "Missing", "launch_command": "not-installed"},
-        ])
-        found = {"claude": "/Users/someone/.local/bin/claude"}
-        resolved = resolve_launch_command_paths(settings, found.get)
-        self.assertEqual([tool["launch_command"] for tool in resolved["agent_tools"]],
-                         ["/Users/someone/.local/bin/claude --model opus", "/opt/codex/bin/codex", "not-installed"])
-        self.assertEqual(settings["agent_tools"][0]["launch_command"], "claude --model opus")  # input unchanged
-        json.dumps(resolved)
+class FindAndRunProgramTests(unittest.TestCase):
+    def test_a_script_runs_with_the_interpreter_installed_next_to_it(self):
+        # As npm installs codex: a `#!/usr/bin/env node` script in the folder that has node, which
+        # isn't on the PATH an app started by iTerm2 gets.
+        with tempfile.TemporaryDirectory() as npm_folder:
+            for name, text in (("node", "#!/bin/sh\necho node ran \"$1\"\n"), ("codex", "#!/usr/bin/env node\n")):
+                with open(os.path.join(npm_folder, name), "w") as program_file:
+                    program_file.write(text)
+                os.chmod(os.path.join(npm_folder, name), 0o755)
+            codex_path = os.path.join(npm_folder, "codex")
+            bare_environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.path.expanduser("~")}
+            self.assertEqual(subprocess.run([codex_path], env=bare_environment, capture_output=True).returncode, 127)
+            completed_process = subprocess.run(
+                [codex_path], env=build_environment_with_the_programs_folder_first_on_path(codex_path, bare_environment),
+                capture_output=True, text=True)
+            self.assertEqual(completed_process.stdout, f"node ran {codex_path}\n")
+            self.assertEqual(bare_environment["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")  # its input unchanged
+        self.assertEqual(build_environment_with_the_programs_folder_first_on_path("/opt/x/codex", {})["PATH"], "/opt/x")
 
     def test_a_program_off_the_apps_minimal_path_is_found_in_the_usual_folders(self):  # code review, 2026-10-28
         # As for an app started at login, whose PATH is launchd's.

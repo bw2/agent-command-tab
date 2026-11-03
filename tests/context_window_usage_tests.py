@@ -125,16 +125,16 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(list(read_last_records(path)), [{"type": "assistant"}, {"type": "user"}])
         self.assertIsNone(read_context_tokens_from_claude_code_transcript(self.write_lines("list.jsonl", ["[1, 2]"])))
 
+    def write_codex_conversation_in_its_start_days_folder(self, name, folder, started_at, source="cli", originator="codex-tui"):
+        started_day = datetime.date.fromtimestamp(started_at)
+        started_at_text = datetime.datetime.fromtimestamp(started_at, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        return self.write_lines(f"sessions/{started_day.year:04d}/{started_day.month:02d}/{started_day.day:02d}/{name}", [
+            {"type": "session_meta", "payload": {"cwd": folder, "timestamp": started_at_text, "source": source,
+                                                 "originator": originator}}])
+
     def test_codex_conversation_file_is_found_by_folder_and_start_time(self):
         now = time.time()
-        today = datetime.date.fromtimestamp(now)
-        day_folder = f"sessions/{today.year:04d}/{today.month:02d}/{today.day:02d}"
-
-        def write_conversation(name, folder, started_at, source="cli"):
-            started_at_text = datetime.datetime.fromtimestamp(started_at, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-            return self.write_lines(f"{day_folder}/{name}", [{"type": "session_meta", "payload": {
-                "cwd": folder, "timestamp": started_at_text, "source": source}}])
-
+        write_conversation = self.write_codex_conversation_in_its_start_days_folder
         own_file = write_conversation("rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl", "/Users/me/code", now - 30)
         write_conversation("rollout-b-01a151f0-8f89-7711-a0cc-cfcae10915f9.jsonl", "/Users/me/other", now - 20)  # another folder
         write_conversation("rollout-c-01a151f0-8f89-7711-a0cc-cfcae10915fa.jsonl", "/Users/me/code", now - 3600)  # before the agent
@@ -144,15 +144,26 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now), [own_file])
         self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/nothing-here", now), [])
 
+    def test_a_codex_0_165_terminal_session_is_found_through_its_originator(self):
+        # Codex 0.165 runs its terminal sessions through its shared background server, whose
+        # headers say source "vscode" (seen on 2026-11-02); its subagents' say "codex-tui" too.
+        now = time.time()
+        write_conversation = self.write_codex_conversation_in_its_start_days_folder
+        own_file = write_conversation("rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl", "/Users/me/code", now - 30,
+                                      source="vscode")
+        for name, source, originator in (("rollout-b-01a151f0-8f89-7711-a0cc-cfcae10915f9.jsonl", {"subagent": {"other": "guardian"}},
+                                          "codex-tui"),
+                                         ("rollout-c-01a151f0-8f89-7711-a0cc-cfcae10915fa.jsonl", "vscode", "codex_vscode"),
+                                         ("rollout-d-01a151f0-8f89-7711-a0cc-cfcae10915fb.jsonl", "exec", "codex_exec")):
+            write_conversation(name, "/Users/me/code", now - 29, source=source, originator=originator)
+        sessions_folder = os.path.join(self.folder.name, "sessions")
+        self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now), [own_file])
+
     def test_a_resumed_codex_conversation_is_found_in_its_own_older_day_folder(self):
         now = time.time()
 
         def write_conversation(name, started_at, modified_at):
-            started_day = datetime.date.fromtimestamp(started_at)
-            started_at_text = datetime.datetime.fromtimestamp(started_at, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-            path = self.write_lines(f"sessions/{started_day.year:04d}/{started_day.month:02d}/{started_day.day:02d}/{name}",
-                                    [{"type": "session_meta", "payload": {"cwd": "/Users/me/code", "timestamp": started_at_text,
-                                                                          "source": "cli"}}])
+            path = self.write_codex_conversation_in_its_start_days_folder(name, "/Users/me/code", started_at)
             os.utime(path, (modified_at, modified_at))
             return path
 
