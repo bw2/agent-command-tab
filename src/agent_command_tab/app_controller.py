@@ -358,7 +358,8 @@ class AppController(NSObject):
         """The global shortcut shows the list as the menu bar icon does and, pressed again, hides
         it, giving the keyboard back to the app that had it (user request, 2026-10-21)
         (choose_what_the_global_shortcut_does). The list it shows has the first agent asking a
-        question selected (user request, 2026-10-29)."""
+        question selected (user request, 2026-10-29), or while none asks, the tab in front (user
+        request, 2026-11-03)."""
         closed_a_dropdown_the_menu_showed = self.close_a_dropdown_the_menu_showed()
         what_to_do = choose_what_the_global_shortcut_does(
             self.settings["show_as"], self.settings["sidebar_mode"], self.sidebar_controller.is_shown,
@@ -369,12 +370,12 @@ class AppController(NSObject):
             self.give_activation_to(self.application_in_front_before_dropdown)
         if what_to_do == "show_sidebar":
             self.show_the_sidebar()  # for a few seconds, or for good if it stays visible
-            self.sidebar_controller.list_controller.select_the_first_asking_tab()
+            self.sidebar_controller.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
         elif what_to_do == "hide_sidebar":
             self.sidebar_controller.hide_now()
         elif what_to_do == "show_window":
             self.show_the_list_window()
-            self.list_window_controller.list_controller.select_the_first_asking_tab()
+            self.list_window_controller.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
         elif what_to_do == "hide_window":
             self.list_window_controller.hide()
             self.list_window_closed()
@@ -382,7 +383,7 @@ class AppController(NSObject):
                 self.give_activation_to(self.last_other_active_application)
         elif what_to_do == "open_dropdown":
             self.status_item_controller.show_popover()
-            self.dropdown_list_controller.select_the_first_asking_tab()
+            self.dropdown_list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
         elif what_to_do == "close_dropdown":
             self.close_dropdown()
             self.give_activation_to(self.application_in_front_before_dropdown)

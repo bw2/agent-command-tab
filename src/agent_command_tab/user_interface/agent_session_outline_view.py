@@ -1539,29 +1539,32 @@ class AgentSessionListController(NSObject):
         return True
 
     @objc.python_method
-    def select_the_first_asking_tab(self):
-        """Selects the first tab row, top to bottom, whose agent asks a question, opening the
-        collapsed monitor and window rows above it, and scrolls to it (user request,
-        2026-10-29: the global shortcut does this as it shows the list). The selection stays as
-        it is while no agent asks."""
-        def find_first_asking_tab_and_its_ancestors(items, ancestors):
+    def select_the_first_asking_tab_or_else_the_tab_in_front(self):
+        """Selects the first tab row, top to bottom, whose agent asks a question (user request,
+        2026-10-29), or while no agent asks, the row of the tab in front, drawn in bold (user
+        request, 2026-11-03), opening the collapsed monitor and window rows above it, and
+        scrolls to it: the global shortcut does this as it shows the list. The selection stays as
+        it is while no agent asks and no listed tab is in front (another app is, or Hide Idle
+        hides that tab's row)."""
+        def find_first_matching_tab_and_its_ancestors(items, ancestors, tab_entry_matches):
             for item in items:
-                if item.kind == "tab" and item.entry.status == "asking":
+                if item.kind == "tab" and tab_entry_matches(item.entry):
                     return item, ancestors
                 if item.kind in ("monitor", "window"):
-                    found = find_first_asking_tab_and_its_ancestors(item.child_items, ancestors + [item])
+                    found = find_first_matching_tab_and_its_ancestors(item.child_items, ancestors + [item], tab_entry_matches)
                     if found is not None:
                         return found
             return None
-        found = find_first_asking_tab_and_its_ancestors(self.top_level_items, [])
+        found = (find_first_matching_tab_and_its_ancestors(self.top_level_items, [], lambda entry: entry.status == "asking")
+                 or find_first_matching_tab_and_its_ancestors(self.top_level_items, [], lambda entry: entry.is_in_front))
         if found is None:
             return
         self.select_row_alone_and_scroll_to_it(*found)
 
     @objc.python_method
     def select_window_once_it_shows(self, window_id):
-        """Selects the first tab row of a window the "+" row opened, as select_the_first_asking_tab
-        selects a row, once the window is in a snapshot: it is listed only after its agent has
+        """Selects the first tab row of a window the "+" row opened, as
+        select_the_first_asking_tab_or_else_the_tab_in_front selects a row, once the window is in a snapshot: it is listed only after its agent has
         started (user request, 2026-10-30: in the folder of another window, it looked like that
         window). It waits SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW at most for the window to show;
         a list that isn't on screen then selects it when it appears, within

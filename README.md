@@ -13,7 +13,7 @@ A macOS menu bar app that lists the iTerm2 windows and tabs, and the tmux sessio
 - **Keyboard:** Return shows the selected tab or window, Delete ends its agent (asking first), R renames it, the Right and Left arrows open and close a tab's preview, typing a name's first letters selects its row, Command-comma opens Settings, and Esc closes the list.
 - **Sort and filter:** sort by status, name, share of the context window, start time, memory or CPU use, or keep the tab order; hide the idle tabs with one click or Command-I (new ones stay).
 - **Your choice of view:** a dropdown under the menu bar icon, a sidebar that hides at the screen's edge or stays visible (optionally keeping iTerm2 windows out of its way), or a regular window (optionally always on top).
-- **A shortcut from any app:** Shift-Command-Tab (or Command-Fn-Tab, chosen in Settings) shows the list with the first agent waiting for your answer selected, and hides it when pressed again. While macOS's app switcher is open, the keys still go to it.
+- **A shortcut from any app:** Shift-Command-Tab (or Command-Fn-Tab, chosen in Settings) shows the list with the first agent waiting for your answer selected (or, while none is, the tab in front), and hides it when pressed again. While macOS's app switcher is open, the keys still go to it.
 
 ## Requirements
 

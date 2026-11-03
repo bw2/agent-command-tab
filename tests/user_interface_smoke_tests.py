@@ -2161,7 +2161,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.press_key(characters, key_code)
         self.assertEqual([item.entry.title for item in self.list_controller.list_selected_items()], ["tandem-repeats"])
 
-    def test_the_first_asking_tab_is_selected_opening_its_collapsed_window(self):  # user request, 2026-10-29
+    def test_the_first_asking_tab_or_else_the_tab_in_front_is_selected_opening_its_collapsed_window(self):  # user requests, 2026-10-29 and 2026-11-03
         snapshot = make_sample_snapshot()
         window_one, window_two = snapshot.monitors[0].windows
         window_two = window_two._replace(agent_sessions=(window_two.agent_sessions[0]._replace(status="asking"),)
@@ -2170,13 +2170,25 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         outline_view = self.list_controller.outline_view
         self.list_controller.toggle_expansion(outline_view.itemAtRow_(0))  # collapses agent-command-tab
         self.select_rows(2)  # tandem-repeats
-        self.list_controller.select_the_first_asking_tab()
+        self.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()  # planning is in front, but agents ask
         self.assertTrue(outline_view.isItemExpanded_(outline_view.itemAtRow_(0)))
         self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["phase0-tests"])
-        self.list_controller.apply_snapshot(make_sample_snapshot(second_window_tabs=1)._replace(monitors=(
-            snapshot.monitors[0]._replace(windows=(window_one._replace(agent_sessions=window_one.agent_sessions[:1]),)),)))
-        self.select_rows(1)
-        self.list_controller.select_the_first_asking_tab()  # no agent asks
+
+        def apply_snapshot_where_no_agent_asks_and_this_tab_is_in_front(tab_id_in_front):
+            self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=tuple(
+                window_entry._replace(agent_sessions=tuple(
+                    entry._replace(status="idle", is_in_front=entry.tab_id == tab_id_in_front) for entry in window_entry.agent_sessions))
+                for window_entry in (window_one, window_two))),)))
+        apply_snapshot_where_no_agent_asks_and_this_tab_is_in_front("11")  # analysis-1
+        tandem_repeats_window_item = self.list_controller.items_by_key[("window", "w2")]
+        self.list_controller.toggle_expansion(tandem_repeats_window_item)  # collapses tandem-repeats
+        self.select_rows(outline_view.rowForItem_(self.list_controller.items_by_key[("tab", "1")]))  # planning
+        self.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
+        self.assertTrue(outline_view.isItemExpanded_(tandem_repeats_window_item))
+        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["analysis-1"])
+        apply_snapshot_where_no_agent_asks_and_this_tab_is_in_front(None)  # another app is in front
+        self.select_rows(outline_view.rowForItem_(self.list_controller.items_by_key[("tab", "1")]))
+        self.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
         self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
 
     def test_a_window_the_plus_row_opened_is_selected_and_scrolled_to_once_it_shows(self):  # user request, 2026-10-30
@@ -2527,8 +2539,9 @@ class AutomaticIconColorTests(unittest.TestCase):
         calls.clear()
         AppController.global_shortcut_pressed(stand_in_app_controller)
         self.assertEqual(calls, ["close dropdown", "give the keyboard to iTerm2", "show"])
-        # The sidebar it shows has the first agent asking a question selected (user request, 2026-10-29).
-        stand_in_app_controller.sidebar_controller.list_controller.select_the_first_asking_tab.assert_called_once_with()
+        # The sidebar it shows has the first agent asking a question selected (user request, 2026-10-29),
+        # or while none asks, the tab in front (user request, 2026-11-03).
+        stand_in_app_controller.sidebar_controller.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front.assert_called_once_with()
 
     def test_a_row_dragged_in_the_dropdown_keeps_it_open_when_the_dashboard_stops_being_the_active_app(self):
         # A drag usually starts as a hold, so it ends a peek right away, and macOS told the
