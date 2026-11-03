@@ -27,7 +27,9 @@ STATUSES_OF_A_RUNNING_BACKGROUND_TASK = frozenset({"running", "pending", None})
 # counted: Claude Code lists it as "running" for as long as it exists, idle or not, so a row kept
 # its lights and its "running" state for days after the teammates' work was done (user request, 2026-11-02).
 TYPES_OF_A_BACKGROUND_TASK_LEFT_UNCOUNTED = frozenset({"teammate"})
-# The type Claude Code's list gives a command its shell tool runs in the background.
+# The type Claude Code's list gives a command its shell tool runs in the background, and also a
+# command its Monitor tool runs (only an MCP server's monitor is a "monitor"; checked with Claude
+# Code 2.1.316 and 2.1.317 on 2026-11-03).
 BACKGROUND_SHELL_TASK_TYPE = "shell"
 # The hook events of a tool call starting and finishing (hooks_installer registers both for Claude Code's
 # Bash, Agent and Task); the main agent's, after a Stop, show its turn going on (code review, 2026-10-28).
@@ -84,25 +86,30 @@ def list_reported_shells_a_reading_can_check(hook_state, read_at):
             if task_id in hook_state["background_task_ids"] and read_at >= reported_at + SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS}
 
 
-def list_reported_background_task_ids_still_running(hook_state, running_claude_code_task_ids, read_at):
+def list_reported_background_task_ids_still_running(hook_state, running_claude_code_task_ids, claude_code_monitor_shell_count, read_at):
     """Returns the background task IDs the hooks reported for an agent process, without the
     shells no process below the agent runs any more: Claude Code sends its list only when a turn
     or an agent ends, so a shell that ended after the last one stayed on it as running, and its
     row kept a light for days (user request, 2026-11-02). A shell is known by the task output
     file its shell writes to (agent_process_tree.find_the_claude_code_task_of_an_output_file). Each
-    shell the reading can't tell yet (list_reported_shells_a_reading_can_check) counts.
+    shell the reading can't tell yet (list_reported_shells_a_reading_can_check) counts. A Monitor
+    tool's task is listed as a shell too (BACKGROUND_SHELL_TASK_TYPE), but its shell writes to
+    no file, so as many of the shells found ended as Monitor shells run still count: those of
+    the lowest IDs, as only their number shows (user request, 2026-11-03).
 
     Args:
         hook_state: The agent process's hook state (apply_hook_event), its background task IDs known.
         running_claude_code_task_ids: The task IDs of the shells running below the agent, or None
             before they were read or while a shell runs whose task isn't known, which might be
             any of them.
+        claude_code_monitor_shell_count: How many of Claude Code's Monitor shells run below the
+            agent (agent_process_tree.read_child_processes's "is_a_claude_code_monitor_shell").
         read_at: When they were read, or None.
     """
     if running_claude_code_task_ids is None:
         return set(hook_state["background_task_ids"])
-    shells_no_longer_running = list_reported_shells_a_reading_can_check(hook_state, read_at) - set(running_claude_code_task_ids)
-    return hook_state["background_task_ids"] - shells_no_longer_running
+    shells_no_longer_running = sorted(list_reported_shells_a_reading_can_check(hook_state, read_at) - set(running_claude_code_task_ids))
+    return hook_state["background_task_ids"] - set(shells_no_longer_running[claude_code_monitor_shell_count:])
 
 
 def apply_hook_event(hook_state, event):

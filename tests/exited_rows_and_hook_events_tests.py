@@ -356,7 +356,7 @@ class ChildProcessReadingTests(unittest.TestCase):
             return core.note_child_processes({"s1": [
                 {"child": child, "command_text": "python3 -m unittest", "command_started_at": 50.0, "is_background_shell": True,
                  "is_detached": False, "claude_code_task_id": "b1", "is_a_shell_writing_to_a_file_of_no_claude_code_task": False,
-                 "resource_usage": (300 * 1024 ** 2 + 12345, cpu_seconds)}],
+                 "is_a_claude_code_monitor_shell": False, "resource_usage": (300 * 1024 ** 2 + 12345, cpu_seconds)}],
                 "s-closed": []}, cpu_time_readings_by_child, now)
         cpu_time_readings_by_child = read_once(10.0, 100.0, {})
         self.assertEqual(core.screen_readings_by_session_id["s1"]["child_processes"],
@@ -375,7 +375,8 @@ class ChildProcessReadingTests(unittest.TestCase):
         core.note_child_processes({"s1": [
             {"child": child, "command_text": "sleep 30", "command_started_at": 5.0, "is_background_shell": True,
              "is_detached": is_detached, "claude_code_task_id": None if is_detached else "shell-1",
-             "is_a_shell_writing_to_a_file_of_no_claude_code_task": False, "resource_usage": None}
+             "is_a_shell_writing_to_a_file_of_no_claude_code_task": False, "is_a_claude_code_monitor_shell": False,
+             "resource_usage": None}
             for child, is_detached in ((background_shell, False), (detached_job, True))]}, {}, 100.0)
         core.note_background_task_counts()  # no hooks: the background shells seen, detached jobs included
         self.assertEqual(core.screen_readings_by_session_id["s1"]["background_task_count"], 2)
@@ -399,7 +400,8 @@ class ChildProcessReadingTests(unittest.TestCase):
                 {"child": ProcessInfo(201 + index, 101, "bash", 5.0), "command_text": "sleep 600", "command_started_at": 5.0,
                  "is_background_shell": True, "is_detached": False,
                  "claude_code_task_id": None if task_id in ("monitor", "renamed") else task_id,
-                 "is_a_shell_writing_to_a_file_of_no_claude_code_task": task_id == "renamed", "resource_usage": None}
+                 "is_a_shell_writing_to_a_file_of_no_claude_code_task": task_id == "renamed",
+                 "is_a_claude_code_monitor_shell": task_id == "monitor", "resource_usage": None}
                 for index, task_id in enumerate(task_ids)]}, {}, read_at)
             core.note_background_task_counts()
             reading = core.screen_readings_by_session_id["s1"]
@@ -414,7 +416,9 @@ class ChildProcessReadingTests(unittest.TestCase):
         self.assertTrue(core.snapshot_needed.is_set())
         self.assertEqual(count_with_the_shells_running(100.0), (1, True))
         self.assertFalse(core.snapshot_needed.is_set())
-        self.assertEqual(count_with_the_shells_running(101.0, "b7", "monitor"), (1, True))  # another task's shell, and a Monitor's
+        self.assertEqual(count_with_the_shells_running(101.0, "b7"), (1, True))  # another task's shell
+        # Claude Code lists a Monitor's task as a shell, so b1 might be the Monitor whose shell runs (user request, 2026-11-03).
+        self.assertEqual(count_with_the_shells_running(101.5, "b7", "monitor"), (2, True))
         self.assertEqual(count_with_the_shells_running(102.0, "b1"), (2, True))
         # A shell that writes to a file of no task might be b1's (Claude Code named its files
         # otherwise, say), so b1 counts, and the log says why, once.

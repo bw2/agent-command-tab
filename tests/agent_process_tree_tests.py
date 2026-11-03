@@ -237,6 +237,8 @@ class ChildProcessTests(unittest.TestCase):
                 with open(os.path.join(folder, output_file_name), "w") as output_file:
                     shells[name] = start_shell(output_file, command)
             shells["pipe"] = start_shell(subprocess.PIPE)  # as a Monitor's socket
+            # A Monitor's shell: Claude Code's shell tool wrapper, writing to a socket (seen on 2026-11-03).
+            shells["monitor"] = start_shell(subprocess.PIPE, "true && eval 'sleep 30; true' < /dev/null && pwd -P >| /dev/null")
             shells["device"] = start_shell(subprocess.DEVNULL)
             try:
                 self.assertEqual(list_the_files_a_process_writes_to(shells["device"].pid), {1: "/dev/null", 2: "/dev/null"})
@@ -251,10 +253,12 @@ class ChildProcessTests(unittest.TestCase):
                             shell.pid for shell in shells.values()}}
                 self.assertEqual(
                     {name: (entries_by_process_id[shell.pid]["claude_code_task_id"],
-                            entries_by_process_id[shell.pid]["is_a_shell_writing_to_a_file_of_no_claude_code_task"])
+                            entries_by_process_id[shell.pid]["is_a_shell_writing_to_a_file_of_no_claude_code_task"],
+                            entries_by_process_id[shell.pid]["is_a_claude_code_monitor_shell"])
                      for name, shell in shells.items()},
-                    {"task": ("b3jvsqvs2", False), "loop sent to /dev/null": ("b5loop", False), "other file": (None, True),
-                     "pipe": (None, False), "device": (None, False)})
+                    {"task": ("b3jvsqvs2", False, False), "loop sent to /dev/null": ("b5loop", False, False),
+                     "other file": (None, True, False), "pipe": (None, False, False), "monitor": (None, False, True),
+                     "device": (None, False, False)})
             finally:
                 for shell in shells.values():
                     os.killpg(shell.pid, signal.SIGKILL)
@@ -272,6 +276,7 @@ class ChildProcessTests(unittest.TestCase):
             self.assertEqual(entry["command_started_at"], entry["child"].started_at)  # not a shell: the command itself
             self.assertFalse(entry["is_background_shell"])  # not a shell
             self.assertFalse(entry["is_a_shell_writing_to_a_file_of_no_claude_code_task"])
+            self.assertFalse(entry["is_a_claude_code_monitor_shell"])
             self.assertGreater(entry["resource_usage"][0], 0)  # its memory
         finally:
             child.kill()

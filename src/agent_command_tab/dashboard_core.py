@@ -1742,6 +1742,7 @@ class DashboardCore:
             hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
             reported_background_task_ids = (
                 list_reported_background_task_ids_still_running(hook_state, reading.get("running_claude_code_task_ids"),
+                                                                reading.get("claude_code_monitor_shell_count", 0),
                                                                 reading.get("running_claude_code_task_ids_read_at"))
                 if hook_state is not None and hook_state["background_task_ids"] is not None else None)
             reading["background_task_count"] = (
@@ -2244,6 +2245,8 @@ class DashboardCore:
                                        if child_process["is_a_shell_writing_to_a_file_of_no_claude_code_task"]]
             self.note_reading_value(session_id, "running_claude_code_task_ids", None if shells_of_unknown_tasks else tuple(sorted(
                 child_process["claude_code_task_id"] for child_process in child_processes if child_process["claude_code_task_id"])))
+            self.note_reading_value(session_id, "claude_code_monitor_shell_count",
+                                    sum(child_process["is_a_claude_code_monitor_shell"] for child_process in child_processes))
             if (shells_of_unknown_tasks and (hook_state or {}).get("background_task_ids") is not None
                     and agent_process_id not in self.agent_process_ids_with_shells_of_unknown_tasks):
                 self.agent_process_ids_with_shells_of_unknown_tasks.add(agent_process_id)

@@ -97,10 +97,22 @@ class ApplyHookEventTests(unittest.TestCase):
         self.assertEqual(hook_state["background_shells_reported_at_by_task_id"], {"b2": 2.0, "b3": 2.0})
         every_task_id = {"b2", "b3", "a1"}
         # Not read yet, or a shell runs whose task isn't known: every one counts.
-        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, None, 9.0), every_task_id)
-        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 3.9), every_task_id)  # read too soon
-        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b2", "b7"), 4.0), {"b2", "a1"})
-        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 4.0), {"a1"})  # a subagent has no shell
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, None, 0, 9.0), every_task_id)
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 0, 3.9), every_task_id)  # read too soon
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b2", "b7"), 0, 4.0), {"b2", "a1"})
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 0, 4.0), {"a1"})  # a subagent has no shell
+
+    def test_a_monitor_listed_as_a_shell_counts_while_a_monitor_shell_runs(self):  # user request, 2026-11-03
+        # As Claude Code 2.1.316 listed two Monitor tasks on 2026-11-03, next to a background shell.
+        hook_state = apply_events(make_event("SessionStart", 1.0, source="startup"), make_event("Stop", 2.0, background_tasks=[
+            {"id": "bn1eiejdt", "type": "shell", "status": "running"}, {"id": "b2h6kc8nt", "type": "shell", "status": "running"},
+            {"id": "b3", "type": "shell", "status": "running"}]))
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b3",), 2, 4.0), {"bn1eiejdt", "b2h6kc8nt", "b3"})
+        # One monitor ended, and so did the background shell: one of the three still counts.
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 1, 4.0), {"b2h6kc8nt"})
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 0, 4.0), set())
+        # More Monitor shells than shells found ended (one started after the list) keep them all.
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b3",), 3, 4.0), {"bn1eiejdt", "b2h6kc8nt", "b3"})
 
     def test_a_shell_started_after_the_list_is_checked_from_its_own_start(self):  # user request, 2026-11-02
         # No list follows its start (a turn ended with Esc sends no Stop).
@@ -110,9 +122,9 @@ class ApplyHookEventTests(unittest.TestCase):
             make_event("PostToolUse", 10.0, background_task_launched_id="b2", background_task_launched_type="shell"),
             make_event("PostToolUse", 10.5, background_task_launched_id="a2", background_task_launched_type="subagent"))
         self.assertEqual(hook_state["background_shells_reported_at_by_task_id"], {"b1": 2.0, "b2": 10.0})
-        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 11.0), {"b2", "a2"})  # b2 not readable yet
-        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 12.0), {"a2"})
-        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b2",), 12.0), {"b2", "a2"})
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 0, 11.0), {"b2", "a2"})  # b2 not readable yet
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 0, 12.0), {"a2"})
+        self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b2",), 0, 12.0), {"b2", "a2"})
 
     def test_background_tasks_are_unknown_until_a_new_start_or_a_list(self):
         # The app started while the session already ran: what it runs isn't known yet.

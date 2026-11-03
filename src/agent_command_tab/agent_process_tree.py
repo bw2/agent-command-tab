@@ -523,6 +523,10 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
     "is_a_shell_writing_to_a_file_of_no_claude_code_task": whether it is a shell or wrapper with a
     process running in it, writing to no Claude Code task's file, whose standard output goes to a
     file (not to a pipe, a socket or a device, as Claude Code's Monitor tool's shells write to sockets),
+    "is_a_claude_code_monitor_shell": whether it is a shell Claude Code's shell tool runs
+    (find_the_command_a_claude_code_shell_runs) whose standard output goes to no file: Claude
+    Code's Monitor tool runs its command so, writing to a socket, while every command of its
+    Bash tool writes to its task's output file (checked with Claude Code 2.1.316 on 2026-11-03),
     "resource_usage": (memory in bytes, CPU seconds) of the child and the processes below it, or
     None}] for each process the agent started (list_child_processes_of_the_agent), then for each
     detached one (choose_detached_processes_of_the_conversation), which runs in the background.
@@ -559,12 +563,13 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
             "is_a_shell_writing_to_a_file_of_no_claude_code_task": (
                 child.name in SHELL_AND_WRAPPER_PROCESS_NAMES and shown_process is not child and claude_code_task_id is None
                 and output_file_path != "" and not output_file_path.startswith(DEVICES_FOLDER)),
+            "is_a_claude_code_monitor_shell": claude_code_shell_command is not None and claude_code_task_id is None and output_file_path == "",
             "resource_usage": read_process_tree_resource_usage(child.process_id) if reads_resource_usage else None})
     for process, arguments in detached_processes_of_the_conversation:
         child_processes.append({
             "child": process, "command_text": build_command_text(arguments, process.name), "command_started_at": process.started_at,
             "is_background_shell": True, "is_detached": True, "claude_code_task_id": None,
-            "is_a_shell_writing_to_a_file_of_no_claude_code_task": False,
+            "is_a_shell_writing_to_a_file_of_no_claude_code_task": False, "is_a_claude_code_monitor_shell": False,
             "resource_usage": read_process_tree_resource_usage(process.process_id) if reads_resource_usage else None})
     return sorted(child_processes, key=lambda child_process: child_process["child"].started_at)  # oldest first, detached ones too
 
