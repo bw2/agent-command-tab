@@ -9,8 +9,9 @@ import threading
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSBezierPath, NSBox, NSBoxCustom, NSBoxSeparator, NSButton,
                     NSColor, NSControlSizeMini, NSControlSizeSmall, NSEventModifierFlagCommand, NSEventModifierFlagControl,
-                    NSEventModifierFlagOption, NSEventTypeKeyDown, NSFont, NSInsetRect, NSMakeRect, NSNoTitle, NSNormalWindowLevel,
-                    NSPopUpButton, NSScreen, NSScrollView, NSSwitch, NSTextField, NSView, NSViewMinXMargin, NSViewWidthSizable,
+                    NSDownArrowFunctionKey, NSEventModifierFlagOption, NSEventTypeKeyDown, NSFont, NSInsetRect, NSMakeRect, NSNoTitle,
+                    NSNormalWindowLevel, NSPopUpButton, NSScreen, NSScrollView, NSSwitch, NSText, NSTextField, NSUpArrowFunctionKey, NSView,
+                    NSViewMinXMargin, NSViewWidthSizable,
                     NSWindow, NSWindowOcclusionStateVisible, NSWindowStyleMaskClosable,
                     NSWindowStyleMaskResizable, NSWindowStyleMaskTitled, NSWorkspace)
 from Foundation import NSURL
@@ -45,6 +46,10 @@ INDENT_OF_A_ROW_THAT_CONTINUES_THE_ONE_ABOVE = 16  # a harness's command, under 
 GAP_BEFORE_UNITS = 6  # between a control and its units ("points")
 BOX_CORNER_RADIUS = 8
 MINI_SWITCH_SIZE = (26, 15)  # what a mini NSSwitch draws (checked on macOS 27)
+# The keys that work the focused control (user request, 2026-11-02): Space and Return turn a switch
+# on or off and press a button; they and the up and down arrows open a pop-up's menu.
+KEYS_THAT_PRESS_A_CONTROL = frozenset({" ", "\r"})
+KEYS_THAT_OPEN_A_POP_UP = KEYS_THAT_PRESS_A_CONTROL | {NSUpArrowFunctionKey, NSDownArrowFunctionKey}
 NOTE_HEIGHT = 30  # the sidebar's placement note under its box: two lines of small text
 LAUNCH_COMMAND_FIELD_WIDTH = 360  # a longer command scrolls inside the field (user requests, 2026-10-25; 200 until 2026-10-28)
 # A box's fill and border: a little darker than the window in light mode, a little lighter in dark mode.
@@ -105,17 +110,87 @@ class LaunchCommandField(NSTextField):
             outline.stroke()
 
 
+def is_a_plain_press_of(event, keys):
+    """Whether a key press is one of keys (characters, as charactersIgnoringModifiers gives them),
+    without Command, Option or Control, which other shortcuts use."""
+    return (event.charactersIgnoringModifiers() in keys
+            and not event.modifierFlags() & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl))
+
+
+def find_the_control_that_has_the_keyboard(window):
+    """Returns the control that has a window's keyboard (a text field being typed in rather than
+    the field editor that takes its keys), or None."""
+    responder = window.firstResponder()
+    if isinstance(responder, NSText) and responder.isFieldEditor():
+        return responder.delegate()
+    return responder if isinstance(responder, NSView) else None
+
+
+def can_be_reached_with_tab(control):
+    """Whether a settings control is in the order Tab and Shift-Tab go through: shown and enabled.
+    AppKit leaves switches, pop-ups and buttons out of it unless System Settings > Keyboard >
+    Keyboard navigation is on, so the settings window's own controls put themselves in."""
+    return bool(control.isEnabled()) and not control.isHiddenOrHasHiddenAncestor()
+
+
+class KeyboardSwitch(NSSwitch):
+    """A switch that Tab and Shift-Tab reach, and that Space or Return turns on or off (user request, 2026-11-02)."""
+
+    def canBecomeKeyView(self):
+        return can_be_reached_with_tab(self)
+
+    def keyDown_(self, event):
+        if is_a_plain_press_of(event, KEYS_THAT_PRESS_A_CONTROL):
+            self.setState_(0 if self.state() else 1)
+            self.sendAction_to_(self.action(), self.target())
+        else:
+            objc.super(KeyboardSwitch, self).keyDown_(event)
+
+
+class KeyboardPopUpButton(NSPopUpButton):
+    """A pop-up that Tab and Shift-Tab reach, and whose menu Space, Return or an up or down arrow
+    opens; the arrows and Return then choose in it, as in any menu (user request, 2026-11-02)."""
+
+    def canBecomeKeyView(self):
+        return can_be_reached_with_tab(self)
+
+    def keyDown_(self, event):
+        if is_a_plain_press_of(event, KEYS_THAT_OPEN_A_POP_UP):
+            self.performClick_(None)
+        else:
+            objc.super(KeyboardPopUpButton, self).keyDown_(event)
+
+
+class KeyboardButton(NSButton):
+    """A button that Tab and Shift-Tab reach, and that Space or Return presses (user request, 2026-11-02)."""
+
+    def canBecomeKeyView(self):
+        return can_be_reached_with_tab(self)
+
+    def keyDown_(self, event):
+        if is_a_plain_press_of(event, KEYS_THAT_PRESS_A_CONTROL):
+            self.performClick_(None)
+        else:
+            objc.super(KeyboardButton, self).keyDown_(event)
+
+
 class SettingsWindow(NSWindow):
     """The settings window: Esc closes it as its close button does (user request, 2026-10-29),
     also while a field is being typed in, whose text field would otherwise take Esc as a request
-    for completions. Closing saves that field (SettingsWindowController.windowWillClose_)."""
+    for completions. Closing saves that field (SettingsWindowController.windowWillClose_). A
+    control that Tab or Shift-Tab reaches scrolls into view when the rows are taller than the window."""
 
     def sendEvent_(self, event):
-        if (event.type() == NSEventTypeKeyDown and event.charactersIgnoringModifiers() == ESCAPE_CHARACTER
-                and not event.modifierFlags() & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl)):
+        if event.type() == NSEventTypeKeyDown and is_a_plain_press_of(event, {ESCAPE_CHARACTER}):
             self.performClose_(None)
             return
         objc.super(SettingsWindow, self).sendEvent_(event)
+
+    def makeFirstResponder_(self, responder):
+        made = objc.super(SettingsWindow, self).makeFirstResponder_(responder)
+        if made and isinstance(responder, NSView):
+            responder.scrollRectToVisible_(responder.bounds())
+        return made
 
 
 class SettingsWindowController(WindowFrameSavingController):
@@ -197,8 +272,9 @@ class SettingsWindowController(WindowFrameSavingController):
         self.global_shortcut_popup = self.make_popup(GLOBAL_SHORTCUT_TITLES, self.settings["global_shortcut"])
         self.global_shortcut_popup.setToolTip_("Shows AgentCommandTab, and hides it when pressed again.")  # the user's wording, 2026-10-28
         # Shown, in a row of its own under the shortcut, only while macOS refuses the shortcut's key filter.
-        self.accessibility_settings_button = NSButton.buttonWithTitle_target_action_(
+        self.accessibility_settings_button = KeyboardButton.buttonWithTitle_target_action_(
             "Needs Accessibility: Open System Settings…", self, "openAccessibilitySettingsClicked:")
+        self.accessibility_settings_button.cell().setShowsFirstResponder_(True)  # its focus ring, also without Keyboard navigation
         self.accessibility_settings_button.setControlSize_(NSControlSizeSmall)
         self.accessibility_settings_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.accessibility_settings_button.sizeToFit()
@@ -279,6 +355,10 @@ class SettingsWindowController(WindowFrameSavingController):
         window.setTitle_("AgentCommandTab Settings")
         window.setReleasedWhenClosed_(False)
         window.setContentView_(scroll_view)
+        # Tab and Shift-Tab go through the controls from the top one, which has the keyboard when
+        # the window opens (user request, 2026-11-02).
+        window.recalculateKeyViewLoop()
+        window.setInitialFirstResponder_(self.show_as_popup)
         window.setMinSize_(SMALLEST_WINDOW_SIZES["settings_window_frame"])
         window.setDelegate_(self)
         for launch_command_field in self.launch_command_fields:
@@ -313,9 +393,15 @@ class SettingsWindowController(WindowFrameSavingController):
             return
         # A width being typed is saved first, as when the window closes: its field would end
         # editing, and save, as it is taken out during the layout.
+        control_that_had_the_keyboard = find_the_control_that_has_the_keyboard(self.window)
         self.window.makeFirstResponder_(None)
         self.lay_out_sections(show_as)
         self.window.recalculateKeyViewLoop()  # Tab goes through the fields shown now (code review, 2026-10-27)
+        # Taken out of the window with the views it was among; the keyboard goes back to the control
+        # that had it, so Tab goes on from there after "Show as" was chosen with it (user request, 2026-11-02).
+        self.window.setInitialFirstResponder_(self.show_as_popup)
+        if control_that_had_the_keyboard is not None and control_that_had_the_keyboard.window() is self.window:
+            self.window.makeFirstResponder_(control_that_had_the_keyboard)
         self.fit_window_height_to_rows()
 
     @objc.python_method
@@ -406,7 +492,7 @@ class SettingsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def make_switch(self, is_on):
-        switch = NSSwitch.alloc().init()
+        switch = KeyboardSwitch.alloc().init()
         switch.setControlSize_(NSControlSizeMini)  # the size System Settings' switches have
         # A switch reports the regular size whatever its control size, and draws a mini one in the
         # middle of that, so its frame is made to fit what it draws: it then lines up at the right.
@@ -419,7 +505,8 @@ class SettingsWindowController(WindowFrameSavingController):
     @objc.python_method
     def make_popup(self, titles_by_value, selected_value):
         """Returns a pop-up of a setting's values, titled from titles_by_value, with selected_value chosen."""
-        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 240, 24), False)
+        popup = KeyboardPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 240, 24), False)
+        popup.cell().setShowsFirstResponder_(True)  # its focus ring, also without Keyboard navigation
         add_popup_choices(popup, titles_by_value)
         popup.sizeToFit()  # only as wide as its longest item
         select_popup_choice(popup, selected_value)

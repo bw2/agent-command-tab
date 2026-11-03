@@ -17,7 +17,8 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
                     NSBitmapImageFileTypePNG, NSBox, NSBoxCustom, NSButton, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
-                    NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagShift, NSEventTypeKeyDown,
+                    NSDownArrowFunctionKey, NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagShift,
+                    NSEventTypeKeyDown, NSSwitch, NSText, NSUpArrowFunctionKey,
                     NSEventTypeLeftMouseDown,
                     NSEventTypeLeftMouseUp, NSLeftArrowFunctionKey, NSMakePoint, NSMakeRect, NSMidX, NSMidY, NSPointInRect,
                     NSRightArrowFunctionKey,
@@ -65,7 +66,7 @@ from agent_command_tab.user_interface.menu_bar_status_item import (choose_icon_c
                                                                    choose_what_a_click_on_the_icon_does_to_the_dropdown)
 from agent_command_tab.user_interface.settings_window import (GAP_BELOW_SECTION_TITLE, GAP_BETWEEN_SECTIONS,
                                                               LAUNCH_COMMAND_FIELD_WIDTH, SECTION_TITLE_HEIGHT,
-                                                              SettingsWindowController)
+                                                              KeyboardButton, KeyboardPopUpButton, SettingsWindowController)
 from agent_command_tab.user_interface.settings_window import ROW_HEIGHT as SETTINGS_ROW_HEIGHT  # the list has its own
 from agent_command_tab.user_interface.sidebar_panel import (SidebarController,
                                                             allow_pointer_changes_while_another_app_is_in_front)
@@ -3159,6 +3160,63 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_text_fields_save_when_they_lose_focus_too(self):
         self.assertTrue(self.controller.sidebar_width_field.cell().sendsActionOnEndEditing())
 
+    def test_tab_and_shift_tab_go_through_every_control_from_top_to_bottom(self):  # user request, 2026-11-02
+        # Also with System Settings > Keyboard > Keyboard navigation off, when AppKit's own switches,
+        # pop-ups and buttons stay out of it.
+        window = self.controller.window
+
+        def go_around(find_the_next_control):
+            """The controls Tab (or Shift-Tab) goes through, as AppKit takes them from the window's
+            key view loop, from the one that has the keyboard when the window opens."""
+            controls = [window.initialFirstResponder()]
+            while find_the_next_control(controls[-1]) not in controls and len(controls) < 100:
+                controls.append(find_the_next_control(controls[-1]))
+            return controls
+        shown_controls = sorted(
+            (view for view in self.controller.rows_view.subviews() if not view.isHidden()
+             and (isinstance(view, (NSSwitch, NSButton)) or (isinstance(view, NSTextField) and view.isEditable()))),
+            key=lambda view: (view.frame().origin.y, view.frame().origin.x))  # the rows' view is flipped: the top row first
+        self.assertGreater(len([control for control in shown_controls if isinstance(control, NSSwitch)]), 5)
+        self.assertEqual(go_around(lambda control: control.nextValidKeyView()), shown_controls)
+        # Shift-Tab: from the top control round to the bottom one, and up from there.
+        self.assertEqual(go_around(lambda control: control.previousValidKeyView()), shown_controls[:1] + shown_controls[:0:-1])
+        # After a layout for another "Show as" too, which shows the sidebar's pop-ups and its width field.
+        # The keyboard stays on "Show as", as when Sidebar was chosen with it, so Tab goes on from there.
+        window.makeFirstResponder_(self.controller.show_as_popup)
+        self.controller.reflect_settings(dict(self.owner.settings, show_as="sidebar"))
+        self.assertIs(window.firstResponder(), self.controller.show_as_popup)
+        self.assertIn(self.controller.sidebar_width_field, go_around(lambda control: control.nextValidKeyView()))
+
+    def make_key_press(self, characters, key_code):
+        return NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+            NSEventTypeKeyDown, (0, 0), 0, 0, self.controller.window.windowNumber(), None, characters, characters, False, key_code)
+
+    def test_space_or_return_turns_the_focused_switch_on_or_off(self):  # user request, 2026-11-02
+        switch = self.controller.start_with_iterm2_switch
+        self.controller.window.makeFirstResponder_(switch)
+        switch.keyDown_(self.make_key_press(" ", 49))
+        self.assertFalse(self.owner.settings["app_starts_with_iterm2"])
+        switch.keyDown_(self.make_key_press("\r", 36))
+        self.assertTrue(self.owner.settings["app_starts_with_iterm2"])
+
+    def test_keys_open_a_focused_pop_ups_menu_and_press_a_focused_button(self):  # user request, 2026-11-02
+        pressed = []
+
+        class PopUpThatRecordsPresses(KeyboardPopUpButton):  # a real menu would wait for a choice
+            def performClick_(self, sender):
+                pressed.append("pop-up")
+
+        class ButtonThatRecordsPresses(KeyboardButton):
+            def performClick_(self, sender):
+                pressed.append("button")
+        popup = PopUpThatRecordsPresses.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 100, 24), False)
+        button = ButtonThatRecordsPresses.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 24))
+        for characters, key_code in ((" ", 49), ("\r", 36), (NSUpArrowFunctionKey, 126), (NSDownArrowFunctionKey, 125)):
+            popup.keyDown_(self.make_key_press(characters, key_code))
+        for characters, key_code in ((" ", 49), ("\r", 36)):
+            button.keyDown_(self.make_key_press(characters, key_code))
+        self.assertEqual(pressed, ["pop-up"] * 4 + ["button"] * 2)
+
     def test_invalid_number_puts_the_current_value_back(self):
         self.controller.sidebar_width_field.setStringValue_("5")
         self.controller.controlChanged_(self.controller.sidebar_width_field)
@@ -3350,7 +3408,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_tab_goes_through_the_fields_of_a_section_shown_after_the_window_opened(self):  # code review, 2026-10-27
         self.controller.window.recalculateKeyViewLoop()  # as showing the window does, here as Popup
         self.show_the_sidebar_section()
-        self.assertIs(self.controller.sidebar_width_field.nextValidKeyView(), self.controller.launch_command_fields[0])
+        # On to the control below it, the first column's switch (the next text field until 2026-11-02, when Tab reached only those).
+        self.assertIs(self.controller.sidebar_width_field.nextValidKeyView(), self.controller.column_switches["state"])
 
     def test_the_window_fits_its_height_to_the_sections_shown_keeping_its_top_edge_and_width(self):
         window = self.controller.window  # built, not shown
