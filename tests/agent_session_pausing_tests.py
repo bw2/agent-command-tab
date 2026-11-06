@@ -27,6 +27,7 @@ SHELL_PROCESS_ID = 50  # the shell that runs the agent as a job
 TOOL = "Claude Code"
 PROMPT = "mac:~/code $ "
 RIGHT_PROMPT = "    main 12:24"
+AGENT_INPUT_LINE = "❯\xa0"  # Claude Code's input line, where its cursor waits
 STARTED_AT = 1000.0  # every fake process's start time
 Entry = collections.namedtuple("Entry", ["session_id", "status", "is_paused_with_the_processes_below_it"], defaults=[False])
 
@@ -77,6 +78,18 @@ class FakeTab:
         return FakeScreenContents(self.screen_rows, self.cursor_x)
 
 
+def make_tab_whose_agent_takes_control_z(processes, screen_rows_after_control_z, cursor_x=None):
+    """Returns a FakeTab that shows the agent's input line until Ctrl+Z, which suspends the agent
+    and leaves the shell's rows on screen."""
+    tab = FakeTab([AGENT_INPUT_LINE])
+
+    def take_control_z(text):
+        processes.stopped_process_ids.add(AGENT_PROCESS_ID)
+        tab.screen_rows, tab.cursor_x = screen_rows_after_control_z, cursor_x
+    tab.on_text = take_control_z
+    return tab
+
+
 class FakeProcesses:
     """Which fake processes are stopped, which have their terminal, which other jobs the shell
     has suspended, and the signals sent to them."""
@@ -122,7 +135,8 @@ class FakeProcesses:
                 unittest.mock.patch.object(agent_session_pausing, "read_name_of_any_process", return_value="sudo"),
                 unittest.mock.patch.object(agent_session_pausing, "read_process_info", side_effect=make_process_info),
                 unittest.mock.patch.object(agent_session_pausing.os, "kill", side_effect=self.kill),
-                unittest.mock.patch.object(agent_session_pausing, "SECONDS_BETWEEN_CHECKS", 0.01)]
+                unittest.mock.patch.object(agent_session_pausing, "SECONDS_BETWEEN_CHECKS", 0.01),
+                unittest.mock.patch.object(agent_session_pausing, "SECONDS_THE_PROMPT_MUST_STAY_THE_SAME", 0.05)]
 
 
 def run_with_patches(processes, coroutine):
@@ -148,8 +162,7 @@ class SplitTests(unittest.TestCase):
 class PauseTests(unittest.TestCase):
     def test_control_z_suspends_the_agent_then_every_process_below_it_is_stopped_and_recorded(self):
         processes = FakeProcesses()
-        tab = FakeTab([PROMPT + RIGHT_PROMPT], cursor_x=len(PROMPT),
-                      on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))  # the agent takes Ctrl+Z
+        tab = make_tab_whose_agent_takes_control_z(processes, [PROMPT + RIGHT_PROMPT], cursor_x=len(PROMPT))
         action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL))
         self.assertTrue(action_result.succeeded)
         self.assertEqual(tab.typed_texts, ["\x1a"])
@@ -158,7 +171,7 @@ class PauseTests(unittest.TestCase):
 
     def test_the_detached_processes_its_conversation_started_are_stopped_and_recorded_too(self):  # code review, 2026-10-29
         processes = FakeProcesses()
-        tab = FakeTab([PROMPT], on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))
+        tab = make_tab_whose_agent_takes_control_z(processes, [PROMPT])
         detached_process = ProcessInfo(300, 1, "python3", STARTED_AT)  # launchd adopted it when its shell ended
         action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(
             Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL, detached_processes=[detached_process]))
@@ -173,7 +186,8 @@ class PauseTests(unittest.TestCase):
             signal_number == signal.SIGSTOP and processes.stopped_process_ids.add(process_id))
         tab = FakeTab([PROMPT])
         with unittest.mock.patch.object(agent_session_pausing, "SECONDS_TO_WAIT_FOR_CONTROL_Z", 0.05), \
-                unittest.mock.patch.object(agent_session_pausing, "SECONDS_TO_WAIT_FOR_SIGTSTP", 0.05):
+                unittest.mock.patch.object(agent_session_pausing, "SECONDS_TO_WAIT_FOR_SIGTSTP", 0.05), \
+                unittest.mock.patch.object(agent_session_pausing, "SECONDS_TO_WAIT_FOR_THE_SHELL_PROMPT", 0.05):
             action_result, _ = run_with_patches(processes, agent_session_pausing.pause_agent_session(Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL))
         self.assertTrue(action_result.succeeded)
         self.assertEqual(processes.signals[:2], [(AGENT_PROCESS_ID, signal.SIGTSTP), (AGENT_PROCESS_ID, signal.SIGSTOP)])
@@ -181,7 +195,7 @@ class PauseTests(unittest.TestCase):
     def test_the_prompt_is_recorded_only_once_the_shell_has_the_terminal_and_its_line_settles(self):
         processes = FakeProcesses(process_ids_with_their_terminal={AGENT_PROCESS_ID})
         # The agent's own input line still shows, then the shell draws its prompt bit by bit.
-        screens = [["❯ "], ["[1]+  Stopped  claude", "mac:~/co"], ["[1]+  Stopped  claude", PROMPT]]
+        screens = [[AGENT_INPUT_LINE], ["[1]+  Stopped  claude", "mac:~/co"], ["[1]+  Stopped  claude", PROMPT]]
         tab = FakeTab(screens[0])
         screen_reads = []
 
@@ -192,6 +206,8 @@ class PauseTests(unittest.TestCase):
         tab.on_text = on_control_z
 
         async def read_next_screen():
+            if not tab.typed_texts:  # the read right before Ctrl+Z, while the agent has the terminal
+                return FakeScreenContents(screens[0])
             self.assertFalse(processes.process_ids_with_their_terminal)
             screen_reads.append(None)
             return FakeScreenContents(screens[min(len(screen_reads) - 1, len(screens) - 1)])
@@ -200,13 +216,36 @@ class PauseTests(unittest.TestCase):
         _, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL))
         self.assertEqual(pause_record.text_around_the_cursor, (PROMPT, ""))
 
+    def test_the_agents_line_that_iterm2_still_reports_after_control_z_is_not_taken_for_the_prompt(self):
+        # For a tab that isn't visible, iTerm2 refreshes the screen its Python API reports about
+        # once a second, so after Ctrl+Z it goes on reporting the agent's input line for a while,
+        # then the shell's rows as they were at a refresh, here halfway through the prompt
+        # (measured 2026-11-05: Claude Code's line until 0.94 s, the prompt from 1.99 s).
+        processes = FakeProcesses()
+        screens_reported_after_control_z = ([[AGENT_INPUT_LINE]] * 10 + [["[1]+  Stopped  claude", "mac:~/co"]] * 3
+                                            + [["[1]+  Stopped  claude", PROMPT]])
+        tab = FakeTab([AGENT_INPUT_LINE], on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))
+        reads_after_control_z = []
+
+        async def report_next_screen():
+            if not tab.typed_texts:
+                return FakeScreenContents([AGENT_INPUT_LINE])
+            reads_after_control_z.append(None)
+            return FakeScreenContents(screens_reported_after_control_z[
+                min(len(reads_after_control_z), len(screens_reported_after_control_z)) - 1])
+        tab.async_get_screen_contents = report_next_screen
+        _, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL))
+        self.assertEqual(pause_record.text_around_the_cursor, (PROMPT, ""))
+
     def test_a_tab_closed_while_the_pause_waits_for_the_prompt_still_gets_a_record(self):
         processes = FakeProcesses()
-        tab = FakeTab([PROMPT], on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))
+        tab = FakeTab([AGENT_INPUT_LINE], on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))
 
-        async def tab_closed():
+        async def tab_closed_after_control_z():
+            if not tab.typed_texts:
+                return FakeScreenContents([AGENT_INPUT_LINE])
             raise iterm2.RPCException("SESSION_NOT_FOUND")
-        tab.async_get_screen_contents = tab_closed
+        tab.async_get_screen_contents = tab_closed_after_control_z
         action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL))
         self.assertTrue(action_result.succeeded)
         self.assertEqual(pause_record, make_pause_record()._replace(text_around_the_cursor=None))  # still continued later
@@ -316,7 +355,7 @@ class ResumeTests(unittest.TestCase):
                 raise PermissionError(1, "Operation not permitted")
             signal_process(process_id, signal_number)
         processes.kill = kill
-        tab = FakeTab([PROMPT], on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))
+        tab = make_tab_whose_agent_takes_control_z(processes, [PROMPT])
         action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL))
         self.assertFalse(action_result.succeeded)
         self.assertIn("keep running: node", action_result.message)
@@ -324,7 +363,7 @@ class ResumeTests(unittest.TestCase):
 
     def test_another_users_process_below_the_agent_is_named_and_left_alone(self):
         processes = FakeProcesses(other_users_process_ids_below=(104,))  # sudo, which this user can't even read
-        tab = FakeTab([PROMPT], on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))
+        tab = make_tab_whose_agent_takes_control_z(processes, [PROMPT])
         action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL))
         self.assertEqual((action_result.succeeded, action_result.message[-len("keep running: sudo"):]),
                          (False, "keep running: sudo"))
@@ -334,7 +373,7 @@ class ResumeTests(unittest.TestCase):
     def test_the_dashboard_started_from_the_agents_commands_is_not_stopped(self):
         processes = FakeProcesses(process_ids_below=(101, 102, 103))
         processes.dashboard_and_its_ancestor_ids = [102, 101, AGENT_PROCESS_ID]  # the agent's shell started the dashboard
-        tab = FakeTab([PROMPT], on_text=lambda text: processes.stopped_process_ids.add(AGENT_PROCESS_ID))
+        tab = make_tab_whose_agent_takes_control_z(processes, [PROMPT])
         action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session(Iterm2TerminalSession(tab), AGENT_PROCESS_ID, TOOL))
         self.assertTrue(action_result.succeeded)
         self.assertEqual(processes.signals, [(103, signal.SIGSTOP)])

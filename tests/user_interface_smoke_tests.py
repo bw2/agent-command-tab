@@ -655,11 +655,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertTrue(message_frame.size.width == 0
                             or message_frame.origin.x + message_frame.size.width <= idle_tabs_button_frame.origin.x,
                             width)  # never covers the buttons
-            # Settings at the bottom bar's left end, and pause or resume all at its right end.
+            # Settings at the bottom bar's left end, and pause or resume the selected rows at its right end.
             settings_button_frame = panel.settings_button.frame()
             self.assertEqual(settings_button_frame.origin.x, PANEL_SIDE_MARGIN)
             self.assertLessEqual(settings_button_frame.origin.y + settings_button_frame.size.height, BOTTOM_BAR_HEIGHT)
-            pause_button_frame = panel.pause_or_resume_all_button.frame()
+            pause_button_frame = panel.pause_or_resume_selected_rows_button.frame()
             self.assertEqual(pause_button_frame.origin.x + pause_button_frame.size.width, width - PANEL_SIDE_MARGIN)
             self.assertLessEqual(pause_button_frame.origin.y + pause_button_frame.size.height, BOTTOM_BAR_HEIGHT)
         self.window.setContentSize_((320, 260))
@@ -707,8 +707,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
         self.assertEqual(outline_view.numberOfRows(), 4)  # w1, phase0-tests (asking), codex-review (done), "+"
         # Only rows are hidden: the window row still stands for its whole window (New tab starts in
-        # the selected tab's folder, Close window counts every agent), and the bottom bar's pause
-        # button still acts on every agent session.
+        # the selected tab's folder, Close window counts every agent), and the hooks note still
+        # counts every agent session's tool.
         self.assertEqual(len(outline_view.itemAtRow_(0).entry.agent_sessions), 3)
         self.assertEqual(len(self.list_controller.list_agent_session_entries()), 5)
         self.select_rows(0, 1)  # the window and phase0-tests: Kill counts and ends the hidden idle planning too
@@ -974,7 +974,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Extract to new window", "---",
                           "/compact", "/clear", "Kill session", "---", "Pause session"])
 
-    def test_pause_and_resume_in_the_row_menus_and_the_top_bar(self):
+    def test_pause_and_resume_in_the_row_menus_and_the_bottom_bar(self):
         snapshot = make_sample_snapshot()
         window_one, window_two = snapshot.monitors[0].windows
         with_one_paused = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one._replace(
@@ -990,22 +990,38 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.menuResumeSessions_(tab_menu_items_by_title["Resume session"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("resume_agent_sessions", {"session_ids": ["s1"]}))
+        # The bottom bar's button acts on the selected rows only (user request, 2026-11-05).
         panel = self.dropdown_panel_controller
-        button = panel.pause_or_resume_all_button
-        self.assertEqual((button.isHidden(), button.toolTip()),
-                         (False, "Pause all agent processes by suspending them (Ctrl+Z, or a STOP signal)"))
-        panel.pauseOrResumeAllClicked_(button)  # pauses the sessions that run
-        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
-                         ("pause_agent_sessions", {"session_ids": ["s2", "s3", "s10", "s11"]}))
+        button = panel.pause_or_resume_selected_rows_button
+        self.list_controller.outline_view.deselectAll_(None)
+        self.assertTrue(button.isHidden())  # nothing selected
+        for rows, action, session_ids in (
+                ((2,), "pause_agent_sessions", ["s2"]),  # phase0-tests alone
+                ((0,), "pause_agent_sessions", ["s2", "s3"]),  # a window row: its tabs that run, not the paused planning
+                ((1,), "resume_agent_sessions", ["s1"]),  # planning, paused
+                ((1, 5), "pause_agent_sessions", ["s10"])):  # while one of the selected rows runs, a click pauses
+            self.select_rows(*rows)
+            self.assertEqual((button.isHidden(), button.toolTip()), (False, {
+                "pause_agent_sessions": "Pause the selected rows' agent processes by suspending them (Ctrl+Z, or a STOP signal)",
+                "resume_agent_sessions": "Resume the selected rows' paused agent processes (fg, then a CONT signal)"}[action]), rows)
+            panel.pauseOrResumeSelectedRowsClicked_(button)
+            self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                             (action, {"session_ids": session_ids}), rows)
         all_paused = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=tuple(
             window._replace(agent_sessions=tuple(entry._replace(status="paused", is_paused_with_the_processes_below_it=True)
                                                  for entry in window.agent_sessions))
             for window in snapshot.monitors[0].windows)),))
         self.list_controller.apply_snapshot(all_paused)
-        self.assertEqual(button.toolTip(), "Resume all paused agent processes (fg, then a CONT signal)")
-        panel.pauseOrResumeAllClicked_(button)
+        self.select_rows(0, 4)  # both window rows
+        panel.pauseOrResumeSelectedRowsClicked_(button)
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("resume_agent_sessions", {"session_ids": ["s1", "s2", "s3", "s10", "s11"]}))
+        self.apply_snapshot_with_child_processes()
+        self.click_row_arrow(1)  # planning's process rows show below it
+        self.select_rows(2)  # a process row stands for its tab's agent session, which a pause stops with it
+        panel.pauseOrResumeSelectedRowsClicked_(button)
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
+                         ("pause_agent_sessions", {"session_ids": ["s1"]}))
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(snapshot))
         self.assertEqual(self.build_right_click_menu_titles(0)[-1], "Pause 3 sessions")  # a monitor row's menu
 
@@ -2394,12 +2410,14 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual((panel.hooks_note_text_field.stringValue(), panel.hooks_note_text_field.isHidden(),
                               panel.install_hooks_button.isHidden()), (expected_note, not expected_note, not shows_button))
         self.list_controller.apply_snapshot(snapshot._replace(hooks_status_per_agent_tool=(("Claude Code", "missing"),)))
+        self.select_rows(1)  # "planning", which runs: the pause button shows at the bottom right
+        self.assertFalse(panel.pause_or_resume_selected_rows_button.isHidden())
         note_frame, button_frame = panel.hooks_note_text_field.frame(), panel.install_hooks_button.frame()
         settings_button_frame = panel.settings_button.frame()  # at the bottom left, then the note, then its button
         self.assertEqual(settings_button_frame.origin.x, PANEL_SIDE_MARGIN)
         self.assertEqual(note_frame.origin.x, settings_button_frame.origin.x + settings_button_frame.size.width + 8)
         self.assertLess(note_frame.origin.x + note_frame.size.width, button_frame.origin.x)
-        self.assertLessEqual(button_frame.origin.x + button_frame.size.width, panel.pause_or_resume_all_button.frame().origin.x)
+        self.assertLessEqual(button_frame.origin.x + button_frame.size.width, panel.pause_or_resume_selected_rows_button.frame().origin.x)
         self.assertLess(button_frame.origin.y + button_frame.size.height, BOTTOM_BAR_HEIGHT)
         panel.installHooksClicked_(panel.install_hooks_button)
         self.assertEqual(self.owner.hooks_install_requests, [["Claude Code"]])

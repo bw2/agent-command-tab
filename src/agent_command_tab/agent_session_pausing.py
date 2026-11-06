@@ -38,7 +38,10 @@ CONTROL_Z = "\x1a"
 CONTROL_U = "\x15"  # clears the shell's input line (bash, zsh, fish)
 SECONDS_TO_WAIT_FOR_CONTROL_Z = 2
 SECONDS_TO_WAIT_FOR_SIGTSTP = 1
-SECONDS_TO_WAIT_FOR_THE_SHELL_PROMPT = 2
+SECONDS_TO_WAIT_FOR_THE_SHELL_PROMPT = 6
+# Longer than the second or so in which iTerm2 refreshes what its Python API reports of a tab that
+# isn't visible (read_the_shell_prompt).
+SECONDS_THE_PROMPT_MUST_STAY_THE_SAME = 1.5
 SECONDS_TO_WAIT_FOR_FG = 3
 SECONDS_BETWEEN_CHECKS = 0.1
 
@@ -97,12 +100,26 @@ async def wait_until(condition, seconds):
     return condition()
 
 
-async def read_the_shell_prompt(terminal_session, agent_process_id):
+async def read_the_shell_prompt(terminal_session, agent_process_id, text_around_the_cursor_before_control_z):
     """Returns the cursor line once the shell has drawn its prompt, waiting up to
     SECONDS_TO_WAIT_FOR_THE_SHELL_PROMPT for a slow prompt, or None. The prompt counts as drawn
-    once the shell has taken the terminal back from the agent and the cursor line, not empty,
-    reads the same twice in a row (until then the agent's own input line may still show)."""
-    previous_text_around_the_cursor = None
+    once the shell has taken the terminal back from the agent and the cursor line, not empty and
+    not the line the agent showed before Ctrl+Z, has read the same for
+    SECONDS_THE_PROMPT_MUST_STAY_THE_SAME.
+
+    For a tab that isn't visible, iTerm2's Python API reports a copy of the screen it refreshes
+    only about once a second, so it goes on reporting the agent's own input line for a while after
+    the agent stopped (measured on 2026-11-05 in a hidden tab: Claude Code's line until 0.94 s
+    after Ctrl+Z, the shell's prompt from 1.99 s). Two equal reads 0.1 s apart took that line for
+    the prompt, and every resume then refused, since the line it compares with never shows again.
+
+    Args:
+        terminal_session: The tab's TerminalSession (terminal_backends.base).
+        agent_process_id: The agent's process.
+        text_around_the_cursor_before_control_z: The cursor line read right before Ctrl+Z.
+    """
+    reads_that_must_match = round(SECONDS_THE_PROMPT_MUST_STAY_THE_SAME / SECONDS_BETWEEN_CHECKS) + 1
+    candidate_text_around_the_cursor, matching_reads = None, 0
     for _ in range(round(SECONDS_TO_WAIT_FOR_THE_SHELL_PROMPT / SECONDS_BETWEEN_CHECKS)):
         await asyncio.sleep(SECONDS_BETWEEN_CHECKS)
         if process_has_its_terminal(agent_process_id):
@@ -111,10 +128,14 @@ async def read_the_shell_prompt(terminal_session, agent_process_id):
             text_around_the_cursor = await terminal_session.read_text_around_the_cursor()
         except TerminalRequestFailed:
             return None  # the tab closed meanwhile; the pause's record still lists what it stopped
-        if (text_around_the_cursor is not None and text_around_the_cursor[0].strip()
-                and text_around_the_cursor == previous_text_around_the_cursor):
-            return text_around_the_cursor
-        previous_text_around_the_cursor = text_around_the_cursor
+        if (text_around_the_cursor is None or not text_around_the_cursor[0].strip()
+                or text_around_the_cursor == text_around_the_cursor_before_control_z):
+            candidate_text_around_the_cursor, matching_reads = None, 0
+            continue
+        matching_reads = matching_reads + 1 if text_around_the_cursor == candidate_text_around_the_cursor else 1
+        candidate_text_around_the_cursor = text_around_the_cursor
+        if matching_reads >= reads_that_must_match:
+            return candidate_text_around_the_cursor
     return None
 
 
@@ -171,7 +192,10 @@ async def pause_agent_session(terminal_session, agent_process_id, agent_tool_nam
         return ActionResult(False, "the agent's process has ended"), None
     was_suspended_by_hand = process_is_stopped(agent_process_id)
     processes_below, other_users_process_ids_below = list_processes_below_the_agent_to_stop(agent_process_id, detached_processes)
+    text_around_the_cursor_before_control_z = None
     if not was_suspended_by_hand:
+        # The agent's own line, which iTerm2 may go on reporting for a while after (read_the_shell_prompt).
+        text_around_the_cursor_before_control_z = await terminal_session.read_text_around_the_cursor()
         await terminal_session.send_text(CONTROL_Z)
         if not await wait_until(lambda: process_is_stopped(agent_process_id), SECONDS_TO_WAIT_FOR_CONTROL_Z):
             send_signal_to_processes([agent_process_id], signal.SIGTSTP)
@@ -186,7 +210,8 @@ async def pause_agent_session(terminal_session, agent_process_id, agent_tool_nam
         [process.name for process_id, process in processes_below.items()
          if process_id not in stopped_process_ids and read_process_info(process_id) is not None]
         + [name for name in map(read_name_of_any_process, other_users_process_ids_below) if name])
-    text_around_the_cursor = None if was_suspended_by_hand else await read_the_shell_prompt(terminal_session, agent_process_id)
+    text_around_the_cursor = None if was_suspended_by_hand else await read_the_shell_prompt(
+        terminal_session, agent_process_id, text_around_the_cursor_before_control_z)
     pause_record = PauseRecord((agent_process_id, agent.started_at), agent_tool_name, text_around_the_cursor, sorted(
         (process_id, process.started_at) for process_id, process in processes_below.items() if process_id in stopped_process_ids))
     if names_of_processes_left_running:

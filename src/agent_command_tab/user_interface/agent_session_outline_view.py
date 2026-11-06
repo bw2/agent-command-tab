@@ -740,9 +740,9 @@ class AgentSessionListController(NSObject):
         self.submit_action = owner.submit_action
         self.on_tab_focused = lambda: owner.tab_was_focused(self)
         self.on_row_count_changed = lambda: owner.rows_changed(self)
-        # Called after every snapshot and expansion change; the panel sets it so its top bar's
-        # buttons (expand or collapse all, pause or resume all) follow along.
-        self.on_snapshot_or_expansion_changed = lambda: None
+        # Called after every snapshot, expansion and selection change; the panel sets it so its
+        # buttons (expand or collapse all, pause or resume the selected rows) follow along.
+        self.on_snapshot_expansion_or_selection_changed = lambda: None
         # Called when the row of column titles needs another height; the panel sets it so the list moves under it.
         self.on_column_titles_row_height_changed = lambda: None
         self.items_by_key = {}
@@ -997,7 +997,7 @@ class AgentSessionListController(NSObject):
             if not self.update_rows_in_place(children_before_by_parent, heights_before_by_key):
                 self.reload_and_restore_expansion()
         self.select_the_window_that_showed()
-        self.on_snapshot_or_expansion_changed()  # a closed window may be gone
+        self.on_snapshot_expansion_or_selection_changed()  # a closed window may be gone
 
     @objc.python_method
     def update_window_item(self, window_entry, live_keys):
@@ -1246,7 +1246,7 @@ class AgentSessionListController(NSObject):
             self.apply_expansion_state(item.child_items)  # children come back as they were
         self.redraw_visible_rows()
         self.on_row_count_changed()
-        self.on_snapshot_or_expansion_changed()
+        self.on_snapshot_expansion_or_selection_changed()
 
     @objc.python_method
     def list_is_on_screen(self):
@@ -1361,6 +1361,7 @@ class AgentSessionListController(NSObject):
 
     def outlineViewSelectionDidChange_(self, notification):
         self.redraw_selection_outlines()
+        self.on_snapshot_expansion_or_selection_changed()  # the pause or resume button acts on the selected rows
 
     # A row view coming or going matters only while a row is selected: AppKit calls these once for
     # each row view of a reload, and each redraw went over every row view (code review, 2026-10-30).
@@ -1409,13 +1410,15 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def list_agent_session_entries_of_the_selected_rows(self):
-        """Returns the agent sessions of the selected tab rows and of every tab of the selected
-        window rows (also collapsed ones, and tabs whose rows Hide Idle hides), once each, in list order."""
+        """Returns the agent sessions of the selected tab rows, of every tab of the selected window
+        rows (also collapsed ones, and tabs whose rows Hide Idle hides) and of the tabs of the
+        selected process rows, once each, in list order."""
         entry_by_session_id = {}
         for item in self.list_selected_items():
             agent_session_entries = (sort_agent_session_entries(item.entry.agent_sessions, self.list_sort_order,
                                                                 self.list_sort_order_is_reversed)
-                                     if item.kind == "window" else [item.entry])
+                                     if item.kind == "window" else [item.parent_item.entry] if item.kind == "process"
+                                     else [item.entry])
             for entry in agent_session_entries:
                 entry_by_session_id.setdefault(entry.session_id, entry)
         return list(entry_by_session_id.values())
@@ -2101,7 +2104,7 @@ class AgentSessionListController(NSObject):
         run_without_animation(change_every_rows_expansion)
         self.redraw_visible_rows()
         self.on_row_count_changed()
-        self.on_snapshot_or_expansion_changed()
+        self.on_snapshot_expansion_or_selection_changed()
 
     @objc.python_method
     def is_fully_expanded(self):
@@ -2395,7 +2398,7 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def list_agent_session_entries(self):
-        """Returns every agent session in the list, those whose rows Hide Idle hides too (the bottom bar's pause or resume button acts on all of them)."""
+        """Returns every agent session in the list, those whose rows Hide Idle hides too (the hooks note names their agent tools)."""
         return [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)] if self.snapshot else []
 
     @objc.python_method

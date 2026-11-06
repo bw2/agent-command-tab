@@ -1,4 +1,4 @@
-"""The panel around the list: the sort order, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a note while the app's hooks are missing, and pause or resume all at the bottom right.
+"""The panel around the list: the sort order, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a note while the app's hooks are missing, and pause or resume the selected rows at the bottom right.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
 sidebar and in the list window, each with its own list controller.
@@ -49,10 +49,12 @@ EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: (ROWS_OPEN_SYMBOL_NAMES[False], "Expand a
                                 True: (ROWS_OPEN_SYMBOL_NAMES[True], "Collapse all", "Collapse all")}
 # The bottom bar's pause or resume button, at the right (user requests, 2026-10-20 and
 # 2026-10-21): (SF Symbol, text fallback, tooltip), by what a click does: pause the agent
-# sessions that run, or, once all are paused, resume them.
+# sessions of the selected rows that run, or, once all of those are paused, resume them (the
+# selected rows only, user request, 2026-11-05; every session in the list before).
 # The tooltips say how (user request, 2026-10-28; agent_session_pausing).
-PAUSE_OR_RESUME_ALL_LOOKS = {"pause": ("pause.circle", "Pause all", "Pause all agent processes by suspending them (Ctrl+Z, or a STOP signal)"),
-                             "resume": ("play.circle", "Resume all", "Resume all paused agent processes (fg, then a CONT signal)")}
+PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
+    "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes by suspending them (Ctrl+Z, or a STOP signal)"),
+    "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (fg, then a CONT signal)")}
 # The top bar's Hide Idle / Show Idle button, left of the expand or collapse button (user
 # requests, 2026-10-21): (title, tooltip), by whether idle tabs are hidden; the title says what a click does.
 # Command-I presses it in the list that has the keyboard, and the tooltips say so (user request, 2026-10-29).
@@ -223,7 +225,7 @@ class ListPanelController(NSViewController):
         self.expand_or_collapse_all_button.setAction_("expandOrCollapseAllClicked:")
         self.expand_or_collapse_all_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)  # stays at the top right
         root_view.addSubview_(self.expand_or_collapse_all_button)
-        self.list_controller.on_snapshot_or_expansion_changed = self.update_top_and_bottom_bar_buttons
+        self.list_controller.on_snapshot_expansion_or_selection_changed = self.update_top_and_bottom_bar_buttons
         self.message_text_field = NSTextField.labelWithString_("")
         self.message_text_field.setFrame_(NSMakeRect(0, height - TOP_BAR_HEIGHT + 4, 0, 18))  # fit_top_bar_to_width sets x and width
         self.message_text_field.setTextColor_(NSColor.secondaryLabelColor())
@@ -233,9 +235,9 @@ class ListPanelController(NSViewController):
 
         # Bottom bar: a Settings button with its name, easier to see than an icon, at the left, a
         # gray pill like the top bar's controls (user request, 2026-10-28; in the middle of the top bar
-        # from 2026-10-26, at the bottom left before), and one button that pauses or resumes all, at the
-        # right; a new window with an agent session is the "+" row at the end of the list (user
-        # requests, 2026-10-19 to 2026-10-21).
+        # from 2026-10-26, at the bottom left before), and one button that pauses or resumes the
+        # selected rows, at the right; a new window with an agent session is the "+" row at the end
+        # of the list (user requests, 2026-10-19 to 2026-10-21 and 2026-11-05).
         self.settings_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
         self.settings_button.setTitle_("Settings")
         self.settings_button.setBezelStyle_(NSBezelStyleRecessed)
@@ -254,13 +256,13 @@ class ListPanelController(NSViewController):
         self.settings_button.setFrameOrigin_((PANEL_SIDE_MARGIN, (BOTTOM_BAR_HEIGHT - self.settings_button.frame().size.height) / 2))
         self.settings_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMaxXMargin)  # stays at the bottom left
         root_view.addSubview_(self.settings_button)
-        self.pause_or_resume_all_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(
+        self.pause_or_resume_selected_rows_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(
             width - PANEL_SIDE_MARGIN - button_width, (BOTTOM_BAR_HEIGHT - button_height) / 2, button_width, button_height))
-        self.pause_or_resume_all_button.setBordered_(False)
-        self.pause_or_resume_all_button.setTarget_(self)
-        self.pause_or_resume_all_button.setAction_("pauseOrResumeAllClicked:")
-        self.pause_or_resume_all_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)  # stays at the bottom right
-        root_view.addSubview_(self.pause_or_resume_all_button)
+        self.pause_or_resume_selected_rows_button.setBordered_(False)
+        self.pause_or_resume_selected_rows_button.setTarget_(self)
+        self.pause_or_resume_selected_rows_button.setAction_("pauseOrResumeSelectedRowsClicked:")
+        self.pause_or_resume_selected_rows_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)  # stays at the bottom right
+        root_view.addSubview_(self.pause_or_resume_selected_rows_button)
         # After the Settings button, while the app's hooks are missing for an agent tool with a session
         # in the list, a note and a button that installs them (user request, 2026-10-27).
         self.hooks_note_text_field = NSTextField.labelWithString_("")
@@ -355,10 +357,11 @@ class ListPanelController(NSViewController):
         expands them all (the tabs' previews stay as they are)."""
         self.list_controller.set_all_expanded(not self.list_controller.is_fully_expanded())
 
-    def pauseOrResumeAllClicked_(self, sender):
-        """Pauses every agent session that runs, or, once all are paused, resumes them all."""
+    def pauseOrResumeSelectedRowsClicked_(self, sender):
+        """Pauses the agent sessions of the selected rows that run, or, once all of those are
+        paused, resumes them."""
         sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(
-            self.list_controller.list_agent_session_entries())
+            self.list_controller.list_agent_session_entries_of_the_selected_rows())
         pause = bool(sessions_to_pause)
         self.list_controller.pause_or_resume_agent_sessions(
             [entry.session_id for entry in (sessions_to_pause if pause else sessions_to_resume)], pause=pause)
@@ -367,34 +370,35 @@ class ListPanelController(NSViewController):
     def update_top_and_bottom_bar_buttons(self):
         """Gives the expand or collapse button (top bar) and the pause or resume button (bottom
         bar) the look of the list's current state and shows each only when it applies; the top bar
-        refits when its button appears or goes. Called after every snapshot and expansion change,
-        so the controls are only touched when what they show changes (code review, 2026-10-29).
+        refits when its button appears or goes. Called after every snapshot, expansion and selection
+        change, so the controls are only touched when what they show changes (code review, 2026-10-29).
 
         The expand or collapse button shows while the list has two or more windows (user request,
-        2026-10-19); the pause or resume button while it has an agent session that a click would
-        pause or resume."""
+        2026-10-19); the pause or resume button while the selected rows have an agent session that
+        a click would pause or resume."""
         agent_session_entries = self.list_controller.list_agent_session_entries()
-        sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(agent_session_entries)
+        sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(
+            self.list_controller.list_agent_session_entries_of_the_selected_rows())
         snapshot = self.list_controller.snapshot
         note, agent_tool_names_to_install_hooks_for = choose_hooks_note(
             snapshot.hooks_status_per_agent_tool if snapshot is not None else (),
             {entry.agent_tool_name for entry in agent_session_entries})
         bars_state = (EXPAND_OR_COLLAPSE_ALL_LOOKS[self.list_controller.is_fully_expanded()],
                       self.list_controller.count_window_rows() < 2,
-                      PAUSE_OR_RESUME_ALL_LOOKS["pause" if sessions_to_pause else "resume"],
+                      PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS["pause" if sessions_to_pause else "resume"],
                       not (sessions_to_pause or sessions_to_resume), note, list(agent_tool_names_to_install_hooks_for))
         if bars_state == self.shown_bars_state:
             return
         self.shown_bars_state = bars_state
-        (expand_or_collapse_all_look, expand_or_collapse_all_button_is_hidden, pause_or_resume_all_look,
-         pause_or_resume_all_button_is_hidden, _, self.agent_tool_names_to_install_hooks_for) = bars_state
+        (expand_or_collapse_all_look, expand_or_collapse_all_button_is_hidden, pause_or_resume_selected_rows_look,
+         pause_or_resume_selected_rows_button_is_hidden, _, self.agent_tool_names_to_install_hooks_for) = bars_state
         expand_or_collapse_all_button_was_hidden = self.expand_or_collapse_all_button.isHidden()
         show_symbol_on_button(self.expand_or_collapse_all_button, *expand_or_collapse_all_look)
         self.expand_or_collapse_all_button.setToolTip_(expand_or_collapse_all_look[2])
         self.expand_or_collapse_all_button.setHidden_(expand_or_collapse_all_button_is_hidden)
-        show_symbol_on_button(self.pause_or_resume_all_button, *pause_or_resume_all_look)
-        self.pause_or_resume_all_button.setToolTip_(pause_or_resume_all_look[2])
-        self.pause_or_resume_all_button.setHidden_(pause_or_resume_all_button_is_hidden)
+        show_symbol_on_button(self.pause_or_resume_selected_rows_button, *pause_or_resume_selected_rows_look)
+        self.pause_or_resume_selected_rows_button.setToolTip_(pause_or_resume_selected_rows_look[2])
+        self.pause_or_resume_selected_rows_button.setHidden_(pause_or_resume_selected_rows_button_is_hidden)
         if self.expand_or_collapse_all_button.isHidden() != expand_or_collapse_all_button_was_hidden:
             self.fit_top_bar_to_width()
         self.hooks_note_text_field.setStringValue_(note)
@@ -411,8 +415,9 @@ class ListPanelController(NSViewController):
         if not note:
             self.install_hooks_button.setHidden_(True)
             return
-        right_end_x = (self.pause_or_resume_all_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
-                       if not self.pause_or_resume_all_button.isHidden() else self.view().bounds().size.width - PANEL_SIDE_MARGIN)
+        right_end_x = (self.pause_or_resume_selected_rows_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
+                       if not self.pause_or_resume_selected_rows_button.isHidden()
+                       else self.view().bounds().size.width - PANEL_SIDE_MARGIN)
         settings_button_frame = self.settings_button.frame()
         note_x = settings_button_frame.origin.x + settings_button_frame.size.width + 8
         button_width, button_height = self.install_hooks_button.frame().size
