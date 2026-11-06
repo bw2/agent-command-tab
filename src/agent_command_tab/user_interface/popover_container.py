@@ -14,7 +14,7 @@ from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeIns
                     NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
-from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL
+from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL, HOOKS_CANT_RUN, HOOKS_SEND_NO_EVENTS
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
 from agent_command_tab.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_NAMES, add_popup_choices,
                                                               read_popup_choice, select_popup_choice,
@@ -68,26 +68,43 @@ SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
 SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS = 120
 HOOKS_NOTE_TOOL_TIP = ("These hooks provide AgentCommandTab more details about agent status, including whether it "
                        "launched background processes, etc.")  # the user's wording, 2026-10-28
+# The notes about hooks that are installed but don't work, which Install Hooks wouldn't fix (user request, 2026-11-05).
+HOOKS_CANT_RUN_TOOL_TIP = ("The Python this copy of AgentCommandTab runs on is gone (for example, Homebrew removed the "
+                           "Python version its pipx environment was made with), so its hooks can't run, and the app "
+                           "can't restart. Reinstall it (with pipx: pipx reinstall agent-command-tab), then quit it "
+                           "and start it again.")
+HOOKS_SEND_NO_EVENTS_TOOL_TIP = ("Claude Code sessions started after the hooks were installed haven't sent "
+                                 "AgentCommandTab any events, so background tasks and turn ends may show wrong. "
+                                 "Check that hooks aren't turned off in Claude Code: type /hooks in a session.")
 
 
 def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
-    """Returns (the bottom bar's note about the app's hooks, or "" for none, the agent tools its
-    Install Hooks button installs them for) (user request, 2026-10-27). Only tools with a session
-    in the list count, so someone who never runs Codex isn't asked to install its hooks.
+    """Returns (the bottom bar's note about the app's hooks, or "" for none, its tooltip, the
+    agent tools its Install Hooks button installs them for) (user requests, 2026-10-27 and
+    2026-11-05). Only tools with a session in the list count, so someone who never runs Codex isn't
+    asked to install its hooks. Hooks that can't run come first: nothing else works until the app
+    is reinstalled.
 
     Args:
         hooks_status_per_agent_tool: ComputerSnapshot.hooks_status_per_agent_tool.
         listed_agent_tool_names: The agent tools of the list's sessions.
     """
-    missing_agent_tool_names = [agent_tool_name for agent_tool_name, status in hooks_status_per_agent_tool
-                                if status == HOOKS_ARE_MISSING and agent_tool_name in listed_agent_tool_names]
+    def list_listed_agent_tools_whose_hooks_are(wanted_status):
+        return [agent_tool_name for agent_tool_name, status in hooks_status_per_agent_tool
+                if status == wanted_status and agent_tool_name in listed_agent_tool_names]
+    agent_tool_names_whose_hooks_cant_run = list_listed_agent_tools_whose_hooks_are(HOOKS_CANT_RUN)
+    if agent_tool_names_whose_hooks_cant_run:
+        return (f"{' and '.join(agent_tool_names_whose_hooks_cant_run)} hooks can't run: reinstall AgentCommandTab",
+                HOOKS_CANT_RUN_TOOL_TIP, [])
+    missing_agent_tool_names = list_listed_agent_tools_whose_hooks_are(HOOKS_ARE_MISSING)
     if missing_agent_tool_names:
         # The user's wording, 2026-10-28 ("No hooks for Claude Code" until then).
-        return f"{' and '.join(missing_agent_tool_names)} hooks not installed yet", missing_agent_tool_names
-    if any(status == HOOKS_AWAIT_APPROVAL and agent_tool_name in listed_agent_tool_names
-           for agent_tool_name, status in hooks_status_per_agent_tool):
-        return "Approve the Codex hooks: /hooks in Codex", []
-    return "", []
+        return f"{' and '.join(missing_agent_tool_names)} hooks not installed yet", HOOKS_NOTE_TOOL_TIP, missing_agent_tool_names
+    if list_listed_agent_tools_whose_hooks_are(HOOKS_AWAIT_APPROVAL):
+        return "Approve the Codex hooks: /hooks in Codex", HOOKS_NOTE_TOOL_TIP, []
+    if list_listed_agent_tools_whose_hooks_are(HOOKS_SEND_NO_EVENTS):
+        return "No events from the Claude Code hooks", HOOKS_SEND_NO_EVENTS_TOOL_TIP, []
+    return "", HOOKS_NOTE_TOOL_TIP, []
 
 
 class ListPanelView(NSView):
@@ -269,7 +286,7 @@ class ListPanelController(NSViewController):
         self.hooks_note_text_field.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.hooks_note_text_field.setTextColor_(NSColor.secondaryLabelColor())
         self.hooks_note_text_field.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
-        self.hooks_note_text_field.setToolTip_(HOOKS_NOTE_TOOL_TIP)
+        self.hooks_note_text_field.setToolTip_(HOOKS_NOTE_TOOL_TIP)  # update_top_and_bottom_bar_buttons sets the note's own
         root_view.addSubview_(self.hooks_note_text_field)
         self.install_hooks_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
         self.install_hooks_button.setTitle_("Install Hooks")
@@ -380,18 +397,18 @@ class ListPanelController(NSViewController):
         sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(
             self.list_controller.list_agent_session_entries_of_the_selected_rows())
         snapshot = self.list_controller.snapshot
-        note, agent_tool_names_to_install_hooks_for = choose_hooks_note(
+        note, note_tool_tip, agent_tool_names_to_install_hooks_for = choose_hooks_note(
             snapshot.hooks_status_per_agent_tool if snapshot is not None else (),
             {entry.agent_tool_name for entry in agent_session_entries})
         bars_state = (EXPAND_OR_COLLAPSE_ALL_LOOKS[self.list_controller.is_fully_expanded()],
                       self.list_controller.count_window_rows() < 2,
                       PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS["pause" if sessions_to_pause else "resume"],
-                      not (sessions_to_pause or sessions_to_resume), note, list(agent_tool_names_to_install_hooks_for))
+                      not (sessions_to_pause or sessions_to_resume), note, note_tool_tip, list(agent_tool_names_to_install_hooks_for))
         if bars_state == self.shown_bars_state:
             return
         self.shown_bars_state = bars_state
         (expand_or_collapse_all_look, expand_or_collapse_all_button_is_hidden, pause_or_resume_selected_rows_look,
-         pause_or_resume_selected_rows_button_is_hidden, _, self.agent_tool_names_to_install_hooks_for) = bars_state
+         pause_or_resume_selected_rows_button_is_hidden, _, _, self.agent_tool_names_to_install_hooks_for) = bars_state
         expand_or_collapse_all_button_was_hidden = self.expand_or_collapse_all_button.isHidden()
         show_symbol_on_button(self.expand_or_collapse_all_button, *expand_or_collapse_all_look)
         self.expand_or_collapse_all_button.setToolTip_(expand_or_collapse_all_look[2])
@@ -402,6 +419,7 @@ class ListPanelController(NSViewController):
         if self.expand_or_collapse_all_button.isHidden() != expand_or_collapse_all_button_was_hidden:
             self.fit_top_bar_to_width()
         self.hooks_note_text_field.setStringValue_(note)
+        self.hooks_note_text_field.setToolTip_(note_tool_tip)
         self.fit_bottom_bar_to_width()
 
     @objc.python_method

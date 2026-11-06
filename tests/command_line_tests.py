@@ -3,14 +3,17 @@ import io
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 import unittest.mock
 
-from agent_command_tab import __version__, command_line
-from agent_command_tab.command_line import (SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C, main, take_the_running_lock,
+from agent_command_tab import __version__, command_line, hooks_installer, start_with_iterm2
+from agent_command_tab.command_line import (SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C, choose_signal_that_stops_the_copy, main,
+                                            stop_the_running_copy, take_the_running_lock, the_running_lock_is_held,
                                             wait_for_app_process)
+from agent_command_tab.hooks_installer import HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, check_hooks, install_hooks
 
 
 class VersionOptionTests(unittest.TestCase):
@@ -151,6 +154,67 @@ class RunningLockTests(unittest.TestCase):  # one copy at a time (user request, 
             take_the_lock.assert_not_called()
             self.assertFalse(os.get_inheritable(lock_file.fileno()))
             self.assertNotIn(command_line.RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE, os.environ)
+
+
+# Stands in for the app started with `app`: holds the running lock until Ctrl+C's SIGINT ends it.
+STAND_IN_FOR_THE_APP = ("import sys, time\n"
+                        "from agent_command_tab.command_line import take_the_running_lock\n"
+                        "lock_file = take_the_running_lock(sys.argv[1])\n"
+                        "print('locked', flush=True)\n"
+                        "time.sleep(60)\n")
+
+
+class CleanUpBeforeUninstallingTests(unittest.TestCase):  # user request, 2026-11-05
+    def test_the_signal_that_stops_a_copy_follows_what_the_process_is(self):
+        self.assertEqual(choose_signal_that_stops_the_copy(["/venv/bin/python", "-m", "agent_command_tab.command_line", "app"]),
+                         signal.SIGINT)  # the app gives docked windows their room back
+        for supervisor_arguments in (["/venv/bin/python", "-m", "agent_command_tab.command_line", "run"],  # started by iTerm2
+                                     ["/venv/bin/python", "/venv/bin/agent-command-tab"]):  # started from a shell
+            self.assertEqual(choose_signal_that_stops_the_copy(supervisor_arguments), signal.SIGTERM)
+        self.assertIsNone(choose_signal_that_stops_the_copy(["-bash"]))  # the lock file's process ID was reused
+        self.assertIsNone(choose_signal_that_stops_the_copy([]))  # a process that can't be read
+
+    def test_the_running_copy_is_stopped_and_its_lock_found_free(self):
+        with tempfile.TemporaryDirectory() as folder:
+            lock_file_path = os.path.join(folder, "running.lock")
+            self.assertEqual(stop_the_running_copy(lock_file_path), (True, "AgentCommandTab isn't running"))
+            copy = subprocess.Popen([sys.executable, "-c", STAND_IN_FOR_THE_APP, lock_file_path, "app"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            try:
+                self.assertEqual(copy.stdout.readline(), "locked\n")
+                self.assertTrue(the_running_lock_is_held(lock_file_path))
+                self.assertEqual(stop_the_running_copy(lock_file_path, seconds_to_wait=10),
+                                 (True, f"stopped AgentCommandTab (process {copy.pid})"))
+                copy.wait(timeout=5)
+            finally:
+                copy.kill()
+                copy.wait()
+                copy.stdout.close()
+
+    def test_the_hooks_and_the_autolaunch_script_are_taken_out(self):
+        with tempfile.TemporaryDirectory() as folder:
+            claude_settings_path = os.path.join(folder, "settings.json")
+            codex_home_folder = os.path.join(folder, "codex")
+            autolaunch_folder = os.path.join(folder, "AutoLaunch")
+            os.mkdir(codex_home_folder)
+            os.mkdir(autolaunch_folder)
+            autolaunch_script_path = os.path.join(autolaunch_folder, start_with_iterm2.AUTOLAUNCH_SCRIPT_FILE_NAME)
+            open(autolaunch_script_path, "w").close()
+            printed = io.StringIO()
+            with unittest.mock.patch.object(hooks_installer, "list_settings_file_paths", lambda agent_tool_name: {
+                        "Claude Code": [claude_settings_path], "Codex": [os.path.join(codex_home_folder, "hooks.json")]}[agent_tool_name]), \
+                    unittest.mock.patch.object(hooks_installer, "find_codex_home_folder", lambda: codex_home_folder), \
+                    unittest.mock.patch.object(start_with_iterm2, "find_iterm2_autolaunch_folder", lambda: autolaunch_folder), \
+                    unittest.mock.patch.object(command_line, "stop_the_running_copy",
+                                               lambda: (True, "AgentCommandTab isn't running")), \
+                    contextlib.redirect_stdout(printed):
+                install_hooks("Claude Code")
+                self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
+                self.assertEqual(main(["clean-up-before-uninstalling"]), 0)
+                self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_MISSING)
+            self.assertFalse(os.path.exists(autolaunch_script_path))
+            self.assertIn(f"removed the script that started AgentCommandTab with iTerm2: {autolaunch_script_path}", printed.getvalue())
+            self.assertIn("pipx uninstall agent-command-tab", printed.getvalue())
 
 
 if __name__ == "__main__":

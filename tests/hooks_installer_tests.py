@@ -10,11 +10,12 @@ import unittest.mock
 
 from agent_command_tab import hooks_installer
 from agent_command_tab.hooks_installer import (BACKUP_FILE_SUFFIX, HOOK_EVENTS_BY_AGENT_TOOL_NAME, HOOK_NAMES_BY_AGENT_TOOL_NAME,
-                                               HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL,
+                                               HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL, HOOKS_CANT_RUN,
                                                add_the_apps_hooks, build_forwarder_command, check_hooks,
                                                codex_has_approved_the_hooks, compute_codex_approval_hash,
                                                convert_event_name_to_codex_hook_state_name, install_hooks,
-                                               list_positions_of_the_apps_hooks, remove_hooks, remove_the_apps_hooks)
+                                               list_positions_of_the_apps_hooks, remove_hooks, remove_the_apps_hooks,
+                                               this_copys_hooks_can_run)
 
 COMMAND = build_forwarder_command("Claude Code", "/venv/bin/python", "/code/hook_event_forwarder.py")
 EVENTS = HOOK_EVENTS_BY_AGENT_TOOL_NAME["Claude Code"]
@@ -192,6 +193,17 @@ class FilesTests(unittest.TestCase):
         install_hooks("Claude Code")
         self.assertTrue(os.path.islink(self.claude_settings_path))
         self.assertIn("hooks", self.read_json(linked_file_path))
+        self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
+
+    def test_hooks_whose_python_or_forwarder_is_gone_cant_run(self):  # user request, 2026-11-05
+        install_hooks("Claude Code")
+        # A pipx environment's bin/python, a link to a Python that a Homebrew upgrade removed.
+        python_link_to_a_removed_python = os.path.join(self.folder, "python")
+        os.symlink(os.path.join(self.folder, "removed", "python3.13"), python_link_to_a_removed_python)
+        with unittest.mock.patch.object(hooks_installer, "find_python_of_this_copy", lambda: python_link_to_a_removed_python):
+            self.assertEqual(check_hooks("Claude Code"), HOOKS_CANT_RUN)
+        self.assertFalse(this_copys_hooks_can_run(sys.executable, os.path.join(self.folder, "hook_event_forwarder.py")))
+        self.assertTrue(this_copys_hooks_can_run(sys.executable))
         self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
 
     def test_a_file_that_isnt_a_json_object_is_left_alone(self):

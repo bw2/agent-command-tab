@@ -1,4 +1,4 @@
-"""Command line entry point: `agent-command-tab run | app | dump-snapshot | install-hooks | remove-hooks`."""
+"""Command line entry point: `agent-command-tab run | app | dump-snapshot | install-hooks | remove-hooks | clean-up-before-uninstalling`."""
 
 import argparse
 import fcntl
@@ -24,6 +24,8 @@ SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C = SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_
 RUNNING_LOCK_FILE_PATH = os.path.expanduser("~/Library/Application Support/agent-command-tab/running.lock")
 # Tells the app which of its open files is the lock file its supervisor handed it (run_with_restarts).
 RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE = "AGENT_COMMAND_TAB_RUNNING_LOCK_FILE_DESCRIPTOR"
+# How long clean-up-before-uninstalling waits for the running copy to stop (stop_the_running_copy).
+SECONDS_TO_WAIT_FOR_THE_RUNNING_COPY_TO_STOP = SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C + 5
 
 
 def dump_snapshot(verbose):
@@ -101,6 +103,80 @@ def install_or_remove_hooks(install):
             print(f"{agent_tool_name}: sessions started from now on use them"
                   + ("; Codex asks you to approve them first (type /hooks in Codex)" if agent_tool_name == "Codex" else ""))
     return exit_status
+
+
+def the_running_lock_is_held(lock_file_path=RUNNING_LOCK_FILE_PATH):
+    """Returns whether a running copy holds the lock (take_the_running_lock), without taking it for
+    longer than the check or changing the file."""
+    try:
+        lock_file = open(lock_file_path)
+    except FileNotFoundError:
+        return False
+    with lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        return False
+
+
+def choose_signal_that_stops_the_copy(process_arguments):
+    """Returns the signal that stops the copy whose process has these arguments, as Quit does: Ctrl+C's
+    SIGINT for the app itself (`... app`), which then gives docked windows their room back; SIGTERM for
+    the supervisor (`run`, the default), which passes it on to its app as Ctrl+C (wait_for_app_process);
+    None for a process that isn't the app's (its process ID was reused)."""
+    if not any("agent_command_tab" in argument or "agent-command-tab" in argument for argument in process_arguments):
+        return None
+    return signal.SIGINT if "app" in process_arguments[1:] else signal.SIGTERM
+
+
+def stop_the_running_copy(lock_file_path=RUNNING_LOCK_FILE_PATH, seconds_to_wait=SECONDS_TO_WAIT_FOR_THE_RUNNING_COPY_TO_STOP):
+    """Stops the copy that holds the running lock, the process its lock file names, and waits until
+    the lock is free. Returns (whether no copy runs now, a sentence saying what happened)."""
+    from agent_command_tab.agent_process_tree import read_process_arguments_and_environment
+    if not the_running_lock_is_held(lock_file_path):
+        return True, "AgentCommandTab isn't running"
+    with open(lock_file_path) as lock_file:
+        process_id_text = lock_file.read().strip()
+    stop_signal = (choose_signal_that_stops_the_copy(read_process_arguments_and_environment(int(process_id_text))[0])
+                   if process_id_text.isdigit() else None)
+    if stop_signal is None:
+        return False, (f"AgentCommandTab runs, but its lock file names no process of it ({process_id_text or 'none'}): "
+                       "quit it from its menu bar icon's menu")
+    try:
+        os.kill(int(process_id_text), stop_signal)
+    except OSError as error:
+        return False, f"AgentCommandTab (process {process_id_text}) couldn't be stopped ({error}): quit it from its menu bar icon's menu"
+    deadline = time.time() + seconds_to_wait
+    while the_running_lock_is_held(lock_file_path):
+        if time.time() > deadline:
+            return False, (f"AgentCommandTab (process {process_id_text}) didn't stop within {seconds_to_wait} s: "
+                           "quit it from its menu bar icon's menu")
+        time.sleep(0.2)
+    return True, f"stopped AgentCommandTab (process {process_id_text})"
+
+
+def clean_up_before_uninstalling():
+    """Takes out what the app added outside its own files, which pip and pipx leave behind when they
+    uninstall it (user request, 2026-11-05): stops the running copy, whose files the uninstall
+    deletes, then removes its hooks from Claude Code's and Codex's settings (whose commands would
+    otherwise fail on every event) and its script in iTerm2's AutoLaunch folder. Leaves its settings
+    folder and its log. Returns the exit status."""
+    from agent_command_tab.settings_store import SETTINGS_FOLDER
+    from agent_command_tab.start_with_iterm2 import AUTOLAUNCH_SCRIPT_FILE_NAME, LOG_FILE_PATH, find_iterm2_autolaunch_folder
+    no_copy_runs, message = stop_the_running_copy()
+    print(message)
+    exit_status = install_or_remove_hooks(install=False)
+    autolaunch_script_path = os.path.join(find_iterm2_autolaunch_folder(), AUTOLAUNCH_SCRIPT_FILE_NAME)
+    if os.path.lexists(autolaunch_script_path):
+        os.remove(autolaunch_script_path)
+        print(f"removed the script that started AgentCommandTab with iTerm2: {autolaunch_script_path}")
+    else:
+        print("iTerm2's AutoLaunch folder has no AgentCommandTab script")
+    print(f"left in place (delete them if you like): the settings in {SETTINGS_FOLDER} and the log {LOG_FILE_PATH}")
+    print("now uninstall the package: pipx uninstall agent-command-tab (or pip uninstall agent-command-tab)")
+    return exit_status if no_copy_runs else 1
 
 
 def run_app_process(verbose):
@@ -210,12 +286,14 @@ def run_with_restarts(verbose):
 def main(arguments=None):
     """Parses the command line and runs the chosen command."""
     parser = argparse.ArgumentParser(prog="agent-command-tab", description=__doc__)
-    parser.add_argument("command", choices=["run", "app", "dump-snapshot", "install-hooks", "remove-hooks"], nargs="?",
+    parser.add_argument("command", choices=["run", "app", "dump-snapshot", "install-hooks", "remove-hooks",
+                                            "clean-up-before-uninstalling"], nargs="?",
                         default="run",
                         help="run: the menu bar app, restarted when iTerm2's connection drops (default); "
                              "app: the menu bar app without restarts; dump-snapshot: print the current list as JSON; "
                              "install-hooks, remove-hooks: add the app's hooks to Claude Code's and Codex's settings, "
-                             "or take them out")
+                             "or take them out; clean-up-before-uninstalling: stop the app, take out its hooks and "
+                             "the script that starts it with iTerm2, which pip and pipx leave behind")
     parser.add_argument("--verbose", action="store_true", help="print diagnostics")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parsed_arguments = parser.parse_args(arguments)
@@ -223,6 +301,8 @@ def main(arguments=None):
         return dump_snapshot(parsed_arguments.verbose)
     if parsed_arguments.command in ("install-hooks", "remove-hooks"):
         return install_or_remove_hooks(parsed_arguments.command == "install-hooks")
+    if parsed_arguments.command == "clean-up-before-uninstalling":
+        return clean_up_before_uninstalling()
     if parsed_arguments.command == "app":
         # Started by the supervisor, the app holds the running lock through the open lock file it
         # was handed, which no program it starts gets in turn; started directly, it takes the lock

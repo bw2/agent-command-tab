@@ -15,8 +15,10 @@ import unittest.mock
 from agent_command_tab import hook_event_forwarder, dashboard_core
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_process_tree import ProcessInfo
-from agent_command_tab.dashboard_core import (EXITED_ROW_SECONDS, SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING,
+from agent_command_tab.dashboard_core import (EXITED_ROW_SECONDS, SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT,
+                                                        SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING,
                                                         DashboardCore, another_process_listens_at)
+from agent_command_tab.hooks_installer import HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, HOOKS_SEND_NO_EVENTS
 from agent_command_tab.snapshot_builder import DisplayedState
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry
 
@@ -181,6 +183,38 @@ class HookEventTests(unittest.IsolatedAsyncioTestCase):
             first_listening_task.cancel()
             if second_listening_task is not None:
                 second_listening_task.cancel()
+
+
+class HooksThatSendNoEventsTests(unittest.TestCase):  # user request, 2026-11-05
+    def test_installed_hooks_are_said_to_send_no_events_once_a_new_session_has_sent_none_for_two_minutes(self):
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.hook_events_are_received = True
+        core.agent_sessions = {"s1": make_agent_session(101)}  # started at 10, before the hooks were found
+        installed = (("Claude Code", HOOKS_ARE_INSTALLED), ("Codex", HOOKS_ARE_MISSING))
+        marked = (("Claude Code", HOOKS_SEND_NO_EVENTS), ("Codex", HOOKS_ARE_MISSING))
+        self.assertEqual(core.mark_hooks_that_send_no_events(installed, 1000.0), installed)  # found installed at 1000
+        core.agent_sessions["s2"] = dict(make_agent_session(102), started_at=1010.0)  # started after: it reads them
+        for now, hook_events_are_received, expected in (
+                (1000.0 + 10 + SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT - 1, True, installed),  # not yet
+                (1000.0 + 10 + SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT, True, marked),
+                (1000.0 + 10 + SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT, False, installed)):  # another copy gets them
+            core.hook_events_are_received = hook_events_are_received
+            self.assertEqual(core.mark_hooks_that_send_no_events(installed, now), expected, (now, hook_events_are_received))
+        core.hook_events_are_received = True
+        core.note_hook_event(make_event("SessionStart", 102, source="startup"))
+        self.assertEqual(core.mark_hooks_that_send_no_events(installed, 2000.0), installed)
+
+    def test_hooks_installed_again_count_from_when_they_were_found_again(self):
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.hook_events_are_received = True
+        core.agent_sessions = {"s1": dict(make_agent_session(101), started_at=1010.0)}
+        core.mark_hooks_that_send_no_events((("Claude Code", HOOKS_ARE_INSTALLED),), 1000.0)
+        core.mark_hooks_that_send_no_events((("Claude Code", HOOKS_ARE_MISSING),), 1005.0)  # taken out, then put back
+        self.assertEqual(core.mark_hooks_that_send_no_events((("Claude Code", HOOKS_ARE_INSTALLED),), 1020.0),
+                         (("Claude Code", HOOKS_ARE_INSTALLED),))
+        # s1 started before they were found again, so it may have started without them.
+        self.assertEqual(core.mark_hooks_that_send_no_events((("Claude Code", HOOKS_ARE_INSTALLED),), 5000.0),
+                         (("Claude Code", HOOKS_ARE_INSTALLED),))
 
 
 class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):

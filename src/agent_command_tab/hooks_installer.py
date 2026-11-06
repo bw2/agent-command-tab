@@ -55,6 +55,12 @@ CODEX_SESSION_END_LONGEST_TIMEOUT = 3  # seconds: Codex lowers a longer SessionE
 HOOKS_ARE_INSTALLED = "installed"
 HOOKS_ARE_MISSING = "missing"
 HOOKS_AWAIT_APPROVAL = "needs approval"  # Codex: in hooks.json, not yet approved in its /hooks screen
+# The Python or the forwarder this copy's hooks run is gone, though the app still runs on it: a
+# Homebrew upgrade removed the Python a pipx environment was made with, say (this_copys_hooks_can_run).
+HOOKS_CANT_RUN = "can't run"
+# Set by the core, not by check_hooks: installed, but new Claude Code sessions send no events
+# (DashboardCore.mark_hooks_that_send_no_events).
+HOOKS_SEND_NO_EVENTS = "send no events"
 
 
 def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FORWARDER_FILE_PATH):
@@ -283,10 +289,27 @@ def remove_hooks(agent_tool_name):
     return changed_file_paths
 
 
+def this_copys_hooks_can_run(python_path=None, forwarder_path=FORWARDER_FILE_PATH):
+    """Returns whether the Python and the forwarder this copy's hooks run exist. The app can go on
+    running after its Python is gone, so its hooks then fail, silently, since they run in the
+    background: twice on the author's Mac the list showed wrong states for hours without a word
+    (2026-10-29 and 2026-10-30; user request, 2026-11-05).
+
+    Args:
+        python_path: The hooks' Python; find_python_of_this_copy's when None.
+        forwarder_path: The hooks' hook_event_forwarder.py.
+    """
+    return os.access(python_path or find_python_of_this_copy(), os.X_OK) and os.path.isfile(forwarder_path)
+
+
 def check_hooks(agent_tool_name):
-    """Returns HOOKS_ARE_INSTALLED when every settings file of the agent tool has the app's
-    hooks with this app's command (and, for Codex, they are approved), HOOKS_AWAIT_APPROVAL for
-    Codex hooks not yet approved, and HOOKS_ARE_MISSING otherwise (also when no file can be read)."""
+    """Returns HOOKS_CANT_RUN when the Python or the forwarder this copy's hooks run is gone
+    (this_copys_hooks_can_run), else HOOKS_ARE_INSTALLED when every settings file of the agent
+    tool has the app's hooks with this app's command (and, for Codex, they are approved),
+    HOOKS_AWAIT_APPROVAL for Codex hooks not yet approved, and HOOKS_ARE_MISSING otherwise (also
+    when no file can be read)."""
+    if not this_copys_hooks_can_run():
+        return HOOKS_CANT_RUN  # installing them again wouldn't help: the app itself needs reinstalling
     command = build_forwarder_command(agent_tool_name)
     events = HOOK_EVENTS_BY_AGENT_TOOL_NAME[agent_tool_name]
     file_paths = list_settings_file_paths(agent_tool_name)

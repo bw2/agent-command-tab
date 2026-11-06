@@ -36,7 +36,7 @@ from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMA
 from agent_command_tab.snapshot_data_classes import (AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry,
                                                      build_window_title_shown_in_the_list)
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
-                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH,
+                                                                HOOKS_SEND_NO_EVENTS_TOOL_TIP, PANEL_SIDE_MARGIN, POPOVER_WIDTH,
                                                                 SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS,
                                                                 SMALLEST_POPOVER_WIDTH, SMALLEST_SORT_POPUP_WIDTH,
                                                                 TOP_BAR_HEIGHT, ListPanelController)
@@ -2405,10 +2405,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                 ((("Claude Code", "missing"), ("Codex", "missing")), "Claude Code and Codex hooks not installed yet", True),
                 ((("Claude Code", "missing"), ("Codex", "installed")), "Claude Code hooks not installed yet", True),
                 ((("Claude Code", "installed"), ("Codex", "needs approval")), "Approve the Codex hooks: /hooks in Codex", False),
-                ((("Claude Code", "installed"), ("Codex", "installed")), "", False)):
+                ((("Claude Code", "installed"), ("Codex", "installed")), "", False),
+                # Hooks that don't work, which installing them again wouldn't fix (user request, 2026-11-05).
+                ((("Claude Code", "can't run"), ("Codex", "can't run")),
+                 "Claude Code and Codex hooks can't run: reinstall AgentCommandTab", False),
+                ((("Claude Code", "send no events"), ("Codex", "installed")), "No events from the Claude Code hooks", False)):
             self.list_controller.apply_snapshot(snapshot._replace(hooks_status_per_agent_tool=hooks_status_per_agent_tool))
             self.assertEqual((panel.hooks_note_text_field.stringValue(), panel.hooks_note_text_field.isHidden(),
                               panel.install_hooks_button.isHidden()), (expected_note, not expected_note, not shows_button))
+        self.assertEqual(panel.hooks_note_text_field.toolTip(), HOOKS_SEND_NO_EVENTS_TOOL_TIP)  # says what to check
         self.list_controller.apply_snapshot(snapshot._replace(hooks_status_per_agent_tool=(("Claude Code", "missing"),)))
         self.select_rows(1)  # "planning", which runs: the pause button shows at the bottom right
         self.assertFalse(panel.pause_or_resume_selected_rows_button.isHidden())

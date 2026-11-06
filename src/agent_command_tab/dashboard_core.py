@@ -31,7 +31,7 @@ from agent_command_tab.hook_event_tracking import (SESSION_START_SOURCES_OF_ANOT
                                                    hooks_report_no_prompt_since_the_agent_started,
                                                    list_reported_background_task_ids_still_running,
                                                    list_reported_shells_a_reading_can_check)
-from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, check_hooks
+from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, HOOKS_ARE_INSTALLED, HOOKS_SEND_NO_EVENTS, check_hooks
 from agent_command_tab.hook_states_store import load_hook_states, save_hook_states
 from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
                                                      pause_has_ended, resume_agent_session, send_signal_to_processes)
@@ -112,6 +112,10 @@ EXITED_ROW_SECONDS = 300
 CHILD_PROCESS_CHECK_INTERVAL_SECONDS = 3  # an open tab row's sub rows and the background shells
 LONGEST_COMMAND_TEXT = 500  # characters of a sub row's command kept in the snapshot
 HOOKS_CHECK_INTERVAL_SECONDS = 10  # whether the agent tools' settings hold the app's hooks
+# A Claude Code session sends its first hook event (SessionStart) as it starts; one that started
+# after the app saw the hooks installed and has sent none after this long means the hooks send no
+# events (mark_hooks_that_send_no_events).
+SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT = 120
 LONGEST_HOOK_EVENT_LINE = 1024 ** 2
 # How often a copy that left the hook events socket to another copy checks whether that one has ended.
 SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER = 5
@@ -314,6 +318,9 @@ class DashboardCore:
         self.agent_process_ids_with_shells_of_unknown_tasks = set()
         self.hooks_status_per_agent_tool = ()  # ComputerSnapshot.hooks_status_per_agent_tool
         self.hooks_check_needed = asyncio.Event()
+        # {agent tool name: when this run first found its hooks installed, while they stay so} (mark_hooks_that_send_no_events).
+        self.hooks_found_installed_at_by_agent_tool_name = {}
+        self.hook_events_are_received = False  # once this copy listens on the hook events socket (listen_for_hook_events)
         self.specific_adapters, self.generic_adapter = build_built_in_agent_tool_adapters()
         self.process_ids_asked_about_in_claude_agents = set()
         self.claude_agents_retry_count_by_process_id = {}
@@ -1857,6 +1864,7 @@ class DashboardCore:
         except OSError as error:
             print(f"hook events can't be received at {self.hook_events_socket_path}: {error!r}")
             await asyncio.Event().wait()
+        self.hook_events_are_received = True
         async with server:
             await server.serve_forever()
 
@@ -1912,6 +1920,8 @@ class DashboardCore:
             except Exception as error:  # a check that fails leaves the last status; it must not end the core
                 print(f"the hooks couldn't be checked: {error!r}")
                 hooks_status_per_agent_tool = self.hooks_status_per_agent_tool
+            else:
+                hooks_status_per_agent_tool = self.mark_hooks_that_send_no_events(hooks_status_per_agent_tool, time.time())
             if hooks_status_per_agent_tool != self.hooks_status_per_agent_tool:
                 self.hooks_status_per_agent_tool = hooks_status_per_agent_tool
                 self.snapshot_needed.set()
@@ -1920,6 +1930,36 @@ class DashboardCore:
             except asyncio.TimeoutError:
                 pass
             self.hooks_check_needed.clear()
+
+    def mark_hooks_that_send_no_events(self, hooks_status_per_agent_tool, now):
+        """Returns check_hooks's statuses with Claude Code's HOOKS_ARE_INSTALLED replaced by
+        HOOKS_SEND_NO_EVENTS when a Claude Code session that started after this run first found
+        the hooks installed has sent no hook event SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT
+        after it started (hooks turned off in Claude Code, or failing for a reason the files don't
+        show; user request, 2026-11-05). Only while this copy receives the hook events. Codex is
+        left out: its hooks report too little to tell.
+
+        Args:
+            hooks_status_per_agent_tool: ((agent tool name, check_hooks's status), ...).
+            now: The time of the check.
+        """
+        for agent_tool_name, status in hooks_status_per_agent_tool:
+            if status == HOOKS_ARE_INSTALLED:
+                self.hooks_found_installed_at_by_agent_tool_name.setdefault(agent_tool_name, now)
+            else:
+                self.hooks_found_installed_at_by_agent_tool_name.pop(agent_tool_name, None)
+        hooks_found_installed_at = self.hooks_found_installed_at_by_agent_tool_name.get("Claude Code")
+        if hooks_found_installed_at is None or not self.hook_events_are_received:
+            return hooks_status_per_agent_tool
+        if not any(isinstance(agent_session["adapter"], ClaudeCodeAdapter) and agent_session["process_id"]
+                   and agent_session.get("started_at") is not None
+                   and hooks_found_installed_at < agent_session["started_at"]
+                   <= now - SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT
+                   and agent_session["process_id"] not in self.hook_state_by_agent_process_id
+                   for agent_session in self.agent_sessions.values()):
+            return hooks_status_per_agent_tool
+        return tuple((agent_tool_name, HOOKS_SEND_NO_EVENTS if agent_tool_name == "Claude Code" and status == HOOKS_ARE_INSTALLED
+                      else status) for agent_tool_name, status in hooks_status_per_agent_tool)
 
     async def read_agent_screens_periodically(self):
         """Reads the screens the status rules need: the permission dialog of an

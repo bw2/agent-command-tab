@@ -34,9 +34,22 @@ Almost everything works as in iTerm2: the states, previews, process rows, /compa
 
 ## Install
 
+The `python3` that comes with macOS is too old (3.9), so install with pipx, which [Homebrew](https://brew.sh) installs along with a recent Python:
+
 ```bash
-pipx install agent-command-tab        # or: pip install agent-command-tab
+brew install pipx
+pipx ensurepath                  # puts pipx's programs on your PATH; open a new terminal tab afterwards
+pipx install agent-command-tab
 ```
+
+Then, once:
+
+1. Turn on iTerm2's Python API: iTerm2 > Settings > General > Magic > Enable Python API.
+2. Start the app from an iTerm2 tab: `agent-command-tab`. iTerm2 asks whether to let it use the Python API: allow it. From then on, iTerm2 starts the app whenever iTerm2 starts.
+3. Click the "C" in the menu bar. If the list's bottom bar says the hooks aren't installed, click Install Hooks; for Codex, then type `/hooks` in Codex and approve them. Agent sessions started afterwards report to the app.
+4. Optionally, for the Shift-Command-Tab shortcut, give iTerm2 the Accessibility permission (System Settings > Privacy & Security > Accessibility).
+
+If a Homebrew upgrade removes the Python version that pipx made the app's environment with, the app no longer starts, and a copy still running says in its bottom bar that the hooks can't run. `pipx reinstall agent-command-tab` fixes both.
 
 From a clone of this repository:
 
@@ -55,11 +68,22 @@ agent-command-tab --version      # prints the installed version, for bug reports
 
 Click the "C" in the menu bar to see the list, right-click it for Settings. The first time, iTerm2 asks whether to allow the app to use its Python API.
 
-From its first start on, iTerm2 starts the app whenever iTerm2 starts: the app adds `AgentCommandTab.scpt` to iTerm2's AutoLaunch folder (`~/Library/Application Support/iTerm2/Scripts/AutoLaunch`), which starts the copy you ran, however you installed it. Started that way, it has iTerm2's permissions, as when you start it from an iTerm2 tab. Turning off Settings > Launch AgentCommandTab whenever iTerm2 is started removes the script. Only one copy runs at a time; starting another prints that one is already running. Before uninstalling, turn that setting off and run `agent-command-tab remove-hooks`, since pip and pipx leave the script and the hooks behind.
+From its first start on, iTerm2 starts the app whenever iTerm2 starts: the app adds `AgentCommandTab.scpt` to iTerm2's AutoLaunch folder (`~/Library/Application Support/iTerm2/Scripts/AutoLaunch`), which starts the copy you ran, however you installed it. Started that way, it has iTerm2's permissions, as when you start it from an iTerm2 tab, and writes its output to `~/Library/Logs/agent-command-tab.log`. Turning off Settings > Launch AgentCommandTab whenever iTerm2 is started removes the script. Only one copy runs at a time; starting another prints that one is already running.
 
 The app's hooks tell a crashed agent from one that ended normally (its row stays, gray and "exited", for 5 minutes), count Claude Code's background shells and agents, and tell when a Claude Code turn ends while one of those still runs. The list offers to install them (Install Hooks, at its bottom left) while an agent tool in it lacks them. The first time the app changes a settings file, it copies it to `<file>.agent-command-tab-backup`. Sessions started afterwards use them, and Codex asks you to approve them first: type `/hooks` in Codex.
 
 The shortcut needs the Accessibility permission (System Settings > Privacy & Security > Accessibility), because it has to see the keys before macOS's app switcher does. macOS gives it to the app that starts AgentCommandTab, so started from iTerm2, turn it on for iTerm2. Until it is on, Settings show a button that opens that page.
+
+## Uninstall
+
+pip and pipx remove only the app's own files, so first take out what it added elsewhere:
+
+```bash
+agent-command-tab clean-up-before-uninstalling   # stops the app, takes out its hooks and its iTerm2 AutoLaunch script
+pipx uninstall agent-command-tab
+```
+
+Its settings stay in `~/Library/Application Support/agent-command-tab`, and its log in `~/Library/Logs/agent-command-tab.log`.
 
 ## Development
 

@@ -33,3 +33,37 @@ jobs:
 
       - name: Run tests
         run: python -m unittest discover -s tests -p '*_tests.py'
+
+  package:
+    # The files PyPI gets: built as a release builds them (docs/RELEASING.md), each installed into a
+    # fresh environment, away from this checkout, and run.
+    name: build and install the package
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Build the source archive and the wheel, and check them
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Install each into a fresh environment and run it
+        run: |
+          expected_version_line="agent-command-tab $(python -c 'import re; print(re.search(r"__version__ = \"(.+)\"", open("src/agent_command_tab/__init__.py").read()).group(1))')"
+          for archive in dist/*.whl dist/*.tar.gz; do
+            environment="$RUNNER_TEMP/environment-for-$(basename "$archive")"
+            python -m venv "$environment"
+            "$environment/bin/pip" install "$archive"
+            version_line="$(cd "$RUNNER_TEMP" && "$environment/bin/agent-command-tab" --version)"
+            echo "$archive: $version_line"
+            test "$version_line" = "$expected_version_line"
+            # The dependencies the menu bar app imports (PyObjC, iterm2) came along.
+            (cd "$RUNNER_TEMP" && "$environment/bin/python" -c "import agent_command_tab.app_controller")
+          done
