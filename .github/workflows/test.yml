@@ -35,7 +35,7 @@ jobs:
         run: python -m unittest discover -s tests -p '*_tests.py'
 
   package:
-    # The files PyPI gets: built as a release builds them (docs/RELEASING.md), each installed into a
+    # The files PyPI gets: built as a release builds them (dev/RELEASING.md), each installed into a
     # fresh environment, away from this checkout, and run.
     name: build and install the package
     runs-on: macos-latest

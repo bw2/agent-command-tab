@@ -91,7 +91,7 @@ Its settings stay in `~/Library/Application Support/agent-command-tab`, and its 
 .venv/bin/python -m unittest discover -s tests -p '*_tests.py'
 ```
 
-[docs/RELEASING.md](https://github.com/bw2/agent-command-tab/blob/main/docs/RELEASING.md) describes how to publish a version.
+[dev/RELEASING.md](https://github.com/bw2/agent-command-tab/blob/main/dev/RELEASING.md) describes how to publish a version.
 
 ## License
 
