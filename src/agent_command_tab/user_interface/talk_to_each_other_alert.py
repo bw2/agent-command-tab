@@ -1,21 +1,20 @@
 """The Talk to Each Other window: the note sent to the selected agent sessions, which the user can
-edit before sending it (user request, 2026-10-21), and which of them gets it (user request, 2026-10-28)."""
+edit before sending it, and which of them gets it."""
 
 import objc
 from AppKit import (NSAlert, NSBezelBorder, NSButton, NSColor, NSControlStateValueOff, NSControlStateValueOn,
-                    NSEventModifierFlagCommand, NSFont, NSMakeRect, NSScrollView, NSTextField, NSTextView, NSView,
-                    NSViewWidthSizable)
+                    NSEventModifierFlagCommand, NSFont, NSMakeRect, NSScrollView, NSTextField, NSView, NSViewWidthSizable)
 from Foundation import NSObject
 
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
+from agent_command_tab.user_interface.control_helpers import LARGEST_TEXT_VIEW_SIZE, make_text_view_that_wraps_lines
 
 ACCESSORY_WIDTH = 460
 NOTE_BOX_HEIGHT = 110
 GAP = 6
 GAP_BETWEEN_SECTIONS = 12
 RADIO_BUTTON_INDENT = 8
-LARGEST_TEXT_VIEW_SIZE = 1e7
-EXPLANATION = "The message will also include the other agents' names, and process ids"  # the user's wording, 2026-10-28
+EXPLANATION = "The message will also include the other agents' names, and process ids"
 
 
 class RecipientChoices(NSObject):
@@ -55,14 +54,9 @@ def list_tab_titles_for_alert(agent_session_entries):
 def build_note_text_view(frame_size):
     """Returns a plain-text view of the scroll view's content size that wraps lines and leaves
     quotes and dashes as typed."""
-    note_text_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, frame_size.width, frame_size.height))
+    note_text_view = make_text_view_that_wraps_lines(frame_size.width, frame_size.height)
     note_text_view.setMinSize_((0, frame_size.height))
-    note_text_view.setMaxSize_((LARGEST_TEXT_VIEW_SIZE, LARGEST_TEXT_VIEW_SIZE))
-    note_text_view.setVerticallyResizable_(True)
-    note_text_view.setHorizontallyResizable_(False)
     note_text_view.setAutoresizingMask_(NSViewWidthSizable)
-    note_text_view.textContainer().setContainerSize_((frame_size.width, LARGEST_TEXT_VIEW_SIZE))
-    note_text_view.textContainer().setWidthTracksTextView_(True)
     note_text_view.setRichText_(False)
     note_text_view.setAllowsUndo_(True)
     note_text_view.setAutomaticQuoteSubstitutionEnabled_(False)
@@ -83,8 +77,7 @@ def build_talk_to_each_other_alert(agent_session_entries, left_out_agent_session
         left_out_agent_session_entries: The selected ones whose tools can't take part.
     """
     alert = NSAlert.alloc().init()
-    alert.setMessageText_("Talk to Each Other")  # with the app's icon (blanked, then restored: user requests, 2026-10-27)
-    # The user's wording, 2026-10-28 (the agents were listed with bullets after "introducing these 2 agents to each other:").
+    alert.setMessageText_("Talk to Each Other")  # with the app's icon
     informative_text = f"Send a message instructing these {len(agent_session_entries)} agents to talk to each other."
     if left_out_agent_session_entries:
         informative_text += ("\n\nLeft out, since their tools can't take messages from other sessions: "

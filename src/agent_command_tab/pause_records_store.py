@@ -5,11 +5,11 @@ dashboard restarts while sessions are paused (a reconnect when iTerm2's connecti
 quit, an upgrade). Pure functions apart from the file reading and writing.
 """
 
-import json
 import os
 
 from agent_command_tab.agent_session_pausing import PauseRecord
-from agent_command_tab.settings_store import SETTINGS_FOLDER, write_json_file_atomically
+from agent_command_tab.hook_states_store import is_number
+from agent_command_tab.settings_store import SETTINGS_FOLDER, read_json_file, write_json_file_atomically
 
 PAUSE_RECORDS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "paused_agent_sessions.json")
 
@@ -17,12 +17,12 @@ PAUSE_RECORDS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "paused_agent_sessions.j
 def is_process_record(value):
     """Whether value is a stored (process ID, start time) pair."""
     return (isinstance(value, list) and len(value) == 2 and isinstance(value[0], int) and not isinstance(value[0], bool)
-            and isinstance(value[1], (int, float)) and not isinstance(value[1], bool))
+            and is_number(value[1]))
 
 
 def build_pause_record_from_stored_value(value):
     """Returns the PauseRecord a stored value describes, or None when it doesn't have that shape.
-    A record saved before 2026-11-06, of a pause that pressed Ctrl+Z, has no shell_processes (it
+    A record saved by version 0.3.0 or earlier, of a pause that pressed Ctrl+Z, has no shell_processes (it
     has the shell's prompt instead, no longer used) and gets none: its shell has the terminal."""
     if (not isinstance(value, dict) or not is_process_record(value.get("agent_process"))
             or not isinstance(value.get("agent_tool_name"), str)):
@@ -39,12 +39,8 @@ def build_pause_record_from_stored_value(value):
 def load_pause_records(file_path):
     """Returns {(session ID, agent process ID): PauseRecord} from the file; {} when it is missing
     or unreadable, and without records that don't have that shape."""
-    try:
-        with open(file_path) as file:
-            stored_records = json.load(file)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(stored_records, list):
+    stored_records = read_json_file(file_path, list)
+    if stored_records is None:
         return {}
     pause_record_by_tab_and_agent = {}
     for value in stored_records:

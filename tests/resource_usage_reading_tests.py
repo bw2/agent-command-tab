@@ -7,9 +7,10 @@ import unittest.mock
 
 from agent_command_tab import dashboard_core
 from agent_command_tab.dashboard_core import DashboardCore
+from condition_waiting import wait_until_in_a_coroutine
 
 
-class ResourceUsageReadingTests(unittest.TestCase):  # code review, 2026-10-29
+class ResourceUsageReadingTests(unittest.TestCase):
     def test_turning_the_readings_on_gives_memory_at_once_and_cpu_use_right_after(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
         core.agent_sessions = {"s1": {"process_id": 4242}}
@@ -23,8 +24,7 @@ class ResourceUsageReadingTests(unittest.TestCase):  # code review, 2026-10-29
             reading_task = asyncio.ensure_future(core.read_resource_usage_periodically())
             await asyncio.sleep(0.01)  # the loop is waiting out its (long) interval
             core.set_core_settings({"left_out_agent_tool_names": [], "resource_usage_is_read": True, "codex_command_path": None})
-            while core.screen_readings_by_session_id.get("s1", {}).get("cpu_percent") is None and time.monotonic() - started_at < 5:
-                await asyncio.sleep(0.01)
+            await wait_until_in_a_coroutine(lambda: core.session_readings_by_session_id.get("s1", {}).get("cpu_percent") is not None)
             reading_task.cancel()
 
         with unittest.mock.patch.object(dashboard_core, "RESOURCE_USAGE_CHECK_INTERVAL_SECONDS", 30), \
@@ -32,8 +32,8 @@ class ResourceUsageReadingTests(unittest.TestCase):  # code review, 2026-10-29
                 unittest.mock.patch.object(dashboard_core, "read_process_tree_resource_usage", read_process_tree_resource_usage):
             asyncio.run(turn_the_readings_on_then_wait_for_cpu_use())
         self.assertLess(time.monotonic() - started_at, 2)  # not the 30-second interval
-        self.assertEqual(core.screen_readings_by_session_id["s1"]["memory_bytes"], 512 * 1024 ** 2)
-        self.assertIsNotNone(core.screen_readings_by_session_id["s1"]["cpu_percent"])
+        self.assertEqual(core.session_readings_by_session_id["s1"]["memory_bytes"], 512 * 1024 ** 2)
+        self.assertIsNotNone(core.session_readings_by_session_id["s1"]["cpu_percent"])
 
 
 if __name__ == "__main__":

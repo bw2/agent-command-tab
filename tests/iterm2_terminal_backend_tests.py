@@ -19,8 +19,8 @@ def make_iterm2_terminal_backend(app=None):
 
 
 class StartAgentSessionTests(unittest.TestCase):
-    def test_a_new_window_returns_its_id_for_the_lists_to_select_it(self):  # user request, 2026-10-30
-        # And its tab's, which a restored session's name is given to (user request, 2026-11-06).
+    def test_a_new_window_returns_its_id_for_the_lists_to_select_it(self):
+        # And its tab's, which a restored session's name is given to.
         for new_window, expected_result in ((unittest.mock.Mock(window_id="w9", current_tab=unittest.mock.Mock(tab_id="t9")),
                                              ActionResult(True, details={"window_id": "w9", "tab_id": "t9"})),
                                             (None, ActionResult(True))):  # iTerm2 gives no window when its session ended right away

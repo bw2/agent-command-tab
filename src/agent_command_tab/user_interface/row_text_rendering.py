@@ -13,13 +13,17 @@ from agent_command_tab.context_window_usage import format_token_count
 from agent_command_tab.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list
 
+# Each optional field beside its default, so a field added or moved can't take another's default.
+ROW_TEXT_PARTS_DEFAULTS_BY_OPTIONAL_FIELD = {
+    "agent_tool_name": "", "state_text": "", "context_text": "",
+    "created_time_text": "", "existence_duration_text": "", "memory_text": "", "cpu_text": "",
+    "details_color_name": "gray", "dot_tool_tip": "", "details_tool_tip": "",
+    "context_fill_percent_color_name": "", "state_color_name": "", "state_text_is_semibold": False,
+}
 RowTextParts = collections.namedtuple(
-    "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
-                     "agent_tool_name", "state_text", "context_text",
-                     "created_time_text", "existence_duration_text", "memory_text", "cpu_text",
-                     "details_color_name", "dot_tool_tip", "details_tool_tip",
-                     "context_fill_percent_color_name", "state_color_name", "state_text_is_semibold"],
-    defaults=["", "", "", "", "", "", "", "gray", "", "", "", "", False])
+    "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text"]
+    + list(ROW_TEXT_PARTS_DEFAULTS_BY_OPTIONAL_FIELD),
+    defaults=list(ROW_TEXT_PARTS_DEFAULTS_BY_OPTIONAL_FIELD.values()))
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot. A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
                         "context_text (the context's size and its share of the context window, "
@@ -30,11 +34,11 @@ RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working sessi
                         "(in state_color_name, semibold for state_text_is_semibold). "
                         "A tab row's details are its background task lights, in details_color_name. "
                         "dot_tool_tip and details_tool_tip are what the dot and the details mean, shown when the "
-                        "pointer rests on them, or \"\" for none (user request, 2026-10-27).")
+                        "pointer rests on them, or \"\" for none.")
 
 # A light per background shell or background agent after a tab's name; more than
-# MOST_BACKGROUND_TASK_LIGHTS show as one light and their number. After the name rather than the
-# dot (as first built), so the names stay lined up from row to row.
+# MOST_BACKGROUND_TASK_LIGHTS show as one light and their number. After the name rather than
+# before it, so the names stay lined up from row to row.
 BACKGROUND_TASK_LIGHT = "•"
 BACKGROUND_TASK_LIGHTS_COLOR_NAME = "yellow"
 MOST_BACKGROUND_TASK_LIGHTS = 4
@@ -42,19 +46,19 @@ MOST_BACKGROUND_TASK_LIGHTS = 4
 # and a gray middle dot otherwise, the same width, so the commands line up.
 CHILD_PROCESS_DOT_GLYPHS_AND_COLORS = {True: (BACKGROUND_TASK_LIGHT, BACKGROUND_TASK_LIGHTS_COLOR_NAME), False: ("·", "gray")}
 CHILD_PROCESS_DOT_TOOL_TIPS = {
-    True: "Running in the background: the agent launched this command in the background and went on",  # the user's wording, 2026-10-28
-    False: "Not a background task: a command from the agent's current turn, or a helper the agent runs for itself",  # the user's wording, 2026-10-28
+    True: "Running in the background: the agent launched this command in the background and went on",
+    False: "Not a background task: a command from the agent's current turn, or a helper the agent runs for itself",
 }
 
-# Each state's dot and its color, also the menu bar icon's color for the most urgent state.
+# Each state's dot and its color; the menu bar icon takes the colors of asking and error
+# (menu_bar_status_item.ICON_COLOR_NAME_BY_MOST_URGENT_STATE).
 DOT_GLYPH_AND_COLOR_BY_STATE = {
-    "asking": ("●", "light_blue"),  # also the asking count's color in the menu bar (user request, milestone 2)
+    "asking": ("●", "light_blue"),  # also the asking count's color in the menu bar
     "error": ("✕", "red"),
-    "stuck": ("◆", "orange"),
     "working": ("●", "green"),
-    "background": ("●", "yellow"),  # steady, the color of the background task lights (user request, 2026-10-28)
+    "background": ("●", "yellow"),  # steady, the color of the background task lights
     "done": ("✔", "green"),
-    "new": ("✦", "green"),  # user request, 2026-10-30
+    "new": ("✦", "green"),
     "idle": ("○", "gray"),
     "paused": ("‖", "purple"),
     "unknown": ("◌", "gray"),
@@ -63,37 +67,31 @@ DOT_GLYPH_AND_COLOR_BY_STATE = {
 
 # The color of each state's text in the Status column: its dot's, but done is gray, in the names'
 # color in dark mode, and unknown is pure black, or pure white in dark mode, so it stands out from
-# done (user requests, 2026-10-28). named_colors' "_text" colors are darker in light mode, so they
+# done. named_colors' "_text" colors are darker in light mode, so they
 # read on white.
 STATE_TEXT_COLOR_NAME_BY_STATE = {
     "asking": "light_blue_text",
     "error": "red",
-    "stuck": "orange_text",
     "working": "green_text",  # a tab row's "thinking" and "running"
-    "background": "amber",  # its "running" in yellow (user request, 2026-10-28), darker in light mode to read on white
+    "background": "amber",  # its "running" in yellow, darker in light mode to read on white
     "done": "gray_in_light_mode_only",
-    "new": "green_text",  # user request, 2026-10-30
-    "idle": "light_gray",  # a little fainter than gray (user request, 2026-10-28)
+    "new": "green_text",
+    "idle": "light_gray",  # a little fainter than gray
     "paused": "purple",
     "unknown": "pure_black_or_white",
     "exited": "gray",
 }
 
-# The status text is semibold, easier to read, except idle's, the most common and least telling
-# (user requests, 2026-10-28).
+# The status text is semibold, easier to read, except idle's, the most common and least telling.
 STATES_WHOSE_TEXT_IS_IN_THE_REGULAR_WEIGHT = frozenset({"idle"})
 
-# What each state means, the dot's hover text (user request, 2026-10-27). The 10 and 5 minutes are
-# dashboard_core's STUCK_THRESHOLD_SECONDS and EXITED_ROW_SECONDS.
-MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2026-10-28
+# What each state means, the dot's hover text. The 5 minutes are dashboard_core's EXITED_ROW_SECONDS.
+MEANING_BY_STATE = {
     "asking": "the agent is waiting for your answer to a question, or for permission to use a tool",
     "error": "the agent reported an error",
-    # Also a tool that should take seconds, open that long (user request and code review, 2026-10-30).
-    "stuck": ("the agent has been thinking for 10 minutes with nothing new on screen and no command running, "
-              "or has waited 10 minutes on a tool that should take seconds (a web fetch, a file read)"),
     "working": "the agent is thinking or running a command",
     "background": "the agent is at its prompt, and processes it started keep running in the background",
-    "done": "the agent is done and you haven't looked at its last message yet",  # the user's wording, 2026-10-27
+    "done": "the agent is done and you haven't looked at its last message yet",
     "new": "the agent has started, and no message has been sent to it yet",
     "idle": "nothing new here since you last looked at this tab",
     # A pause stops its shell too, so a CONT signal continues it (agent_session_pausing), but not after a Ctrl+Z.
@@ -102,18 +100,17 @@ MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2
     "exited": "this status appears for 5 minutes after an agent exits abnormally (a crash, or killed)",
 }
 # A tab row names a working agent's state for what it does: "running" while it waits on a tool,
-# a command at once and any other tool after 5 seconds, otherwise "thinking" (user requests,
-# 2026-10-28; snapshot_builder.choose_tool_the_agent_is_waiting_on). Window rows, whose
+# a command at once and any other tool after 5 seconds, otherwise "thinking"
+# (snapshot_builder.choose_tool_the_agent_is_waiting_on). Window rows, whose
 # counts sum up their tabs, still say "working" for both.
 MEANING_BY_WORKING_STATE_NAME = {
-    "thinking": "the agent is thinking or briefly running tools",  # the user's wording, 2026-10-28
+    "thinking": "the agent is thinking or briefly running tools",
     "running": "the agent is waiting on a tool it started, such as a command, a subagent or a web fetch",
 }
 
 # The longest text each column at a tab row's right edge can get, by RowTextParts field (the font
 # is monospaced, so the longest is the widest). The dropdown makes each shown column this wide,
-# so its width stays put as numbers grow ("99k" to "100k", "9m" to "10m") and states change
-# (user request, 2026-10-25).
+# so its width stays put as numbers grow ("99k" to "100k", "9m" to "10m") and states change.
 LONGEST_TEXT_BY_COLUMN_FIELD_NAME = {
     # format_token_count: "425k", or "1.2M" from 999,500 up; the share is over 100% only for a
     # context larger than the window it is measured against.
@@ -153,7 +150,7 @@ def format_memory_size(memory_bytes):
 
 def format_context_text(context_tokens, context_fill_percent):
     """Returns the Tokens column's text: the context's size and its share of the context window,
-    such as "134k (13%)" (user request, 2026-10-26), the size alone while the window's size isn't
+    such as "134k (13%)", the size alone while the window's size isn't
     known, or "" while the context's size isn't."""
     if not context_tokens:
         return ""
@@ -164,8 +161,7 @@ def format_context_text(context_tokens, context_fill_percent):
 
 def choose_context_fill_percent_color_name(context_fill_percent):
     """Returns the color of the Tokens column's share of the context window: "amber" from 50%,
-    "red" from 75%, or "" below 50% or while the share isn't known, for the column's own color
-    (user request, 2026-10-27)."""
+    "red" from 75%, or "" below 50% or while the share isn't known, for the column's own color."""
     if context_fill_percent is None or context_fill_percent < 50:
         return ""
     return "amber" if context_fill_percent < 75 else "red"
@@ -215,8 +211,8 @@ def describe_state(state):
 def name_and_describe_tab_rows_state(agent_session_entry, state):
     """Returns a tab row's state text and its dot's hover text, such as ("running", "Running: the
     agent is waiting on a tool it started, such as a command, a subagent or a web fetch"): a working agent's state is "thinking" or
-    "running" (MEANING_BY_WORKING_STATE_NAME), and "background" is "running" too, in yellow (user
-    request, 2026-10-28). A state the app doesn't know shows as it came, with the hover text of
+    "running" (MEANING_BY_WORKING_STATE_NAME), and "background" is "running" too, in yellow. A state the app
+    doesn't know shows as it came, with the hover text of
     state, "unknown"."""
     if state == "background":
         return "running", f"Running in the background: {MEANING_BY_STATE['background']}"
@@ -270,7 +266,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
 
 
 def build_child_process_row_text_parts(child_process_entry, is_last_child_at_each_level, now):
-    """Returns the RowTextParts for a sub row of an open tab row (user request, 2026-10-27): the
+    """Returns the RowTextParts for a sub row of an open tab row: the
     command the agent started, in gray, and when it started, how long ago, and its memory and CPU
     use in the tab row's columns.
 
@@ -301,8 +297,7 @@ def build_window_row_text_parts(window_entry, is_last_child_at_each_level, is_ex
 
     The dot shows the window's most urgent session state. A collapsed window counts its hidden
     sessions' states ("1 working, 2 idle"); an
-    expanded one shows nothing there, since its tab rows show each state (user requests,
-    milestone 2).
+    expanded one shows nothing there, since its tab rows show each state.
     """
     states = [agent_session_entry.status for agent_session_entry in window_entry.agent_sessions]
     most_urgent_state = pick_most_urgent_state(states)
@@ -313,8 +308,7 @@ def build_window_row_text_parts(window_entry, is_last_child_at_each_level, is_ex
         dot_glyph=dot_glyph,
         dot_color_name=dot_color_name,
         dot_blinks=most_urgent_state == "working",  # blinks like its working tab's dot
-        # Its most urgent tab's state, without "The most urgent status among this window's tabs:" before it (user request, 2026-10-27).
-        dot_tool_tip=describe_state(most_urgent_state),
+        dot_tool_tip=describe_state(most_urgent_state),  # its most urgent tab's state
         name_text=build_window_title_shown_in_the_list(window_entry),
         details_text=details_text,
     )

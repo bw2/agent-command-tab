@@ -13,7 +13,8 @@ from agent_command_tab import __version__, command_line, hooks_installer, start_
 from agent_command_tab.command_line import (SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C, choose_signal_that_stops_the_copy, main,
                                             stop_the_running_copy, take_the_running_lock, the_running_lock_is_held,
                                             wait_for_app_process)
-from agent_command_tab.hooks_installer import HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, check_hooks, install_hooks
+from agent_command_tab.hooks_installer import (HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL, check_hooks,
+                                               install_hooks)
 
 
 class VersionOptionTests(unittest.TestCase):
@@ -72,27 +73,33 @@ class WaitForAppProcessTests(unittest.TestCase):
         self.assertEqual(wait_for_app_process(process), -9)
         self.assertTrue(process.was_killed)
 
-    def test_a_plain_kill_of_the_supervisor_reaches_the_app_as_ctrl_c(self):  # code review, 2026-10-30
+    def test_a_plain_kill_of_the_supervisor_reaches_the_app_as_ctrl_c(self):
         # It ended the supervisor alone, leaving the app running without the lock.
-        handler_before = signal.getsignal(signal.SIGTERM)
+        def fail_instead_of_ending_the_test_run(signal_number, frame):
+            raise AssertionError("wait_for_app_process left SIGTERM unhandled")
+        handler_before = signal.signal(signal.SIGTERM, fail_instead_of_ending_the_test_run)
+        self.addCleanup(signal.signal, signal.SIGTERM, handler_before)
         process = FakeAppProcess([KILL_THE_SUPERVISOR, 0])
         self.assertEqual(wait_for_app_process(process), 0)
         self.assertEqual(process.signals_sent, [signal.SIGINT])
         self.assertEqual(process.wait_timeouts, [None, SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C])
-        self.assertIs(signal.getsignal(signal.SIGTERM), handler_before)
+        self.assertIs(signal.getsignal(signal.SIGTERM), fail_instead_of_ending_the_test_run)  # put back as it was
 
 
-class RunningLockTests(unittest.TestCase):  # one copy at a time (user request, 2026-10-28)
+class RunningLockTests(unittest.TestCase):  # one copy at a time
     def test_only_one_holder_at_a_time_and_the_file_names_it(self):
         with tempfile.TemporaryDirectory() as folder:
             lock_file_path = os.path.join(folder, "agent-command-tab", "running.lock")  # its folder made if missing
             lock_file = take_the_running_lock(lock_file_path)
             self.assertIsNotNone(lock_file)
+            self.addCleanup(lock_file.close)  # closing it twice is harmless
             with open(lock_file_path) as written_lock_file:
                 self.assertEqual(written_lock_file.read(), f"{os.getpid()}\n")
             self.assertIsNone(take_the_running_lock(lock_file_path))  # another open of the file, as another process's
             lock_file.close()  # as when the holder ends
-            self.assertIsNotNone(take_the_running_lock(lock_file_path))
+            lock_file_taken_again = take_the_running_lock(lock_file_path)
+            self.assertIsNotNone(lock_file_taken_again)
+            lock_file_taken_again.close()
 
     def test_a_second_copy_exits_at_once_without_starting_the_app(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -111,10 +118,10 @@ class RunningLockTests(unittest.TestCase):  # one copy at a time (user request, 
                 self.assertEqual(command_line.run_with_restarts(verbose=False), 0)
             self.assertIn("already running (process 4242)", printed.getvalue())
             # The move comes first: the lock file makes the new folder, after which the move never
-            # happens (code review, 2026-10-29).
+            # happens.
             self.assertEqual(steps, ["move the old-name settings folder", "take the lock"])
 
-    def test_the_supervisor_hands_the_lock_to_the_app_it_starts(self):  # code review, 2026-10-30
+    def test_the_supervisor_hands_the_lock_to_the_app_it_starts(self):
         # So an app left running after its supervisor ended still keeps a second copy out.
         popen_keyword_arguments = []
         commands = []
@@ -128,15 +135,17 @@ class RunningLockTests(unittest.TestCase):  # one copy at a time (user request, 
                                            return_value=lock_file), \
                 unittest.mock.patch("agent_command_tab.installed_copy_paths.find_python_of_this_copy",
                                     return_value="/opt/homebrew/opt/agent-command-tab/libexec/bin/python"), \
+                unittest.mock.patch(  # not the real login shell, which a bare PATH (launchd's) would ask
+                    "agent_command_tab.login_shell_environment.add_the_login_shells_environment_when_started_without_it"), \
                 unittest.mock.patch.object(command_line.subprocess, "Popen", side_effect=start_the_app):
             self.assertEqual(command_line.run_with_restarts(verbose=False), 0)
-            # By the Python's path that survives `brew upgrade`, not sys.executable (code review, 2026-10-30).
+            # By the Python's path that survives `brew upgrade`, not sys.executable.
             self.assertEqual(commands[0][0], "/opt/homebrew/opt/agent-command-tab/libexec/bin/python")
             self.assertEqual(popen_keyword_arguments[0]["pass_fds"], [lock_file.fileno()])
             self.assertEqual(popen_keyword_arguments[0]["env"][command_line.RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE],
                              str(lock_file.fileno()))
 
-    def test_the_app_started_directly_takes_the_lock_itself(self):  # code review, 2026-10-30
+    def test_the_app_started_directly_takes_the_lock_itself(self):
         with unittest.mock.patch.dict(os.environ), \
                 unittest.mock.patch.object(command_line, "take_the_running_lock_or_name_the_copy_holding_it",
                                            return_value=None) as take_the_lock, \
@@ -164,7 +173,7 @@ STAND_IN_FOR_THE_APP = ("import sys, time\n"
                         "time.sleep(60)\n")
 
 
-class CleanUpBeforeUninstallingTests(unittest.TestCase):  # user request, 2026-11-05
+class CleanUpBeforeUninstallingTests(unittest.TestCase):
     def test_the_signal_that_stops_a_copy_follows_what_the_process_is(self):
         self.assertEqual(choose_signal_that_stops_the_copy(["/venv/bin/python", "-m", "agent_command_tab.command_line", "app"]),
                          signal.SIGINT)  # the app gives docked windows their room back
@@ -203,15 +212,16 @@ class CleanUpBeforeUninstallingTests(unittest.TestCase):  # user request, 2026-1
             printed = io.StringIO()
             with unittest.mock.patch.object(hooks_installer, "list_settings_file_paths", lambda agent_tool_name: {
                         "Claude Code": [claude_settings_path], "Codex": [os.path.join(codex_home_folder, "hooks.json")]}[agent_tool_name]), \
-                    unittest.mock.patch.object(hooks_installer, "find_codex_home_folder", lambda: codex_home_folder), \
                     unittest.mock.patch.object(start_with_iterm2, "find_iterm2_autolaunch_folder", lambda: autolaunch_folder), \
                     unittest.mock.patch.object(command_line, "stop_the_running_copy",
                                                lambda: (True, "AgentCommandTab isn't running")), \
                     contextlib.redirect_stdout(printed):
                 install_hooks("Claude Code")
-                self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
+                install_hooks("Codex")
+                # Codex's wait for the user's approval in Codex, which config.toml (read in codex_home_folder) doesn't hold.
+                self.assertEqual((check_hooks("Claude Code"), check_hooks("Codex")), (HOOKS_ARE_INSTALLED, HOOKS_AWAIT_APPROVAL))
                 self.assertEqual(main(["clean-up-before-uninstalling"]), 0)
-                self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_MISSING)
+                self.assertEqual((check_hooks("Claude Code"), check_hooks("Codex")), (HOOKS_ARE_MISSING, HOOKS_ARE_MISSING))
             self.assertFalse(os.path.exists(autolaunch_script_path))
             self.assertIn(f"removed the script that started AgentCommandTab with iTerm2: {autolaunch_script_path}", printed.getvalue())
             self.assertIn("pipx uninstall agent-command-tab", printed.getvalue())

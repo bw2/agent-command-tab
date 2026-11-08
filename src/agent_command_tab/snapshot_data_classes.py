@@ -5,10 +5,6 @@ computer can receive exactly what the menu bar list receives. They are named tup
 classes, which would need type annotations), so equal contents compare equal, which the views
 use to redraw only the rows that changed. Frames are (x, y, width, height) tuples in points,
 with the origin at the bottom-left of the main monitor.
-
-The fields once kept for importance levels, hover panels, automatic introductions, the startup
-window order and Codex usage bars were removed when those features were dropped (user decision,
-2026-10-27).
 """
 
 import collections
@@ -16,10 +12,10 @@ import collections
 # Each optional field beside its default, so a field added or moved can't take another's default.
 AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD = {
     "status_reason": "", "status_since": 0.0, "context_fill_percent": None,
-    "background_task_count": 0, "ended_abnormally_at": None, "is_in_front": False, "last_time_tab_was_seen": None,
+    "background_task_count": 0, "is_in_front": False, "last_time_tab_was_seen": None,
     "running_tool_name": "", "running_tool_started_at": None, "context_tokens": None, "started_at": None,
     "memory_bytes": None, "cpu_percent": None, "slash_commands": (), "is_paused_with_the_processes_below_it": False,
-    "child_processes": (), "can_be_paused_while_it_runs": True,
+    "child_processes": (), "can_be_paused_while_it_runs": True, "turns_run_outside_the_tab": False,
 }
 AgentSessionEntry = collections.namedtuple(
     "AgentSessionEntry",
@@ -33,8 +29,7 @@ AgentSessionEntry.__doc__ = ("One terminal tab (an iTerm2 tab, or a tmux window)
                              "running_tool_name is the tool a working agent waits on, and running_tool_started_at "
                              "when it started (snapshot_builder.choose_tool_the_agent_is_waiting_on): a "
                              "command it started in this turn (for example \"python3\"), or another tool open for "
-                             "5 seconds or more (for example \"Agent\"), or \"\" while it thinks (\"running_command_"
-                             "name\" until 2026-10-28, when other tools began to count). context_tokens is how many "
+                             "5 seconds or more (for example \"Agent\"), or \"\" while it thinks. context_tokens is how many "
                              "tokens its context holds, from its conversation file, or None if unknown, and "
                              "context_fill_percent that as a whole percent of its context window, or None. "
                              "started_at is when the agent's process started (the Created Time column), or None. "
@@ -45,15 +40,17 @@ AgentSessionEntry.__doc__ = ("One terminal tab (an iTerm2 tab, or a tmux window)
                              "is True for a paused row whose pause also stopped the processes below the agent (Pause "
                              "from the list), False for an agent suspended with Ctrl+Z by hand. "
                              "can_be_paused_while_it_runs is False in tmux, which would undo a pause "
-                             "(agent_session_pausing); a Ctrl+Z there can still be followed by a pause. A row whose agent "
+                             "(agent_session_pausing); a Ctrl+Z there can still be followed by a pause. "
+                             "turns_run_outside_the_tab is True for a Codex session whose turns run in Codex's shared "
+                             "background server, which is never paused, also after a Ctrl+Z. A row whose agent "
                              "ended without a normal session end (a crash, or killed) has the status "
-                             "\"exited\" and ended_abnormally_at, when that was noticed. background_task_count is "
+                             "\"exited\", its status_since when that was noticed. background_task_count is "
                              "how many background shells and background agents it runs, and "
                              "child_processes the ChildProcessEntry of each process it started, oldest first.")
 
 ChildProcessEntry = collections.namedtuple(
     "ChildProcessEntry", ["process_id", "command_text", "started_at", "is_background_shell", "memory_bytes", "cpu_percent"])
-ChildProcessEntry.__doc__ = ("One process an agent started, a sub row of its open tab row (user request, 2026-10-27): "
+ChildProcessEntry.__doc__ = ("One process an agent started, a sub row of its open tab row: "
                              "the command it runs (agent_process_tree.list_child_processes_of_the_agent), when that "
                              "command started, whether it is a command left running in the background, and what it and the "
                              "processes below it use (None while memory and CPU use aren't read).")
@@ -84,7 +81,7 @@ ComputerSnapshot = collections.namedtuple(
 )
 ComputerSnapshot.__doc__ = ("Everything one computer's core knows, at one moment. hooks_status_per_agent_tool holds "
                             "(agent tool name, hooks_installer.check_hooks's status) pairs, one for each tool the "
-                            "app has hooks for (user request, 2026-10-27).")
+                            "app has hooks for.")
 
 
 def convert_snapshot_to_json_ready_dict(snapshot):
@@ -106,7 +103,7 @@ def convert_snapshot_to_json_ready_dict(snapshot):
 def rename_window_entry(window_entry, new_title):
     """Returns the window entry with a new title, for a rename the list shows before a snapshot
     from the core confirms it: numbered 1 until that snapshot numbers it among the windows with
-    the new title, rather than keeping the old title's number (code review, 2026-10-30)."""
+    the new title, rather than keeping the old title's number."""
     return window_entry._replace(title=new_title, number_among_windows_with_the_same_title=1)
 
 
@@ -127,9 +124,9 @@ def replace_title_in_snapshot(snapshot, kind, item_id, new_title):
 def build_window_title_shown_in_the_list(window_entry):
     """Returns the window's title, with its number after it for the second and later windows
     with that title ("tandem-repeat-catalogs (2)"): a window opened in the same folder as
-    another otherwise looks like the same window (user request, 2026-10-30). A window of a
+    another otherwise looks like the same window. A window of a
     terminal other than iTerm2 has its terminal's name before it ("tmux: research"), so a tmux
-    session can't be taken for an iTerm2 window (user request, 2026-11-01)."""
+    session can't be taken for an iTerm2 window."""
     number = window_entry.number_among_windows_with_the_same_title
     title = window_entry.title if number == 1 else f"{window_entry.title} ({number})"
     return title if window_entry.terminal_name == "iTerm2" else f"{window_entry.terminal_name}: {title}"
@@ -151,7 +148,7 @@ SECONDS_A_TAB_COUNTS_AS_RECENTLY_USED = 24 * 60 * 60
 
 
 def choose_folder_for_new_agent_window(snapshot, now, home_folder):
-    """Returns the folder a new window's agent session starts in (user request, milestone 2): the
+    """Returns the folder a new window's agent session starts in: the
     folder of the tab in front, else of the tab seen most recently within the last 24 hours,
     else the home folder.
 

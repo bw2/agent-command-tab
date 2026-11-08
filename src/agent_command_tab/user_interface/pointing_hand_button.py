@@ -1,4 +1,4 @@
-"""A button that shows the pointing hand while the pointer is over it (user request, 2026-10-19).
+"""A button that shows the pointing hand while the pointer is over it.
 
 Used for the list's icon buttons (a row's arrow, the "+" row's button) and the
 top and bottom bars' buttons. The sidebar window turns cursor rects off (they reset its edge's

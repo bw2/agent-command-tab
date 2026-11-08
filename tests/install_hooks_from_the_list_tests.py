@@ -1,4 +1,4 @@
-"""The list's Install Hooks button (AppController.install_hooks; user request, 2026-10-27): it asks
+"""The list's Install Hooks button (AppController.install_hooks): it asks
 first, naming the files, installs the hooks, and has the core check them again at once."""
 
 import json
@@ -13,8 +13,11 @@ from agent_command_tab import app_controller as app_controller_module
 from agent_command_tab import hooks_installer
 from agent_command_tab.app_controller import AppController
 from agent_command_tab.hooks_installer import HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, check_hooks
+from codex_sandbox_detection import REASON_FOR_SKIPPING_WINDOW_TESTS_IN_CODEX_SANDBOX, RUNNING_IN_CODEX_SANDBOX
+from stand_in_app_controller_builders import make_stand_in_app_controller_with_real_methods
 
 
+@unittest.skipIf(RUNNING_IN_CODEX_SANDBOX, REASON_FOR_SKIPPING_WINDOW_TESTS_IN_CODEX_SANDBOX)
 class InstallHooksFromTheListTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -33,7 +36,7 @@ class InstallHooksFromTheListTests(unittest.TestCase):
             self.addCleanup(patch.stop)
         self.alerts = []
         self.button_chosen = NSAlertFirstButtonReturn
-        self.stand_in_app_controller = unittest.mock.Mock()
+        self.stand_in_app_controller = make_stand_in_app_controller_with_real_methods(["show_message_alert"])
 
         def run_alert_in_front(alert):
             self.alerts.append(alert)
@@ -60,9 +63,16 @@ class InstallHooksFromTheListTests(unittest.TestCase):
     def test_a_file_that_cant_be_changed_is_reported(self):
         with open(self.settings_path, "w") as settings_file:
             settings_file.write('{"model": ')  # not JSON: left alone
-        AppController.install_hooks(self.stand_in_app_controller, ["Claude Code"])
+        install_hooks_tried_for = []
+        install_hooks = hooks_installer.install_hooks
+        with unittest.mock.patch.object(app_controller_module, "install_hooks",
+                                        lambda agent_tool_name: install_hooks_tried_for.append(agent_tool_name) or install_hooks(agent_tool_name)):
+            AppController.install_hooks(self.stand_in_app_controller, ["Claude Code", "Codex"])
         self.assertEqual([alert.messageText() for alert in self.alerts],
-                         ["Install the hooks for Claude Code?", "The hooks couldn't be installed"])
+                         ["Install the hooks for Claude Code and Codex?", "The hooks couldn't be installed"])
+        # The failure names the tool and the file, and the other tool's hooks are still tried.
+        self.assertTrue(self.alerts[1].informativeText().startswith(f"Claude Code: {self.settings_path} isn't valid JSON"))
+        self.assertEqual(install_hooks_tried_for, ["Claude Code", "Codex"])
         with open(self.settings_path) as settings_file:
             self.assertEqual(settings_file.read(), '{"model": ')
 

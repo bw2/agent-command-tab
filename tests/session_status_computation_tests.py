@@ -28,13 +28,10 @@ class MapIterm2StatusValueTests(unittest.TestCase):
         self.assertIsNone(map_iterm2_status_value_to_state(None))
 
 
-STUCK_THRESHOLD_SECONDS = 600
-
-
-def compute_state(iterm2_status_value, status_change_time, last_seen=None, seen_now=False, screen_reading=None, now=200,
+def compute_state(iterm2_status_value, status_change_time, last_seen=None, seen_now=False, session_reading=None,
                   last_turn_ended_at=None):
     return compute_session_status_from_sources(iterm2_status_value, status_change_time, last_turn_ended_at, last_seen,
-                                               seen_now, screen_reading, STUCK_THRESHOLD_SECONDS, now)[0]
+                                               seen_now, session_reading)[0]
 
 
 class ComputeSessionStatusTests(unittest.TestCase):
@@ -88,7 +85,7 @@ class ComputeSessionStatusTests(unittest.TestCase):
         tracking = track_status_value(dict(tracking, last_time_tab_was_seen=125), "idle", 150)  # Codex's end of a turn
         self.assertEqual((tracking["last_turn_ended_at"], tracking["last_time_tab_was_seen"]), (150, 125))
 
-    def test_a_permission_prompt_answered_no_or_esc_ends_the_turn_so_the_next_working_is_a_new_one(self):  # code review, 2026-10-28
+    def test_a_permission_prompt_answered_no_or_esc_ends_the_turn_so_the_next_working_is_a_new_one(self):
         tracking = track_status_value(track_status_value(None, "idle", 100), "working", 120)
         tracking = track_status_value(tracking, "waiting", 142)
         answered_no = {"permission_dialog_is_showing": False, "permission_dialog_gone_since": 143,
@@ -115,71 +112,25 @@ class ComputeSessionStatusTests(unittest.TestCase):
     def test_asking_ends_when_the_permission_dialog_is_gone(self):
         answered = {"permission_dialog_is_showing": False, "permission_dialog_checked_at": 105,
                     "permission_dialog_gone_since": 105}
-        self.assertEqual(compute_state("waiting", 100, screen_reading=answered), "working")
+        self.assertEqual(compute_state("waiting", 100, session_reading=answered), "working")
 
     def test_asking_stays_while_the_dialog_was_never_recognized(self):
         never_seen = {"permission_dialog_is_showing": False, "permission_dialog_checked_at": 105}
-        self.assertEqual(compute_state("waiting", 100, screen_reading=never_seen), "asking")
+        self.assertEqual(compute_state("waiting", 100, session_reading=never_seen), "asking")
 
     def test_asking_stays_while_the_dialog_shows_or_before_any_check_after_the_change(self):
-        self.assertEqual(compute_state("waiting", 100, screen_reading={"permission_dialog_is_showing": True,
+        self.assertEqual(compute_state("waiting", 100, session_reading={"permission_dialog_is_showing": True,
                                                                        "permission_dialog_checked_at": 105}), "asking")
-        self.assertEqual(compute_state("waiting", 100, screen_reading={"permission_dialog_is_showing": False,
-                                                                       "permission_dialog_checked_at": 95}), "asking")
+        # Gone at the last check, but that came before the status changed.
+        self.assertEqual(compute_state("waiting", 100, session_reading={"permission_dialog_is_showing": False,
+                                                                       "permission_dialog_checked_at": 95,
+                                                                       "permission_dialog_gone_since": 95}), "asking")
 
-    def test_stuck_after_the_threshold_without_screen_change(self):
-        self.assertEqual(compute_state("working", 100, screen_reading={"fingerprint_changed_at": 150}, now=749), "working")
-        self.assertEqual(compute_state("working", 100, screen_reading={"fingerprint_changed_at": 150}, now=750), "stuck")
-
-    def test_waiting_on_a_long_command_is_never_stuck(self):
-        reading = {"fingerprint_changed_at": 150, "running_command": ("python3", 160), "command_last_seen_running_at": 2000}
-        self.assertEqual(compute_session_status_from_sources("working", 100, None, None, False, reading, 600, 2000),
-                         ("working", "running python3"))
-
-    def test_waiting_on_an_open_tool_call_is_stuck_only_for_a_tool_that_finishes_in_seconds(self):  # user request, 2026-10-30
-        reading = {"fingerprint_changed_at": 150, "running_command": None,
-                   "open_tool_call": {"open_tool_name": "WebFetch", "open_tool_started_at": 1500}}
-        self.assertEqual(compute_session_status_from_sources("working", 100, None, None, False, reading, 600, 2000),
-                         ("working", "running WebFetch"))  # open for 500 seconds, under the threshold
-        self.assertEqual(compute_session_status_from_sources("working", 100, None, None, False, reading, 600, 2220),
-                         ("stuck", "waiting on WebFetch for 12 min"))
-        for tool_that_may_run_long in ("mcp__github__search_code", "Agent"):  # never stuck, however long
-            reading["open_tool_call"] = {"open_tool_name": tool_that_may_run_long, "open_tool_started_at": 160}
-            self.assertEqual(compute_session_status_from_sources("working", 100, None, None, False, reading, 600, 5000),
-                             ("working", f"running {tool_that_may_run_long}"))
-        reading["open_tool_call"] = {"open_tool_name": "", "open_tool_started_at": None}  # the call returned
-        self.assertEqual(compute_state("working", 100, screen_reading=reading, now=2000), "stuck")
-
-    def test_the_stuck_clock_restarts_when_the_command_ends(self):
-        # A silent 30-minute command ended at 1900; the agent has been thinking for 100 seconds since.
-        reading = {"fingerprint_changed_at": 150, "running_command": None, "command_last_seen_running_at": 1900}
-        self.assertEqual(compute_state("working", 100, screen_reading=reading, now=2000), "working")
-        self.assertEqual(compute_state("working", 100, screen_reading=reading, now=2500), "stuck")
-
-    def test_a_new_working_period_starts_the_stuck_clock_again(self):
-        self.assertEqual(compute_state("working", 1000, screen_reading={"fingerprint_changed_at": 100}, now=1100), "working")
-
-    def test_answered_permission_can_become_stuck(self):
-        reading = {"permission_dialog_is_showing": False, "permission_dialog_checked_at": 105,
-                   "permission_dialog_gone_since": 104, "fingerprint_changed_at": 100}
-        self.assertEqual(compute_state("waiting", 100, screen_reading=reading, now=800), "stuck")
-
-    def test_stuck_clock_after_an_approval_starts_when_the_dialog_went_away(self):
-        # The prompt waited 11 minutes for the user; the approved tool has only run for 2 minutes since.
-        reading = {"permission_dialog_is_showing": False, "permission_dialog_checked_at": 762,
-                   "permission_dialog_gone_since": 760, "fingerprint_changed_at": 90}
-        self.assertEqual(compute_state("waiting", 100, screen_reading=reading, now=880), "working")
-        # So too for a tool that finishes in seconds, open since before the prompt (code review, 2026-10-30).
-        reading["open_tool_call"] = {"open_tool_name": "Edit", "open_tool_started_at": 99}
-        self.assertEqual(compute_session_status_from_sources("waiting", 100, None, None, False, reading, 600, 880),
-                         ("working", "running Edit"))
-        self.assertEqual(compute_session_status_from_sources("waiting", 100, None, None, False, reading, 600, 1400),
-                         ("stuck", "waiting on Edit for 11 min"))
 
     def test_denied_permission_waits_for_instructions(self):
         reading = {"permission_dialog_is_showing": False, "permission_dialog_checked_at": 105,
                    "permission_dialog_gone_since": 105, "turn_was_interrupted": True}
-        self.assertEqual(compute_state("waiting", 100, screen_reading=reading), "idle")
+        self.assertEqual(compute_state("waiting", 100, session_reading=reading), "idle")
 
 
 class PermissionDialogReadingTests(unittest.TestCase):

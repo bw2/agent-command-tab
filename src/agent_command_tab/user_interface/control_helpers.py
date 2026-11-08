@@ -1,13 +1,27 @@
-"""Helpers for buttons and pop-ups shared by the list's rows, the panel around the list and the settings window."""
+"""Helpers for buttons, pop-ups and text views shared by the list's rows, the panel around the
+list, the settings window and the alerts."""
 
 from AppKit import (NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagOption, NSFontWeightBold, NSImage,
-                    NSImageOnly, NSImageSymbolConfiguration)
+                    NSImageOnly, NSImageSymbolConfiguration, NSMakeRect, NSTextView)
+
+LARGEST_TEXT_VIEW_SIZE = 1e7  # no limit to how far a text view's text, and a field's measured text, may reach
+
+
+def make_text_view_that_wraps_lines(width, height):
+    """Returns an NSTextView of this size that wraps its text at its width and grows downward with it."""
+    text_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+    text_view.setVerticallyResizable_(True)
+    text_view.setHorizontallyResizable_(False)
+    text_view.setMaxSize_((LARGEST_TEXT_VIEW_SIZE, LARGEST_TEXT_VIEW_SIZE))
+    text_view.textContainer().setContainerSize_((width, LARGEST_TEXT_VIEW_SIZE))
+    text_view.textContainer().setWidthTracksTextView_(True)
+    return text_view
 
 
 def is_a_command_press_of_letter(letter, characters, modifier_flags):
     """Whether a key press is Command and the letter, with or without Shift, and without Option or
     Control: Command-R and Command-Shift-R rename the selected row, in the list and in the Saved
-    sessions window, and Command-E and Command-Shift-E expand or collapse all (user requests, 2026-11-07).
+    sessions window, and Command-E and Command-Shift-E expand or collapse all.
 
     Args:
         letter: The lowercase letter, such as "r".

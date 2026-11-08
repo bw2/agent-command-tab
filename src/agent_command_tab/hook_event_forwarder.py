@@ -4,7 +4,7 @@ event), and sends one line to the app's socket.
 
 The installer (hooks_installer) registers it as `<python> -I -S <this file> <agent tool name>`
 (build_forwarder_command): it imports only the standard library, so Python starts without its
-site packages (30 to 40 ms in all, measured on 2026-10-27), and it runs in the background (the hooks are registered as
+site packages (30 to 40 ms in all, as measured), and it runs in the background (the hooks are registered as
 async), so agents never wait for it. It never prints, since Claude Code can feed a hook's output into the conversation,
 and it never fails: an event that can't be sent (the app isn't running) is dropped.
 """
@@ -21,7 +21,11 @@ SECONDS_TO_REACH_THE_APP = 0.2
 ANCESTOR_LEVELS_SENT = 6  # the shell the hook runs in, the agent, and the agent's own launcher and shell above it
 LONGEST_TEXT_KEPT = 300  # characters of a text field (a reason, an ID)
 MOST_BACKGROUND_TASKS_KEPT = 50
-PROC_PIDT_SHORTBSDINFO = 13  # proc_pidinfo flavor of struct proc_bsdshortinfo, as in agent_process_tree
+# proc_pidinfo flavor that returns struct proc_bsdshortinfo, also for another user's process. Read
+# here (read_process_short_bsd_info), which agent_process_tree imports, since the hooks run this
+# file without the package.
+PROC_PIDT_SHORTBSDINFO = 13
+LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
 
 
 class ProcessShortBsdInfo(ctypes.Structure):
@@ -36,15 +40,20 @@ class ProcessShortBsdInfo(ctypes.Structure):
     ]
 
 
+def read_process_short_bsd_info(process_id):
+    """Returns a process's ProcessShortBsdInfo, also for a process of another user, or None if it is gone."""
+    info = ProcessShortBsdInfo()
+    size = LIBPROC.proc_pidinfo(process_id, PROC_PIDT_SHORTBSDINFO, ctypes.c_uint64(0), ctypes.byref(info), ctypes.sizeof(info))
+    return info if size == ctypes.sizeof(info) else None
+
+
 def list_ancestor_processes(process_id, levels):
     """Returns [process ID, executable name] of process_id and the processes above it, nearest
     first, up to levels of them (fewer once one can't be read)."""
-    libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
     ancestors = []
     while process_id > 1 and len(ancestors) < levels:
-        info = ProcessShortBsdInfo()
-        if libproc.proc_pidinfo(process_id, PROC_PIDT_SHORTBSDINFO, ctypes.c_uint64(0), ctypes.byref(info),
-                                ctypes.sizeof(info)) != ctypes.sizeof(info):
+        info = read_process_short_bsd_info(process_id)
+        if info is None:
             break
         ancestors.append([process_id, info.pbsi_comm.decode(errors="replace")])
         process_id = info.pbsi_ppid

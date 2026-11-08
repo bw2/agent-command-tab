@@ -1,4 +1,4 @@
-"""The list in a regular window, for "Show as: Window" in the settings (user request, 2026-10-19).
+"""The list in a regular window, for "Show as: Window" in the settings.
 
 A titled window you can move, resize and minimize, holding its own list controller and panel
 (the same panel as the dropdown's and the sidebar's). It remembers its frame in the settings.
@@ -91,7 +91,7 @@ class ListWindowController(WindowFrameSavingController):
     def follow_the_pointer_until_the_button_comes_up(self, pointer_offset):
         """Moves the window with the pointer, keeping the pointer pointer_offset (x, y) from the
         window's bottom-left corner, until the mouse button comes up: the drag that detached the
-        dropdown goes on in this window (user request, 2026-10-19)."""
+        dropdown goes on in this window."""
         while True:
             event = NSApp.nextEventMatchingMask_untilDate_inMode_dequeue_(
                 NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp, NSDate.distantFuture(), NSEventTrackingRunLoopMode, True)

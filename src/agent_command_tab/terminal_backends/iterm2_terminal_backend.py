@@ -85,7 +85,7 @@ async def read_status_shown_in_iterm2s_tab_bar(session):
 
     After iTerm2 restarts, its tab bar still shows each tab's status, and this function returns
     it, but the session's `status` variable stays empty until the agent's next hook event (seen
-    with iTerm2 3.7.6; user request, 2026-10-21).
+    with iTerm2 3.7.6).
     """
     try:
         result = await session.async_invoke_function(f'iterm2.get_session_status(session_id: "{session.session_id}")',
@@ -109,7 +109,7 @@ def convert_frame_to_iterm2_frame(frame):
 def build_new_agent_session_profile(folder, launch_command):
     """Returns profile customizations that start launch_command in folder.
 
-    iTerm2's "send text at start" profile setting ("Initial Text", Phase 0) types the command
+    iTerm2's "send text at start" profile setting ("Initial Text") types the command
     once the shell is ready, so the tab keeps a normal shell and stays open if the agent exits.
     """
     profile = iterm2.LocalWriteOnlyProfile({"Initial Text": launch_command})
@@ -161,7 +161,7 @@ class Iterm2TerminalBackend(TerminalBackend):
     tab_kind_name = "iTerm2 tab"
     reports_agent_status = True
     windows_have_frames = True
-    # Its IDs are UUIDs, and the windows and tabs it brought back after a reboot kept theirs (seen 2026-11-06).
+    # Its IDs are UUIDs, and the windows and tabs it brought back after a reboot kept theirs.
     ids_are_never_reused = True
 
     def __init__(self, request_regather, request_snapshot, report_problem):
@@ -201,7 +201,6 @@ class Iterm2TerminalBackend(TerminalBackend):
                 self.iterm2_process_ids = list_iterm2_process_ids()
                 break
             except Exception as error:
-                # The user's wording for the hint, 2026-10-28.
                 self.report_problem(self.terminal_name, f"could not connect to iTerm2 ({error}). Retrying soon. Make sure "
                                                         "iTerm2's Settings > General > Magic > Enable Python API is on.")
                 await asyncio.sleep(SECONDS_BEFORE_CONNECTING_AGAIN_AFTER_A_FAILURE)
@@ -217,7 +216,8 @@ class Iterm2TerminalBackend(TerminalBackend):
             raise TerminalConnectionLost(f"the iTerm2 connection could not start: {start_up_task.exception()!r}")
         self.report_problem(self.terminal_name, None)
         watching_tasks = [asyncio.ensure_future(coroutine) for coroutine in (
-            self.watch_layout_changes(), self.watch_new_sessions(), self.watch_session_terminations(),
+            *(self.regather_on_each_notification_of(monitor_class)
+              for monitor_class in (iterm2.LayoutChangeMonitor, iterm2.NewSessionMonitor, iterm2.SessionTerminationMonitor)),
             self.watch_focus_changes())]
         done_tasks, _ = await asyncio.wait(watching_tasks + [connection_loss_task], return_when=asyncio.FIRST_COMPLETED)
         failure_message = "the iTerm2 connection closed"
@@ -295,20 +295,10 @@ class Iterm2TerminalBackend(TerminalBackend):
         """A tab or window title changed (here, in iTerm2's own dialogs, or by a program): re-read."""
         self.request_regather()
 
-    async def watch_layout_changes(self):
-        async with iterm2.LayoutChangeMonitor(self.connection) as monitor:
-            while True:
-                await monitor.async_get()
-                self.request_regather()
-
-    async def watch_new_sessions(self):
-        async with iterm2.NewSessionMonitor(self.connection) as monitor:
-            while True:
-                await monitor.async_get()
-                self.request_regather()
-
-    async def watch_session_terminations(self):
-        async with iterm2.SessionTerminationMonitor(self.connection) as monitor:
+    async def regather_on_each_notification_of(self, monitor_class):
+        """Asks for a regather each time an iTerm2 monitor (a layout change, a new session, a
+        session ending) reports one."""
+        async with monitor_class(self.connection) as monitor:
             while True:
                 await monitor.async_get()
                 self.request_regather()
@@ -579,8 +569,8 @@ class Iterm2TerminalBackend(TerminalBackend):
         """
         profile = build_new_agent_session_profile(folder, launch_command)
         if window_id is None:
-            # Its ID lets the lists select it once its agent shows (user request, 2026-10-30), and the
-            # tab's lets a restored session's tab get its saved name (user request, 2026-11-06).
+            # Its ID lets the lists select it once its agent shows, and the
+            # tab's lets a restored session's tab get its saved name.
             window = await iterm2.Window.async_create(self.connection, profile_customizations=profile)
             return ActionResult(True, details={"window_id": window.window_id, "tab_id": window.current_tab.tab_id}
                                 if window is not None and window.current_tab is not None else None)

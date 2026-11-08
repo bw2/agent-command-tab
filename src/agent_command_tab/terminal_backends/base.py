@@ -1,4 +1,4 @@
-"""What the core asks of a terminal (user request, 2026-11-01): the terminal layer that lets the
+"""What the core asks of a terminal: the terminal layer that lets the
 dashboard list agent sessions from iTerm2 and tmux at the same time.
 
 A terminal backend gathers its windows, tabs and sessions into plain dicts (the shape
@@ -9,7 +9,7 @@ and pane "%3" IDs, which can't be mistaken for iTerm2's), so the core routes eac
 backend whose gathered windows hold the item.
 
 In tmux terms: a tmux session is a window row, a tmux window is a tab row, and its first pane is
-the tab's session, as an iTerm2 tab's first pane is (user's choice, 2026-11-01).
+the tab's session, as an iTerm2 tab's first pane is.
 """
 
 import collections

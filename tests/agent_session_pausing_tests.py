@@ -9,7 +9,6 @@ import json
 import os
 import pty
 import select
-import shutil
 import signal
 import subprocess
 import tempfile
@@ -24,19 +23,18 @@ from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.dashboard_core import DashboardCore
 from agent_command_tab.pause_records_store import load_pause_records, save_pause_records
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
-from agent_command_tab.settings_store import find_program_on_path_or_in_the_usual_folders
 from agent_command_tab.terminal_backends import iterm2_terminal_backend
+from condition_waiting import SECONDS_TO_WAIT_FOR_A_REAL_PROCESS, wait_for_the_process_named_below, wait_until
+from private_tmux_server import TMUX_PROGRAM_PATH, start_a_private_tmux_server
 
 AGENT_PROCESS_ID = 100
 SHELL_PROCESS_ID = 50  # the shell that runs the agent as a job
 OUTER_SHELL_PROCESS_ID = 40  # the tab's first shell, when the agent was started from a second one
 TOOL = "Claude Code"
 STARTED_AT = 1000.0  # every fake process's start time
-SECONDS_TO_WAIT_FOR_A_REAL_PROCESS = 5
 NOT_A_PROCESS_ID = 99999  # above macOS's highest process ID, 99998
-TMUX_PROGRAM_PATH = find_program_on_path_or_in_the_usual_folders("tmux")  # as the tmux backend finds it
 Entry = collections.namedtuple("Entry", ["session_id", "status", "is_paused_with_the_processes_below_it",
-                                         "can_be_paused_while_it_runs"], defaults=[False, True])
+                                         "can_be_paused_while_it_runs", "turns_run_outside_the_tab"], defaults=[False, True, False])
 
 
 def make_pause_record():
@@ -61,7 +59,8 @@ class FakeProcesses:
         self.shell_process_ids = list(shell_process_ids)  # outermost first; none: no job control shell
         self.runs_in_a_tmux_pane = False
         self.start_time_by_process_id = {}  # STARTED_AT unless set
-        self.gone_process_ids = set()
+        self.gone_process_ids = set()  # ended after they were read, so a signal no longer reaches them
+        self.process_ids_that_no_longer_exist = set()  # ended before they were read
         self.signals = []
 
     def kill(self, process_id, signal_number):
@@ -74,6 +73,8 @@ class FakeProcesses:
             self.stopped_process_ids.discard(process_id)
 
     def make_process_info(self, process_id):
+        if process_id in self.process_ids_that_no_longer_exist:
+            return None
         return ProcessInfo(process_id, AGENT_PROCESS_ID, "node", self.start_time_by_process_id.get(process_id, STARTED_AT))
 
     def patch(self):
@@ -117,10 +118,12 @@ class SplitTests(unittest.TestCase):
         entries = [Entry("a", "working"), Entry("b", "paused", True), Entry("c", "exited"), Entry("d", "idle"),
                    Entry("e", "paused"),  # e: suspended with Ctrl+Z by hand, so the processes below it still run
                    Entry("f", "working", can_be_paused_while_it_runs=False),  # in tmux
-                   Entry("g", "paused", can_be_paused_while_it_runs=False)]  # in tmux, suspended with Ctrl+Z by hand
+                   Entry("g", "paused", can_be_paused_while_it_runs=False),  # in tmux, suspended with Ctrl+Z by hand
+                   # Codex sessions run by its shared background server, running and suspended with Ctrl+Z by hand
+                   Entry("h", "working", turns_run_outside_the_tab=True), Entry("i", "paused", turns_run_outside_the_tab=True)]
         sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(entries)
         self.assertEqual([entry.session_id for entry in sessions_to_pause], ["a", "d", "e", "g"])
-        self.assertEqual([entry.session_id for entry in sessions_to_resume], ["b", "e", "g"])
+        self.assertEqual([entry.session_id for entry in sessions_to_resume], ["b", "e", "g", "i"])
 
 
 class PauseTests(unittest.TestCase):
@@ -140,7 +143,7 @@ class PauseTests(unittest.TestCase):
                                              (90, signal.SIGSTOP), (101, signal.SIGSTOP)])
         self.assertEqual(pause_record.stopped_processes, [(90, STARTED_AT), (101, STARTED_AT)])
 
-    def test_the_detached_processes_its_conversation_started_are_stopped_and_recorded_too(self):  # code review, 2026-10-29
+    def test_the_detached_processes_its_conversation_started_are_stopped_and_recorded_too(self):
         processes = FakeProcesses()
         detached_process = ProcessInfo(300, 1, "python3", STARTED_AT)  # launchd adopted it when its shell ended
         action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session, AGENT_PROCESS_ID, TOOL,
@@ -168,13 +171,18 @@ class PauseTests(unittest.TestCase):
         self.assertEqual((action_result.succeeded, pause_record, processes.signals), (False, None, []))
         self.assertIn("tmux", action_result.message)
 
-    def test_an_agent_suspended_with_control_z_in_a_tmux_pane_gets_the_rest_stopped(self):  # no shell is stopped
+    def test_an_agent_whose_turns_run_outside_the_tab_is_left_running(self):
+        # Codex 0.165 and later run a terminal session's turns in their shared background server.
+        processes = FakeProcesses()
+        action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session, AGENT_PROCESS_ID,
+                                                       "Codex", turns_run_outside_the_tab=True)
+        self.assertEqual((action_result.succeeded, pause_record, processes.signals), (False, None, []))
+        self.assertIn("shared background server", action_result.message)
+        # Also after a Ctrl+Z, which stops only the tab's client of the server.
         processes = FakeProcesses(stopped_process_ids={AGENT_PROCESS_ID}, process_ids_with_their_terminal=())
-        processes.runs_in_a_tmux_pane = True
-        action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session, AGENT_PROCESS_ID, TOOL)
-        self.assertTrue(action_result.succeeded)
-        self.assertEqual(processes.signals, [(101, signal.SIGSTOP), (102, signal.SIGSTOP)])
-        self.assertEqual(pause_record, make_pause_record()._replace(shell_processes=[]))
+        action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session, AGENT_PROCESS_ID,
+                                                       "Codex", turns_run_outside_the_tab=True)
+        self.assertEqual((action_result.succeeded, pause_record, processes.signals), (False, None, []))
 
     def test_an_agent_under_no_job_control_shell_is_paused_without_one(self):  # the tab's own command
         processes = FakeProcesses(shell_process_ids=())
@@ -183,12 +191,17 @@ class PauseTests(unittest.TestCase):
         self.assertEqual(pause_record, make_pause_record()._replace(shell_processes=[]))
 
     def test_an_agent_suspended_with_control_z_gets_only_the_rest_stopped_and_a_record_without_its_shell(self):
-        # Its shell has the terminal already, and stopping it now would change nothing.
-        processes = FakeProcesses(stopped_process_ids={AGENT_PROCESS_ID}, process_ids_with_their_terminal=())
-        action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session, AGENT_PROCESS_ID, TOOL)
-        self.assertTrue(action_result.succeeded)
-        self.assertEqual(processes.signals, [(101, signal.SIGSTOP), (102, signal.SIGSTOP)])
-        self.assertEqual(pause_record, make_pause_record()._replace(shell_processes=[]))
+        # Its shell has the terminal already, and stopping it now would change nothing. In a tmux
+        # pane too, where a running agent is never paused.
+        for runs_in_a_tmux_pane in (False, True):
+            with self.subTest(runs_in_a_tmux_pane=runs_in_a_tmux_pane):
+                processes = FakeProcesses(stopped_process_ids={AGENT_PROCESS_ID}, process_ids_with_their_terminal=())
+                processes.runs_in_a_tmux_pane = runs_in_a_tmux_pane
+                action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session,
+                                                               AGENT_PROCESS_ID, TOOL)
+                self.assertTrue(action_result.succeeded)
+                self.assertEqual(processes.signals, [(101, signal.SIGSTOP), (102, signal.SIGSTOP)])
+                self.assertEqual(pause_record, make_pause_record()._replace(shell_processes=[]))
 
     def test_an_agent_that_ended_meanwhile_leaves_its_shell_running(self):
         processes = FakeProcesses()
@@ -211,6 +224,20 @@ class PauseTests(unittest.TestCase):
         self.assertIn("keep running: node", action_result.message)
         self.assertEqual(pause_record.stopped_processes, [(101, STARTED_AT), (103, STARTED_AT)])  # still continued later
 
+    def test_a_process_started_before_its_parent_was_stopped_is_stopped_and_recorded_too(self):
+        processes = FakeProcesses()
+        signal_process = processes.kill
+
+        def kill(process_id, signal_number):
+            if (process_id, signal_number) == (102, signal.SIGSTOP):  # a build that started a compiler just before
+                processes.process_ids_below.append(103)
+            signal_process(process_id, signal_number)
+        processes.kill = kill
+        action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session, AGENT_PROCESS_ID, TOOL)
+        self.assertTrue(action_result.succeeded)
+        self.assertEqual(processes.signals[2:], [(101, signal.SIGSTOP), (102, signal.SIGSTOP), (103, signal.SIGSTOP)])
+        self.assertEqual(pause_record.stopped_processes, [(101, STARTED_AT), (102, STARTED_AT), (103, STARTED_AT)])
+
     def test_another_users_process_below_the_agent_is_named_and_left_alone(self):
         processes = FakeProcesses(other_users_process_ids_below=(104,))  # sudo, which this user can't even read
         action_result, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session, AGENT_PROCESS_ID, TOOL)
@@ -229,23 +256,27 @@ class PauseTests(unittest.TestCase):
         self.assertEqual(pause_record.stopped_processes, [(103, STARTED_AT)])
 
     def test_a_pause_ends_once_its_agent_runs_again_is_gone_or_its_terminal_has_hung_up(self):
-        for stopped_process_ids, start_time_by_process_id, terminal_has_hung_up, has_ended in (
-                ({AGENT_PROCESS_ID}, {}, False, False),
-                (set(), {}, False, True),  # fg typed by hand after a Ctrl+Z, or a CONT signal from elsewhere
-                ({AGENT_PROCESS_ID}, {AGENT_PROCESS_ID: STARTED_AT + 9}, False, True),  # gone, its process ID reused
-                ({AGENT_PROCESS_ID}, {}, True, True)):  # its tab closed, or iTerm2 quit
+        for stopped_process_ids, start_time_by_process_id, process_ids_that_no_longer_exist, terminal_has_hung_up, has_ended in (
+                ({AGENT_PROCESS_ID}, {}, set(), False, False),
+                (set(), {}, set(), False, True),  # fg typed by hand after a Ctrl+Z, or a CONT signal from elsewhere
+                ({AGENT_PROCESS_ID}, {}, {AGENT_PROCESS_ID}, False, True),  # gone
+                ({AGENT_PROCESS_ID}, {AGENT_PROCESS_ID: STARTED_AT + 9}, set(), False, True),  # gone, its process ID reused
+                ({AGENT_PROCESS_ID}, {}, set(), True, True)):  # its tab closed, or iTerm2 quit
             processes = FakeProcesses(stopped_process_ids=stopped_process_ids)
             processes.start_time_by_process_id = start_time_by_process_id
+            processes.process_ids_that_no_longer_exist = process_ids_that_no_longer_exist
             if terminal_has_hung_up:
                 processes.process_ids_whose_terminal_has_hung_up.add(AGENT_PROCESS_ID)
             self.assertEqual(run_with_patches(processes, agent_session_pausing.pause_has_ended, make_pause_record()),
                              has_ended, (stopped_process_ids, terminal_has_hung_up))
 
     def test_what_a_pause_stopped_is_continued_the_shell_last_unless_it_runs_or_its_process_id_was_reused(self):
-        processes = FakeProcesses(stopped_process_ids={SHELL_PROCESS_ID, AGENT_PROCESS_ID, 101})
-        processes.start_time_by_process_id = {102: STARTED_AT + 5}  # 102 ended, and its process ID was reused
-        run_with_patches(processes, agent_session_pausing.continue_what_the_pause_stopped, make_pause_record())
-        self.assertEqual(processes.signals, [(101, signal.SIGCONT), (AGENT_PROCESS_ID, signal.SIGCONT),
+        # 101 was continued by hand, and 102 ended and its process ID went to another stopped process.
+        processes = FakeProcesses(stopped_process_ids={SHELL_PROCESS_ID, AGENT_PROCESS_ID, 102, 103})
+        processes.start_time_by_process_id = {102: STARTED_AT + 5}
+        pause_record = make_pause_record()._replace(stopped_processes=[(101, STARTED_AT), (102, STARTED_AT), (103, STARTED_AT)])
+        run_with_patches(processes, agent_session_pausing.continue_what_the_pause_stopped, pause_record)
+        self.assertEqual(processes.signals, [(103, signal.SIGCONT), (AGENT_PROCESS_ID, signal.SIGCONT),
                                              (SHELL_PROCESS_ID, signal.SIGCONT)])
 
     def test_a_record_saved_before_pauses_stopped_the_shell_loads_without_one(self):
@@ -279,7 +310,7 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(processes.signals[-1], (SHELL_PROCESS_ID, signal.SIGCONT))
 
     def test_an_agent_suspended_with_control_z_is_left_for_fg_typed_in_the_tab(self):
-        # By hand (no record), or by a pause before 2026-11-06 (a record without its shell).
+        # By hand (no record), or by a pause of version 0.3.0 or earlier (a record without its shell).
         for pause_record in (None, make_pause_record()._replace(shell_processes=[])):
             processes = FakeProcesses(stopped_process_ids={AGENT_PROCESS_ID, 101, 102}, process_ids_with_their_terminal=())
             action_result = run_with_patches(processes, agent_session_pausing.resume_agent_session, AGENT_PROCESS_ID, pause_record)
@@ -295,12 +326,12 @@ class ResumeTests(unittest.TestCase):
 
 
 class PausingInTheCoreTests(unittest.TestCase):
-    def make_core_with_one_agent_tab(self, command_line_in_front="claude"):
+    def make_core_with_one_agent_tab(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
-        core.agent_sessions = {"s1": {"process_id": AGENT_PROCESS_ID, "is_in_background": command_line_in_front != "claude",
-                                      "is_stopped": False, "agent_tool_name": TOOL}}
+        core.agent_sessions = {"s1": {"process_id": AGENT_PROCESS_ID, "is_in_background": False, "is_stopped": False,
+                                      "agent_tool_name": TOOL}}
         core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [
-            {"tab_id": "t1", "first_session": {"session_id": "s1", "command_line": command_line_in_front}}]}]
+            {"tab_id": "t1", "first_session": {"session_id": "s1", "command_line": "claude"}}]}]
         return core
 
     def test_the_core_continues_what_a_pause_stopped_once_the_agent_runs_again_or_is_gone_and_saves_the_rest(self):
@@ -320,7 +351,7 @@ class PausingInTheCoreTests(unittest.TestCase):
             self.assertEqual([agent_session["is_paused_with_the_processes_below_it"]
                               for agent_session in core.agent_sessions.values()], [True, False])
 
-    def test_a_pause_records_file_that_cant_be_written_is_reported_rather_than_ending_the_core(self):  # code review, 2026-10-28
+    def test_a_pause_records_file_that_cant_be_written_is_reported_rather_than_ending_the_core(self):
         with tempfile.TemporaryDirectory() as folder:
             not_a_folder = os.path.join(folder, "a file")
             open(not_a_folder, "w").close()
@@ -346,7 +377,8 @@ class PausingInTheCoreTests(unittest.TestCase):
                 pass
         with unittest.mock.patch.object(dashboard_core, "pause_has_ended", return_value=True), \
                 unittest.mock.patch.object(dashboard_core, "continue_what_the_pause_stopped") as continue_what_it_stopped, \
-                unittest.mock.patch.object(iterm2_terminal_backend, "list_iterm2_process_ids", return_value=[]):
+                unittest.mock.patch.object(iterm2_terminal_backend, "list_iterm2_process_ids", return_value=[]), \
+                unittest.mock.patch.object(dashboard_core, "SNAPSHOT_COALESCING_DELAY_SECONDS", 10):  # no snapshot does it instead
             asyncio.run(run_the_core_for_a_moment())
         self.assertEqual(continue_what_it_stopped.call_args_list, [unittest.mock.call(make_pause_record())])
         self.assertEqual(core.pause_record_by_tab_and_agent, {})
@@ -388,9 +420,8 @@ class PausingInTheCoreTests(unittest.TestCase):
             core.list_again_the_paused_agents_that_lost_their_row()
         self.assertEqual(core.agent_sessions["s1"]["process_id"], AGENT_PROCESS_ID)
 
-    def test_a_pause_from_the_list_is_recorded_also_while_another_program_is_in_front_of_the_agent(self):
-        # Nothing is typed, so an editor that Claude Code's Ctrl+G opened in front is stopped with the rest.
-        core = self.make_core_with_one_agent_tab("vim /tmp/prompt.md")
+    def test_a_pause_from_the_list_records_the_pause_agent_session_result(self):
+        core = self.make_core_with_one_agent_tab()
         with unittest.mock.patch.object(dashboard_core, "pause_agent_session",
                                         return_value=(ActionResult(True), make_pause_record())) as pause:
             action_result = asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
@@ -411,7 +442,7 @@ class PausingInTheCoreTests(unittest.TestCase):
         self.assertEqual(core.pause_record_by_tab_and_agent,
                          {("s1", AGENT_PROCESS_ID): older_pause_record, ("s1", 200): newer_pause_record})
 
-    def test_a_pause_from_the_list_stops_the_detached_processes_its_sub_rows_show_too(self):  # code review, 2026-10-29
+    def test_a_pause_from_the_list_stops_the_detached_processes_its_sub_rows_show_too(self):
         core = self.make_core_with_one_agent_tab()
         core.agent_sessions["s1"]["started_at"] = STARTED_AT
         core.claude_agents_by_process_id = {AGENT_PROCESS_ID: {"sessionId": "conversation-1"}}
@@ -425,11 +456,27 @@ class PausingInTheCoreTests(unittest.TestCase):
             asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
         self.assertEqual(pause.call_args.kwargs["detached_processes"], [detached_process])
 
+    def test_a_codex_run_by_its_shared_server_stays_unpausable_when_its_conversation_is_no_longer_known(self):
+        # Another Codex in its folder makes the lookup ambiguous, which clears the conversation's readings.
+        core = self.make_core_with_one_agent_tab()
+        core.note_reading_value("s1", "process_id_whose_turns_run_outside_the_tab", AGENT_PROCESS_ID)
+        core.forget_conversation_file_readings("s1")
+        with unittest.mock.patch.object(dashboard_core, "pause_agent_session",
+                                        return_value=(ActionResult(False, "can't be paused"), None)) as pause:
+            asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
+        self.assertTrue(pause.call_args.kwargs["turns_run_outside_the_tab"])
+        # A new agent in the tab doesn't take it over.
+        core.agent_sessions["s1"]["process_id"] = AGENT_PROCESS_ID + 1
+        with unittest.mock.patch.object(dashboard_core, "pause_agent_session",
+                                        return_value=(ActionResult(True), make_pause_record())) as pause:
+            asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
+        self.assertFalse(pause.call_args.kwargs["turns_run_outside_the_tab"])
+
     def test_a_pause_waits_for_a_message_being_typed_into_the_tab(self):  # its paste and Enter stay together
         core = self.make_core_with_one_agent_tab()
         events = []
 
-        def pause_stand_in(agent_process_id, agent_tool_name, detached_processes=()):
+        def pause_stand_in(agent_process_id, agent_tool_name, detached_processes=(), turns_run_outside_the_tab=False):
             events.append("paused")
             return ActionResult(True), make_pause_record()
 
@@ -487,13 +534,6 @@ def read_terminal_output(terminal_file_descriptor, seconds, until_text=None):
     return output.decode(errors="replace")
 
 
-def wait_until(condition):
-    deadline = time.time() + SECONDS_TO_WAIT_FOR_A_REAL_PROCESS
-    while not condition() and time.time() < deadline:
-        time.sleep(0.05)
-    return condition()
-
-
 class RealShellTests(unittest.TestCase):
     """A real bash in a terminal of its own runs `cat` as the agent, alone, below a wrapper in its
     job, as Codex runs below `node .../codex`, or below a second bash typed at the first."""
@@ -508,8 +548,9 @@ class RealShellTests(unittest.TestCase):
         for command_line in command_lines:
             self.assertIn("PROMPT> ", read_terminal_output(terminal_file_descriptor, SECONDS_TO_WAIT_FOR_A_REAL_PROCESS, "PROMPT> "))
             os.write(terminal_file_descriptor, command_line.encode() + b"\n")
-        self.assertTrue(wait_until(lambda: any(process.name == "cat" for process in list_descendant_processes(shell_process_id))))
-        cat_process_id = next(process.process_id for process in list_descendant_processes(shell_process_id) if process.name == "cat")
+        cat_process = wait_for_the_process_named_below("cat", shell_process_id)
+        self.assertIsNotNone(cat_process)
+        cat_process_id = cat_process.process_id
         read_terminal_output(terminal_file_descriptor, 1, command_lines[-1] + "\r\n")  # the command line's echo
         return shell_process_id, cat_process_id, terminal_file_descriptor
 
@@ -568,21 +609,17 @@ class RealShellTests(unittest.TestCase):
 
     @unittest.skipIf(TMUX_PROGRAM_PATH is None, "tmux isn't installed")
     def test_an_agent_in_a_tmux_pane_is_left_running(self):
-        folder = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, folder, True)
-        tmux_command = [TMUX_PROGRAM_PATH, "-S", os.path.join(folder, "s")]
-        environment = {"PATH": "/usr/bin:/bin", "HOME": folder, "SHELL": "/bin/sh", "TERM": "xterm-256color"}
-        subprocess.run(tmux_command + ["-f", "/dev/null", "new-session", "-d", "/bin/sh"], env=environment, check=True)
-        self.addCleanup(subprocess.run, tmux_command + ["kill-server"], env=environment, capture_output=True)
+        _, socket_path, environment = start_a_private_tmux_server(self, "/bin/sh")
+        tmux_command = [TMUX_PROGRAM_PATH, "-S", socket_path]
         pane_process_id = int(subprocess.run(tmux_command + ["display-message", "-p", "#{pane_pid}"], env=environment,
                                              capture_output=True, text=True).stdout)
         subprocess.run(tmux_command + ["send-keys", "cat", "Enter"], env=environment, check=True)
-        self.assertTrue(wait_until(lambda: any(process.name == "cat" for process in list_descendant_processes(pane_process_id))))
-        cat_process_id = next(process.process_id for process in list_descendant_processes(pane_process_id) if process.name == "cat")
-        action_result, pause_record = self.pause(cat_process_id)
+        cat_process = wait_for_the_process_named_below("cat", pane_process_id)
+        self.assertIsNotNone(cat_process)
+        action_result, pause_record = self.pause(cat_process.process_id)
         self.assertEqual((action_result.succeeded, pause_record), (False, None))
         self.assertFalse(agent_session_pausing.process_is_stopped(pane_process_id))
-        self.assertFalse(agent_session_pausing.process_is_stopped(cat_process_id))
+        self.assertFalse(agent_session_pausing.process_is_stopped(cat_process.process_id))
 
     def test_a_paused_agent_whose_tab_closes_ends_once_what_its_pause_stopped_is_continued(self):
         shell_process_id, cat_process_id, terminal_file_descriptor = self.start_bash_running(["cat"])

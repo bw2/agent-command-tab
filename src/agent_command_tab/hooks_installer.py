@@ -1,5 +1,5 @@
 """The app's own hooks in Claude Code's and Codex's settings:
-installing, removing and checking them (user request, 2026-10-27).
+installing, removing and checking them.
 
 Each hook runs hook_event_forwarder.py, which sends the event to the app. The events tell the
 app when an agent's session ended normally (so a crash leaves an "exited" row), and
@@ -12,8 +12,9 @@ the app changed it ({} for a file the app created).
 - Claude Code: settings.json in each config folder in use (claude_code.list_claude_config_folders,
   so a Claude Code started with CLAUDE_CONFIG_DIR=~/.claude_work gets them too). A session
   reads its hooks when it starts, so only sessions started afterwards report.
-- Codex: hooks.json in its home folder. Codex runs a new hook only once the user approves it in
-  its /hooks screen, which records the approval in config.toml under
+- Codex: hooks.json in each Codex home folder in use (list_codex_home_folders: the app's own, and
+  the one the Codex launch command in the settings sets). Codex runs a new hook only once the
+  user approves it in its /hooks screen, which records the approval in that home's config.toml under
   [hooks.state."<hooks.json path>:<event>:<group>:<hook>"], with a hash of
   the hook as it was then, so a changed hook needs approving again (compute_codex_approval_hash).
 """
@@ -24,10 +25,12 @@ import os
 import re
 import shlex
 import shutil
-import tempfile
 
-from agent_command_tab.agent_adapters.claude_code import list_claude_config_folders
+from agent_command_tab.agent_adapters.claude_code import list_claude_config_folder_paths
+from agent_command_tab.agent_adapters.codex import find_codex_home_folder
 from agent_command_tab.installed_copy_paths import find_python_of_this_copy, replace_homebrew_version_folder_with_its_stable_link
+from agent_command_tab.settings_store import (SETTINGS_FILE_PATH, find_launch_command, load_settings,
+                                              read_environment_settings_of_launch_command, write_json_file_atomically)
 
 FORWARDER_FILE_NAME = "hook_event_forwarder.py"
 FORWARDER_FILE_PATH = replace_homebrew_version_folder_with_its_stable_link(
@@ -40,15 +43,14 @@ BACKUP_FILE_SUFFIX = ".agent-command-tab-backup"
 # Code's prompts and turn ends tell when a turn ended while iTerm2's status still says working, as
 # its Claude Code integration keeps it while a background task runs, and the main agent's tool
 # calls after a Stop that another Stop hook blocked tell that the turn goes on, from the start of
-# its first command (PreToolUse; code review, 2026-10-28;
-# hook_event_tracking.find_when_the_hooks_ended_the_turn).
+# its first command (PreToolUse; hook_event_tracking.find_when_the_hooks_ended_the_turn).
 HOOK_EVENTS_BY_AGENT_TOOL_NAME = {
     "Claude Code": [("SessionStart", None), ("UserPromptSubmit", None), ("Stop", None), ("SubagentStop", None),
                     ("SessionEnd", None), ("PreToolUse", "Bash|Agent|Task"), ("PostToolUse", "Bash|Agent|Task")],
     "Codex": [("SessionStart", None), ("Stop", None), ("SessionEnd", None)],
 }
 # Codex's /hooks screen shows a hook's statusMessage as its name, "Unnamed hook" without one, and
-# its status line shows it while the hook runs (user request, 2026-10-27). Claude Code's hooks have
+# its status line shows it while the hook runs. Claude Code's hooks have
 # no names (its statusMessage is only spinner text), so its entries go without.
 HOOK_NAMES_BY_AGENT_TOOL_NAME = {"Codex": "Report to AgentCommandTab"}
 CODEX_SESSION_END_LONGEST_TIMEOUT = 3  # seconds: Codex lowers a longer SessionEnd hook timeout to this
@@ -71,22 +73,30 @@ def build_forwarder_command(agent_tool_name, python_path=None, forwarder_path=FO
     hooks keep working after a `brew upgrade` that keeps the Python version. The forwarder of a
     copy installed with pip, pipx or Homebrew is in the venv's lib/python3.X/site-packages, so a
     venv made again with another Python version (a formula that moves to a newer Python, say) needs
-    Install Hooks again; check_hooks then reports the hooks missing, since their command differs
-    (code review, 2026-10-29)."""
+    Install Hooks again; check_hooks then reports the hooks missing, since their command differs."""
     python_path = replace_homebrew_version_folder_with_its_stable_link(python_path) if python_path else find_python_of_this_copy()
     parts = (python_path, "-I", "-S", forwarder_path, agent_tool_name)
     return " ".join(shlex.quote(part) for part in parts)
 
 
-def hook_group_is_the_apps(hook_group):
-    """Whether a hooks entry ({"matcher": ..., "hooks": [{"type": "command", "command": ...}]}) runs the forwarder."""
-    return isinstance(hook_group, dict) and isinstance(hook_group.get("hooks"), list) and any(
-        isinstance(hook, dict) and FORWARDER_FILE_NAME in str(hook.get("command", "")) for hook in hook_group["hooks"])
+def hook_is_the_apps(hook):
+    """Whether a hook ({"type": "command", "command": ...}) runs the forwarder."""
+    return isinstance(hook, dict) and FORWARDER_FILE_NAME in str(hook.get("command", ""))
+
+
+def remove_the_apps_hooks_from_hook_group(hook_group):
+    """Returns a hooks entry ({"matcher": ..., "hooks": [hook, ...]}) without the app's hooks,
+    keeping the other tools' hooks that were added to it; None when only the app's were in it."""
+    if not (isinstance(hook_group, dict) and isinstance(hook_group.get("hooks"), list)
+            and any(map(hook_is_the_apps, hook_group["hooks"]))):
+        return hook_group
+    kept_hooks = [hook for hook in hook_group["hooks"] if not hook_is_the_apps(hook)]
+    return dict(hook_group, hooks=kept_hooks) if kept_hooks else None
 
 
 def remove_the_apps_hooks(settings):
-    """Returns the settings without the app's hook entries; an event left without entries is
-    left out, and so is "hooks" when only the app's entries were in it."""
+    """Returns the settings without the app's hooks (remove_the_apps_hooks_from_hook_group); an
+    event left without entries is left out, and so is "hooks" when only the app's entries were in it."""
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return dict(settings)
@@ -95,7 +105,8 @@ def remove_the_apps_hooks(settings):
         if not isinstance(hook_groups, list):
             kept_hooks[event_name] = hook_groups
             continue
-        kept_hook_groups = [hook_group for hook_group in hook_groups if not hook_group_is_the_apps(hook_group)]
+        kept_hook_groups = [kept_hook_group for kept_hook_group in map(remove_the_apps_hooks_from_hook_group, hook_groups)
+                            if kept_hook_group is not None]
         if kept_hook_groups or not hook_groups:
             kept_hooks[event_name] = kept_hook_groups
     if not kept_hooks and hooks:
@@ -200,30 +211,38 @@ def codex_has_approved_the_hooks(config_text, hooks_file_path, settings, positio
     return True
 
 
-def find_codex_home_folder():
-    return os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
-
-
 def list_settings_file_paths(agent_tool_name):
     """Returns the files that hold the agent tool's hooks, in folders that exist (a tool that
     isn't installed has none)."""
     if agent_tool_name == "Claude Code":
-        folders = [folder or os.path.expanduser("~/.claude") for folder in list_claude_config_folders()]
+        folders = list_claude_config_folder_paths()
         return [os.path.join(folder, "settings.json") for folder in folders if os.path.isdir(folder)]
-    codex_home_folder = find_codex_home_folder()
-    return [os.path.join(codex_home_folder, "hooks.json")] if os.path.isdir(codex_home_folder) else []
+    return [os.path.join(folder, "hooks.json") for folder in list_codex_home_folders() if os.path.isdir(folder)]
+
+
+def list_codex_home_folders(settings_file_path=SETTINGS_FILE_PATH):
+    """Returns the Codex home folders the app's hooks go in: its own (find_codex_home_folder), and
+    the one the Codex launch command in the settings sets (CODEX_HOME=... in front of its
+    program), since a session reads its hooks only from its own home."""
+    codex_home_setting = read_environment_settings_of_launch_command(
+        find_launch_command(load_settings(settings_file_path), "Codex")).get("CODEX_HOME")
+    return list(dict.fromkeys([find_codex_home_folder()] + ([os.path.expanduser(codex_home_setting)] if codex_home_setting else [])))
 
 
 def read_settings_file(file_path):
     """Returns a settings file's contents ({} when it doesn't exist yet).
 
     Raises:
-        ValueError: It isn't a JSON object, so changing it could lose the user's settings.
+        ValueError: It isn't a JSON object, so changing it could lose the user's settings; the
+            message names the file.
     """
     if not os.path.exists(file_path):
         return {}
     with open(file_path) as settings_file:
-        settings = json.load(settings_file)
+        try:
+            settings = json.load(settings_file)
+        except ValueError as error:
+            raise ValueError(f"{file_path} isn't valid JSON ({error})") from error
     if not isinstance(settings, dict):
         raise ValueError(f"{file_path} doesn't hold a JSON object")
     return settings
@@ -232,7 +251,7 @@ def read_settings_file(file_path):
 def write_settings_file(settings, file_path):
     """Copies the file to its backup the first time only, so the backup keeps the file as it was
     before the app first changed it (each write replaced it, with a later install or a removal
-    leaving the app's own version there; code review, 2026-10-30), then replaces the file at once
+    leaving the app's own version there), then replaces the file at once
     with the new contents, keeping its permissions. A symlink (a dotfiles manager's) stays: the
     file it points to is the one replaced."""
     file_path = os.path.realpath(file_path)
@@ -243,15 +262,10 @@ def write_settings_file(settings, file_path):
         mode = os.stat(file_path).st_mode & 0o777
     elif not os.path.exists(file_path + BACKUP_FILE_SUFFIX):
         # There was no file: the backup says so with {}, what a missing file reads as, or the next
-        # write would copy the app's own file there (code review, 2026-10-30).
+        # write would copy the app's own file there.
         with open(file_path + BACKUP_FILE_SUFFIX, "w") as backup_file:
             backup_file.write("{}\n")
-    file_descriptor, temporary_path = tempfile.mkstemp(dir=os.path.dirname(file_path), suffix=".tmp")
-    with os.fdopen(file_descriptor, "w") as temporary_file:
-        json.dump(settings, temporary_file, indent=2, ensure_ascii=False)
-        temporary_file.write("\n")
-    os.chmod(temporary_path, mode)
-    os.replace(temporary_path, file_path)
+    write_json_file_atomically(settings, file_path, indent=2, ensure_ascii=False, file_mode=mode)
 
 
 def install_hooks(agent_tool_name):
@@ -292,14 +306,23 @@ def remove_hooks(agent_tool_name):
 def this_copys_hooks_can_run(python_path=None, forwarder_path=FORWARDER_FILE_PATH):
     """Returns whether the Python and the forwarder this copy's hooks run exist. The app can go on
     running after its Python is gone, so its hooks then fail, silently, since they run in the
-    background: twice on the author's Mac the list showed wrong states for hours without a word
-    (2026-10-29 and 2026-10-30; user request, 2026-11-05).
+    background, and the list then shows wrong states without a word.
 
     Args:
         python_path: The hooks' Python; find_python_of_this_copy's when None.
         forwarder_path: The hooks' hook_event_forwarder.py.
     """
     return os.access(python_path or find_python_of_this_copy(), os.X_OK) and os.path.isfile(forwarder_path)
+
+
+def read_codex_config_of_the_home_of(hooks_file_path):
+    """Returns the text of the config.toml next to a Codex hooks.json (where Codex records the
+    approvals of that home's hooks), or "" when there is none."""
+    try:
+        with open(os.path.join(os.path.dirname(hooks_file_path), "config.toml")) as config_file:
+            return config_file.read()
+    except OSError:
+        return ""
 
 
 def check_hooks(agent_tool_name):
@@ -325,13 +348,8 @@ def check_hooks(agent_tool_name):
         settings_and_positions_by_file_path[file_path] = (settings, positions)
     if not file_paths:
         return HOOKS_ARE_MISSING
-    if agent_tool_name == "Codex":
-        try:
-            with open(os.path.join(find_codex_home_folder(), "config.toml")) as config_file:
-                config_text = config_file.read()
-        except OSError:
-            config_text = ""
-        if not all(codex_has_approved_the_hooks(config_text, file_path, settings, positions)
-                   for file_path, (settings, positions) in settings_and_positions_by_file_path.items()):
-            return HOOKS_AWAIT_APPROVAL
+    if agent_tool_name == "Codex" and not all(
+            codex_has_approved_the_hooks(read_codex_config_of_the_home_of(file_path), file_path, settings, positions)
+            for file_path, (settings, positions) in settings_and_positions_by_file_path.items()):
+        return HOOKS_AWAIT_APPROVAL
     return HOOKS_ARE_INSTALLED

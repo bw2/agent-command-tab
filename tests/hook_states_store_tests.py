@@ -9,12 +9,7 @@ from agent_command_tab.agent_process_tree import ProcessInfo
 from agent_command_tab.hook_event_tracking import apply_hook_event, find_when_the_hooks_ended_the_turn
 from agent_command_tab.hook_states_store import load_hook_states, save_hook_states
 from agent_command_tab.dashboard_core import DashboardCore
-
-
-def make_event(hook_event_name, agent_process_id, **fields):
-    return dict({"agent_tool_name": "Claude Code", "hook_event_name": hook_event_name, "sent_at": 50.0,
-                 "ancestor_processes": [[agent_process_id + 1000, "sh"], [agent_process_id, "2.1.311"]],
-                 "background_tasks": None, "background_task_launched_id": None}, **fields)
+from hook_event_builders import make_event
 
 
 class HookStatesFileTests(unittest.TestCase):
@@ -35,7 +30,7 @@ class HookStatesFileTests(unittest.TestCase):
         self.assertEqual(turn_ended["background_task_ids"], {"b1", "b2"})
         self.assertIsNone(unknown_tasks["background_task_ids"])
 
-    def test_when_the_shells_were_reported_loads_back_and_a_malformed_time_drops_its_state(self):  # user request, 2026-11-02
+    def test_when_the_shells_were_reported_loads_back_and_a_malformed_time_drops_its_state(self):
         shells_listed = apply_hook_event(None, make_event("Stop", 101, background_tasks=[{"id": "b1", "type": "shell", "status": "running"}]))
         self.assertEqual(shells_listed["background_shells_reported_at_by_task_id"], {"b1": 50.0})
         save_hook_states(self.file_path, {101: (1000.25, shells_listed)})
@@ -45,7 +40,7 @@ class HookStatesFileTests(unittest.TestCase):
                 shells_listed, background_task_ids=["b1"], background_shells_reported_at_by_task_id={"b1": "soon"})}], file)
         self.assertEqual(load_hook_states(self.file_path), {})
 
-    def test_a_started_state_and_one_saved_before_starts_were_recorded_both_load(self):  # user request, 2026-10-30
+    def test_a_started_state_and_one_saved_before_starts_were_recorded_both_load(self):
         started = apply_hook_event(None, make_event("SessionStart", 101, source="startup"))
         self.assertEqual(started["startup_reported_at"], 50.0)
         saved_before = apply_hook_event(None, make_event("Stop", 102))
@@ -90,7 +85,7 @@ class HookStatesAcrossRestartsTests(unittest.TestCase):
         return DashboardCore(lambda snapshot: None, lambda message: None, hook_states_file_path=self.file_path)
 
     def test_a_turn_end_the_hooks_reported_still_counts_after_a_restart(self):
-        # The turn ended while a background task ran on (user report, 2026-10-28): iTerm2 still says
+        # The turn ended while a background task ran on: iTerm2 still says
         # working, Claude Code "shell", so only the hooks tell the turn is over, also once the app restarted.
         core = self.make_core()
         core.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=5.0))
@@ -102,17 +97,15 @@ class HookStatesAcrossRestartsTests(unittest.TestCase):
         self.assertEqual(find_when_the_hooks_ended_the_turn(hook_state, 5.5), 6.0)
         self.assertEqual(hook_state["background_task_ids"], {"b1"})
 
-    def test_dump_snapshot_starts_from_the_saved_states_without_writing_the_file(self):  # code review, 2026-10-29
+    def test_dump_snapshot_starts_from_the_saved_states_without_writing_the_file(self):
         core = self.make_core()
         core.note_hook_event(make_event("Stop", 101, sent_at=6.0, background_tasks=[{"id": "b1", "status": "running"}]))
-        with open(self.file_path) as saved_file:
-            saved_file_contents = saved_file.read()
         core_of_dump_snapshot = DashboardCore(lambda snapshot: None, lambda message: None,
                                               started_at_and_hook_state_by_agent_process_id_to_start_with=load_hook_states(self.file_path))
         self.assertEqual(core_of_dump_snapshot.hook_state_by_agent_process_id, core.hook_state_by_agent_process_id)
-        core_of_dump_snapshot.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=8.0))
-        with open(self.file_path) as saved_file:
-            self.assertEqual(saved_file.read(), saved_file_contents)
+        with unittest.mock.patch.object(dashboard_core, "save_hook_states") as save:  # to any file
+            core_of_dump_snapshot.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=8.0))
+        save.assert_not_called()
 
     def test_a_process_gone_or_started_again_with_the_same_id_gets_no_state(self):
         core = self.make_core()

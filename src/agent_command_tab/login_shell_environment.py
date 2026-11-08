@@ -76,11 +76,11 @@ def add_the_login_shells_environment_when_started_without_it(environment, read_e
     login_shell_environment = read_environment()
     if login_shell_environment is None:
         print("agent-command-tab: started without a shell's PATH, and the login shell's environment couldn't be read; "
-              "programs are looked for in the usual folders too")
+              "programs are looked for in the usual folders too", flush=True)
         return
     combined_environment = build_environment_with_the_login_shells(environment, login_shell_environment)
     added_variable_names = [variable_name for variable_name in VARIABLES_TAKEN_FROM_THE_LOGIN_SHELL
                             if combined_environment.get(variable_name) != environment.get(variable_name)]
     environment.update(combined_environment)
     print(f"agent-command-tab: started without a shell's PATH; took PATH{''.join(', ' + name for name in added_variable_names)} "
-          "from the login shell")
+          "from the login shell", flush=True)

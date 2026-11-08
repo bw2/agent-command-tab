@@ -5,29 +5,25 @@ the dashboard restarts (a reconnect when iTerm2 quits, a crash, Ctrl+C). Pure fu
 from the file reading and writing.
 """
 
-import json
 import os
 
+from agent_command_tab.hook_states_store import is_number
 from agent_command_tab.monitor_assignment import frames_are_within_tolerance
-from agent_command_tab.settings_store import SETTINGS_FOLDER, write_json_file_atomically
+from agent_command_tab.settings_store import SETTINGS_FOLDER, read_json_file, write_json_file_atomically
 
 DOCKED_WINDOW_FRAMES_FILE_PATH = os.path.join(SETTINGS_FOLDER, "docked_window_frames.json")
 
 
 def frame_is_valid(frame):
-    return (isinstance(frame, (list, tuple)) and len(frame) == 4
-            and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in frame))
+    """Whether a stored value is a frame: (x, y, width, height), four numbers."""
+    return isinstance(frame, (list, tuple)) and len(frame) == 4 and all(map(is_number, frame))
 
 
 def load_docked_window_frames(file_path):
     """Returns {window ID: (frame before docking, frame that was set)} from the file; {} when it
     is missing or unreadable, and without records that don't have that shape."""
-    try:
-        with open(file_path) as file:
-            stored_records = json.load(file)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(stored_records, dict):
+    stored_records = read_json_file(file_path, dict)
+    if stored_records is None:
         return {}
     return {window_id: (tuple(frames[0]), tuple(frames[1])) for window_id, frames in stored_records.items()
             if isinstance(frames, list) and len(frames) == 2 and all(map(frame_is_valid, frames))}
@@ -40,8 +36,9 @@ def save_docked_window_frames(file_path, frames_by_window_id):
 
 def adopt_records_of_restored_windows(frames_by_window_id, current_frames_by_window_id, tolerance_points):
     """Returns the records with each record whose window is gone moved to a live window that has
-    no record and still has the frame that was set: iTerm2 gives the windows it restores after
-    a restart new IDs.
+    no record and still has the frame that was set: a window that came back under a new ID
+    (iTerm2 keeps the IDs of the windows it restores itself, so this covers windows reopened
+    another way).
 
     Args:
         frames_by_window_id: {window ID: (frame before docking, frame that was set)}.

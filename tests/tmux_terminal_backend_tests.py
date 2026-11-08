@@ -3,22 +3,18 @@ actions against a real tmux server of its own on a private socket (skipped where
 
 import asyncio
 import os
-import shutil
 import subprocess
-import tempfile
 import time
 import unittest
 
-from agent_command_tab.settings_store import find_program_on_path_or_in_the_usual_folders
 from agent_command_tab.terminal_backends.base import TerminalClient, TerminalTypingRefused
 from agent_command_tab.terminal_backends.tmux_terminal_backend import (
     CLIENT_FIELD_NAMES, FIELD_SEPARATOR, PANE_FIELD_NAMES, TmuxTerminalBackend, TmuxTerminalSession,
     apply_sgr_parameters_to_faintness, build_gathered_windows, build_send_keys_commands, build_tmux_format,
     escape_tmux_argument, escape_tmux_format_argument, join_tmux_commands, parse_screen_lines_with_faint_flags,
     parse_tmux_output_lines)
-
-TMUX_PROGRAM_PATH = find_program_on_path_or_in_the_usual_folders("tmux")  # as the backend finds it
-SECONDS_TO_WAIT_FOR_A_PANE = 5
+from condition_waiting import wait_until
+from private_tmux_server import TMUX_PROGRAM_PATH, start_a_private_tmux_server
 
 
 def make_pane_record(session_id, session_name, window_id, pane_id, pane_index="0", window_active="1",
@@ -99,13 +95,8 @@ class TmuxServerTests(unittest.TestCase):
     """Against a tmux server of the test's own, on a private socket, whose panes run /bin/sh."""
 
     def setUp(self):
-        self.folder = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.folder, True)
-        self.socket_path = os.path.join(self.folder, "s")
-        self.environment = {"PATH": "/usr/bin:/bin", "HOME": self.folder, "SHELL": "/bin/sh", "TERM": "xterm-256color",
-                            "LANG": "en_US.UTF-8"}
-        self.run_tmux("-f", "/dev/null", "new-session", "-d", "-s", "research", "-x", "100", "-y", "20", "-c", self.folder)
-        self.addCleanup(self.run_tmux, "kill-server")
+        self.folder, self.socket_path, self.environment = start_a_private_tmux_server(
+            self, "-s", "research", "-x", "100", "-y", "20")
         self.backend = TmuxTerminalBackend(lambda: None, lambda: None, lambda terminal_name, message: None,
                                            socket_path=self.socket_path, tmux_program_path=TMUX_PROGRAM_PATH)
 
@@ -119,12 +110,7 @@ class TmuxServerTests(unittest.TestCase):
         return asyncio.run(self.backend.gather_windows()) if self.backend.is_connected() else []
 
     def wait_for_screen_text(self, pane_id, text):
-        deadline = time.time() + SECONDS_TO_WAIT_FOR_A_PANE
-        while time.time() < deadline:
-            if text in self.run_tmux("capture-pane", "-p", "-t", pane_id):
-                return True
-            time.sleep(0.05)
-        return False
+        return wait_until(lambda: text in self.run_tmux("capture-pane", "-p", "-t", pane_id))
 
     def test_a_server_ending_leaves_no_windows(self):
         self.assertEqual([gathered_window["title"] for gathered_window in self.gather()], ["research"])
@@ -164,15 +150,16 @@ class TmuxServerTests(unittest.TestCase):
         self.backend.request_regather = lambda: regather_requests.append(True)
         self.run_tmux("send-keys", "-t", pane_id, "sh -c 'vi -u NONE -n prompt.md; true'", "Enter")
         self.addCleanup(self.run_tmux, "send-keys", "-t", pane_id, "Escape", ":q!", "Enter")
-        command_line_in_front = ""
-        deadline = time.time() + SECONDS_TO_WAIT_FOR_A_PANE
-        while not command_line_in_front.startswith("vi ") and time.time() < deadline:
+        command_line_in_front = [""]
+
+        def vi_is_in_front():
             asyncio.run(self.backend.poll_the_server_once())
             if regather_requests:  # the poll noticed a change, as the core would be told
                 regather_requests.clear()
-                command_line_in_front = asyncio.run(self.backend.gather_windows())[0]["tabs"][0]["first_session"]["command_line"]
-            time.sleep(0.05)
-        self.assertEqual(command_line_in_front, "vi -u NONE -n prompt.md")
+                command_line_in_front[0] = asyncio.run(self.backend.gather_windows())[0]["tabs"][0]["first_session"]["command_line"]
+            return command_line_in_front[0].startswith("vi ")
+        self.assertTrue(wait_until(vi_is_in_front))
+        self.assertEqual(command_line_in_front[0], "vi -u NONE -n prompt.md")
 
     def test_typing_pasting_and_reading_the_screen(self):
         pane_id = self.gather()[0]["tabs"][0]["first_session"]["session_id"]
@@ -196,7 +183,7 @@ class TmuxServerTests(unittest.TestCase):
         self.assertTrue(started.succeeded, started)
         gathered_window = self.gather()[0]
         second_tab_id = gathered_window["tabs"][1]["tab_id"]
-        self.assertEqual(started.details, {"tab_id": second_tab_id})  # for a restored session's name (user request, 2026-11-06)
+        self.assertEqual(started.details, {"tab_id": second_tab_id})  # for a restored session's name
         self.assertTrue(self.wait_for_screen_text(gathered_window["tabs"][1]["first_session"]["session_id"], "started-2"))
         self.assertTrue(asyncio.run(self.backend.rename_tab(second_tab_id, "reviews;")).succeeded)
         self.assertTrue(asyncio.run(self.backend.rename_window(session_id, "renamed")).succeeded)
@@ -263,7 +250,9 @@ class TmuxServerTests(unittest.TestCase):
                                    for name, pane_id in (("first", first_pane_id), ("second", second_pane_id))))
         for round_number in range(10):
             asyncio.run(paste_into_both(round_number))
-        self.assertTrue(self.wait_for_screen_text(second_pane_id, "second-9"))
+            # Each round's message reaches its own pane, before the next round can push it out of sight.
+            self.assertTrue(self.wait_for_screen_text(first_pane_id, f"first-{round_number}"), round_number)
+            self.assertTrue(self.wait_for_screen_text(second_pane_id, f"second-{round_number}"), round_number)
         self.assertNotIn("second-", self.run_tmux("capture-pane", "-p", "-t", first_pane_id))
         self.assertNotIn("first-", self.run_tmux("capture-pane", "-p", "-t", second_pane_id))
 
@@ -284,18 +273,11 @@ class TmuxServerTests(unittest.TestCase):
 
 class PeekTests(unittest.TestCase):
     def test_ending_a_peek_switches_the_client_back_though_the_cache_hasnt_seen_the_switch(self):
-        backend = make_backend_without_a_server()
+        backend, sent_commands = make_backend_that_records_tmux_commands()
         backend.active_pane_id_by_tab_id = {"@1": "%5"}  # the user's editor beside the agent's pane %1
         backend.gathered_windows = build_gathered_windows([make_pane_record("$1", "research", "@1", "%1"),
                                                            make_pane_record("$2", "second", "@2", "%2")], describe_stand_in_process)
-        backend.client_records = [{"client_pid": "11", "client_tty": "/dev/ttys1", "session_id": "$1", "window_id": "@1",
-                                   "client_activity": "1"}]
-        sent_commands = []
-
-        async def run_tmux(arguments, input_text=None):
-            sent_commands.append(arguments)
-            return ""
-        backend.run_tmux = run_tmux
+        backend.client_records = [make_client_record()]
         what_was_in_front = backend.remember_what_is_in_front()
         self.assertTrue(asyncio.run(backend.focus_session("%2")).succeeded)  # switches the client to $2
         sent_commands.clear()
@@ -306,15 +288,8 @@ class PeekTests(unittest.TestCase):
 
     def test_showing_a_session_switches_the_client_though_the_cache_says_it_shows_it(self):
         # An earlier focus switched the client away within the last poll.
-        backend = make_backend_without_a_server()
-        backend.client_records = [{"client_pid": "11", "client_tty": "/dev/ttys1", "session_id": "$1", "window_id": "@1",
-                                   "client_activity": "1"}]
-        sent_commands = []
-
-        async def run_tmux(arguments, input_text=None):
-            sent_commands.append(arguments)
-            return ""
-        backend.run_tmux = run_tmux
+        backend, sent_commands = make_backend_that_records_tmux_commands()
+        backend.client_records = [make_client_record()]
         self.assertEqual(asyncio.run(backend.show_session_in_a_client("$1")), 11)
         self.assertEqual(sent_commands, [["switch-client", "-c", "/dev/ttys1", "-t", "$1"]])
 
@@ -322,6 +297,24 @@ class PeekTests(unittest.TestCase):
 def make_backend_without_a_server():
     return TmuxTerminalBackend(lambda: None, lambda: None, lambda terminal_name, message: None,
                                socket_path="/nonexistent/s", tmux_program_path="/nonexistent/tmux")
+
+
+def make_backend_that_records_tmux_commands():
+    """Returns (a backend without a server, the list each tmux command it runs is added to)."""
+    backend = make_backend_without_a_server()
+    sent_commands = []
+
+    async def run_tmux(arguments, input_text=None):
+        sent_commands.append(arguments)
+        return ""
+    backend.run_tmux = run_tmux
+    return backend, sent_commands
+
+
+def make_client_record(client_pid="11", client_tty="/dev/ttys1", client_activity="1"):
+    """Returns the record of a tmux client that shows window @1 of session $1."""
+    return {"client_pid": client_pid, "client_tty": client_tty, "session_id": "$1", "window_id": "@1",
+            "client_activity": client_activity}
 
 
 class GatherTests(unittest.TestCase):
@@ -351,10 +344,8 @@ class ClientTests(unittest.TestCase):
 
     def test_a_client_without_a_process_id_yet_is_left_out(self):
         backend = make_backend_without_a_server()
-        backend.client_records = [{"client_pid": "11", "client_tty": "/dev/ttys1", "session_id": "$1", "window_id": "@1",
-                                   "client_activity": "200"},
-                                  {"client_pid": "", "client_tty": "/dev/ttys2", "session_id": "$1", "window_id": "@1",
-                                   "client_activity": "100"}]  # a client still starting
+        backend.client_records = [make_client_record(client_activity="200"),
+                                  make_client_record("", "/dev/ttys2", "100")]  # a client still starting
         self.assertEqual(backend.list_clients(), [TerminalClient(11, "@1")])
 
     def test_a_socket_without_a_server_is_no_tmux_running(self):

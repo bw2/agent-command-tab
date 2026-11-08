@@ -1,25 +1,16 @@
 """What the dashboard reads from an agent's screen. Pure functions.
 
 - Whether a permission dialog is showing: Claude Code reports nothing when the user answers a
-  permission prompt, and iTerm2's status stays "waiting" until the approved tool finishes
-  (Phase 0), so "asking" ends when the dialog is gone from the screen.
-- A fingerprint of the screen with the lines that change while nothing happens masked out
-  (spinners, elapsed times, token counts, clocks), for "stuck" detection.
+  permission prompt, and iTerm2's status stays "waiting" until the approved tool finishes, so
+  "asking" ends when the dialog is gone from the screen.
 """
 
-import hashlib
 import re
 
-LINES_IN_FINGERPRINT = 20
 LONGEST_INPUT_AREA_LINES = 12  # a draft longer than this counts as not empty
 # Cells an empty input box may hold besides faint text: blanks, iTerm2's empty cells, a
 # no-break space, and Codex's braille-dot idle animation.
 EMPTY_INPUT_CELL_PATTERN = re.compile(r"[ \x00 ⠀-⣿]")
-# Changes in every redraw of any tool: clocks (also in status lines) and braille-dot animations.
-COMMON_PROGRESS_NOISE_PATTERNS = [
-    re.compile(r"\d{1,2}:\d{2}(?::\d{2})?\s?(?:AM|PM)?"),
-    re.compile(r"[⠀-⣿]"),
-]
 
 
 def clean_screen_line(line):
@@ -87,22 +78,3 @@ def count_lines_matching(screen_lines, pattern):
     if pattern is None:
         return 0
     return sum(1 for line in screen_lines if pattern.search(clean_screen_line(line)))
-
-
-def compute_screen_fingerprint(screen_lines, progress_noise_patterns):
-    """Returns a hash of the last non-blank lines with the adapter's progress noise removed.
-
-    Args:
-        screen_lines: The visible screen's lines.
-        progress_noise_patterns: Compiled patterns for text that changes without real progress.
-    """
-    patterns = list(progress_noise_patterns) + COMMON_PROGRESS_NOISE_PATTERNS
-    cleaned_lines = []
-    for line in screen_lines:
-        line = clean_screen_line(line)
-        for pattern in patterns:
-            line = pattern.sub(" ", line)
-        line = " ".join(line.split())  # removed noise and a blinking bullet also shift the spacing
-        if line:
-            cleaned_lines.append(line)
-    return hashlib.sha256("\n".join(cleaned_lines[-LINES_IN_FINGERPRINT:]).encode()).hexdigest()

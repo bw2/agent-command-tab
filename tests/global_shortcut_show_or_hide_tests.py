@@ -17,7 +17,7 @@ class ChooseWhatTheGlobalShortcutDoesTests(unittest.TestCase):
     def test_a_sidebar_set_to_stay_visible_stays_or_comes_back_if_the_menu_hid_it(self):
         for sidebar_mode in ("floating", "docked"):
             self.assertEqual(choose_what_the_global_shortcut_does("sidebar", sidebar_mode, True, False, False), "nothing")
-            # Hidden by the menu bar icon's menu's Show popup or Show window (code review, 2026-10-28).
+            # Hidden by the menu bar icon's menu's Show popup or Show window.
             self.assertEqual(choose_what_the_global_shortcut_does("sidebar", sidebar_mode, False, False, False), "show_sidebar")
 
     def test_the_window_hides_only_while_it_is_in_front(self):

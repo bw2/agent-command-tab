@@ -223,7 +223,7 @@ class SidebarController(NSObject):
         """The menu bar icon's menu's Show popup or Show window: slides the sidebar out at once,
         and keeps one set to stay visible out, a docked one giving its room back, through settings
         changes (a sort order chosen in the window) until show_again, or until Show as or the
-        sidebar's mode changes (code review, 2026-10-28)."""
+        sidebar's mode changes."""
         self.is_kept_hidden = True
         self.hide_now()
         self.owner.reserve_screen_area(None)
@@ -264,7 +264,7 @@ class SidebarController(NSObject):
             self.set_shown(self.is_shown and self.shown_from_the_menu, animate=False)
             if self.is_shown and self.hide_timer is None:
                 # Shown by a click or the shortcut while it auto-hid, its timer stopped while the pointer
-                # was on it: without pointer tracking, only a hide check slides it out (code review, 2026-10-28).
+                # was on it: without pointer tracking, only a hide check slides it out.
                 self.check_whether_to_hide_in(SECONDS_BEFORE_HIDING)
             return
         if self.settings["sidebar_mode"] == "auto_hide":
@@ -281,7 +281,7 @@ class SidebarController(NSObject):
             self.stop_tracking_the_pointer()
             self.cancel_hide_timer()
             self.set_shown(True, animate=False)
-            # Shown for good now, so a later change of Show as hides it (code review, 2026-10-28).
+            # Shown for good now, so a later change of Show as hides it.
             self.shown_from_the_menu = False
         # Docked: iTerm2 windows on this monitor are kept out of the sidebar's area.
         if self.settings["sidebar_mode"] == "docked":
@@ -330,8 +330,7 @@ class SidebarController(NSObject):
     @objc.python_method
     def show_for_a_few_seconds(self):
         """A click on the menu bar icon or the global shortcut while the list shows as a sidebar,
-        and the menu bar icon's menu's "Show sidebar" (user requests, milestone 2 and 2026-10-28),
-        also while the list shows as a popup or a window: shows the sidebar for
+        and the menu bar icon's menu's "Show sidebar", also while the list shows as a popup or a window: shows the sidebar for
         SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT, then hides it once the pointer isn't on it. A
         sidebar that is always shown stays as it is."""
         if self.settings is None or self.placement is None or not self.hides_by_itself():
@@ -350,7 +349,7 @@ class SidebarController(NSObject):
     @objc.python_method
     def hide_now(self, animate=True):
         """Slides the sidebar out at once, even with the pointer on it or while it was to stay a
-        few seconds: the global shortcut pressed again (user request, 2026-10-21) or a click in
+        few seconds: the global shortcut pressed again or a click in
         another app (watch_for_clicks_in_other_apps). Without animate it vanishes at once (its top
         bar dragged away into the list window)."""
         self.cancel_hide_timer()
@@ -362,7 +361,7 @@ class SidebarController(NSObject):
     def watch_for_clicks_in_other_apps(self, is_watching):
         """Adds or removes a global monitor (it only watches, needing no Accessibility permission)
         of mouse button presses in other apps' windows, which slide out a sidebar that hides by
-        itself at once (user request, 2026-10-22), rather than after SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT or
+        itself at once, rather than after SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT or
         once the pointer leaves. Clicks on the sidebar and the menu bar icon go to the dashboard,
         so the monitor never sees them."""
         if is_watching and self.click_monitor is None:
@@ -408,7 +407,7 @@ class SidebarController(NSObject):
         if not self.is_shown:
             # The edge counts only beside the sidebar, not in the menu bar's or a bottom Dock's
             # band, where the pointer is never over the sidebar it showed, which then hid again
-            # and again (code review, 2026-10-30).
+            # and again.
             screen = self.screens[self.placement.screen_index]
             frame_beside_the_sidebar = (screen["frame"][0], screen["visible_frame"][1], screen["frame"][2],
                                         screen["visible_frame"][3])

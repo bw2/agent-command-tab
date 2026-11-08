@@ -1,6 +1,5 @@
 """The colors of the menu bar icon and the list's rows, by name: the rows' color names
-(row_text_rendering), which the icon uses too. "light_blue" is the color of "asking" everywhere
-(user request, milestone 2)."""
+(row_text_rendering), which the icon uses too. "light_blue" is the color of "asking" everywhere."""
 
 from AppKit import NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor
 
@@ -27,24 +26,23 @@ def make_light_and_dark_mode_color_maker(light_mode_color_maker, dark_mode_color
 
 # Purple is a fixed color, since on current macOS the system purple is a magenta.
 COLOR_MAKERS_BY_NAME = {
-    "purple": make_srgb_color_maker(150, 95, 255), "red": NSColor.systemRedColor, "orange": NSColor.systemOrangeColor,
+    "purple": make_srgb_color_maker(150, 95, 255), "red": NSColor.systemRedColor,
     "green": NSColor.systemGreenColor, "light_blue": NSColor.systemCyanColor, "gray": NSColor.secondaryLabelColor,
     "yellow": NSColor.systemYellowColor,  # the background task lights
-    # The Tokens column's share of the context window from 50% (user request, 2026-10-27). The system
+    # The Tokens column's share of the context window from 50%. The system
     # yellow is hard to read as text on white (contrast 1.5 to 1), so light mode has a darker amber,
-    # 2.8 to 1 (brighter than the first one, 168, 118, 0 at 4 to 1, since 2026-10-28, user request).
+    # 2.8 to 1 (brighter than 168, 118, 0, which is 4 to 1).
     "amber": make_light_and_dark_mode_color_maker(make_srgb_color_maker(205, 145, 0), NSColor.systemYellowColor),
-    # The status text (user requests, 2026-10-28). The system green, cyan and orange are hard to
+    # The status text. The system green and cyan are hard to
     # read as text on white too (about 2.2 to 1), so light mode has them about two thirds as
     # bright (4.5 to 1). Done is gray in light mode only. Unknown is pure black, or pure white in
-    # dark mode, a step past the names' 85% (user request, 2026-10-28).
+    # dark mode, a step past the names' 85%.
     "green_text": make_light_and_dark_mode_color_maker(make_srgb_color_maker(35, 135, 61), NSColor.systemGreenColor),
     "light_blue_text": make_light_and_dark_mode_color_maker(make_srgb_color_maker(0, 129, 155), NSColor.systemCyanColor),
-    "orange_text": make_light_and_dark_mode_color_maker(make_srgb_color_maker(176, 97, 28), NSColor.systemOrangeColor),
     "gray_in_light_mode_only": make_light_and_dark_mode_color_maker(NSColor.secondaryLabelColor, NSColor.labelColor),
     "pure_black_or_white": NSColor.textColor,
     # Idle's status text, a little closer to the background than the gray (secondaryLabelColor,
-    # black at 50% or white at 55%) of done and exited (user request, 2026-10-28).
+    # black at 50% or white at 55%) of done and exited.
     "light_gray": make_light_and_dark_mode_color_maker(lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(0, 0, 0, 0.38),
                                                        lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(1, 1, 1, 0.40)),
 }
@@ -52,12 +50,11 @@ COLOR_MAKERS_BY_NAME = {
 
 def choose_list_background_color(appearance):
     """Returns the background of the list's rows for this NSAppearance: a very light gray in light
-    mode rather than controlBackgroundColor's white (user request, 2026-10-28), and in dark mode
+    mode rather than controlBackgroundColor's white, and in dark mode
     controlBackgroundColor itself, the outline view's default. AppKit doesn't fill a list in that
     system color the way it fills one in any other color: in the dropdown it lets the popover's
-    lighter gray through (#383432 against the bars' #282828 on 2026-10-29). A dynamic color
-    standing for it in dark mode lost that, leaving the rows as dark as the bars around them
-    (user report, 2026-10-29)."""
+    lighter gray through (#383432 against the bars' #282828). A dynamic color standing for it in
+    dark mode lost that, leaving the rows as dark as the bars around them."""
     if appearance_is_dark(appearance):
         return NSColor.controlBackgroundColor()
     return make_srgb_color_maker(247, 247, 247)()

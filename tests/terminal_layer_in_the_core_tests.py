@@ -1,4 +1,4 @@
-"""The core with several terminals behind the terminal layer (user request, 2026-11-01), with
+"""The core with several terminals behind the terminal layer, with
 stand-in terminal backends (no real iTerm2 or tmux): routing, status for a terminal that reports
 none, which tab is in front, gathering, problems; and how the snapshot shows a tmux session."""
 
@@ -7,12 +7,12 @@ import unittest
 import unittest.mock
 
 from agent_command_tab import dashboard_core
-from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.dashboard_core import DashboardCore
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.snapshot_builder import build_computer_snapshot
-from agent_command_tab.snapshot_data_classes import AgentSessionEntry, WindowEntry, build_window_title_shown_in_the_list
+from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list
 from agent_command_tab.terminal_backends.base import TerminalBackend, TerminalClient, TerminalRequestFailed
+from gathered_window_builders import make_agent_session, make_gathered_tab, make_gathered_window
 
 MENU_BAR_MONITOR = {"monitor_id": "built-in", "name": "Built-in", "frame": (1000, 0, 1000, 800), "visible_frame": (1000, 0, 1000, 780)}
 LEFT_MONITOR = {"monitor_id": "left", "name": "Left", "frame": (0, 0, 1000, 800), "visible_frame": (0, 0, 1000, 800)}
@@ -46,9 +46,6 @@ class StandInTerminalBackend(TerminalBackend):
             raise self.gather_error
         return self.gathered_windows
 
-    def find_selected_tab_id(self, window_id):
-        return None
-
     def find_front_tab_id(self):
         return self.front_tab_id
 
@@ -74,23 +71,19 @@ class StandInTerminalBackend(TerminalBackend):
         return ActionResult(True)
 
 
-def make_gathered_window(terminal_name, window_id, tab_id, session_id, job_pid, frame=None):
-    return {"window_id": window_id, "terminal_name": terminal_name, "frame": frame, "title": window_id,
-            "title_override_format": None, "tabs": [{"tab_id": tab_id, "title": "", "title_override_format": None,
-                                                     "first_session": {"session_id": session_id, "command_line": "claude",
-                                                                       "job_pid": job_pid, "job_folder": "/p", "job_started_at": 1.0,
-                                                                       "status_set_in_iterm2": None,
-                                                                       "status_set_in_iterm2_at": None, "status": None,
-                                                                       "path": "/p"}}]}
+def make_gathered_window_with_one_claude_tab(terminal_name, window_id, tab_id, session_id, job_pid, frame=None):
+    """Returns a gathered window, titled with its ID, whose one tab runs Claude Code as process job_pid."""
+    return make_gathered_window(window_id, [make_gathered_tab(tab_id, session_id, "claude", job_pid)], terminal_name, frame,
+                                title=window_id)
 
 
 def make_core():
     """An iTerm2 window w1 (tab t1, session s1) whose tab runs the tmux client (process 900), and
     a tmux session $1 (window @1, pane %1) running Claude Code (process 101)."""
     core = DashboardCore(lambda snapshot: None, lambda message: None)
-    iterm2 = StandInTerminalBackend("iTerm2", [make_gathered_window("iTerm2", "w1", "t1", "s1", 900, (0, 0, 800, 600))],
+    iterm2 = StandInTerminalBackend("iTerm2", [make_gathered_window_with_one_claude_tab("iTerm2", "w1", "t1", "s1", 900, (0, 0, 800, 600))],
                                     reports_agent_status=True, windows_have_frames=True, application_process_ids=[50])
-    tmux = StandInTerminalBackend("tmux", [make_gathered_window("tmux", "$1", "@1", "%1", 101)],
+    tmux = StandInTerminalBackend("tmux", [make_gathered_window_with_one_claude_tab("tmux", "$1", "@1", "%1", 101)],
                                   shows_windows_through_clients=True, clients=[TerminalClient(900, "@1")])
     core.terminal_backends = [iterm2, tmux]
     core.terminal_backend_by_name = {"iTerm2": iterm2, "tmux": tmux}
@@ -102,7 +95,7 @@ class RoutingTests(unittest.TestCase):
     def test_a_tab_moves_only_into_a_window_of_its_own_terminal(self):
         core, iterm2, tmux = make_core()
         action_result = asyncio.run(core.handle_move_tab(ActionRequest("move_tab", {"tab_id": "@1"}, {"target_window_id": "w1"})))
-        self.assertEqual(action_result, ActionResult(False, "a tmux tab can't move into a iTerm2 window"))
+        self.assertEqual(action_result, ActionResult(False, "tmux tabs can't move into iTerm2 windows"))
         asyncio.run(core.handle_move_tab(ActionRequest("move_tab", {"tab_id": "@1"}, {"target_window_id": "$1"})))
         self.assertEqual(tmux.actions, [("move_tab", "@1", "$1")])
         self.assertEqual(asyncio.run(core.handle_rename_tab(ActionRequest("rename_tab", {"tab_id": "gone"}, {"new_title": "x"}))),
@@ -154,7 +147,7 @@ class GatheringTests(unittest.TestCase):
 
     def test_saved_frames_wait_for_a_terminal_with_frames(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
-        tmux = StandInTerminalBackend("tmux", [make_gathered_window("tmux", "$1", "@1", "%1", 101)], shows_windows_through_clients=True)
+        tmux = StandInTerminalBackend("tmux", [make_gathered_window_with_one_claude_tab("tmux", "$1", "@1", "%1", 101)], shows_windows_through_clients=True)
         core.terminal_backends, core.terminal_backend_by_name = [tmux], {"tmux": tmux}
         core.gathered_windows = asyncio.run(core.gather_every_terminals_windows())
         self.assertFalse(core.windows_were_gathered)  # a tmux session has no frame to match a saved one to
@@ -176,7 +169,7 @@ class GatheringTests(unittest.TestCase):
 class StatusInATerminalThatReportsNoneTests(unittest.TestCase):
     def test_a_tmux_tab_goes_by_claude_codes_own_report(self):
         core, iterm2, tmux = make_core()
-        core.agent_sessions = {"%1": {"adapter": ClaudeCodeAdapter(), "process_id": 101, "is_in_background": False}}
+        core.agent_sessions = {"%1": make_agent_session(101)}
         status = {"value": "busy"}
         with unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                         lambda config_folder, process_id: status["value"]), \
@@ -240,7 +233,7 @@ class SessionInFrontTests(unittest.TestCase):
 
     def test_while_the_dashboard_is_active_a_client_in_the_app_used_last_wins_over_iterm2s_front_tab(self):
         core, iterm2, tmux = make_core()  # iTerm2's tab t1 runs the client 900, showing %1
-        tmux.gathered_windows.append(make_gathered_window("tmux", "$2", "@2", "%2", 102))
+        tmux.gathered_windows.append(make_gathered_window_with_one_claude_tab("tmux", "$2", "@2", "%2", 102))
         tmux.clients = [TerminalClient(900, "@1"), TerminalClient(901, "@2")]  # 901: in Terminal (process 60)
         core.gathered_windows = asyncio.run(core.gather_every_terminals_windows())
         iterm2.front_tab_id = "t1"
@@ -255,14 +248,12 @@ class SessionInFrontTests(unittest.TestCase):
 
 class SnapshotOfATmuxSessionTests(unittest.TestCase):
     def test_a_tmux_session_goes_with_the_menu_bar_monitor_and_is_named_with_tmux(self):
-        gathered_windows = [make_gathered_window("iTerm2", "w1", "t1", "s1", 100, (10, 10, 500, 500)),
-                            make_gathered_window("tmux", "$1", "@1", "%1", 101)]
+        gathered_windows = [make_gathered_window_with_one_claude_tab("iTerm2", "w1", "t1", "s1", 100, (10, 10, 500, 500)),
+                            make_gathered_window_with_one_claude_tab("tmux", "$1", "@1", "%1", 101)]
         for gathered_window in gathered_windows:
             gathered_window["title_override_format"] = gathered_window["title"] = "project"
-        agent_sessions = {session_id: {"adapter": ClaudeCodeAdapter(), "process_id": process_id, "is_in_background": False,
-                                       "is_stopped": False, "agent_tool_name": "Claude Code", "working_folder": "/p", "started_at": 1.0}
-                          for session_id, process_id in (("s1", 100), ("%1", 101))}
-        snapshot = build_computer_snapshot(gathered_windows, agent_sessions, [MENU_BAR_MONITOR, LEFT_MONITOR], [], {}, {}, {}, 600, {},
+        agent_sessions = {session_id: make_agent_session(process_id, started_at=1.0) for session_id, process_id in (("s1", 100), ("%1", 101))}
+        snapshot = build_computer_snapshot(gathered_windows, agent_sessions, [MENU_BAR_MONITOR, LEFT_MONITOR], [], {}, {}, {}, {},
                                            None, None, "c", "Mac", 20.0)
         windows_by_monitor_id = {monitor_entry.monitor_id: monitor_entry.windows for monitor_entry in snapshot.monitors}
         self.assertEqual([window_entry.window_id for window_entry in windows_by_monitor_id["left"]], ["w1"])
@@ -274,12 +265,12 @@ class SnapshotOfATmuxSessionTests(unittest.TestCase):
         # tmux would undo a pause of its running agent (agent_session_pausing), so the list offers none.
         self.assertEqual([window_entries[0].agent_sessions[0].can_be_paused_while_it_runs
                           for window_entries in (windows_by_monitor_id["left"], windows_by_monitor_id["built-in"])], [True, False])
-
-    def test_an_iterm2_window_title_has_no_terminal_prefix_and_is_numbered_when_the_title_repeats(self):
-        entry = AgentSessionEntry(tab_id="t", session_id="s", tab_title="", tab_title_set_by_user=False, agent_session_name="",
-                                  agent_tool_name="", working_folder="", status="idle")
-        window_entry = WindowEntry("w", "project", True, (0, 0, 1, 1), 1, (entry,), number_among_windows_with_the_same_title=2)
-        self.assertEqual(build_window_title_shown_in_the_list(window_entry), "project (2)")
+        # Nor at all of an agent whose turns run outside its tab (Codex's shared background server).
+        snapshot = build_computer_snapshot(gathered_windows, agent_sessions, [MENU_BAR_MONITOR, LEFT_MONITOR], [], {}, {},
+                                           {"s1": {"process_id_whose_turns_run_outside_the_tab": 100}}, {}, None, None, "c", "Mac", 20.0)
+        first_window_by_monitor_id = {monitor_entry.monitor_id: monitor_entry.windows[0] for monitor_entry in snapshot.monitors}
+        self.assertEqual([first_window_by_monitor_id[monitor_id].agent_sessions[0].turns_run_outside_the_tab
+                          for monitor_id in ("left", "built-in")], [True, False])  # only s1's, not the tmux row's
 
 
 if __name__ == "__main__":

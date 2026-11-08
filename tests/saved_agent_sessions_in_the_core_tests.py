@@ -1,4 +1,4 @@
-"""Save session and Restore sessions in the core (user request, 2026-11-06), with a stand-in
+"""Save session and Restore sessions in the core, with a stand-in
 terminal (no real iTerm2 or tmux): which sessions can be saved, and where each saved session is
 resumed: its own tab, a new tab, or a new window."""
 
@@ -14,10 +14,10 @@ from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.agent_adapters.generic import GenericAdapter
 from agent_command_tab.dashboard_core import DashboardCore
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
-from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ComputerSnapshot, MonitorEntry, WindowEntry
+from agent_command_tab.snapshot_data_classes import ComputerSnapshot, MonitorEntry, WindowEntry
 from agent_command_tab.terminal_backends.base import TerminalBackend
-
-MONITOR = {"monitor_id": "1", "name": "Built-in", "frame": (0, 0, 2000, 1300), "visible_frame": (0, 0, 2000, 1260)}
+from gathered_window_builders import MONITOR, make_agent_session, make_agent_session_entry, make_gathered_tab, make_gathered_window
+from saved_session_builders import build_saved_session_record, build_saved_window_record
 
 
 class StandInTerminalSession:
@@ -44,12 +44,6 @@ class StandInTerminalBackend(TerminalBackend):
     def is_connected(self):
         return True
 
-    def terminal_runs(self):
-        return True
-
-    async def gather_windows(self):
-        return self.gathered_windows
-
     def find_session(self, session_id):
         return StandInTerminalSession(self.typed_texts, session_id)
 
@@ -75,36 +69,21 @@ class StandInTerminalBackend(TerminalBackend):
         return (30, 40, 800, 600)  # moved since the last snapshot, which iTerm2 doesn't report
 
 
-def make_gathered_tab(tab_id, session_id, command_line, job_pid=None):
-    return {"tab_id": tab_id, "title": "", "title_override_format": None,
-            "first_session": {"session_id": session_id, "command_line": command_line, "job_pid": job_pid, "job_folder": "/p",
-                              "job_started_at": 1.0, "status_set_in_iterm2": None, "status_set_in_iterm2_at": None,
-                              "status": None, "path": "/p"}}
-
-
-def make_entry(session_id, title, tool="Claude Code", status="idle", title_set_by_user=False):
-    return AgentSessionEntry(tab_id=f"t-{session_id}", session_id=session_id, tab_title=title,
-                             tab_title_set_by_user=title_set_by_user, agent_session_name=title, agent_tool_name=tool,
-                             working_folder="/entry-folder", status=status)
-
-
 def make_core(folder):
     """iTerm2 window w1: s1 runs Claude Code in conversation conv-1, s2 is a shell at its prompt,
     s3 runs aider (a tool that can't resume), s4 runs Claude Code that was sent no message, s5
     runs a Claude Code a restore started with `--resume conv-9`, which Claude Code doesn't list yet."""
     core = DashboardCore(lambda snapshot: None, lambda message: None)
-    iterm2 = StandInTerminalBackend("iTerm2", [{
-        "window_id": "w1", "terminal_name": "iTerm2", "frame": (0, 0, 800, 600), "title": "w1", "title_override_format": None,
-        "tabs": [make_gathered_tab("t-s1", "s1", "claude", 101), make_gathered_tab("t-s2", "s2", "-bash"),
-                 make_gathered_tab("t-s3", "s3", "aider", 301), make_gathered_tab("t-s4", "s4", "claude", 104),
-                 make_gathered_tab("t-s5", "s5", "claude --resume conv-9", 105)]}])
+    iterm2 = StandInTerminalBackend("iTerm2", [make_gathered_window(
+        "w1", [make_gathered_tab("t-s1", "s1", "claude", 101), make_gathered_tab("t-s2", "s2", "-bash"),
+               make_gathered_tab("t-s3", "s3", "aider", 301), make_gathered_tab("t-s4", "s4", "claude", 104),
+               make_gathered_tab("t-s5", "s5", "claude --resume conv-9", 105)], frame=(0, 0, 800, 600), title="w1")])
     core.terminal_backends = [iterm2]
     core.terminal_backend_by_name = {"iTerm2": iterm2}
     core.gathered_windows = iterm2.gathered_windows
     core.monitors = [MONITOR]
     core.agent_sessions = {
-        session_id: {"adapter": adapter, "process_id": process_id, "is_in_background": False, "is_stopped": False,
-                     "agent_tool_name": tool, "working_folder": folder, "started_at": 1.0}
+        session_id: make_agent_session(process_id, adapter, tool, folder, started_at=1.0)
         for session_id, adapter, process_id, tool in (("s1", ClaudeCodeAdapter(), 101, "Claude Code"),
                                                       ("s3", GenericAdapter(), 301, "aider"),
                                                       ("s4", ClaudeCodeAdapter(), 104, "Claude Code"),
@@ -117,25 +96,23 @@ def make_core(folder):
     core.find_current_conversation_file = find_current_conversation_file
     core.an_agent_runs_in_the_tab = lambda tab_id: True  # each restored agent starts at once
     window_entry = WindowEntry("w1", "my-project", True, (10, 20, 800, 600), 5, (
-        make_entry("s1", "planning", title_set_by_user=True), make_entry("s3", "aider-tab", tool="aider"),
-        make_entry("s4", "fresh"), make_entry("s5", "restored")))
+        make_agent_session_entry("s1", "planning", tab_title_set_by_user=True),
+        make_agent_session_entry("s3", "aider-tab", agent_tool_name="aider"),
+        make_agent_session_entry("s4", "fresh"), make_agent_session_entry("s5", "restored")))
     core.last_published_snapshot_without_time = ComputerSnapshot("c", "Test Mac", 0, (MonitorEntry(
         "1", "Built-in", MONITOR["frame"], MONITOR["visible_frame"], (window_entry,)),))
     return core, iterm2
 
 
 def make_saved_session(conversation_id, folder, terminal_session_id="gone-session", name="", name_was_set_by_user=False,
-                       agent_tool_name="Claude Code", claude_config_folder=None):
-    return {"conversation_id": conversation_id, "agent_tool_name": agent_tool_name, "name": name,
-            "name_was_set_by_user": name_was_set_by_user, "folder": folder, "claude_config_folder": claude_config_folder,
-            "terminal_session_id": terminal_session_id, "saved_at": 1.0}
+                       agent_tool_name="Claude Code", claude_config_folder=None, codex_home_folder=None):
+    return build_saved_session_record(conversation_id, folder, terminal_session_id, name, name_was_set_by_user, agent_tool_name,
+                                      claude_config_folder, codex_home_folder=codex_home_folder)
 
 
 def make_saved_window(saved_sessions, terminal_window_id="gone-window", frame=(100, 200, 900, 700), name="saved",
                       name_was_set_by_user=False):
-    return {"terminal_name": "iTerm2", "terminal_window_id": terminal_window_id, "terminal_window_opened_at": None, "name": name,
-            "name_was_set_by_user": name_was_set_by_user, "frame": list(frame) if frame else None,
-            "saved_sessions": saved_sessions}
+    return build_saved_window_record(saved_sessions, terminal_window_id, name, frame, name_was_set_by_user)
 
 
 def restore(core, saved_windows, launch_commands=None):
@@ -166,7 +143,20 @@ class SaveAgentSessionsTests(unittest.TestCase):
             "name_was_set_by_user": True,
             "frame": [30, 40, 800, 600], "saved_sessions": [{  # where the window is now, not the snapshot's
                 "conversation_id": "conv-1", "agent_tool_name": "Claude Code", "name": "planning", "name_was_set_by_user": True,
-                "folder": self.folder, "claude_config_folder": None, "terminal_session_id": "s1", "saved_at": 1000.0}]}]})
+                "folder": self.folder, "claude_config_folder": None, "codex_home_folder": None, "terminal_session_id": "s1",
+                "saved_at": 1000.0}]}]})
+
+    def test_a_window_narrowed_for_the_docked_sidebar_is_saved_with_its_own_frame(self):
+        def save_frame_of_w1():
+            action_result = asyncio.run(self.core.handle_save_agent_sessions(
+                ActionRequest("save_agent_sessions", {"session_ids": ["s1"]})))
+            return action_result.details["saved_windows"][0]["frame"]
+        # The sidebar narrowed w1 from 1100 to the 800 points it has now (StandInTerminalBackend.read_window_frame).
+        self.core.frames_before_making_room_by_window_id = {"w1": ((30, 40, 1100, 600), (30, 40, 800, 600))}
+        self.assertEqual(save_frame_of_w1(), [30, 40, 1100, 600])
+        # Resized by hand since: the frame it has now.
+        self.core.frames_before_making_room_by_window_id = {"w1": ((30, 40, 1100, 600), (30, 40, 700, 600))}
+        self.assertEqual(save_frame_of_w1(), [30, 40, 800, 600])
 
     def test_a_cleared_conversation_with_no_new_file_isnt_saved(self):
         self.core.conversation_files_by_session_id["s1"] = {"key": None, "path": None, "modified_at": None,
@@ -181,12 +171,25 @@ class SaveAgentSessionsTests(unittest.TestCase):
         codex_adapter = CodexAdapter()
         self.core.agent_sessions["s1"].update(adapter=codex_adapter, agent_tool_name="Codex")
         with unittest.mock.patch.object(codex_adapter, "find_conversation_files", return_value=[
-                    "/sessions/rollout-2026-11-06T09-00-00-new.jsonl", "/sessions/rollout-2026-11-06T08-00-00-old.jsonl"]), \
-                unittest.mock.patch.object(self.core, "codex_conversation_may_be_another_sessions", return_value=False):
+                "/sessions/rollout-2026-11-06T09-00-00-new.jsonl", "/sessions/rollout-2026-11-06T08-00-00-old.jsonl"]):
             action_result = asyncio.run(self.core.handle_save_agent_sessions(
                 ActionRequest("save_agent_sessions", {"session_ids": ["s1"]})))
         self.assertEqual(action_result.message,
                          '"planning": it has started more than one conversation, and which one runs now can\'t be told')
+
+    def test_a_codex_session_is_saved_with_its_own_codex_home_also_the_default(self):
+        # The default too, so a CODEX_HOME the launch command sets doesn't take its place on restore.
+        codex_adapter = CodexAdapter()
+        self.core.agent_sessions["s1"].update(adapter=codex_adapter, agent_tool_name="Codex")
+        for codex_home_folder, expected_codex_home_folder in (("/Users/me/.codex-work", "/Users/me/.codex-work"),
+                                                              (os.path.expanduser("~/.codex"), os.path.expanduser("~/.codex"))):
+            with unittest.mock.patch.object(codex_adapter, "find_conversation_files", return_value=[
+                    "/sessions/rollout-2026-11-06T09-00-00-0199a1b2-0000-7000-8000-00000000000a.jsonl"]), \
+                    unittest.mock.patch.object(codex_adapter, "find_codex_home_folder_of_process", return_value=codex_home_folder):
+                action_result = asyncio.run(self.core.handle_save_agent_sessions(
+                    ActionRequest("save_agent_sessions", {"session_ids": ["s1"]})))
+            (saved_session,) = action_result.details["saved_windows"][0]["saved_sessions"]
+            self.assertEqual(saved_session["codex_home_folder"], expected_codex_home_folder)
 
 
 class RestoreSavedAgentSessionsTests(unittest.TestCase):
@@ -204,10 +207,21 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])
         self.assertEqual(self.iterm2.actions, [("rename_tab", "t-s2", "reviews")])
 
-    def test_a_tab_running_an_agent_gets_a_new_tab_beside_it(self):
+    def test_a_tab_running_an_agent_gets_a_new_tab_in_its_window(self):
         restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s4")],
                                               terminal_window_id="w1")])
         self.assertEqual((self.iterm2.typed_texts, self.iterm2.actions), ([], [("start", "w1", self.folder, "yc --resume conv-7")]))
+
+    def test_a_tab_running_a_shell_script_isnt_typed_into_and_gets_a_new_tab_in_its_window(self):
+        # A script with a `#!/bin/bash` line runs as `/bin/bash ./job.sh`, whose first word is a shell.
+        for command_line in ("/bin/bash ./job.sh", "zsh -c 'make all'", "bash -lc 'sleep 60'"):
+            with self.subTest(command_line=command_line):
+                self.core, self.iterm2 = make_core(self.folder)
+                self.core.gathered_windows[0]["tabs"][1]["first_session"]["command_line"] = command_line
+                restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2")],
+                                                      terminal_window_id="w1")])
+                self.assertEqual((self.iterm2.typed_texts, self.iterm2.actions),
+                                 ([], [("start", "w1", self.folder, "yc --resume conv-7")]))
 
     def test_in_a_terminal_that_reuses_ids_neither_the_tab_nor_the_window_is_taken_for_the_saved_one(self):
         self.iterm2.ids_are_never_reused = False  # tmux: "s2" and "w1" may be another pane and session since the reboot
@@ -256,7 +270,7 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder)], frame=(5000, 0, 800, 600))])
         self.assertEqual(self.iterm2.actions, [("start", None, self.folder, "yc --resume conv-7")])
 
-    def test_sessions_after_one_resumed_in_its_own_tab_open_beside_it(self):
+    def test_sessions_after_one_resumed_in_its_own_tab_open_in_that_tabs_window(self):
         restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2"),
                                                make_saved_session("conv-8", self.folder)])])
         self.assertEqual(self.iterm2.actions, [("start", "w1", self.folder, "yc --resume conv-8")])
@@ -355,16 +369,17 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         self.assertIn('"planning": its agent didn\'t start in its tab', action_result.message)
 
     def test_a_restore_asks_for_gathers_until_the_agent_shows_in_its_tab(self):
-        looks = []
+        gathers = []
 
-        def an_agent_runs_in_the_tab(tab_id):  # found by the third gather
-            looks.append(tab_id)
-            return len(looks) >= 3
+        def an_agent_runs_in_the_tab(tab_id):
+            if self.core.regather_needed.is_set():  # a gather was asked for since the last look: it runs now
+                self.core.regather_needed.clear()
+                gathers.append(tab_id)
+            return len(gathers) >= 3  # the third gather finds the agent
         self.core.an_agent_runs_in_the_tab = an_agent_runs_in_the_tab
         with unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT", 0.01):
             action_result = restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder)])])
-        self.assertEqual((action_result.details, len(looks)), ({"restored_conversation_ids": ["conv-7"]}, 3))
-        self.assertTrue(self.core.regather_needed.is_set())
+        self.assertEqual((action_result.details, len(gathers)), ({"restored_conversation_ids": ["conv-7"]}, 3))
 
     def test_an_agent_runs_in_a_tab_once_a_gather_found_its_process(self):
         core, _ = make_core(self.folder)
@@ -383,6 +398,22 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         action_result = restore(self.core, [make_saved_window([make_saved_session("conv-1", self.folder)],  # s1 runs it
                                                               terminal_window_id="w1", name="Archived", name_was_set_by_user=True)])
         self.assertEqual((action_result.succeeded, self.iterm2.actions), (False, []))
+
+    def test_a_codex_session_resumes_with_the_codex_home_it_was_saved_with(self):
+        restore(self.core, [make_saved_window([make_saved_session(
+            "0199-ab", self.folder, terminal_session_id="s2", agent_tool_name="Codex", codex_home_folder="/Users/me/.codex-work")])])
+        self.assertEqual(self.iterm2.typed_texts,
+                         [("s2", f"\x05\x15cd {self.folder} && CODEX_HOME=/Users/me/.codex-work codex resume 0199-ab\r")])
+
+    def test_a_conversation_whose_process_runs_unlisted_is_not_started_again(self):
+        # Suspended with Ctrl+Z, with a newer agent started at its tab's shell: no tab lists it.
+        self.core.claude_agents_by_process_id[777] = {"sessionId": "conv-7", "config_folder": None}
+        for process_is_alive, expected_typed_texts in ((True, []),
+                                                       (False, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])):
+            self.iterm2.typed_texts.clear()
+            with unittest.mock.patch.object(dashboard_core, "process_is_alive", lambda process_id: process_is_alive):
+                restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2")])])
+            self.assertEqual(self.iterm2.typed_texts, expected_typed_texts, process_is_alive)
 
     def test_a_codex_conversation_is_not_started_again_while_a_codex_session_that_may_run_it_does(self):
         # Another Codex session started in its folder since: two conversation files fit its process.

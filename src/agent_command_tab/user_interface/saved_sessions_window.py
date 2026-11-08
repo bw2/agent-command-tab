@@ -1,4 +1,4 @@
-"""The Saved sessions window (user request, 2026-11-06), which the menu bar icon's "Restore
+"""The Saved sessions window, which the menu bar icon's "Restore
 sessions…" opens: the saved sessions (saved_agent_sessions_store) under the windows they were
 saved from, to restore, rename or delete.
 
@@ -19,16 +19,16 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSCarriageReturnCha
                     NSDeleteFunctionKey, NSEnterCharacter, NSEventTypeKeyDown, NSMakeRect, NSMenu, NSOutlineView, NSScrollView, NSTableColumn, NSText, NSViewHeightSizable, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewWidthSizable, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskResizable,
                     NSWindowStyleMaskTitled)
-from Foundation import NSIndexSet, NSMutableIndexSet, NSNotFound, NSObject
+from Foundation import NSIndexSet, NSObject
 
 from agent_command_tab.saved_agent_sessions_store import find_saved_window_key
 from agent_command_tab.settings_store import SMALLEST_WINDOW_SIZES
-from agent_command_tab.user_interface.agent_session_outline_view import ESCAPE_CHARACTER, RENAME_KEY
+from agent_command_tab.user_interface.agent_session_outline_view import ESCAPE_CHARACTER, RENAME_KEY, build_index_set
 from agent_command_tab.user_interface.control_helpers import is_a_command_press_of_letter
 from agent_command_tab.user_interface.screen_layout import WindowFrameSavingController, place_window_at_saved_frame_or_center
 from agent_command_tab.user_interface.settings_window import is_a_plain_press_of
 
-WINDOW_TITLE = "Saved sessions"  # the user's name for them, 2026-11-06 ("Don't call them checkpoints")
+WINDOW_TITLE = "Saved sessions"
 # Each column's title and starting width; the name column holds the tree and is the one to rename in.
 COLUMN_TITLE_AND_WIDTH_BY_COLUMN_NAME = {"name": ("Name", 230), "agent_tool_name": ("Agent", 100),
                                          "folder": ("Folder", 240), "saved_at": ("Saved", 130)}
@@ -84,8 +84,8 @@ def make_saved_item(kind, saved_window, saved_session=None, child_items=()):
 
 class SavedSessionsOutlineView(NSOutlineView):
     """The tree of saved windows and sessions: Delete or Forward Delete deletes the selected rows,
-    and Return or Enter renames the selected row, as in Finder (user request, 2026-11-06: not a
-    restore), as do Command-R and Command-Shift-R, as in the list (user request, 2026-11-07)."""
+    and Return or Enter renames the selected row, as in Finder (not a
+    restore), as do Command-R and Command-Shift-R, as in the list."""
 
     def keyDown_(self, event):
         if is_a_plain_press_of(event, {NSDeleteCharacter, NSDeleteFunctionKey}):
@@ -153,17 +153,14 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         self.window_items = [make_saved_item("window", saved_window, child_items=[
             make_saved_item("session", saved_window, saved_session) for saved_session in saved_window["saved_sessions"]])
             for saved_window in saved_windows]
-        # The Agent column only while the saved sessions are of two or more tools (user request, 2026-11-06).
+        # The Agent column only while the saved sessions are of two or more tools.
         agent_tool_names = {saved_session["agent_tool_name"] for saved_window in saved_windows
                             for saved_session in saved_window["saved_sessions"]}
         self.outline_view.tableColumnWithIdentifier_("agent_tool_name").setHidden_(len(agent_tool_names) < 2)
         self.outline_view.reloadData()
         self.outline_view.expandItem_expandChildren_(None, True)
-        rows_to_select = NSMutableIndexSet.indexSet()
-        for row in range(self.outline_view.numberOfRows()):
-            if self.outline_view.itemAtRow_(row).key in selected_keys:
-                rows_to_select.addIndex_(row)
-        self.outline_view.selectRowIndexes_byExtendingSelection_(rows_to_select, False)
+        self.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(
+            row for row in range(self.outline_view.numberOfRows()) if self.outline_view.itemAtRow_(row).key in selected_keys), False)
         self.update_buttons()
 
     @objc.python_method
@@ -171,13 +168,7 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         """Returns the items of the selected rows, top to bottom."""
         if self.window is None:
             return []
-        selected_rows = self.outline_view.selectedRowIndexes()
-        items = []
-        row = selected_rows.firstIndex()
-        while row != NSNotFound:
-            items.append(self.outline_view.itemAtRow_(row))
-            row = selected_rows.indexGreaterThanIndex_(row)
-        return items
+        return [self.outline_view.itemAtRow_(row) for row in self.outline_view.selectedRowIndexes()]
 
     @objc.python_method
     def split_items_into_window_keys_and_conversation_ids(self, items):
@@ -231,7 +222,7 @@ class SavedSessionsWindowController(WindowFrameSavingController):
             outline_view.addTableColumn_(column)
         outline_view.setOutlineTableColumn_(outline_view.tableColumns()[0])
         outline_view.setAllowsMultipleSelection_(True)
-        # No drag: the data source writes no rows to a pasteboard (user request, 2026-11-06).
+        # No drag: the data source writes no rows to a pasteboard.
         outline_view.setDataSource_(self)
         outline_view.setDelegate_(self)
         menu = NSMenu.alloc().initWithTitle_("")
@@ -269,8 +260,8 @@ class SavedSessionsWindowController(WindowFrameSavingController):
             self.window.makeFirstResponder_(None)  # a name being renamed is kept
 
     def control_textView_doCommandBySelector_(self, control, text_view, command_selector):
-        # Esc ends a rename without renaming. AppKit's calls arrive with the selector as str; direct Python calls may pass bytes.
-        if command_selector in ("cancelOperation:", b"cancelOperation:"):
+        # Esc ends a rename without renaming.
+        if command_selector == "cancelOperation:":
             self.outline_view.abortEditing()
             self.window.makeFirstResponder_(self.outline_view)
             return True

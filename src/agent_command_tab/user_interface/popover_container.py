@@ -22,7 +22,7 @@ from agent_command_tab.user_interface.named_colors import appearance_is_dark
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 
 # The Sort pop-up's titles for settings_store.LIST_SORT_ORDERS: each the title of a column whose
-# title chooses that order when clicked (user request, 2026-11-02; Age of the two that sort by when
+# title chooses that order when clicked (Age of the two that sort by when
 # the agent started). Tab Order, the terminal's own order, has no column.
 LIST_SORT_ORDER_TITLES = {"manual": "Tab Order", "activity": "Status", "alphabet": "Name", "context_percent": "Tokens",
                           "created_time": "Age", "memory_usage": "Memory", "cpu_usage": "CPU"}
@@ -30,8 +30,8 @@ POPOVER_WIDTH = 460  # before the first fit
 SMALLEST_POPOVER_WIDTH = 320
 LARGEST_SHARE_OF_SCREEN_WIDTH = 0.9
 SPACE_FOR_SCROLLER_AND_MARGINS = 24
-# Its controls sit 3 points above its bottom; the 3 points more than the 26 it had put about as
-# much room above them as below them, down to the column titles (user request, 2026-10-27).
+# Its controls sit 3 points above its bottom, so there is about as much room above them as below
+# them, down to the column titles.
 TOP_BAR_HEIGHT = 29
 BOTTOM_BAR_HEIGHT = 28
 SMALLEST_LIST_HEIGHT = 60
@@ -41,27 +41,25 @@ INITIAL_PANEL_HEIGHT = 300
 TOP_BAR_DRAG_DISTANCE_TO_DETACH = 6  # points: a shorter drag is a click
 PANEL_SIDE_MARGIN = 6  # between the panel's edges and the expand or collapse, the Settings and the pause or resume buttons
 EXPAND_OR_COLLAPSE_ALL_BUTTON_SIZE = (24, 22)
-# The top bar's one expand or collapse button (user requests, 2026-10-19): (SF Symbol, text
+# The top bar's one expand or collapse button: (SF Symbol, text
 # fallback, tooltip), by whether the list is fully expanded. The symbol, the fallback text and
-# the tooltip all say what a click does (the symbol showed the current state until 2026-11-07,
-# user request). Command-E and Command-Shift-E press it in the list that has the keyboard, and
-# the tooltips say so (user requests, 2026-11-07).
+# the tooltip all say what a click does. Command-E and Command-Shift-E press it in the list that
+# has the keyboard, and the tooltips say so.
 EXPAND_OR_COLLAPSE_ALL_KEY = "e"
 EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: ("rectangle.expand.vertical", "Expand all", "Expand all (⌘-e)"),
                                 True: ("rectangle.compress.vertical", "Collapse all", "Collapse all (⌘-e)")}
-# The bottom bar's pause or resume button, at the right (user requests, 2026-10-20 and
-# 2026-10-21): (SF Symbol, text fallback, tooltip), by what a click does: pause the agent
-# sessions of the selected rows that run, or, once all of those are paused, resume them (the
-# selected rows only, user request, 2026-11-05; every session in the list before).
-# The tooltips say how (user request, 2026-10-28; agent_session_pausing).
+# The bottom bar's pause or resume button, at the right: (SF Symbol, text fallback, tooltip), by what a click
+# does: pause the agent
+# sessions of the selected rows that run, or, once all of those are paused, resume them.
+# The tooltips say how (agent_session_pausing).
 PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
     "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes, their shells and the processes below them (a STOP signal)"),
     "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (a CONT signal)")}
-# The top bar's Hide Idle / Show Idle button, left of the expand or collapse button (user
-# requests, 2026-10-21): (title, tooltip), by whether idle tabs are hidden; the title says what a click does.
-# Command-I presses it in the list that has the keyboard, and the tooltips say so (user request, 2026-10-29).
+# The top bar's Hide Idle / Show Idle button, left of the expand or collapse button: (title, tooltip), by
+# whether idle tabs are hidden; the title says what a click does.
+# Command-I presses it in the list that has the keyboard, and the tooltips say so.
 IDLE_TABS_BUTTON_KEY = "i"
-IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle (⌘-i)"),  # the user's wording, 2026-10-28
+IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle (⌘-i)"),
                           True: ("Show Idle", "Show tabs whose agent is idle (⌘-i)")}
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
@@ -69,8 +67,8 @@ SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
 # read, so they step aside for it (fit_top_bar_to_width).
 SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS = 120
 HOOKS_NOTE_TOOL_TIP = ("These hooks provide AgentCommandTab more details about agent status, including whether it "
-                       "launched background processes, etc.")  # the user's wording, 2026-10-28
-# The notes about hooks that are installed but don't work, which Install Hooks wouldn't fix (user request, 2026-11-05).
+                       "launched background processes, etc.")
+# The notes about hooks that are installed but don't work, which Install Hooks wouldn't fix.
 HOOKS_CANT_RUN_TOOL_TIP = ("The Python this copy of AgentCommandTab runs on is gone (for example, Homebrew removed the "
                            "Python version its pipx environment was made with), so its hooks can't run, and the app "
                            "can't restart. Reinstall it (with pipx: pipx reinstall agent-command-tab), then quit it "
@@ -82,8 +80,8 @@ HOOKS_SEND_NO_EVENTS_TOOL_TIP = ("Claude Code sessions started after the hooks w
 
 def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
     """Returns (the bottom bar's note about the app's hooks, or "" for none, its tooltip, the
-    agent tools its Install Hooks button installs them for) (user requests, 2026-10-27 and
-    2026-11-05). Only tools with a session in the list count, so someone who never runs Codex isn't
+    agent tools its Install Hooks button installs them for). Only tools with a session in the list count, so
+    someone who never runs Codex isn't
     asked to install its hooks. Hooks that can't run come first: nothing else works until the app
     is reinstalled.
 
@@ -100,13 +98,26 @@ def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
                 HOOKS_CANT_RUN_TOOL_TIP, [])
     missing_agent_tool_names = list_listed_agent_tools_whose_hooks_are(HOOKS_ARE_MISSING)
     if missing_agent_tool_names:
-        # The user's wording, 2026-10-28 ("No hooks for Claude Code" until then).
         return f"{' and '.join(missing_agent_tool_names)} hooks not installed yet", HOOKS_NOTE_TOOL_TIP, missing_agent_tool_names
     if list_listed_agent_tools_whose_hooks_are(HOOKS_AWAIT_APPROVAL):
         return "Approve the Codex hooks: /hooks in Codex", HOOKS_NOTE_TOOL_TIP, []
     if list_listed_agent_tools_whose_hooks_are(HOOKS_SEND_NO_EVENTS):
         return "No events from the Claude Code hooks", HOOKS_SEND_NO_EVENTS_TOOL_TIP, []
     return "", HOOKS_NOTE_TOOL_TIP, []
+
+
+def make_gray_pill_button(title, target, action_name):
+    """Returns a small button drawn as a gray pill, like the top bar's Sort pop-up (Hide Idle,
+    Settings, Install Hooks), with the pointing hand."""
+    button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
+    button.setTitle_(title)
+    button.setBezelStyle_(NSBezelStyleRecessed)
+    button.setShowsBorderOnlyWhileMouseInside_(False)
+    button.setControlSize_(NSControlSizeSmall)
+    button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+    button.setTarget_(target)
+    button.setAction_(action_name)
+    return button
 
 
 class ExpandOrCollapseAllButton(PointingHandButton):
@@ -124,7 +135,7 @@ class ExpandOrCollapseAllButton(PointingHandButton):
 class ListPanelView(NSView):
     """The panel's root view: tells its controller when its size changes, so the top bar fits,
     and when the top bar's empty space is dragged (the dropdown or the sidebar then turns into
-    the list window; user requests, 2026-10-19 and 2026-10-22). The top bar's controls take
+    the list window). The top bar's controls take
     their own clicks."""
 
     def acceptsFirstMouse_(self, event):
@@ -134,10 +145,10 @@ class ListPanelView(NSView):
         # In dark mode, the top bar, the column titles and the bottom bar are filled with the list's
         # own background color (the outline view's default, controlBackgroundColor) rather than
         # left on the lighter gray of the window, the popover or the sidebar around it. The list
-        # itself, which AppKit doesn't fill solid in that color, shows lighter than the bars (user
-        # requests, 2026-10-27 and 2026-10-29). Light mode keeps that gray around the list, whose
-        # rows are on a very light gray there (user request, 2026-10-28;
-        # named_colors.choose_list_background_color). AppKit redraws views when the mode changes.
+        # itself, which AppKit doesn't fill solid in that color, shows lighter than the bars. Light mode keeps
+        # that gray around the list, whose
+        # rows are on a very light gray there (named_colors.choose_list_background_color). AppKit redraws
+        # views when the mode changes.
         if appearance_is_dark(self.effectiveAppearance()):
             NSColor.controlBackgroundColor().set()
             NSRectFill(rect)
@@ -197,7 +208,7 @@ class ListPanelController(NSViewController):
         scroll_view.setDrawsBackground_(False)
         scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         root_view.addSubview_(scroll_view)
-        # The column titles, between the top bar and the list (user request, 2026-10-26), as tall
+        # The column titles, between the top bar and the list, as tall
         # as their titles need (fit_list_under_column_titles).
         column_titles_row_view = self.list_controller.column_titles_row_view
         column_titles_row_view.setFrame_(NSMakeRect(0, height - TOP_BAR_HEIGHT, width, 0))
@@ -205,9 +216,8 @@ class ListPanelController(NSViewController):
         root_view.addSubview_(column_titles_row_view)
         self.list_controller.on_column_titles_row_height_changed = self.fit_list_under_column_titles
 
-        # Top bar (user requests, milestone 2, 2026-10-19 to 2026-10-28): the sort order on the
-        # left; at the right, Hide Idle and one button that expands or collapses all; a
-        # message line after the sort order. Settings was in its middle from 2026-10-26 to 2026-10-28.
+        # Top bar: the sort order on the left; at the right, Hide Idle and one button that expands
+        # or collapses all; a message line after the sort order.
         self.sort_label = NSTextField.labelWithString_("Sort:")
         self.sort_label.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.sort_label.sizeToFit()
@@ -228,11 +238,7 @@ class ListPanelController(NSViewController):
         self.list_sort_order_popup.setFrameOrigin_((0, height - TOP_BAR_HEIGHT + 3))  # fit_top_bar_to_width sets x
         self.list_sort_order_popup.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.list_sort_order_popup)
-        self.idle_tabs_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 70, 20))
-        self.idle_tabs_button.setBezelStyle_(NSBezelStyleRecessed)  # a gray pill like the Sort pop-up's
-        self.idle_tabs_button.setShowsBorderOnlyWhileMouseInside_(False)
-        self.idle_tabs_button.setControlSize_(NSControlSizeSmall)
-        self.idle_tabs_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.idle_tabs_button = make_gray_pill_button("", self, "idleTabsButtonClicked:")
         # As wide as the wider of its two titles, so the top bar doesn't shift when it toggles.
         idle_tabs_button_widths = []
         for title, _ in IDLE_TABS_BUTTON_LOOKS.values():
@@ -241,8 +247,6 @@ class ListPanelController(NSViewController):
             idle_tabs_button_widths.append(self.idle_tabs_button.frame().size.width)
         self.idle_tabs_button.setFrame_(NSMakeRect(  # fit_top_bar_to_width sets x
             0, height - TOP_BAR_HEIGHT + 3, max(idle_tabs_button_widths), self.list_sort_order_popup.frame().size.height))
-        self.idle_tabs_button.setTarget_(self)
-        self.idle_tabs_button.setAction_("idleTabsButtonClicked:")
         self.idle_tabs_button.setKeyEquivalent_(IDLE_TABS_BUTTON_KEY)
         self.idle_tabs_button.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
         self.idle_tabs_button.setAutoresizingMask_(NSViewMinYMargin | NSViewMinXMargin)
@@ -265,24 +269,16 @@ class ListPanelController(NSViewController):
         self.sort_control_and_hide_idle_step_aside_for_the_message = True  # show_message's
 
         # Bottom bar: a Settings button with its name, easier to see than an icon, at the left, a
-        # gray pill like the top bar's controls (user request, 2026-10-28; in the middle of the top bar
-        # from 2026-10-26, at the bottom left before), and one button that pauses or resumes the
+        # gray pill like the top bar's controls, and one button that pauses or resumes the
         # selected rows, at the right; a new window with an agent session is the "+" row at the end
-        # of the list (user requests, 2026-10-19 to 2026-10-21 and 2026-11-05).
-        self.settings_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
-        self.settings_button.setTitle_("Settings")
-        self.settings_button.setBezelStyle_(NSBezelStyleRecessed)
-        self.settings_button.setShowsBorderOnlyWhileMouseInside_(False)
-        self.settings_button.setControlSize_(NSControlSizeSmall)
-        self.settings_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
-        # A gear before its name (user request, 2026-10-27), as tall as the small text; the name alone where the symbol is missing.
+        # of the list.
+        self.settings_button = make_gray_pill_button("Settings", self, "settingsClicked:")
+        # A gear before its name, as tall as the small text; the name alone where the symbol is missing.
         gear_image = NSImage.imageWithSystemSymbolName_accessibilityDescription_("gearshape", None)
         if gear_image is not None:
             self.settings_button.setImage_(gear_image.imageWithSymbolConfiguration_(
                 NSImageSymbolConfiguration.configurationWithPointSize_weight_(NSFont.smallSystemFontSize(), NSFontWeightRegular)))
             self.settings_button.setImagePosition_(NSImageLeading)
-        self.settings_button.setTarget_(self)
-        self.settings_button.setAction_("settingsClicked:")
         self.settings_button.sizeToFit()
         self.settings_button.setFrameOrigin_((PANEL_SIDE_MARGIN, (BOTTOM_BAR_HEIGHT - self.settings_button.frame().size.height) / 2))
         self.settings_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMaxXMargin)  # stays at the bottom left
@@ -295,22 +291,15 @@ class ListPanelController(NSViewController):
         self.pause_or_resume_selected_rows_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)  # stays at the bottom right
         root_view.addSubview_(self.pause_or_resume_selected_rows_button)
         # After the Settings button, while the app's hooks are missing for an agent tool with a session
-        # in the list, a note and a button that installs them (user request, 2026-10-27).
+        # in the list, a note and a button that installs them.
         self.hooks_note_text_field = NSTextField.labelWithString_("")
         self.hooks_note_text_field.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.hooks_note_text_field.setTextColor_(NSColor.secondaryLabelColor())
         self.hooks_note_text_field.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
         self.hooks_note_text_field.setToolTip_(HOOKS_NOTE_TOOL_TIP)  # update_top_and_bottom_bar_buttons sets the note's own
         root_view.addSubview_(self.hooks_note_text_field)
-        self.install_hooks_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 20))
-        self.install_hooks_button.setTitle_("Install Hooks")
-        self.install_hooks_button.setBezelStyle_(NSBezelStyleRecessed)  # a gray pill like the top bar's buttons
-        self.install_hooks_button.setShowsBorderOnlyWhileMouseInside_(False)
-        self.install_hooks_button.setControlSize_(NSControlSizeSmall)
-        self.install_hooks_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.install_hooks_button = make_gray_pill_button("Install Hooks", self, "installHooksClicked:")
         self.install_hooks_button.sizeToFit()
-        self.install_hooks_button.setTarget_(self)
-        self.install_hooks_button.setAction_("installHooksClicked:")
         self.install_hooks_button.setToolTip_(HOOKS_NOTE_TOOL_TIP)
         root_view.addSubview_(self.install_hooks_button)
         self.agent_tool_names_to_install_hooks_for = []
@@ -337,7 +326,7 @@ class ListPanelController(NSViewController):
     @objc.python_method
     def fit_top_bar_to_width(self):
         """Puts the expand or collapse all button at the right end and the Hide Idle button just
-        left of it (user request, 2026-10-26; in the middle of the bar before). The sort control
+        left of it. The sort control
         fits between the panel's left edge and those buttons: with its "Sort:" label when there is
         room, without it in a narrower one, and then with the pop-up narrowed, cutting its title
         short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar or a list window,
@@ -402,10 +391,10 @@ class ListPanelController(NSViewController):
         """Gives the expand or collapse button (top bar) and the pause or resume button (bottom
         bar) the look of the list's current state and shows each only when it applies; the top bar
         refits when its button appears or goes. Called after every snapshot, expansion and selection
-        change, so the controls are only touched when what they show changes (code review, 2026-10-29).
+        change, so the controls are only touched when what they show changes.
 
-        The expand or collapse button shows while the list has two or more windows (user request,
-        2026-10-19); the pause or resume button while the selected rows have an agent session that
+        The expand or collapse button shows while the list has two or more windows; the pause or resume button
+        while the selected rows have an agent session that
         a click would pause or resume."""
         agent_session_entries = self.list_controller.list_agent_session_entries()
         sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(
@@ -440,7 +429,7 @@ class ListPanelController(NSViewController):
     def fit_bottom_bar_to_width(self):
         """Puts the hooks note after the Settings button at the bottom left, then its Install Hooks
         button (when there is something to install and room for it before the pause or resume
-        button, which it covered in a narrow sidebar: code review, 2026-10-29), the note cut short
+        button, which it covered in a narrow sidebar), the note cut short
         before the button and the pause or resume button."""
         note = self.hooks_note_text_field.stringValue()
         self.hooks_note_text_field.setHidden_(not note)
@@ -516,7 +505,7 @@ class ListPanelController(NSViewController):
     def fit_size_to_rows(self):
         """Sizes the panel so every row's text shows in full when all rows are expanded, scrolling
         only when the rows are taller (or wider) than the screen allows. Collapsing or expanding
-        rows keeps that size (user request, milestone 2)."""
+        rows keeps that size."""
         window = self.view().window()
         screen = (window.screen() if window is not None else None) or NSScreen.screens()[0]
         usable_frame = screen.visibleFrame()

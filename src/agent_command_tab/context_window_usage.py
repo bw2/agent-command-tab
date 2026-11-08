@@ -1,17 +1,19 @@
 """How much of its context window each agent session uses, read from the end of its own
-conversation file (user request, milestone 2: a tokens column, for example "425k").
+conversation file (the Tokens column, for example "425k").
 
 - Claude Code writes a transcript, <config folder>/projects/<folder>/<session ID>.jsonl; the
   latest reply's usage (input, cache-write and cache-read tokens) is the context in use, the
   same number its status line shows as total_input_tokens.
 - Codex writes ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<ID>.jsonl with "token_count"
   events whose last_token_usage.total_tokens is the context in use (find_codex_conversation_files).
-- The context window's size, for the share in use (user request, 2026-10-26: "134k (13%)" in the
+- The context window's size, for the share in use ("134k (13%)" in the
   Tokens column): Codex reports it with its usage; for Claude Code it follows from the model of the
   latest reply (read_model_from_claude_code_transcript) and from the model the session was started
   with, from its arguments, environment or settings (read_claude_code_model_setting).
 
-Only the last BYTES_TO_READ_FROM_THE_END bytes are read, since transcripts reach tens of megabytes.
+Only the end of a transcript is read, since transcripts reach tens of megabytes: the last
+BYTES_TO_READ_FROM_THE_END bytes, or up to LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END when the newest
+record is longer (read_last_lines).
 """
 
 import datetime
@@ -20,17 +22,19 @@ import json
 import os
 import re
 
+from agent_command_tab.settings_store import read_json_file
 from agent_command_tab.claude_code_transcript_records import (RECORD_KINDS_THAT_START_A_TURN, classify_user_record,
                                                               list_message_blocks)
 
 BYTES_TO_READ_FROM_THE_END = 512 * 1024
+CODEX_TURN_EVENT_TYPES = ("task_started", "task_complete", "turn_aborted")  # a Codex conversation file's events that start or end a turn
 # A file whose newest record is longer than this many bytes gives no lines (read_last_lines).
 LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END = 16 * 1024 * 1024
 CLAUDE_CODE_CONTEXT_WINDOW_TOKENS = 200_000
 CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS = 1_000_000
 # The newest version in each Claude model family whose context window is 200k unless chosen with
 # the "[1m]" suffix, from Claude Code 2.1.314's built-in model list. Newer models, and models not
-# listed, have a 1M window (user request, 2026-10-30: claude-opus-5-5 showed "175k (87%)" while
+# listed, have a 1M window (claude-opus-5-5 showed "175k (87%)" while
 # its status line said 1000k).
 NEWEST_CLAUDE_MODEL_VERSIONS_WITH_A_200K_CONTEXT_WINDOW = {"opus": (4, 6), "sonnet": (4, 6), "haiku": (4, 5)}
 # "claude-opus-4-6", "claude-haiku-4-5-20251001", "claude-opus-4-20250514" (4.0): a minor version
@@ -41,7 +45,7 @@ CLAUDE_MODEL_FAMILY_AND_VERSION_PATTERN = re.compile(r"claude-(opus|sonnet|haiku
 def read_last_lines(file_path, byte_count=BYTES_TO_READ_FROM_THE_END):
     """Returns the file's last complete lines within its last byte_count bytes, newest first. When
     those bytes hold no complete line, as when the newest record is a large tool result, it reads
-    four times as many, up to LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END (code review, 2026-10-29)."""
+    four times as many, up to LARGEST_BYTE_COUNT_TO_READ_FROM_THE_END."""
     while True:
         try:
             with open(file_path, "rb") as file:
@@ -76,7 +80,9 @@ def read_context_tokens_from_claude_code_transcript(file_path):
     """Returns the tokens in context after the latest reply in a Claude Code transcript, or after
     the latest compaction (/compact, or an automatic one) when no reply came since, or None."""
     for record in read_last_records(file_path):
-        if record.get("type") == "system" and record.get("subtype") == "compact_boundary" and not record.get("isSidechain"):
+        if record.get("isSidechain"):
+            continue  # a subagent's record, whose context isn't the main agent's
+        if record.get("type") == "system" and record.get("subtype") == "compact_boundary":
             post_compaction_tokens = (record.get("compactMetadata") or {}).get("postTokens")
             if isinstance(post_compaction_tokens, int):
                 return post_compaction_tokens
@@ -118,7 +124,12 @@ def read_claude_code_model_setting(process_arguments, process_environment, confi
     """Returns the model a Claude Code session was started with, in the order Claude Code goes by:
     its `--model` argument, else its ANTHROPIC_MODEL environment variable, else the "model" in its
     config folder's settings.json (for example "opus[1m]"), else None. Its transcript names the
-    model without saying whether its context window is the 1M one."""
+    model without saying whether its context window is the 1M one.
+
+    Args:
+        process_arguments, process_environment: The Claude Code process's (read_process_arguments_and_environment).
+        config_folder: The config folder it runs with (the default one's path for the default).
+    """
     for index, argument in enumerate(process_arguments):
         if argument == "--model" and index + 1 < len(process_arguments):
             return process_arguments[index + 1]
@@ -126,11 +137,7 @@ def read_claude_code_model_setting(process_arguments, process_environment, confi
             return argument.partition("=")[2]
     if process_environment.get("ANTHROPIC_MODEL"):
         return process_environment["ANTHROPIC_MODEL"]
-    try:
-        with open(os.path.join(config_folder or os.path.expanduser("~/.claude"), "settings.json")) as settings_file:
-            model = json.load(settings_file).get("model")
-    except (OSError, ValueError, AttributeError):
-        return None
+    model = (read_json_file(os.path.join(config_folder, "settings.json"), dict) or {}).get("model")
     return model if isinstance(model, str) else None
 
 
@@ -138,7 +145,8 @@ def read_model_from_claude_code_transcript(file_path):
     """Returns the model of the latest reply in a Claude Code transcript (for example
     "claude-opus-5-5", without the "[1m]" suffix it may have been chosen with), or None."""
     for record in read_last_records(file_path):
-        model = (record.get("message") or {}).get("model") if record.get("type") == "assistant" else None
+        model = ((record.get("message") or {}).get("model")
+                 if record.get("type") == "assistant" and not record.get("isSidechain") else None)
         if isinstance(model, str) and model != "<synthetic>":
             return model
     return None
@@ -158,15 +166,20 @@ def choose_claude_code_context_window_tokens(model_setting, model, context_token
     """Returns the size of a Claude Code session's context window: 1M for a model chosen with the
     "[1m]" suffix, once the context holds more than 200k tokens (a 1M model chosen some other
     way), or when its latest reply's model isn't one with a 200k window
-    (claude_model_has_a_200k_context_window), else 200k.
+    (claude_model_has_a_200k_context_window), else 200k; None when neither the setting nor the
+    size settles it and no reply's model is known (the file's end holds no reply, after a large
+    paste say), so the core keeps the size it had.
 
     Args:
         model_setting: The model the session was started with (read_claude_code_model_setting), or None.
         model: The model of its latest reply (read_model_from_claude_code_transcript), or None.
         context_tokens: The tokens in its context, or None.
     """
-    if ((model_setting or "").lower().endswith("[1m]") or (context_tokens or 0) > CLAUDE_CODE_CONTEXT_WINDOW_TOKENS
-            or not claude_model_has_a_200k_context_window(model or "")):
+    if (model_setting or "").lower().endswith("[1m]") or (context_tokens or 0) > CLAUDE_CODE_CONTEXT_WINDOW_TOKENS:
+        return CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS
+    if model is None:
+        return None
+    if not claude_model_has_a_200k_context_window(model):
         return CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS
     return CLAUDE_CODE_CONTEXT_WINDOW_TOKENS
 
@@ -191,6 +204,17 @@ def read_turn_started_at_from_codex_conversation_file(file_path):
     return None
 
 
+def read_turn_is_under_way_from_codex_conversation_file(file_path):
+    """Returns whether a turn is under way: True when the newest turn event in the file's end is a
+    "task_started", False when it is the "task_complete" Codex writes as each turn ends (or a
+    "turn_aborted"), None when there is neither."""
+    for record in read_last_records(file_path):
+        payload = record.get("payload")
+        if record.get("type") == "event_msg" and isinstance(payload, dict) and payload.get("type") in CODEX_TURN_EVENT_TYPES:
+            return payload["type"] == "task_started"
+    return None
+
+
 def find_claude_code_transcript(claude_config_folders, claude_session_id):
     """Returns the path of a Claude Code session's transcript, or None if it isn't found."""
     for config_folder in claude_config_folders:
@@ -206,7 +230,15 @@ def codex_session_header_comes_from_a_terminal_session(header):
     background server, source "vscode" with originator "codex-tui". Not the header of `codex exec`
     (source "exec"), of a subagent such as the auto-review helper (source {"subagent": ...}, whose
     originator is "codex-tui" too when a terminal session started it), or of the VS Code extension."""
-    return header.get("source") == "cli" or (header.get("source") == "vscode" and header.get("originator") == "codex-tui")
+    return header.get("source") == "cli" or codex_session_header_says_it_runs_in_the_shared_server(header)
+
+
+def codex_session_header_says_it_runs_in_the_shared_server(header):
+    """Returns whether a Codex conversation file's session_meta header is that of a terminal session
+    run through Codex's shared background server (`codex app-server`, since Codex 0.165): source
+    "vscode" with originator "codex-tui". That server, not the codex process in the tab, runs the
+    session's turns and commands."""
+    return header.get("source") == "vscode" and header.get("originator") == "codex-tui"
 
 
 def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent_working_folder, now,

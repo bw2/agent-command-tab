@@ -7,22 +7,20 @@ from agent_command_tab.snapshot_builder import (DisplayedState, build_computer_s
                                                        compute_displayed_state_since, resolve_agent_sessions)
 from agent_command_tab.snapshot_data_classes import (ChildProcessEntry, build_window_title_shown_in_the_list,
                                                      convert_snapshot_to_json_ready_dict, iterate_agent_session_entries)
-
-MONITOR = {"monitor_id": "display-1", "name": "Built-in", "frame": (0, 0, 2000, 1300), "visible_frame": (0, 0, 2000, 1260)}
+from gathered_window_builders import MONITOR, make_gathered_tab, make_gathered_window
 
 
 def make_tab(tab_id, command_line, status=None, path="/Users/someone/code/project", title="claude",
              title_override_format=None, job_pid=None, job_started_at=None, status_set_in_iterm2=None,
              status_set_in_iterm2_at=None):
-    return {"tab_id": tab_id, "title": title, "title_override_format": title_override_format,
-            "first_session": {"session_id": f"session-{tab_id}", "command_line": command_line, "job_pid": job_pid,
-                              "job_started_at": job_started_at, "status_set_in_iterm2": status_set_in_iterm2,
-                              "status_set_in_iterm2_at": status_set_in_iterm2_at, "status": status, "path": path}}
+    """make_gathered_tab's tab with this file's defaults: session "session-<tab ID>", and no job folder read."""
+    return make_gathered_tab(tab_id, f"session-{tab_id}", command_line, job_pid, title, title_override_format, job_folder="",
+                             job_started_at=job_started_at, status_set_in_iterm2=status_set_in_iterm2,
+                             status_set_in_iterm2_at=status_set_in_iterm2_at, status=status, path=path)
 
 
 def make_window(window_id, tabs, title="claude", title_override_format=None, frame=(10, 10, 800, 600)):
-    return {"window_id": window_id, "terminal_name": "iTerm2", "frame": frame, "title": title,
-            "title_override_format": title_override_format, "tabs": tabs}
+    return make_gathered_window(window_id, tabs, frame=frame, title=title, title_override_format=title_override_format)
 
 
 def resolve(gathered_windows, previous_agent_sessions=None, alive_process_ids=(), stopped_process_ids=()):
@@ -33,13 +31,19 @@ def resolve(gathered_windows, previous_agent_sessions=None, alive_process_ids=()
 
 
 def build_snapshot(gathered_windows, window_order=(), claude_agents_by_process_id=None, tracking=None,
-                   seen_session_id=None, monitors=(MONITOR,), agent_sessions=None, displayed_states=None,
-                   screen_readings=None, now=1000.0, exited_agent_sessions_by_session_id=None, hooks_status_per_agent_tool=()):
+                   monitors=(MONITOR,), agent_sessions=None, displayed_states=None,
+                   session_readings=None, now=1000.0, exited_agent_sessions_by_session_id=None, hooks_status_per_agent_tool=()):
     return build_computer_snapshot(gathered_windows, agent_sessions if agent_sessions is not None else resolve(gathered_windows),
                                    list(monitors), list(window_order), tracking or {}, displayed_states or {},
-                                   screen_readings or {}, 600, claude_agents_by_process_id or {}, seen_session_id,
-                                   seen_session_id, "computer-1", "Test Mac", now, exited_agent_sessions_by_session_id,
+                                   session_readings or {}, claude_agents_by_process_id or {}, None,
+                                   None, "computer-1", "Test Mac", now, exited_agent_sessions_by_session_id,
                                    hooks_status_per_agent_tool)
+
+
+def build_the_one_claude_entry(status, session_reading):
+    """Returns the entry of a one-tab snapshot whose Claude Code agent has this status and session reading."""
+    return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
+                          session_readings={"session-1": session_reading}).monitors[0].windows[0].agent_sessions[0]
 
 
 class ContextFillPercentTests(unittest.TestCase):
@@ -95,7 +99,7 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual(window.agent_sessions[0].tab_title, "Review bot")
         self.assertTrue(window.agent_sessions[0].tab_title_set_by_user)
 
-    def test_windows_with_the_same_title_are_numbered_in_iterm2s_order(self):  # user request, 2026-10-30
+    def test_windows_with_the_same_title_are_numbered_in_iterm2s_order(self):
         # The list order (newest first here) doesn't change which window keeps the plain title.
         snapshot = build_snapshot([make_window(window_id, [make_tab(window_id + "-tab", "claude", path=path)])
                                    for window_id, path in (("a", "/x/catalogs"), ("b", "/x/explorer"), ("c", "/x/catalogs"),
@@ -134,33 +138,31 @@ class BuildComputerSnapshotTests(unittest.TestCase):
 
     def test_claude_codes_own_report_fills_in_while_iterm2_reports_no_status(self):
         # After iTerm2 restarts, its API returns no status for a tab until the session's next hook event.
-        def build_entry(iterm2_status, claude_agents_status, displayed_states=None, screen_reading=None):
+        def build_entry(iterm2_status, claude_agents_status, displayed_states=None, session_reading=None):
             return build_snapshot([make_window("w", [make_tab("1", "claude", status=iterm2_status, job_pid=42)])],
                                   claude_agents_by_process_id={42: {"name": "n", "status": claude_agents_status}},
                                   displayed_states=displayed_states,
-                                  screen_readings={"session-1": screen_reading or {}}).monitors[0].windows[0].agent_sessions[0]
+                                  session_readings={"session-1": session_reading or {}}).monitors[0].windows[0].agent_sessions[0]
         for claude_agents_status, state in (("idle", "idle"), ("busy", "working"), ("shell", "working"), ("waiting", "asking"),
                                             (None, "unknown"), ("some new word", "unknown")):
             self.assertEqual(build_entry(None, claude_agents_status).status, state, claude_agents_status)
-        # "shell" after a turn the hooks saw end, with its background tasks running (code review, 2026-10-29).
-        self.assertEqual(build_entry(None, "shell", screen_reading={"hooks_report_background_tasks_after_the_turn": True,
+        # "shell" after a turn the hooks saw end, with its background tasks running.
+        self.assertEqual(build_entry(None, "shell", session_reading={"hooks_report_background_tasks_after_the_turn": True,
                                                                     "background_task_count": 1}).status, "background")
         self.assertEqual(build_entry(None, "idle").status_reason, "from claude agents --json: iTerm2 reports no status for this tab")
         self.assertEqual(build_entry("working", "idle").status, "working")  # iTerm2's status wins once there is one
         self.assertEqual(build_entry(None, "idle", {"session-1": DisplayedState("idle", 500.0, 400.0)}).status_since, 500.0)
         self.assertEqual(build_entry(None, "idle", {"session-1": DisplayedState("unknown", 500.0, 400.0)}).status_since, 1000.0)
 
-    def test_screen_readings_reach_the_status(self):
+    def test_session_readings_reach_the_status(self):
         tracking = {"session-1": {"status_change_time": 100.0, "last_time_tab_was_seen": None}}
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="working")])], tracking=tracking,
-                                  screen_readings={"session-1": {"fingerprint_changed_at": 200.0}})
+                                  session_readings={"session-1": {"running_command": ("pytest", 200.0)}})
         entry = snapshot.monitors[0].windows[0].agent_sessions[0]
-        self.assertEqual((entry.status, entry.status_reason), ("stuck", "thinking with no screen change for 13 min"))
+        self.assertEqual((entry.status, entry.status_reason), ("working", "running pytest"))
 
-    def test_an_idle_session_with_background_processes_is_background(self):  # user request, 2026-10-28
-        def build_entry(status, screen_reading):
-            return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
-                                  screen_readings={"session-1": screen_reading}).monitors[0].windows[0].agent_sessions[0]
+    def test_an_idle_session_with_background_processes_is_background(self):
+        build_entry = build_the_one_claude_entry
         helper = ChildProcessEntry(65, "clangd --background-index", 900.0, False, None, None)
         detached_job = ChildProcessEntry(77, "bash scratchpad/run.sh", 950.0, True, None, None)
         self.assertEqual(build_entry("idle", {"background_task_count": 1}).status, "background")
@@ -169,10 +171,8 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual(build_entry("idle", {"child_processes": (helper,)}).status, "idle")  # a helper isn't background work
         self.assertEqual(build_entry("working", {"background_task_count": 1}).status, "working")  # the turn goes first
 
-    def test_an_idle_session_with_no_prompt_since_it_started_is_new(self):  # user request, 2026-10-30
-        def build_entry(status, screen_reading):
-            return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
-                                  screen_readings={"session-1": screen_reading}).monitors[0].windows[0].agent_sessions[0]
+    def test_an_idle_session_with_no_prompt_since_it_started_is_new(self):
+        build_entry = build_the_one_claude_entry
         no_prompt = {"hooks_report_no_prompt_since_the_agent_started": True}
         entry = build_entry("idle", no_prompt)
         self.assertEqual((entry.status, entry.status_reason), ("new", "started, with no message sent to it yet"))
@@ -181,19 +181,18 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         # A reply in its conversation file: a prompt was sent while the app wasn't running to hear it.
         self.assertEqual(build_entry("idle", dict(no_prompt, context_tokens=58_000)).status, "idle")
 
-    def test_a_tool_call_open_for_5_seconds_or_more_shows_as_running(self):  # user request, 2026-10-28
-        def build_entry(screen_reading, status="working"):
-            return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
-                                  screen_readings={"session-1": screen_reading}, now=1000.0).monitors[0].windows[0].agent_sessions[0]
+    def test_a_tool_call_open_for_5_seconds_or_more_shows_as_running(self):  # build_snapshot's time is 1000
         subagent_call = {"open_tool_name": "Agent", "open_tool_started_at": 995.0}
-        entry = build_entry({"open_tool_call": subagent_call})
-        self.assertEqual((entry.running_tool_name, entry.running_tool_started_at), ("Agent", 995.0))
+        entry = build_the_one_claude_entry("working", {"open_tool_call": subagent_call})
+        self.assertEqual((entry.running_tool_name, entry.running_tool_started_at, entry.status_reason), ("Agent", 995.0, "running Agent"))
         quick_call = dict(subagent_call, open_tool_started_at=996.0)  # open 4 seconds: likely a file read, still thinking
-        self.assertEqual(build_entry({"open_tool_call": quick_call}).running_tool_name, "")
+        entry = build_the_one_claude_entry("working", {"open_tool_call": quick_call})
+        self.assertEqual((entry.running_tool_name, entry.status_reason), ("", ""))  # the reason says no more than the row
         # A command found from the agent's processes counts at once, and from its own start.
-        entry = build_entry({"open_tool_call": quick_call, "running_command": ("pytest", 990.0)})
-        self.assertEqual((entry.running_tool_name, entry.running_tool_started_at), ("pytest", 990.0))
-        self.assertEqual(build_entry({"open_tool_call": subagent_call}, status="idle").running_tool_name, "")
+        entry = build_the_one_claude_entry("working", {"open_tool_call": quick_call, "running_command": ("pytest", 990.0)})
+        self.assertEqual((entry.running_tool_name, entry.running_tool_started_at, entry.status_reason),
+                         ("pytest", 990.0, "running pytest"))
+        self.assertEqual(build_the_one_claude_entry("idle", {"open_tool_call": subagent_call}).running_tool_name, "")
 
     def test_snapshot_converts_to_json(self):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="waiting")])])
@@ -208,7 +207,7 @@ class BuildComputerSnapshotTests(unittest.TestCase):
                                 "visible_frame": (-1920, 0, 1920, 1050)}
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude")], frame=(-1500, 100, 800, 600))],
                                   monitors=(MONITOR, monitor_left_of_main))
-        self.assertEqual([monitor.monitor_id for monitor in snapshot.monitors], ["left", "display-1"])
+        self.assertEqual([monitor.monitor_id for monitor in snapshot.monitors], ["left", "1"])
         self.assertEqual(len(snapshot.monitors[0].windows), 1)
 
     def test_no_monitor_message_yet_uses_a_placeholder_monitor(self):
@@ -276,7 +275,7 @@ class BuildComputerSnapshotTests(unittest.TestCase):
 
     def test_background_tasks_and_child_processes_come_from_the_readings(self):
         child_process = ChildProcessEntry(77, "python3 -m unittest", 990.0, True, None, None)
-        snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="working")])], screen_readings={
+        snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="working")])], session_readings={
             "session-1": {"background_task_count": 2, "child_processes": (child_process,)}})
         entry = snapshot.monitors[0].windows[0].agent_sessions[0]
         self.assertEqual((entry.background_task_count, entry.child_processes), (2, (child_process,)))
@@ -284,14 +283,13 @@ class BuildComputerSnapshotTests(unittest.TestCase):
     def test_an_agent_that_ended_without_a_session_end_keeps_an_exited_row_in_its_tab(self):
         running = [make_window("w", [make_tab("1", "claude", status="working", job_pid=42),
                                      make_tab("2", "claude", status="idle", job_pid=43)])]
-        last_entry = build_snapshot(running, screen_readings={"session-1": {"memory_bytes": 1024 ** 2}}).monitors[0].windows[0].agent_sessions[0]
+        last_entry = build_snapshot(running, session_readings={"session-1": {"memory_bytes": 1024 ** 2}}).monitors[0].windows[0].agent_sessions[0]
         # The first tab's agent is gone: its shell is in front again.
         after_the_crash = [make_window("w", [make_tab("1", "-zsh", job_pid=80), make_tab("2", "claude", status="idle", job_pid=43)])]
         snapshot = build_snapshot(after_the_crash, exited_agent_sessions_by_session_id={"session-1": (last_entry, 1500.0)},
                                   now=1600.0)
         exited_entry, other_entry = snapshot.monitors[0].windows[0].agent_sessions
-        self.assertEqual((exited_entry.tab_id, exited_entry.status, exited_entry.status_since, exited_entry.ended_abnormally_at),
-                         ("1", "exited", 1500.0, 1500.0))
+        self.assertEqual((exited_entry.tab_id, exited_entry.status, exited_entry.status_since), ("1", "exited", 1500.0))
         self.assertEqual((exited_entry.memory_bytes, exited_entry.slash_commands), (None, ()))  # nothing of a running agent
         self.assertEqual(other_entry.tab_id, "2")
         # A window whose only agent crashed stays for its row.

@@ -13,15 +13,18 @@ from agent_command_tab.global_shortcut_key_filter import (COMMAND_FLAG, CONTROL_
 from agent_command_tab.settings_store import GLOBAL_SHORTCUT_CHOICES
 
 LETTER_A_KEY_CODE = 0
+COMMAND_KEY_CODE = 55  # the left Command key, whose press or release is a modifier keys event
 
 
 def play_key_events(key_events, global_shortcut="shift_command_tab"):
-    """Runs (event_type, key_code, flags) events through the filter's decisions, the way macOS
-    would send them; returns each what_to_do and the state after the last one."""
+    """Runs (event_type, key_code, flags) events, or (event_type, key_code, flags, is_key_repeat)
+    ones, through the filter's decisions, the way macOS would send them; returns each what_to_do
+    and the state after the last one."""
     state = START_KEY_FILTER_STATE
     decisions = []
-    for event_type, key_code, flags in key_events:
-        what_to_do, state = decide_what_to_do_with_key_event(event_type, key_code, flags, False, global_shortcut, state)
+    for event_type, key_code, flags, *is_key_repeat in key_events:
+        what_to_do, state = decide_what_to_do_with_key_event(event_type, key_code, flags, bool(is_key_repeat and is_key_repeat[0]),
+                                                             global_shortcut, state)
         decisions.append(what_to_do)
     return decisions, state
 
@@ -47,25 +50,21 @@ class KeyFilterDecisionTests(unittest.TestCase):
         self.assertEqual(what_to_do, "hold_back")
 
     def test_a_held_back_press_keeps_its_repeats_held_back_after_command_is_let_go(self):
-        # Shift-Command-Tab held until Tab repeats, then Command let go before Tab.
-        state = START_KEY_FILTER_STATE
-        decisions = []
-        for event_type, flags, is_key_repeat in [(KEY_DOWN_EVENT, COMMAND_FLAG | SHIFT_FLAG, False),
-                                                 (KEY_DOWN_EVENT, COMMAND_FLAG | SHIFT_FLAG, True),
-                                                 (MODIFIER_KEYS_CHANGED_EVENT, SHIFT_FLAG, False),
-                                                 (KEY_DOWN_EVENT, SHIFT_FLAG, True), (KEY_UP_EVENT, SHIFT_FLAG, False),
-                                                 (KEY_DOWN_EVENT, SHIFT_FLAG, False)]:
-            key_code = 56 if event_type == MODIFIER_KEYS_CHANGED_EVENT else TAB_KEY_CODE
-            what_to_do, state = decide_what_to_do_with_key_event(event_type, key_code, flags, is_key_repeat,
-                                                                 "shift_command_tab", state)
-            decisions.append(what_to_do)
+        # Shift-Command-Tab held until Tab repeats, then Command let go before Tab; the release of a
+        # held-back press without a repeat goes the same way.
+        decisions, _ = play_key_events([(KEY_DOWN_EVENT, TAB_KEY_CODE, COMMAND_FLAG | SHIFT_FLAG, False),
+                                        (KEY_DOWN_EVENT, TAB_KEY_CODE, COMMAND_FLAG | SHIFT_FLAG, True),
+                                        (MODIFIER_KEYS_CHANGED_EVENT, COMMAND_KEY_CODE, SHIFT_FLAG, False),
+                                        (KEY_DOWN_EVENT, TAB_KEY_CODE, SHIFT_FLAG, True),
+                                        (KEY_UP_EVENT, TAB_KEY_CODE, SHIFT_FLAG, False),
+                                        (KEY_DOWN_EVENT, TAB_KEY_CODE, SHIFT_FLAG, False)])
         self.assertEqual(decisions, ["hold_back_and_show_the_list", "hold_back", "let_through", "hold_back", "hold_back",
                                      "let_through"])
 
     def test_the_shortcut_goes_to_the_app_switcher_while_it_is_open(self):
         # Hold Command, Tab opens the app switcher, Shift-Tab moves back in it, then Command is let go.
-        key_events = ([(MODIFIER_KEYS_CHANGED_EVENT, 55, COMMAND_FLAG)] + press_tab(COMMAND_FLAG)
-                      + press_tab(COMMAND_FLAG | SHIFT_FLAG) + [(MODIFIER_KEYS_CHANGED_EVENT, 55, 0)]
+        key_events = ([(MODIFIER_KEYS_CHANGED_EVENT, COMMAND_KEY_CODE, COMMAND_FLAG)] + press_tab(COMMAND_FLAG)
+                      + press_tab(COMMAND_FLAG | SHIFT_FLAG) + [(MODIFIER_KEYS_CHANGED_EVENT, COMMAND_KEY_CODE, 0)]
                       + press_tab(COMMAND_FLAG | SHIFT_FLAG))
         decisions, _ = play_key_events(key_events)
         self.assertEqual(decisions, ["let_through"] * 6 + ["hold_back_and_show_the_list", "hold_back"])
@@ -88,12 +87,6 @@ class KeyFilterDecisionTests(unittest.TestCase):
         decisions, _ = play_key_events(press_tab(COMMAND_FLAG | SHIFT_FLAG) + press_tab(COMMAND_FLAG | FN_FLAG),
                                        global_shortcut="off")
         self.assertEqual(decisions, ["let_through"] * 4)
-
-    def test_a_held_back_press_has_its_release_held_back_even_after_command_is_let_go(self):
-        key_events = [(KEY_DOWN_EVENT, TAB_KEY_CODE, COMMAND_FLAG | SHIFT_FLAG), (MODIFIER_KEYS_CHANGED_EVENT, 55, SHIFT_FLAG),
-                      (KEY_UP_EVENT, TAB_KEY_CODE, SHIFT_FLAG), (KEY_UP_EVENT, TAB_KEY_CODE, 0)]
-        decisions, _ = play_key_events(key_events)
-        self.assertEqual(decisions, ["hold_back_and_show_the_list", "let_through", "hold_back", "let_through"])
 
 
 class KeyFilterTests(unittest.TestCase):

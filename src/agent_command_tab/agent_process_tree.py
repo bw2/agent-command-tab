@@ -5,10 +5,8 @@
   the shells an agent runs under, whether it runs in a tmux pane, and whether its terminal has
   hung up (agent_session_pausing).
 - The agent's descendant processes, to tell an agent that is waiting on a command it started
-  (a pipeline, a test run) from one that is thinking (and turns "stuck" when that lasts), and the
-  name that command was started as.
-- The memory and CPU time the agent and all its descendants use (the Memory and CPU columns,
-  user request, 2026-10-19).
+  (a pipeline, a test run) from one that is thinking, and the name that command was started as.
+- The memory and CPU time the agent and all its descendants use (the Memory and CPU columns).
 """
 
 import collections
@@ -18,6 +16,10 @@ import re
 import select
 import stat
 
+# The hook forwarder reads struct proc_bsdshortinfo and the processes above one, since the hooks
+# run it on its own, unable to import the package.
+from agent_command_tab.hook_event_forwarder import list_ancestor_processes, read_process_short_bsd_info
+
 LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
 LIBC = ctypes.CDLL("/usr/lib/libc.dylib")
 LIBC.devname.restype = ctypes.c_char_p  # a device's name in /dev, or NULL
@@ -26,8 +28,8 @@ NO_TERMINAL_DEVICE = 0xFFFFFFFF  # NODEV, proc_bsdinfo's e_tdev of a process wit
 CTL_KERN = 1
 KERN_PROCARGS2 = 49  # sysctl that returns a process's argument count, executable path and arguments (what ps reads)
 PROC_PIDTBSDINFO = 3  # proc_pidinfo flavor that returns struct proc_bsdinfo (refused for another user's process)
-PROC_PIDT_SHORTBSDINFO = 13  # proc_pidinfo flavor that returns struct proc_bsdshortinfo, also for another user's process
 STOPPED_PROCESS_STATUS = 4  # SSTOP in <sys/proc.h>, proc_bsdinfo's pbi_status of a stopped process
+MOST_ANCESTORS_LISTED = 64  # far more parents than any process has, so the list always reaches launchd
 PROC_PIDVNODEPATHINFO = 9  # proc_pidinfo flavor that returns struct proc_vnodepathinfo
 VNODE_INFO_SIZE = 152  # sizeof(struct vnode_info); the current folder's path follows it
 PROC_PIDLISTFDS = 1  # proc_pidinfo flavor that returns a struct proc_fdinfo for each open file descriptor
@@ -59,10 +61,10 @@ SECONDS_OF_SLACK_AT_TURN_START = 2
 SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS = 2
 # Claude Code's shell tool runs each command as `bash -c "source <its shell snapshot> ... && eval
 # '<the command>' < /dev/null && pwd -P >| <a file>"`, a ' in the command written as '"'"', and
-# without the `< /dev/null` for a command with a heredoc (code review, 2026-10-28).
+# without the `< /dev/null` for a command with a heredoc.
 CLAUDE_CODE_SHELL_TOOL_COMMAND = re.compile(r"""&& eval '((?:[^']|'"'"')*)'(?: < /dev/null)? && pwd -P >\| \S+\Z""", re.DOTALL)
 # A Claude Code session's scratchpad folder, /private/tmp/claude-<user ID>/<project>/<session ID>/scratchpad,
-# which a process row calls just "scratchpad" (user request, 2026-10-28), so the end of the command shows.
+# which a process row calls just "scratchpad", so the end of the command shows.
 CLAUDE_CODE_SCRATCHPAD_PATH = re.compile(r"(?:/private)?/tmp/claude-\d+/[^/\s'\"]+/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/scratchpad")
 LAUNCHD_PROCESS_ID = 1  # adopts a process whose parent ended
 # Text editors that run in a terminal, which an agent may open in its own process group (Claude
@@ -87,18 +89,6 @@ class ProcessBsdInfo(ctypes.Structure):
         ("pbi_pgid", ctypes.c_uint32), ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
         ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32), ("pbi_start_tvsec", ctypes.c_uint64),
         ("pbi_start_tvusec", ctypes.c_uint64),
-    ]
-
-
-class ProcessShortBsdInfo(ctypes.Structure):
-    """struct proc_bsdshortinfo from <sys/proc_info.h>."""
-
-    _fields_ = [
-        ("pbsi_pid", ctypes.c_uint32), ("pbsi_ppid", ctypes.c_uint32), ("pbsi_pgid", ctypes.c_uint32),
-        ("pbsi_status", ctypes.c_uint32), ("pbsi_comm", ctypes.c_char * 16), ("pbsi_flags", ctypes.c_uint32),
-        ("pbsi_uid", ctypes.c_uint32), ("pbsi_gid", ctypes.c_uint32), ("pbsi_ruid", ctypes.c_uint32),
-        ("pbsi_rgid", ctypes.c_uint32), ("pbsi_svuid", ctypes.c_uint32), ("pbsi_svgid", ctypes.c_uint32),
-        ("pbsi_rfu", ctypes.c_uint32),
     ]
 
 
@@ -239,14 +229,6 @@ def read_process_info(process_id):
     return ProcessInfo(process_id, bsd_info.pbi_ppid, name, bsd_info.pbi_start_tvsec + bsd_info.pbi_start_tvusec / 1e6)
 
 
-def read_process_short_bsd_info(process_id):
-    """Returns a process's ProcessShortBsdInfo, also for a process of another user, or None if it is gone."""
-    short_bsd_info = ProcessShortBsdInfo()
-    size = LIBPROC.proc_pidinfo(process_id, PROC_PIDT_SHORTBSDINFO, ctypes.c_uint64(0), ctypes.byref(short_bsd_info),
-                                ctypes.sizeof(short_bsd_info))
-    return short_bsd_info if size == ctypes.sizeof(short_bsd_info) else None
-
-
 def read_name_of_any_process(process_id):
     """Returns a process's executable name (at most 16 characters), also for a process of
     another user, or "" if it is gone."""
@@ -255,15 +237,9 @@ def read_name_of_any_process(process_id):
 
 
 def list_the_process_and_its_ancestor_ids(process_id):
-    """Returns process_id and the IDs of its parent, the parent's parent, and so on up to launchd."""
-    process_ids = []
-    while process_id > 0 and process_id not in process_ids:
-        process_ids.append(process_id)
-        short_bsd_info = read_process_short_bsd_info(process_id)
-        if short_bsd_info is None:
-            break
-        process_id = short_bsd_info.pbsi_ppid
-    return process_ids
+    """Returns process_id and the IDs of its parent, the parent's parent, and so on, below
+    launchd (hook_event_forwarder.list_ancestor_processes); [] when process_id is gone."""
+    return [ancestor_id for ancestor_id, _ in list_ancestor_processes(process_id, MOST_ANCESTORS_LISTED)]
 
 
 def process_is_stopped(process_id):
@@ -320,8 +296,8 @@ def process_runs_in_a_tmux_pane(process_id):
 def process_terminal_has_hung_up(process_id):
     """Returns whether the process's terminal has been closed at its other end (its tab closed,
     or the terminal app or the tmux server quit) while the process still holds it open. A stopped
-    process can't act on the hangup, and nothing in its process info changes (checked on
-    2026-11-06), so this opens the terminal and asks the kernel, reading nothing from it: keys
+    process can't act on the hangup, and nothing in its process info changes, so this opens the
+    terminal and asks the kernel, reading nothing from it: keys
     typed into the tab stay there for the process. False when the process is gone, has no
     terminal, or its terminal can't be opened."""
     bsd_info = read_process_bsd_info(process_id)
@@ -346,7 +322,7 @@ def find_foreground_job_process_id(process_id):
     """Returns the ID of the job in front on the process's terminal (the leader of the terminal's
     foreground process group, as iTerm2's jobPid names it), or process_id itself when the
     process has no terminal or the leader is gone; None when the process is gone. For a tmux
-    pane's shell, the program the pane runs in front (user request, 2026-11-01)."""
+    pane's shell, the program the pane runs in front."""
     bsd_info = read_process_bsd_info(process_id)
     if bsd_info is None:
         return None
@@ -455,7 +431,7 @@ def list_descendant_processes_and_other_users_process_ids(process_id, maximum_de
 
 def list_child_processes_of_the_agent(agent_process_id, descendant_processes, now):
     """Returns [(child, shown process)] for each process the agent started, oldest first (the sub
-    rows of an open tab row; user request, 2026-10-27). Codex's own program below its node
+    rows of an open tab row). Codex's own program below its node
     launcher is part of the agent, so the processes it started count instead. The shown process
     is the child itself, or for a shell or wrapper the first process started below it (the agent's
     shell tool runs `python3 ...` inside a `bash -c`), if one runs. As for the command the agent
@@ -498,15 +474,14 @@ def child_process_is_a_background_shell(child, shown_process, command_started_at
     Codex's terminal kept open between commands, nor a helper such as an MCP server, which the
     agent starts itself), between turns, or during a turn when the command in it started before
     the turn did. A command started in the turn under way may be the one the agent waits on (the
-    order the agent started them in doesn't tell), so it counts only once the turn ends (code
-    review, 2026-10-27).
+    order the agent started them in doesn't tell), so it counts only once the turn ends.
 
     Args:
         child, shown_process: One of list_child_processes_of_the_agent's pairs.
         command_started_at: When the command in the shell started: the shell's own start for a
             Claude Code shell (a wait loop from an earlier turn starts a new sleep in this one),
             else the shown process's (Codex runs a later turn's commands in a shell kept from an
-            earlier turn) (code review, 2026-10-28).
+            earlier turn).
         turn_is_under_way: Whether the agent is in a turn (working or asking).
         turn_started_at: When that turn began, or None while not known (then no command counts).
     """
@@ -532,8 +507,8 @@ def shorten_scratchpad_paths(text):
 
 def find_the_command_a_claude_code_shell_runs(arguments):
     """Returns the command Claude Code's shell tool gave a `bash -c` (CLAUDE_CODE_SHELL_TOOL_COMMAND),
-    as the agent wrote it, or None for another process. A sub row names such a shell by it (user
-    request, 2026-10-28): a background wait loop then reads as the loop, not as the `sleep 30` it
+    as the agent wrote it, or None for another process. A sub row names such a shell by it: a background wait
+    loop then reads as the loop, not as the `sleep 30` it
     runs at that moment."""
     if len(arguments) != 3 or arguments[1] != "-c":
         return None
@@ -557,7 +532,7 @@ def list_detached_processes(earliest_started_at):
 
 def choose_detached_processes_of_the_conversation(detached_processes, conversation_id, agent_started_at):
     """Returns [(ProcessInfo, arguments)] for the detached processes (list_detached_processes) that
-    an agent's conversation started, oldest first (user request, 2026-10-28): started after the
+    an agent's conversation started, oldest first: started after the
     agent, with the conversation's ID in their arguments or current folder, as every path in a
     Claude Code session's scratchpad folder has it. A job run from elsewhere isn't found."""
     return sorted(((process, arguments) for process, arguments, current_folder in detached_processes
@@ -577,7 +552,7 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
     "is_a_claude_code_monitor_shell": whether it is a shell Claude Code's shell tool runs
     (find_the_command_a_claude_code_shell_runs) whose standard output goes to no file: Claude
     Code's Monitor tool runs its command so, writing to a socket, while every command of its
-    Bash tool writes to its task's output file (checked with Claude Code 2.1.316 on 2026-11-03),
+    Bash tool writes to its task's output file (checked with Claude Code 2.1.316),
     "resource_usage": (memory in bytes, CPU seconds) of the child and the processes below it, or
     None}] for each process the agent started (list_child_processes_of_the_agent), then for each
     detached one (choose_detached_processes_of_the_conversation), which runs in the background.
@@ -626,11 +601,11 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
 
 
 def read_process_details(process_id):
-    """Returns what a sub row's Info shows about its process (user request, 2026-10-29), or None
+    """Returns what a sub row's Info shows about its process, or None
     if it is gone: {"process_id", "command_line": its arguments as ps shows them, "agent_command":
     the command in it as the agent wrote it, for a Claude Code shell, else None, "working_folder"
     ("" if unknown), "started_at", "subprocesses": [{"process_id", "command_text"
-    (build_command_text's)}] of the processes below it, oldest first (user request, 2026-10-29),
+    (build_command_text's)}] of the processes below it, oldest first,
     and "memory_bytes" and "cpu_seconds" (read_process_tree_resource_usage's), its and theirs
     together}. The command line keeps its line breaks, as a command with a heredoc has them."""
     process = read_process_info(process_id)
@@ -697,12 +672,13 @@ def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at
 
     Not commands, and nor is anything below them: the tool's own helpers (Claude Code's
     caffeinate, Codex's code mode host), processes that were already running while the session
-    was idle (MCP servers, from the second turn on), processes older than the turn, and Claude
-    Code shells older than the turn: each runs one command, so one from an earlier turn is a
-    command left in the background, and what it starts now (a wait loop's next `sleep 30`) isn't
-    this turn's (code review, 2026-10-28; Codex runs new commands in a terminal it keeps, so its
-    shells aren't told apart this way). A shell with nothing running in it doesn't count either,
-    nor does a command younger than SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS.
+    was idle (MCP servers, from the second turn on), and Claude Code shells older than the turn:
+    each runs one command, so one from an earlier turn is a command left in the background, and
+    what it starts now (a wait loop's next `sleep 30`) isn't this turn's. Any other process older
+    than the turn isn't a command itself, but what it starts in this turn is (Codex runs new
+    commands in a terminal it keeps, so its shells aren't told apart this way). A shell with
+    nothing running in it doesn't count either, nor does a command younger than
+    SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS.
 
     Args:
         descendant_processes: ProcessInfo of every process below the agent process.

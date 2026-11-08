@@ -3,16 +3,15 @@
 So a turn end the hooks reported still counts after the dashboard restarts while iTerm2 says
 working (find_when_the_hooks_ended_the_turn): a background task that runs after the turn keeps
 iTerm2 at working and Claude Code's own report at "shell", so nothing else tells the turn is
-over, and the row turned "stuck" (user report, 2026-10-28). Each state is stored with its
+over, and the row kept showing "working". Each state is stored with its
 process's start time, so a later process that gets the same ID doesn't take it over. Pure
 functions apart from the file reading and writing.
 """
 
-import json
 import os
 
 from agent_command_tab.hook_event_tracking import apply_hook_event
-from agent_command_tab.settings_store import SETTINGS_FOLDER, write_json_file_atomically
+from agent_command_tab.settings_store import SETTINGS_FOLDER, read_json_file, write_json_file_atomically
 
 HOOK_STATES_FILE_PATH = os.path.join(SETTINGS_FOLDER, "agent_hook_states.json")
 
@@ -37,20 +36,15 @@ def is_stored_hook_state(value):
 def load_hook_states(file_path):
     """Returns {agent process ID: (its start time, its hook state)} from the file; {} when it is
     missing or unreadable, and without records that don't have that shape."""
-    try:
-        with open(file_path) as file:
-            stored_records = json.load(file)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(stored_records, list):
+    stored_records = read_json_file(file_path, list)
+    if stored_records is None:
         return {}
     started_at_and_hook_state_by_process_id = {}
     for value in stored_records:
         if not isinstance(value, dict) or not is_stored_hook_state(value.get("hook_state")):
             continue
         process_id, started_at = value.get("process_id"), value.get("started_at")
-        if (not isinstance(process_id, int) or isinstance(process_id, bool) or not isinstance(started_at, (int, float))
-                or isinstance(started_at, bool)):
+        if not isinstance(process_id, int) or isinstance(process_id, bool) or not is_number(started_at):
             continue
         hook_state = dict(value["hook_state"])
         if hook_state["background_task_ids"] is not None:

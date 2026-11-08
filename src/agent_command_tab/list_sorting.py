@@ -1,5 +1,5 @@
-"""The list's sort orders, chosen with the Sort pop-up at the top of the list (user request, 2026-10-19)
-or by clicking a column's title, which also reverses them (user requests, 2026-10-26).
+"""The list's sort orders, chosen with the Sort pop-up at the top of the list
+or by clicking a column's title, which also reverses them.
 
 Sorting changes only the order the list shows. iTerm2's tab order and the window order set by
 dragging rows stay as they are, so "manual" shows them again unchanged. Python's sort keeps
@@ -23,7 +23,7 @@ def find_when_the_shown_state_started(agent_session_entry):
 
 
 def rank_agent_session_by_activity(agent_session_entry):
-    """Sort key: the most urgent state first (asking, error, stuck, working, done, idle), then the
+    """Sort key: the most urgent state first (asking, error, working, done, idle), then the
     most recent state change, as the row shows it (find_when_the_shown_state_started)."""
     state = agent_session_entry.status
     if state not in STATES_IN_URGENCY_ORDER:
@@ -43,22 +43,20 @@ def rank_agent_session_by_title(agent_session_entry):
 
 
 def rank_agent_session_by_memory_usage(agent_session_entry):
-    """Sort key: the agent session using the most memory first (with the processes below it; user
-    request, 2026-10-21)."""
+    """Sort key: the agent session using the most memory first (with the processes below it)."""
     memory_bytes = agent_session_entry.memory_bytes
     return None if memory_bytes is None else -memory_bytes
 
 
 def rank_agent_session_by_cpu_usage(agent_session_entry):
-    """Sort key: the agent session using the most CPU first (with the processes below it; user
-    request, 2026-10-21)."""
+    """Sort key: the agent session using the most CPU first (with the processes below it)."""
     cpu_percent = agent_session_entry.cpu_percent
     return None if cpu_percent is None else -cpu_percent
 
 
 def rank_agent_session_by_context_percent(agent_session_entry):
     """Sort key: the agent session whose context fills the most of its window first, rather than
-    the largest context, since windows differ in size (the Tokens column; user request, 2026-10-26)."""
+    the largest context, since windows differ in size (the Tokens column)."""
     context_fill_percent = agent_session_entry.context_fill_percent
     return None if context_fill_percent is None else -context_fill_percent
 
@@ -106,7 +104,7 @@ def sort_window_entries(window_entries, list_sort_order, list_ranked_agent_sessi
                             is_reversed)
     rank_agent_session = AGENT_SESSION_RANK_BY_LIST_SORT_ORDER[list_sort_order]
 
-    def rank_window_by_its_first_agent_session(window_entry):
-        first_agent_sessions = sort_agent_session_entries(list_ranked_agent_sessions(window_entry), list_sort_order, is_reversed)[:1]
-        return rank_agent_session(first_agent_sessions[0]) if first_agent_sessions else None
+    def rank_window_by_its_first_agent_session(window_entry):  # the rank of the session sort_agent_session_entries puts first
+        ranks = [rank for rank in map(rank_agent_session, list_ranked_agent_sessions(window_entry)) if rank is not None]
+        return (max if is_reversed else min)(ranks, default=None)
     return sort_by_rank(window_entries, rank_window_by_its_first_agent_session, is_reversed)

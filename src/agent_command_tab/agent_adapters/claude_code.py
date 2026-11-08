@@ -7,7 +7,8 @@ import re
 import shlex
 
 from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL,
-                                                   AgentToolAdapter, split_command_line_into_program_names)
+                                                   AgentToolAdapter, remove_environment_settings_from_launch_command,
+                                                   split_command_line_into_program_names)
 from agent_command_tab.agent_process_tree import read_process_arguments_and_environment
 from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens, find_claude_code_transcript,
                                                     read_claude_code_model_setting,
@@ -16,10 +17,7 @@ from agent_command_tab.context_window_usage import (choose_claude_code_context_w
                                                     read_turn_started_at_from_claude_code_transcript)
 from agent_command_tab.open_tool_call_reading import read_open_tool_call_from_claude_code_transcript
 
-ELAPSED_TIME = r"(?:\d+h )?(?:\d+m )?\d+s"
-# One "NAME=value " word in front of a launch command's program, the value maybe quoted
-# ("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude").
-LEADING_ENVIRONMENT_SETTING_PATTERN = re.compile(r"""([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])*\s+""")
+DEFAULT_CLAUDE_CONFIG_FOLDER = os.path.expanduser("~/.claude")  # the one a Claude Code without CLAUDE_CONFIG_DIR uses
 
 
 def list_claude_config_folders():
@@ -30,22 +28,15 @@ def list_claude_config_folders():
     by `claude agents --json`, which lists a session only from its own folder, and by the hooks
     installer, since such a session reads only its own folder's settings.json.
     """
-    default_folder = os.path.expanduser("~/.claude")
     other_folders = ([os.environ["CLAUDE_CONFIG_DIR"]] if os.environ.get("CLAUDE_CONFIG_DIR") else []) + sorted(
         folder for folder in glob.glob(os.path.expanduser("~/.claude*")) if os.path.isdir(os.path.join(folder, "sessions")))
-    return [None] + [folder for folder in dict.fromkeys(other_folders) if os.path.realpath(folder) != os.path.realpath(default_folder)]
+    return [None] + [folder for folder in dict.fromkeys(other_folders)
+                     if os.path.realpath(folder) != os.path.realpath(DEFAULT_CLAUDE_CONFIG_FOLDER)]
 
 
-def remove_config_folder_settings_from_launch_command(launch_command):
-    """Returns the launch command without the CLAUDE_CONFIG_DIR=... words in front of its
-    program, keeping its other environment settings."""
-    kept_settings = []
-    rest = launch_command.lstrip()
-    while (match := LEADING_ENVIRONMENT_SETTING_PATTERN.match(rest)):
-        if match.group(1) != "CLAUDE_CONFIG_DIR":
-            kept_settings.append(match.group(0))
-        rest = rest[match.end():]
-    return "".join(kept_settings) + rest
+def list_claude_config_folder_paths():
+    """Returns list_claude_config_folders's folders, the default one by its path."""
+    return [folder or DEFAULT_CLAUDE_CONFIG_FOLDER for folder in list_claude_config_folders()]
 
 
 class ClaudeCodeAdapter(AgentToolAdapter):
@@ -59,18 +50,12 @@ class ClaudeCodeAdapter(AgentToolAdapter):
     # "allow Claude to fetch this content?" in 2.1.303) above an "Esc to cancel" hint.
     permission_dialog_screen_patterns = (re.compile(r"Do you want to .+\?"), re.compile(r"Esc to cancel"))
     interrupted_turn_screen_pattern = re.compile(r"Interrupted · What should Claude do instead\?")
-    progress_noise_patterns = (
-        re.compile(r"^\s*[✳✶✢✻✽✺·*⏺]\s"),  # the spinner glyph, and the tool line's blinking bullet
-        re.compile(r"\(" + ELAPSED_TIME + r"(?: · [↓↑] [\d.,]+k? tokens)?\)"),  # "(5s · ↓ 97 tokens)", "(4s)"
-        re.compile(r" · " + ELAPSED_TIME + r"\b"),  # the tool line's " · 4s"
-        re.compile(r"\(ctrl\+b to run in background\)"),
-    )
     helper_process_names = frozenset({"caffeinate"})  # keeps the Mac awake while a turn runs
     slash_commands = COMPACT_AND_CLEAR_SLASH_COMMANDS
-    # The input box: "❯" and a no-break space, then the input, between two rules of "─" (Phase 0).
+    # The input box: "❯" and a no-break space, then the input, between two rules of "─".
     input_line_marker = "❯"
     input_area_end_pattern = re.compile(r"^─{10,}\s*$")
-    # Checked live with Claude Code 2.1.307 on 2026-10-21: /compact and /clear typed during a turn
+    # Checked live with Claude Code 2.1.307: /compact and /clear typed during a turn
     # showed under "Press up to edit queued messages" and ran when the turn ended.
     queues_slash_commands_typed_during_a_turn = True
     how_other_agent_sessions_send_it_messages = MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
@@ -91,7 +76,7 @@ class ClaudeCodeAdapter(AgentToolAdapter):
         conversation_id = await self.find_conversation_id(agent_process_id, claude_agent_record)
         if not conversation_id:
             return None
-        own_config_folder = (claude_agent_record or {}).get("config_folder") or os.path.expanduser("~/.claude")
+        own_config_folder = (claude_agent_record or {}).get("config_folder") or DEFAULT_CLAUDE_CONFIG_FOLDER
         return await asyncio.to_thread(find_claude_code_transcript, [own_config_folder, *claude_config_folders], conversation_id)
 
     def read_context_tokens(self, conversation_file_path):
@@ -99,7 +84,8 @@ class ClaudeCodeAdapter(AgentToolAdapter):
 
     def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
         return choose_claude_code_context_window_tokens(read_claude_code_model_setting(
-            *read_process_arguments_and_environment(agent_process_id), (claude_agent_record or {}).get("config_folder")),
+            *read_process_arguments_and_environment(agent_process_id),
+            (claude_agent_record or {}).get("config_folder") or DEFAULT_CLAUDE_CONFIG_FOLDER),
             read_model_from_claude_code_transcript(conversation_file_path), context_tokens)
 
     def read_turn_started_at(self, conversation_file_path):
@@ -108,7 +94,7 @@ class ClaudeCodeAdapter(AgentToolAdapter):
     def read_open_tool_call(self, conversation_file_path):
         return read_open_tool_call_from_claude_code_transcript(conversation_file_path)
 
-    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
+    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None, codex_home_folder=None):
         """Continues a copy of the conversation under a new session ID (`--resume <id> --fork-session`),
         in the original's config folder (build_launch_command_to_resume)."""
         if not conversation_id:
@@ -116,10 +102,10 @@ class ClaudeCodeAdapter(AgentToolAdapter):
         return self.build_launch_command_to_resume(launch_command, conversation_id,
                                                    (claude_agent_record or {}).get("config_folder")) + " --fork-session"
 
-    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None):
+    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None, codex_home_folder=None):
         """`<launch command> --resume <id>`, in the conversation's config folder (Claude Code finds
         the conversation only there): a CLAUDE_CONFIG_DIR set in front of the launch command gives
         way to that folder, or to none for a conversation in the default folder."""
         environment_prefix = f"CLAUDE_CONFIG_DIR={shlex.quote(claude_config_folder)} " if claude_config_folder else ""
-        return (f"{environment_prefix}{remove_config_folder_settings_from_launch_command(launch_command)}"
+        return (f"{environment_prefix}{remove_environment_settings_from_launch_command(launch_command, 'CLAUDE_CONFIG_DIR')}"
                 f" --resume {shlex.quote(conversation_id)}")

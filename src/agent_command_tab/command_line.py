@@ -11,6 +11,7 @@ import threading
 import time
 
 from agent_command_tab import __version__
+from agent_command_tab.settings_store import SETTINGS_FOLDER
 
 RECONNECT_EXIT_STATUS = 75
 LONGEST_RESTART_DELAY_SECONDS = 30
@@ -20,8 +21,8 @@ SECONDS_TO_WAIT_FOR_THE_TERMINALS_TO_CONNECT = 30  # dump-snapshot
 # (app_controller); after Ctrl+C the supervisor gives it that and more before killing it.
 SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING = 3
 SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C = SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING + 7
-# Held by the running supervisor and its app (take_the_running_lock), in the settings folder (settings_store.SETTINGS_FOLDER).
-RUNNING_LOCK_FILE_PATH = os.path.expanduser("~/Library/Application Support/agent-command-tab/running.lock")
+# Held by the running supervisor and its app (take_the_running_lock), in the settings folder.
+RUNNING_LOCK_FILE_PATH = os.path.join(SETTINGS_FOLDER, "running.lock")
 # Tells the app which of its open files is the lock file its supervisor handed it (run_with_restarts).
 RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE = "AGENT_COMMAND_TAB_RUNNING_LOCK_FILE_DESCRIPTOR"
 # How long clean-up-before-uninstalling waits for the running copy to stop (stop_the_running_copy).
@@ -54,7 +55,7 @@ def dump_snapshot(verbose):
         first_snapshot_arrived.set()
 
     # The app's pause records, so paused sessions are listed, and its hook states, so a turn the
-    # hooks saw end shows as the app shows it (code review, 2026-10-29), kept in memory only: this
+    # hooks saw end shows as the app shows it, kept in memory only: this
     # run never changes the app's files.
     connection_thread = DashboardCoreThread(
         publish_snapshot, report_connection_lost, verbose,
@@ -159,18 +160,16 @@ def stop_the_running_copy(lock_file_path=RUNNING_LOCK_FILE_PATH, seconds_to_wait
 
 def clean_up_before_uninstalling():
     """Takes out what the app added outside its own files, which pip and pipx leave behind when they
-    uninstall it (user request, 2026-11-05): stops the running copy, whose files the uninstall
+    uninstall it: stops the running copy, whose files the uninstall
     deletes, then removes its hooks from Claude Code's and Codex's settings (whose commands would
     otherwise fail on every event) and its script in iTerm2's AutoLaunch folder. Leaves its settings
     folder and its log. Returns the exit status."""
-    from agent_command_tab.settings_store import SETTINGS_FOLDER
-    from agent_command_tab.start_with_iterm2 import AUTOLAUNCH_SCRIPT_FILE_NAME, LOG_FILE_PATH, find_iterm2_autolaunch_folder
+    from agent_command_tab.start_with_iterm2 import LOG_FILE_PATH, find_autolaunch_script_path, update_autolaunch_script_to_match_setting
     no_copy_runs, message = stop_the_running_copy()
     print(message)
     exit_status = install_or_remove_hooks(install=False)
-    autolaunch_script_path = os.path.join(find_iterm2_autolaunch_folder(), AUTOLAUNCH_SCRIPT_FILE_NAME)
-    if os.path.lexists(autolaunch_script_path):
-        os.remove(autolaunch_script_path)
+    autolaunch_script_path = find_autolaunch_script_path()
+    if update_autolaunch_script_to_match_setting(False, None, None, autolaunch_script_path) == "removed":
         print(f"removed the script that started AgentCommandTab with iTerm2: {autolaunch_script_path}")
     else:
         print("iTerm2's AutoLaunch folder has no AgentCommandTab script")
@@ -194,7 +193,7 @@ def wait_for_app_process(process):
     (subprocess.call would kill it after a quarter of a second). It kills the app only if it
     hasn't exited after SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C. A plain `kill` of this
     supervisor (SIGTERM) reaches the app as Ctrl+C, so the app stops too rather than running on
-    alone (code review, 2026-10-30).
+    alone.
     """
     def pass_a_kill_on_to_the_app_as_ctrl_c(signal_number, frame):
         process.send_signal(signal.SIGINT)
@@ -234,7 +233,7 @@ def take_the_running_lock(lock_file_path=RUNNING_LOCK_FILE_PATH):
 def take_the_running_lock_or_name_the_copy_holding_it():
     """Returns take_the_running_lock's open lock file, or None after printing that another copy
     holds the lock, with the process ID in the file. Moves the settings folder of the old name
-    first: the lock file makes the new one, after which the move never happens (code review, 2026-10-29)."""
+    first: the lock file makes the new one, after which the move never happens."""
     from agent_command_tab.settings_store import move_the_settings_folder_of_the_old_name
     move_the_settings_folder_of_the_old_name()
     running_lock_file = take_the_running_lock()
@@ -255,9 +254,9 @@ def run_with_restarts(verbose):
 
     Only one copy runs at a time (take_the_running_lock): another exits at once, so iTerm2
     starting the app when it opens (start_with_iterm2) adds no second copy to one still waiting to
-    reconnect, and two copies never compete for the hook events (user request, 2026-10-28). The
+    reconnect, and two copies never compete for the hook events. The
     app it starts gets the open lock file too, so the lock stays held while either runs: an app
-    left running after its supervisor ended still keeps a second copy out (code review, 2026-10-30).
+    left running after its supervisor ended still keeps a second copy out.
     """
     from agent_command_tab.installed_copy_paths import find_python_of_this_copy
     from agent_command_tab.login_shell_environment import add_the_login_shells_environment_when_started_without_it
@@ -269,7 +268,7 @@ def run_with_restarts(verbose):
     while True:
         started_at = time.time()
         # By the Python's path that survives `brew upgrade`, which deletes the version folder
-        # sys.executable can be in (code review, 2026-10-30).
+        # sys.executable can be in.
         command = [find_python_of_this_copy(), "-m", "agent_command_tab.command_line", "app"] + (["--verbose"] if verbose else [])
         exit_status = wait_for_app_process(subprocess.Popen(
             command, env=dict(os.environ, **{RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE: str(running_lock_file.fileno())}),
@@ -278,7 +277,8 @@ def run_with_restarts(verbose):
             return exit_status
         if time.time() - started_at > 60:
             restart_delay_seconds = 1
-        print(f"agent-command-tab: reconnecting in {restart_delay_seconds} s")
+        # Flushed, as the app flushes its lines, so the log keeps them in order when it is a file.
+        print(f"agent-command-tab: reconnecting in {restart_delay_seconds} s", flush=True)
         time.sleep(restart_delay_seconds)
         restart_delay_seconds = min(restart_delay_seconds * 2, LONGEST_RESTART_DELAY_SECONDS)
 
@@ -306,7 +306,7 @@ def main(arguments=None):
     if parsed_arguments.command == "app":
         # Started by the supervisor, the app holds the running lock through the open lock file it
         # was handed, which no program it starts gets in turn; started directly, it takes the lock
-        # itself, so it can't run next to another copy (code review, 2026-10-30).
+        # itself, so it can't run next to another copy.
         lock_file_descriptor_handed_over = os.environ.pop(RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE, None)
         if lock_file_descriptor_handed_over is not None:
             os.set_inheritable(int(lock_file_descriptor_handed_over), False)

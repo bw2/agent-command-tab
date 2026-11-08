@@ -7,16 +7,16 @@ web page, phone app or second computer would, and the core runs them through one
 import collections
 
 ActionRequest = collections.namedtuple("ActionRequest", ["action", "target", "arguments"], defaults=[None])
-ActionRequest.__doc__ = ("One user action. target is a dict with any of computer_id, window_id, tab_id and "
-                         "session_id; arguments is a dict, for example {\"new_title\": \"Reviews\"}.")
+ActionRequest.__doc__ = ("One user action. target is a dict with any of window_id, tab_id, session_id and "
+                         "session_ids (a list, for an action on several agent sessions); arguments is a dict, "
+                         "for example {\"new_title\": \"Reviews\"}.")
 
 ActionResult = collections.namedtuple("ActionResult", ["succeeded", "message", "details"], defaults=["", None])
 ActionResult.__doc__ = ("What an action did. message explains a failure in plain words; details is what an action "
                         "that reads something returns, or the window an action opened (a dict), else None.")
 
 class ActionRegistry:
-    """Maps action names to their handlers. The flags for requests from another computer and for
-    actions that type into a session, which nothing read, are gone (code review, 2026-10-29)."""
+    """Maps action names to their handlers."""
 
     def __init__(self):
         self.handler_by_action_name = {}

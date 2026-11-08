@@ -1,12 +1,13 @@
-"""A sub row's Info window (user request, 2026-10-29): what is known about a process an agent
+"""A sub row's Info window: what is known about a process an agent
 started, read-only, in text that can be selected and copied."""
 
 import time
 
 from AppKit import (NSAlert, NSAttributedString, NSColor, NSFont, NSFontAttributeName, NSFontWeightRegular,
                     NSForegroundColorAttributeName, NSMakeRect, NSMutableAttributedString, NSMutableParagraphStyle,
-                    NSParagraphStyleAttributeName, NSScrollView, NSTextAlignmentLeft, NSTextTab, NSTextView)
+                    NSParagraphStyleAttributeName, NSScrollView, NSTextAlignmentLeft, NSTextTab)
 
+from agent_command_tab.user_interface.control_helpers import make_text_view_that_wraps_lines
 from agent_command_tab.user_interface.row_text_rendering import format_elapsed_time, format_memory_size
 
 ACCESSORY_WIDTH = 560
@@ -14,7 +15,6 @@ LARGEST_ACCESSORY_HEIGHT = 380  # a longer command scrolls
 GAP_BEFORE_VALUES = 12
 GAP_BETWEEN_FIELDS = 8
 LONGEST_COMMAND_IN_AN_ALERT = 100  # characters of a command named in the Kill question
-LARGEST_TEXT_VIEW_SIZE = 1e7
 
 
 def shorten_command_for_alert(command_text):
@@ -34,7 +34,7 @@ def format_date_and_time(timestamp):
 def list_process_info_lines(details, now):
     """Returns [(label, value)] for the Info window, in the order shown. The process's
     subprocesses are listed, each with its ID, and CPU and memory are their total with it, as
-    the row's columns count them, labeled so (user requests, 2026-10-29).
+    the row's columns count them, labeled so.
 
     Args:
         details: The details of a read_child_process_details result
@@ -96,15 +96,10 @@ def build_process_info_alert(details, now):
     """
     alert = NSAlert.alloc().init()
     alert.setMessageText_("Process info")
-    text_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, ACCESSORY_WIDTH, LARGEST_ACCESSORY_HEIGHT))
+    text_view = make_text_view_that_wraps_lines(ACCESSORY_WIDTH, LARGEST_ACCESSORY_HEIGHT)
     text_view.setEditable_(False)
     text_view.setSelectable_(True)
     text_view.setDrawsBackground_(False)
-    text_view.setVerticallyResizable_(True)
-    text_view.setHorizontallyResizable_(False)
-    text_view.setMaxSize_((LARGEST_TEXT_VIEW_SIZE, LARGEST_TEXT_VIEW_SIZE))
-    text_view.textContainer().setContainerSize_((ACCESSORY_WIDTH, LARGEST_TEXT_VIEW_SIZE))
-    text_view.textContainer().setWidthTracksTextView_(True)
     font = NSFont.monospacedSystemFontOfSize_weight_(NSFont.smallSystemFontSize(), NSFontWeightRegular)
     text_view.textStorage().setAttributedString_(build_process_info_text(list_process_info_lines(details, now), font))
     text_view.layoutManager().ensureLayoutForTextContainer_(text_view.textContainer())

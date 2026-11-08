@@ -13,8 +13,7 @@ from agent_command_tab.user_interface.named_colors import build_color_from_name
 from agent_command_tab.user_interface.row_text_rendering import DOT_GLYPH_AND_COLOR_BY_STATE
 
 # The icon color of the most urgent state: the rows' dot color for that state, otherwise green.
-ICON_COLOR_NAME_BY_MOST_URGENT_STATE = {state: DOT_GLYPH_AND_COLOR_BY_STATE[state][1]
-                                        for state in ("asking", "error", "stuck")}
+ICON_COLOR_NAME_BY_MOST_URGENT_STATE = {state: DOT_GLYPH_AND_COLOR_BY_STATE[state][1] for state in ("asking", "error")}
 
 
 def count_asking_agent_sessions(snapshot):
@@ -25,7 +24,7 @@ def count_asking_agent_sessions(snapshot):
 
 def choose_icon_color_name(snapshot):
     """Returns the icon's color: light blue while any agent session is asking, else red if any has
-    an error, else orange if any is stuck, otherwise green."""
+    an error, otherwise green."""
     states = [agent_session_entry.status for _, _, agent_session_entry in iterate_agent_session_entries(snapshot)]
     return ICON_COLOR_NAME_BY_MOST_URGENT_STATE.get(pick_most_urgent_state(states), "green")
 
@@ -35,15 +34,14 @@ def choose_what_a_click_on_the_icon_does_to_the_dropdown(dropdown_is_shown, drop
 
     The dropdown closes by itself as the mouse button goes down outside it, on the icon too,
     before the click's mouse-up arrives. A dropdown that closed during this click stays closed,
-    rather than opening again, so every click toggles it (user request, 2026-10-28); before, a
-    slow click opened it again, and only a quick one, while it was still closing, closed it.
+    rather than opening again, so every click toggles it.
 
     Args:
         dropdown_is_shown: Whether the dropdown is open (or still closing).
         dropdown_closed_at: When it last began to close, in seconds since the Mac started (an
             event's timestamp), or 0.
         button_pressed_at: The click's mouse-down timestamp, or 0 when that wasn't seen (the
-            click then opens it, as before).
+            click then opens it).
     """
     if dropdown_is_shown:
         return "close"
@@ -165,9 +163,7 @@ class MenuBarStatusItemController(NSObject):
     @objc.python_method
     def build_right_click_menu(self):
         """Returns the right-click menu: each way to show the list, whatever "Show as" is, without
-        changing it (user request, 2026-10-28; "Show the sidebar" alone until then), in sentence
-        case as the other menus are; "Restore sessions…" while any are saved (user request,
-        2026-11-06); Settings; Quit."""
+        changing it, in sentence case as the other menus are; "Restore sessions…" while any are saved; Settings; Quit."""
         menu = NSMenu.alloc().initWithTitle_("")
         restore_items = (("Restore sessions…", "restoreSessionsClicked:"),) if self.owner.has_saved_agent_sessions() else ()
         for title, action_name in (("Show popup", "showPopupClicked:"), ("Show sidebar", "showSidebarClicked:"),

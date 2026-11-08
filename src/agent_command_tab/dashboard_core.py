@@ -41,21 +41,23 @@ from agent_command_tab.settings_store import (build_environment_with_the_program
                                               find_program_on_path_or_in_the_usual_folders)
 from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
 from agent_command_tab.agent_adapters.base import (COMMAND_THAT_STARTS_A_NEW_CONVERSATION, MESSAGES_THROUGH_CODEX_QUEUE,
-                                                   MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, command_line_runs_a_shell)
-from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter, list_claude_config_folders
+                                                   MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL,
+                                                   command_line_is_a_shell_with_no_script_or_command)
+from agent_command_tab.agent_adapters.claude_code import (DEFAULT_CLAUDE_CONFIG_FOLDER, ClaudeCodeAdapter, list_claude_config_folder_paths,
+                                                          list_claude_config_folders)
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.dashboard_core_api import ActionRegistry, ActionResult
 from agent_command_tab.messages_between_agent_sessions import (SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT,
                                                                AgentSessionForMessages,
                                                                build_message_asking_agent_session_to_talk_to_the_others)
 from agent_command_tab.snapshot_builder import (SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING, DisplayedState,
-                                                build_computer_snapshot, resolve_agent_sessions)
+                                                build_computer_snapshot, resolve_agent_sessions,
+                                                turns_of_the_agent_run_outside_its_tab)
 from agent_command_tab.docked_window_frames_store import (adopt_records_of_restored_windows,
                                                           load_docked_window_frames, save_docked_window_frames)
 from agent_command_tab.monitor_assignment import compute_frame_clear_of_area, compute_overlap_area, frames_are_within_tolerance
 from agent_command_tab.saved_agent_sessions_store import build_saved_session, build_saved_window
-from agent_command_tab.screen_readings import (compute_screen_fingerprint, count_lines_matching,
-                                               screen_shows_permission_dialog)
+from agent_command_tab.screen_readings import count_lines_matching, screen_shows_permission_dialog
 from agent_command_tab.session_status_computation import (CLAUDE_CODE_SESSION_STATUSES_TO_ITERM2_STATUS_VALUES,
                                                           STATES_OF_A_TURN_UNDER_WAY, STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT,
                                                           map_iterm2_status_value_to_state,
@@ -72,28 +74,31 @@ from agent_command_tab.window_list_ordering import move_window_in_window_list_or
 
 FRAME_POLL_INTERVAL_SECONDS = 2
 SCREEN_CHECK_INTERVAL_SECONDS = 2
-FINGERPRINT_INTERVAL_SECONDS = 30
 # When the dashboard first sees a session mid-turn, processes started this long after the agent
 # itself count as commands; MCP servers and other helpers start before that.
 SECONDS_AN_AGENT_TAKES_TO_START_ITS_HELPERS = 30
 SECONDS_BETWEEN_HELPER_PROCESS_RECORDINGS = 30  # while a session is idle
 CONTEXT_USAGE_CHECK_INTERVAL_SECONDS = 5
 RESOURCE_USAGE_CHECK_INTERVAL_SECONDS = 3  # the Memory and CPU columns
-# After a first reading, which gives no CPU use yet, the second follows this soon (code review, 2026-10-29).
+# After a first reading, which gives no CPU use yet, the second follows this soon.
 SECONDS_BETWEEN_THE_FIRST_TWO_CPU_READINGS = 0.5
 CPU_PERCENT_SHOWN_AS_IDLE = 3  # an idle agent's CPU use wavers between 0 and 2 percent
 SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED = 5  # "Kill Session": SIGTERM, then SIGKILL (a sub row's "Kill" too)
 SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER = 0.5  # a sub row's Info
 CONVERSATION_FILE_RETRY_SECONDS = 15  # a conversation file not found yet (Codex writes it at the first prompt)
 CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up again in case the conversation changed
-CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "open_tool_call")  # screen reading values read from it
-# How long a working agent may think with nothing new on screen before its row shows "stuck"; no
-# longer a setting (user request, 2026-10-26).
-STUCK_THRESHOLD_SECONDS = 600
+# The session reading values read from it that belong to its conversation, so cleared when the
+# file is no longer known to be the session's. Not "process_id_whose_turns_run_outside_the_tab",
+# which belongs to the agent process (snapshot_builder.turns_of_the_agent_run_outside_its_tab): an
+# ambiguous lookup must not let Pause stop a client of Codex's shared server.
+CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "open_tool_call", "conversation_shows_a_turn_under_way")
 # How long iTerm2 must have said working before Claude Code's own "idle" counts over it without a
 # turn end from the hooks: at a turn's start Claude Code's own report may lag iTerm2's for a moment
 # (DashboardCore.claude_code_reports_the_turn_over).
 SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING = 10
+# A tab's session tracking that belongs to the agent that ran in it (update_session_tracking): a
+# new agent in the tab starts without them.
+TRACKING_KEYS_OF_AN_AGENTS_TURNS = ("turn_started_at", "last_turn_ended_at", "finished_turn_cleared_at")
 SMALLEST_WINDOW_WIDTH = 400  # a docked sidebar never makes an iTerm2 window narrower than this
 FRAME_TOLERANCE_POINTS = 20  # iTerm2 rounds window sizes to whole character cells
 RETRY_DELAY_SECONDS = 1
@@ -106,10 +111,9 @@ SNAPSHOT_COALESCING_DELAY_SECONDS = 0.1
 # since nothing tells the core when it changes (Claude Code's session file).
 SECONDS_BETWEEN_OWN_STATUS_READINGS = 1
 CODEX_QUEUE_TIMEOUT_SECONDS = 30
-# How often "Talk to Each Other" checks whether a held message can be pasted (user request, 2026-10-21).
+# How often "Talk to Each Other" checks whether a held message can be pasted.
 SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT = 3
-# How long the row of an agent that ended without a normal session end stays, gray and "exited"
-# (a fixed time rather than a setting, as for "stuck").
+# How long the row of an agent that ended without a normal session end stays, gray and "exited".
 EXITED_ROW_SECONDS = 300
 CHILD_PROCESS_CHECK_INTERVAL_SECONDS = 3  # an open tab row's sub rows and the background shells
 LONGEST_COMMAND_TEXT = 500  # characters of a sub row's command kept in the snapshot
@@ -128,12 +132,6 @@ KEYS_THAT_CLEAR_THE_SHELLS_LINE = "\x05\x15"
 # Claude Code and Codex start within a few seconds.
 SECONDS_A_RESTORED_AGENT_HAS_TO_START = 15
 SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT = 1
-
-
-def find_claude_command_path():
-    """Returns the path of the `claude` command (the stable link on PATH or in the usual folders,
-    not a versioned file), or None."""
-    return find_program_on_path_or_in_the_usual_folders("claude")
 
 
 async def give_a_restored_tab_or_window_its_saved_name(rename, renamed_thing):
@@ -162,30 +160,62 @@ async def read_claude_agents_by_process_id(claude_command_path, config_folders):
         environment.pop("CLAUDE_CONFIG_DIR", None)
         if config_folder:
             environment["CLAUDE_CONFIG_DIR"] = config_folder
-        process = None
         try:
-            process = await asyncio.create_subprocess_exec(
-                claude_command_path, "agents", "--json", env=environment,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            standard_output, standard_error = await asyncio.wait_for(process.communicate(), timeout=CLAUDE_AGENTS_TIMEOUT_SECONDS)
-            if process.returncode != 0:  # on standard error: dump-snapshot's standard output holds only its JSON
+            exit_status, standard_output, end_of_standard_error = await run_program_and_wait(
+                [claude_command_path, "agents", "--json"], environment, CLAUDE_AGENTS_TIMEOUT_SECONDS, asyncio.subprocess.PIPE)
+            if exit_status != 0:  # on standard error: dump-snapshot's standard output holds only its JSON
                 print(f"claude agents --json failed for config folder {config_folder or '(default)'} with exit status "
-                      f"{process.returncode}: {standard_error.decode(errors='replace').strip()[-300:]}", file=sys.stderr)
+                      f"{exit_status}: {end_of_standard_error}", file=sys.stderr)
                 continue
             for record in json.loads(standard_output or b"[]"):
                 if isinstance(record, dict) and record.get("pid"):
                     claude_agents_by_process_id[int(record["pid"])] = dict(record, config_folder=config_folder)
         except (OSError, ValueError, asyncio.TimeoutError) as error:
             print(f"claude agents --json failed for config folder {config_folder or '(default)'}: {error!r}", file=sys.stderr)
-            if process is not None and process.returncode is None:
-                process.kill()
-                await process.wait()
     return claude_agents_by_process_id
+
+
+async def run_program_and_wait(arguments, environment, timeout_seconds, standard_output):
+    """Runs a program until it ends, at most timeout_seconds; one still running then is killed.
+
+    Args:
+        arguments: The program and its arguments.
+        environment: The environment it runs with.
+        timeout_seconds: How long it may run.
+        standard_output: asyncio.subprocess.PIPE to read its standard output, or DEVNULL.
+
+    Returns:
+        (its exit status, its standard output or None, the last 300 characters of its standard error).
+
+    Raises:
+        OSError: It couldn't start.
+        asyncio.TimeoutError: It ran longer than timeout_seconds.
+    """
+    process = await asyncio.create_subprocess_exec(*arguments, env=environment, stdout=standard_output,
+                                                   stderr=asyncio.subprocess.PIPE)
+    try:
+        output, standard_error = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise
+    return process.returncode, output, standard_error.decode(errors="replace").strip()[-300:]
+
+
+async def kill_the_processes_still_running_after_the_grace_period(process_ids):
+    """Waits until the processes, sent SIGTERM already, have ended, at most
+    SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED, then sends SIGKILL to those still running."""
+    deadline = time.time() + SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED
+    while time.time() < deadline:
+        if not any(process_is_alive(process_id) for process_id in process_ids):
+            return
+        await asyncio.sleep(0.2)
+    send_signal_to_processes(process_ids, signal.SIGKILL)
 
 
 def read_claude_code_session_status(config_folder, process_id):
     """Returns the status Claude Code keeps for a running session ("idle", "busy", "waiting", or
-    "shell" while it runs a command; seen on 2026-10-21), read now from
+    "shell" while it runs a command), read now from
     <config folder>/sessions/<process ID>.json (the file `claude agents --json` reads), or None
     when it can't be read. Cheap enough to read just before typing into a session, and for each
     snapshot for a tab iTerm2 gives no status, while the record from `claude agents --json` may be
@@ -195,7 +225,7 @@ def read_claude_code_session_status(config_folder, process_id):
         config_folder: The record's "config_folder", or None for the default ~/.claude.
         process_id: The Claude Code process ID.
     """
-    path = os.path.join(config_folder or os.path.expanduser("~/.claude"), "sessions", f"{process_id}.json")
+    path = os.path.join(config_folder or DEFAULT_CLAUDE_CONFIG_FOLDER, "sessions", f"{process_id}.json")
     try:
         with open(path) as session_file:
             return json.load(session_file).get("status")
@@ -203,28 +233,26 @@ def read_claude_code_session_status(config_folder, process_id):
         return None
 
 
-async def queue_message_for_codex_session(codex_command_path, conversation_id, message):
+async def queue_message_for_codex_session(codex_command_path, conversation_id, message, codex_home_folder=None):
     """Runs `codex queue --thread <conversation ID> --message <text>`, which hands the message to
     the running Codex session; it runs it as its next turn, after any turn under way (checked live
-    with Codex 0.155.1 on 2026-10-21). Returns an ActionResult."""
+    with Codex 0.155.1). With codex_home_folder, the session's CODEX_HOME (where it keeps its
+    conversation), else the app's own. Returns an ActionResult."""
     if not codex_command_path:
         return ActionResult(False, "the codex command wasn't found")
-    process = None
+    environment = build_environment_with_the_programs_folder_first_on_path(codex_command_path, os.environ)
+    if codex_home_folder:
+        environment["CODEX_HOME"] = codex_home_folder
     try:
         # The message is attached to its option: on its own, a message starting with "-" (a note
         # that begins with a bullet) would be read as an unknown option.
-        process = await asyncio.create_subprocess_exec(
-            codex_command_path, "queue", "--thread", conversation_id, f"--message={message}",
-            env=build_environment_with_the_programs_folder_first_on_path(codex_command_path, os.environ),
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        _, standard_error = await asyncio.wait_for(process.communicate(), timeout=CODEX_QUEUE_TIMEOUT_SECONDS)
+        exit_status, _, end_of_standard_error = await run_program_and_wait(
+            [codex_command_path, "queue", "--thread", conversation_id, f"--message={message}"], environment,
+            CODEX_QUEUE_TIMEOUT_SECONDS, asyncio.subprocess.DEVNULL)
     except (OSError, asyncio.TimeoutError) as error:
-        if process is not None and process.returncode is None:
-            process.kill()
-            await process.wait()
         return ActionResult(False, f"codex queue failed: {error!r}")
-    if process.returncode != 0:
-        return ActionResult(False, f"codex queue failed: {standard_error.decode(errors='replace').strip()[-300:]}")
+    if exit_status != 0:
+        return ActionResult(False, f"codex queue failed: {end_of_standard_error}")
     return ActionResult(True)
 
 
@@ -311,7 +339,7 @@ class DashboardCore:
         self.report_connection_lost = report_connection_lost
         self.report_terminal_problem = report_terminal_problem or (lambda message: None)
         self.verbose = verbose
-        # The terminals, in the order their windows are listed (user request, 2026-11-01).
+        # The terminals, in the order their windows are listed.
         self.terminal_backends = [
             terminal_backend_class(lambda: self.regather_needed.set(), lambda: self.snapshot_needed.set(),
                                    self.note_terminal_problem)
@@ -356,7 +384,8 @@ class DashboardCore:
         self.claude_agents_refresh_is_running = False
         self.computer_id = socket.gethostname()
         self.computer_name = socket.gethostname().split(".")[0]
-        self.claude_command_path = find_claude_command_path()
+        # The stable link on PATH or in the usual folders, not a versioned file.
+        self.claude_command_path = find_program_on_path_or_in_the_usual_folders("claude")
         # For `codex queue`; the app's settings then name it (set_core_settings).
         self.codex_command_path = find_program_on_path_or_in_the_usual_folders("codex")
         self.message_typing_lock_by_session_id = {}  # two held messages are never pasted into one tab at once
@@ -379,13 +408,18 @@ class DashboardCore:
         # value (find_when_the_hooks_ended_the_turn). A value already set when the dashboard first sees
         # the tab was set at a time it doesn't know, maybe before a turn end the hooks reported while
         # the app wasn't running, so that one is -inf: after each restart of the app, a row whose agent
-        # had ended its turn with a background task running showed "stuck" (user report, 2026-10-29).
+        # had ended its turn with a background task running kept showing "working".
         self.status_set_in_iterm2_and_since_by_session_id = {}
         # {session ID: the agent's own report as a status value (read_status_value_of_the_tabs_own_agent)}
         # at the last reading, for the tabs of a terminal that reports no agent status (tmux).
         self.own_status_value_by_session_id = {}
+        # {session ID: when Claude Code's own idle will count over the working iTerm2 says
+        # (claude_code_reports_the_turn_over)}, so a snapshot is asked for then: nothing else may.
+        self.own_idle_counts_at_by_session_id = {}
         self.displayed_state_by_session_id = {}
-        self.screen_readings_by_session_id = {}
+        # {session ID: what is read about the session besides its status: from its screen (the
+        # permission dialog, the turn it shows), its conversation file, its processes and its hooks}
+        self.session_readings_by_session_id = {}
         # {(session ID, agent process ID): agent_session_pausing.PauseRecord}, until the agent runs
         # again or is gone; an agent still paused from before a restart is listed again from its
         # record. By agent too: a tab can hold a paused agent and, at the shell, a newer one.
@@ -573,8 +607,8 @@ class DashboardCore:
         if terminal_backend is None or target_terminal_backend is None:
             return ActionResult(False, "that tab or window no longer exists")
         if target_terminal_backend is not terminal_backend:
-            return ActionResult(False, f"a {terminal_backend.terminal_name} tab can't move into a "
-                                       f"{target_terminal_backend.terminal_name} window")
+            return ActionResult(False, f"{terminal_backend.terminal_name} tabs can't move into "
+                                       f"{target_terminal_backend.terminal_name} windows")
         return await terminal_backend.move_tab(action_request.target["tab_id"], target_window_id,
                                                action_request.arguments.get("drop_before_tab_id"))
 
@@ -651,7 +685,8 @@ class DashboardCore:
         path_of_conversation_to_clear = await self.find_current_conversation_file(session_id, agent_session) \
             if clears_at_once else None
         action_result = await agent_input_box_typing.type_slash_command(
-            terminal_session, command, agent_session["adapter"], agent_is_in_the_middle_of_a_turn=not waits_at_its_prompt)
+            terminal_session, command, agent_session["adapter"], agent_is_in_the_middle_of_a_turn=not waits_at_its_prompt,
+            agent_asks_right_now=lambda: self.agent_asks_right_now(session_id, agent_session))
         if action_result is not None and action_result.succeeded and clears_at_once:
             self.forget_the_cleared_conversation(session_id, agent_session, path_of_conversation_to_clear)
         return action_result
@@ -659,15 +694,15 @@ class DashboardCore:
     async def handle_send_slash_command_to_agent_sessions(self, action_request):
         """Types /compact or /clear (arguments {"command": ...}) into every session of target
         {"session_ids": [...]}, those in the middle of a turn too (the menu of several selected
-        rows; user requests, 2026-10-21): type_slash_command_once_the_agent_can_take_it for each."""
+        rows): type_slash_command_once_the_agent_can_take_it for each."""
         return await self.run_for_each_agent_session(action_request, self.type_slash_command_once_the_agent_can_take_it)
 
     async def type_slash_command_once_the_agent_can_take_it(self, action_request):
         """Types /compact or /clear into one agent session (target {"session_id": ...}) at once when
         it waits at its prompt (for a row without a state, when its screen shows no turn under
         way), or when its tool queues commands typed during a turn (Claude Code runs them when the
-        turn ends). Otherwise (Codex refuses them during a task), and while the
-        input box holds unsent text or is off screen (a permission prompt), checks again every
+        turn ends). Otherwise (Codex refuses them during a task), while the agent is paused, and
+        while the input box holds unsent text or is off screen (a permission prompt), checks again every
         SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT, as a held Talk to Each Other message
         does. Gives up after SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT, or once the tab's
         agent process changes; at once for an agent that is suspended or has another program in
@@ -682,8 +717,11 @@ class DashboardCore:
         async def type_it_if_the_agent_can_take_it(agent_session):
             waits_at_its_prompt = (self.agent_waits_at_its_prompt(session_id, agent_session)
                                    or await self.agent_whose_state_is_unknown_shows_no_turn_on_screen(session_id, agent_session))
-            if agent_session["is_in_background"] or not (
-                    waits_at_its_prompt or agent_session["adapter"].queues_slash_commands_typed_during_a_turn):
+            # A paused agent (stopped, yet in front) would get the keys only once resumed, as a draft;
+            # an asking one's permission prompt would take the Enter as its answer.
+            if agent_session["is_in_background"] or agent_session["is_stopped"] or not (
+                    waits_at_its_prompt or agent_session["adapter"].queues_slash_commands_typed_during_a_turn) \
+                    or self.agent_asks_right_now(session_id, agent_session):
                 return None
             return await self.type_slash_command_into_agent_session(session_id, agent_session, command, waits_at_its_prompt)
         return await self.keep_trying_until_the_agent_takes_it(
@@ -694,7 +732,7 @@ class DashboardCore:
         an ActionResult, holding the tab's typing lock: a held message or command may have just
         been typed, starting a turn. Gives up after SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT,
         once the tab's agent process is no longer agent_process_id, or once the tab closes. The
-        slash commands and the Talk to Each Other messages share it (code review, 2026-10-29).
+        slash commands and the Talk to Each Other messages share it.
 
         Args:
             session_id: The agent session's tab.
@@ -760,13 +798,16 @@ class DashboardCore:
     async def agent_whose_state_is_unknown_shows_no_turn_on_screen(self, session_id, agent_session):
         """Whether an agent session whose row has no state (Codex 0.155.1 reports none to iTerm2)
         shows no turn under way on screen (its adapter's working_screen_pattern, such as Codex's
-        "(5s • esc to interrupt)"), so it waits at its prompt. False when the row has a state, or
-        the adapter no such pattern."""
+        "(5s • esc to interrupt)"), so it waits at its prompt. False when the row has a state, the
+        adapter no such pattern, or the conversation file shows a turn under way (Codex hides its
+        timer while answer text streams; read_status_value_of_the_tabs_own_agent goes by it too)."""
         displayed_state = self.displayed_state_by_session_id.get(session_id)
         working_screen_pattern = agent_session["adapter"].working_screen_pattern
         terminal_session = self.find_terminal_session(session_id)
         if working_screen_pattern is None or terminal_session is None or (
                 displayed_state is not None and displayed_state.state != "unknown"):
+            return False
+        if self.session_readings_by_session_id.get(session_id, {}).get("conversation_shows_a_turn_under_way"):
             return False
         return count_lines_matching(await terminal_session.read_screen_lines(), working_screen_pattern) == 0
 
@@ -777,13 +818,9 @@ class DashboardCore:
         box is empty during a turn too. False when Claude Code reports nothing (another tool). Its
         "shell" while a background task runs after the turn ended, as its hooks report
         (find_when_the_hooks_ended_the_turn), counts as at the prompt: its input box takes text
-        then (code review, 2026-10-27). With no background task running, that "shell" is a
-        command of a turn that another Stop hook kept going (claude_code_reports_the_turn_going_on;
-        code review, 2026-10-28)."""
-        claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
-        if claude_agent_record is None:
-            return False
-        status = read_claude_code_session_status(claude_agent_record.get("config_folder"), agent_session["process_id"])
+        then. With no background task running, that "shell" is a
+        command of a turn that another Stop hook kept going (claude_code_reports_the_turn_going_on)."""
+        status = self.read_claude_code_status_of_agent_process(agent_session["process_id"])
         hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
         if status == "shell" and (hook_state or {}).get("background_task_ids") != set() and find_when_the_hooks_ended_the_turn(
                 hook_state, self.status_set_in_iterm2_and_since_by_session_id.get(session_id, (None, float("inf"), float("inf")))[2]) is not None:
@@ -796,36 +833,48 @@ class DashboardCore:
         hooks reported the turn's end and no prompt since, or working has held for
         SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING since iTerm2's value changed and
         since the last prompt the hooks reported (Claude Code's own report may lag a new turn's
-        start; code review, 2026-10-28). iTerm2's Claude Code integration set working again after
-        turns that had ended with nothing running, which left their rows "stuck" (user report,
-        2026-10-28; what set it isn't known). Claude Code says "shell" while a command runs and
+        start). iTerm2's Claude Code integration set working again after
+        turns that had ended with nothing running, which left their rows "working" (what set it isn't known).
+        Claude Code says "shell" while a command runs and
         "busy" while a Stop hook keeps the turn going, so neither ends here. False when Claude
         Code reports nothing (another tool)."""
         process_id = agent_session["process_id"]
-        claude_agent_record = self.claude_agents_by_process_id.get(process_id)
-        if claude_agent_record is None:
-            return False
         # No time is passed for iTerm2's value: it may have been set after the turn's end.
         hooks_report_the_turn_over = find_when_the_hooks_ended_the_turn(
             self.hook_state_by_agent_process_id.get(process_id), float("-inf")) is not None
         if not hooks_report_the_turn_over and seconds_working_has_held < SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING:
             return False
-        return read_claude_code_session_status(claude_agent_record.get("config_folder"), process_id) == "idle"
+        return self.read_claude_code_status_of_agent_process(process_id) == "idle"
 
     def claude_code_reports_the_turn_going_on(self, agent_session):
         """Whether Claude Code's own report of the session (read_claude_code_session_status) says
         its turn goes on after the Stop its hooks reported: another Stop hook (Claude Code's goal
-        feature) can block a Stop, and iTerm2's value then says working all along (code review,
-        2026-10-28). That is "busy" or "waiting", or "shell" while none of its background tasks
+        feature) can block a Stop, and iTerm2's value then says working all along. That is "busy" or
+        "waiting", or "shell" while none of its background tasks
         runs, so the command is the turn's own: while one runs after the turn ended, Claude Code
         says "shell" too. False when Claude Code reports nothing (another tool)."""
         process_id = agent_session["process_id"]
-        claude_agent_record = self.claude_agents_by_process_id.get(process_id)
-        if claude_agent_record is None:
-            return False
-        status = read_claude_code_session_status(claude_agent_record.get("config_folder"), process_id)
+        status = self.read_claude_code_status_of_agent_process(process_id)
         background_task_ids = (self.hook_state_by_agent_process_id.get(process_id) or {}).get("background_task_ids")
         return status in ("busy", "waiting") or (status == "shell" and background_task_ids == set())
+
+    def agent_asks_right_now(self, session_id, agent_session):
+        """Whether the agent session asks a question or for permission now: its row shows asking,
+        or Claude Code's own report, read at once and fresher than the row or a hidden tab's
+        screen, says it waits. A slash command isn't typed into it during a turn meanwhile, nor
+        its Enter pressed, which the permission prompt would take as its answer."""
+        displayed_state = self.displayed_state_by_session_id.get(session_id)
+        return ((displayed_state is not None and displayed_state.state == "asking")
+                or self.read_claude_code_status_of_agent_process(agent_session["process_id"]) == "waiting")
+
+    def read_claude_code_status_of_agent_process(self, process_id):
+        """Returns Claude Code's own report of an agent's session (read_claude_code_session_status),
+        read from the config folder of its `claude agents --json` record, or None when the
+        process has no record (another tool)."""
+        claude_agent_record = self.claude_agents_by_process_id.get(process_id)
+        if claude_agent_record is None:
+            return None
+        return read_claude_code_session_status(claude_agent_record.get("config_folder"), process_id)
 
     def codex_conversation_may_be_another_sessions(self, session_id, agent_session):
         """Whether this Codex agent session shares its folder with another Codex agent session, or
@@ -905,31 +954,23 @@ class DashboardCore:
         send_signal_to_processes(stopped_process_ids_below, signal.SIGCONT)  # a paused session's: none stays stopped
         if pause_record is not None:
             continue_what_the_pause_stopped(pause_record)
-        deadline = time.time() + SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED
-        while time.time() < deadline:
-            await asyncio.sleep(0.2)
-            if not process_is_alive(process_id):
-                return ActionResult(True)
-        try:
-            os.kill(process_id, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        await kill_the_processes_still_running_after_the_grace_period([process_id])
         return ActionResult(True)
 
     async def handle_end_agent_processes(self, action_request):
         """end_agent_process for every session of target {"session_ids": [...]} (the menu of
-        several selected rows; user request, 2026-10-21)."""
+        several selected rows)."""
         return await self.run_for_each_agent_session(action_request, self.handle_end_agent_process)
 
     def child_process_is_listed(self, session_id, process_id):
         """Whether the session's tab row lists the process as one of its sub rows, so a sub row's
         Info and Kill can't reach any other process."""
         return any(child_process.process_id == process_id
-                   for child_process in self.screen_readings_by_session_id.get(session_id, {}).get("child_processes", ()))
+                   for child_process in self.session_readings_by_session_id.get(session_id, {}).get("child_processes", ()))
 
     async def handle_read_child_process_details(self, action_request):
         """Returns, in its details, what a sub row's Info shows about the process in arguments
-        {"process_id"} of target {"session_id"} (user request, 2026-10-29): read_process_details's
+        {"process_id"} of target {"session_id"}: read_process_details's
         dict, with "cpu_percent", its and its descendants' CPU use over
         SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER, rounded as the row's is."""
         process_id = action_request.arguments["process_id"]
@@ -946,7 +987,7 @@ class DashboardCore:
 
     async def handle_end_child_process(self, action_request):
         """Ends the process in arguments {"process_id"}, a sub row of target {"session_id"}, and
-        every process below it ("Kill" in a sub row's menu; user request, 2026-10-29): killing
+        every process below it ("Kill" in a sub row's menu): killing
         only a shell would leave the command in it running. SIGTERM, then SIGCONT for those
         stopped (a paused session's), and SIGKILL for any still running
         SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later, as Kill Session does."""
@@ -958,18 +999,13 @@ class DashboardCore:
         send_signal_to_processes(process_ids, signal.SIGTERM)
         send_signal_to_processes([listed_process_id for listed_process_id in process_ids if process_is_stopped(listed_process_id)],
                                  signal.SIGCONT)
-        deadline = time.time() + SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED
-        while time.time() < deadline:
-            if not any(process_is_alive(listed_process_id) for listed_process_id in process_ids):
-                return ActionResult(True)
-            await asyncio.sleep(0.2)
-        send_signal_to_processes(process_ids, signal.SIGKILL)
+        await kill_the_processes_still_running_after_the_grace_period(process_ids)
         return ActionResult(True)
 
     def list_detached_processes_of_the_agent_session(self, agent_session):
         """Returns the ProcessInfo of each detached process the agent session's conversation
         started, which its sub rows list (read_child_processes_periodically), so a pause stops
-        them too (code review, 2026-10-29)."""
+        them too."""
         conversation_id = (self.claude_agents_by_process_id.get(agent_session["process_id"]) or {}).get("sessionId")
         agent_started_at = agent_session.get("started_at")
         if not conversation_id or agent_started_at is None:
@@ -979,8 +1015,7 @@ class DashboardCore:
 
     async def handle_pause_agent_sessions(self, action_request):
         """Pauses the agent sessions of target {"session_ids": [...]}: each agent, its shell and
-        every process below it, with STOP signals (agent_session_pausing; user requests,
-        2026-10-20 and 2026-11-06)."""
+        every process below it, with STOP signals (agent_session_pausing)."""
 
         def pause_one(session_id, agent_session):
             agent_process_id = agent_session["process_id"]
@@ -988,7 +1023,9 @@ class DashboardCore:
                 return ActionResult(True)  # paused already
             action_result, pause_record = pause_agent_session(
                 agent_process_id, agent_session["agent_tool_name"],
-                detached_processes=self.list_detached_processes_of_the_agent_session(agent_session))
+                detached_processes=self.list_detached_processes_of_the_agent_session(agent_session),
+                turns_run_outside_the_tab=turns_of_the_agent_run_outside_its_tab(
+                    self.session_readings_by_session_id.get(session_id), agent_process_id))
             if pause_record is not None:
                 self.pause_record_by_tab_and_agent[(session_id, agent_process_id)] = pause_record
                 self.save_pause_records()
@@ -1010,7 +1047,7 @@ class DashboardCore:
     async def pause_or_resume_each_agent_session(self, session_ids, pause_or_resume_one):
         """Runs pause_or_resume_one(session_id, agent_session) for every session, each holding its
         tab's typing lock, as every typing into a tab does: a pause can't stop the agent between a
-        held message's paste and its Enter (code review, 2026-10-28). Returns one ActionResult
+        held message's paste and its Enter. Returns one ActionResult
         whose message names each tab that failed and why."""
 
         async def run_for(session_id):
@@ -1022,12 +1059,12 @@ class DashboardCore:
         action_results = await asyncio.gather(*(run_for(session_id) for session_id in session_ids))
         return self.combine_results_naming_the_tabs_that_failed(session_ids, action_results)
 
-    # ----- Talk to Each Other (user request, 2026-10-21) -----
+    # ----- Talk to Each Other -----
 
     async def handle_ask_agent_sessions_to_talk_to_each_other(self, action_request):
         """Sends the agent sessions of target {"session_ids": [...]} that arguments
         {"recipient_session_ids": [...]} name (all of them when it is left out; one chosen in the
-        Talk to Each Other window, user request, 2026-10-28) the note of arguments {"note": ...},
+        Talk to Each Other window) the note of arguments {"note": ...},
         followed by what each needs to send every other one of the sessions a message
         (messages_between_agent_sessions). A Codex session gets it through `codex queue`, which it
         runs after any turn under way. A Claude Code session has no supported way in from outside,
@@ -1040,7 +1077,7 @@ class DashboardCore:
         agent_session_for_messages_by_session_id = {}
         action_result_by_session_id = {}
         for session_id in session_ids:
-            agent_session_for_messages, reason = await self.describe_agent_session_for_messages(session_id)
+            agent_session_for_messages, reason = await self.build_agent_session_for_messages_or_reason_it_cant_take_part(session_id)
             if agent_session_for_messages is None:
                 action_result_by_session_id[session_id] = ActionResult(False, reason)
             else:
@@ -1068,7 +1105,7 @@ class DashboardCore:
         return self.combine_results_naming_the_tabs_that_failed(
             reported_session_ids, [action_result_by_session_id[session_id] for session_id in reported_session_ids])
 
-    async def describe_agent_session_for_messages(self, session_id):
+    async def build_agent_session_for_messages_or_reason_it_cant_take_part(self, session_id):
         """Returns (AgentSessionForMessages, None) for an agent session that other sessions can
         send messages to, else (None, the reason it can't take part)."""
         agent_session = self.agent_sessions.get(session_id)
@@ -1076,6 +1113,7 @@ class DashboardCore:
             return None, "that tab no longer runs an agent"
         process_id = agent_session["process_id"]
         how_other_agent_sessions_send_it_messages = agent_session["adapter"].how_other_agent_sessions_send_it_messages
+        codex_home_folder = None
         if how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL:
             address = (self.claude_agents_by_process_id.get(process_id) or {}).get("name")
             reason_without_address = "its Claude Code session name isn't known yet"
@@ -1087,6 +1125,7 @@ class DashboardCore:
             address = await agent_session["adapter"].find_conversation_id(process_id, None)
             reason_without_address = ("its Codex conversation can't be identified: Codex starts it at the first prompt, "
                                       "and after /new more than one fits")
+            codex_home_folder = agent_session["adapter"].find_codex_home_folder_of_process(process_id)  # where its conversation is
         else:
             return None, f"{agent_session['agent_tool_name']} sessions can't take messages from other sessions"
         if not address:
@@ -1095,12 +1134,13 @@ class DashboardCore:
         return AgentSessionForMessages(agent_session["agent_tool_name"], how_other_agent_sessions_send_it_messages, address,
                                        process_id, agent_session["working_folder"],
                                        self.find_tab_title_of_agent_session(session_id),
-                                       terminal_backend.tab_kind_name if terminal_backend is not None else "tab"), None
+                                       terminal_backend.tab_kind_name if terminal_backend is not None else "tab", codex_home_folder), None
 
     async def deliver_message_to_agent_session(self, session_id, agent_session_for_messages, message):
         """Queues the message for a Codex session, or pastes it into a Claude Code session once it waits at its prompt."""
         if agent_session_for_messages.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
-            return await queue_message_for_codex_session(self.codex_command_path, agent_session_for_messages.address, message)
+            return await queue_message_for_codex_session(self.codex_command_path, agent_session_for_messages.address, message,
+                                                         codex_home_folder=agent_session_for_messages.codex_home_folder)
         return await self.paste_message_once_the_agent_waits_at_its_prompt(session_id, agent_session_for_messages.process_id, message)
 
     async def paste_message_once_the_agent_waits_at_its_prompt(self, session_id, agent_process_id, message):
@@ -1130,7 +1170,7 @@ class DashboardCore:
         lock so a regather can't resize windows in between. Before the first gather it only
         keeps the area, which make_room_for_reserved_area then applies: the saved frames of
         windows iTerm2 restored after a restart can be matched to them only once they are
-        gathered, and giving room back earlier would drop those records (code review, 2026-10-28)."""
+        gathered, and giving room back earlier would drop those records."""
         async with self.window_room_lock:
             self.reserved_area_was_received = True
             if new_reserved_area == self.reserved_screen_area:
@@ -1222,9 +1262,10 @@ class DashboardCore:
 
     def adopt_records_of_restored_windows(self):
         """On the first pass after start-up, moves frames remembered from the file for windows
-        that are gone to windows iTerm2 restored after a restart, which get new IDs but keep the
-        narrowed frame. Later, the records of windows that closed are dropped instead, so a new
-        window of the same size never takes over a closed window's record."""
+        that are gone to windows that came back under new IDs with the narrowed frame
+        (docked_window_frames_store.adopt_records_of_restored_windows). Later, the records of
+        windows that closed are dropped instead, so a new window of the same size never takes
+        over a closed window's record."""
         frame_by_window_id = {gathered_window["window_id"]: gathered_window["frame"]
                               for gathered_window in self.list_gathered_windows_with_frames()}
         if not frame_by_window_id:
@@ -1282,11 +1323,10 @@ class DashboardCore:
             return ActionResult(False, "that tab no longer runs an agent session")
         claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
         # None (the copy starts fresh) rather than fork a conversation that may not be this session's.
-        conversation_id, _, _ = await self.find_conversation_to_save_or_copy(session_id, agent_session)
+        conversation_id, _, codex_home_folder, _ = await self.find_conversation_to_save_or_copy(session_id, agent_session)
         launch_command_for_the_copy = agent_session["adapter"].build_launch_command_for_a_copy(
-            action_request.arguments["launch_command"], conversation_id, claude_agent_record)
-        # Without the conversation's ID, the copy starts a new conversation, silently: nothing showed
-        # the notices a successful result carried (user's choice, 2026-10-30).
+            action_request.arguments["launch_command"], conversation_id, claude_agent_record, codex_home_folder)
+        # Without the conversation's ID, the copy starts a new conversation, without a notice.
         folder = os.path.expanduser(action_request.arguments["folder"])
         reason_it_cant_start = explain_why_an_agent_session_cant_start(folder, launch_command_for_the_copy)
         if reason_it_cant_start:
@@ -1294,25 +1334,28 @@ class DashboardCore:
         return await terminal_backend.start_agent_session(gathered_window["window_id"], folder, launch_command_for_the_copy,
                                                           after_tab_id=tab_id)
 
-    # ----- saved sessions: Save session and Restore sessions (user request, 2026-11-06) -----
+    # ----- saved sessions: Save session and Restore sessions -----
 
     async def find_conversation_to_save_or_copy(self, session_id, agent_session):
         """Returns (the agent session's conversation ID, the Claude Code config folder it runs
-        with or None, "") for Save session and Duplicate, or (None, None, why it can't be saved)
+        with or None for the default, the CODEX_HOME a Codex session runs with or None for other
+        tools, "") for Save session and Duplicate, or (None, None, None, why it can't be saved)
         when it isn't certainly this session's."""
         if not agent_session["adapter"].can_resume_conversations:
-            return None, None, f"{agent_session['agent_tool_name']} can't resume a saved conversation"
+            return None, None, None, f"{agent_session['agent_tool_name']} can't resume a saved conversation"
         if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
-            return None, None, "it has had no conversation since its /clear"
+            return None, None, None, "it has had no conversation since its /clear"
         if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
-            return None, None, "its conversation can't be told apart from another Codex session's in the same folder"
+            return None, None, None, "its conversation can't be told apart from another Codex session's in the same folder"
         claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
         conversation_id = await agent_session["adapter"].find_conversation_id(agent_session["process_id"], claude_agent_record)
         if await self.find_current_conversation_file(session_id, agent_session) is None:
-            return None, None, "it has no conversation yet (no message was sent to it)"
+            return None, None, None, "it has no conversation yet (no message was sent to it)"
         if not conversation_id:  # Codex after /new: more than one conversation file fits its process
-            return None, None, "it has started more than one conversation, and which one runs now can't be told"
-        return conversation_id, (claude_agent_record or {}).get("config_folder"), ""
+            return None, None, None, "it has started more than one conversation, and which one runs now can't be told"
+        # The default home too, so a CODEX_HOME the launch command sets doesn't take its place.
+        return (conversation_id, (claude_agent_record or {}).get("config_folder"),
+                agent_session["adapter"].find_codex_home_folder_of_process(agent_session["process_id"]), "")
 
     async def handle_save_agent_sessions(self, action_request):
         """Target {"session_ids": [...]}: works out the conversation of each of these agent
@@ -1333,15 +1376,15 @@ class DashboardCore:
             if agent_session is None or not agent_session["process_id"] or agent_session_entry.status == "exited":
                 action_result_by_session_id[session_id] = ActionResult(False, "the agent has ended")
                 continue
-            conversation_id, claude_config_folder, reason_it_cant_be_saved = await self.find_conversation_to_save_or_copy(
-                session_id, agent_session)
+            conversation_id, claude_config_folder, codex_home_folder, reason_it_cant_be_saved = \
+                await self.find_conversation_to_save_or_copy(session_id, agent_session)
             if reason_it_cant_be_saved:
                 action_result_by_session_id[session_id] = ActionResult(False, reason_it_cant_be_saved)
                 continue
             window_entry_by_window_id[window_entry.window_id] = window_entry
             saved_sessions_by_window_id.setdefault(window_entry.window_id, []).append(build_saved_session(
                 agent_session_entry, agent_session["working_folder"] or agent_session_entry.working_folder, conversation_id,
-                claude_config_folder, saved_at))
+                claude_config_folder, saved_at, codex_home_folder))
             action_result_by_session_id[session_id] = ActionResult(True)
         combined_result = self.combine_results_naming_the_tabs_that_failed(session_ids, [
             action_result_by_session_id.get(session_id, ActionResult(False, "that tab no longer runs an agent"))
@@ -1357,6 +1400,12 @@ class DashboardCore:
                     window_entry = window_entry._replace(frame=await terminal_backend.read_window_frame(window_id))
                 except TerminalRequestFailed:  # closed meanwhile: the snapshot's will do
                     pass
+                # A window narrowed for the docked sidebar is saved with its own frame, which a
+                # restore then narrows again only while the sidebar is docked.
+                original_frame, frame_that_was_set = self.frames_before_making_room_by_window_id.get(window_id, (None, None))
+                if frame_that_was_set is not None and frames_are_within_tolerance(
+                        window_entry.frame, frame_that_was_set, FRAME_TOLERANCE_POINTS):
+                    window_entry = window_entry._replace(frame=tuple(original_frame))
             saved_windows.append(build_saved_window(window_entry, saved_sessions,
                                                     terminal_backend.find_when_the_window_was_opened(window_id)))
         return combined_result._replace(details={"saved_windows": saved_windows})
@@ -1367,8 +1416,11 @@ class DashboardCore:
         its conversation, each it may be in (Codex, when more than one conversation file fits),
         and every word of its command line, which holds the ID of one a restore's `--resume <ID>`
         just started (Claude Code doesn't list it yet); not for a Duplicate's (`--fork-session`,
-        Codex's `fork`), which runs a new conversation."""
-        conversation_ids = set()
+        Codex's `fork`), which runs a new conversation. Also each Claude Code conversation that
+        `claude agents --json` reported for a process still running, listed in a tab or not (one
+        suspended with Ctrl+Z behind a newer agent in its tab, or one in another terminal)."""
+        conversation_ids = {record["sessionId"] for process_id, record in self.claude_agents_by_process_id.items()
+                            if record.get("sessionId") and process_is_alive(process_id)}
         for session_id, agent_session in self.agent_sessions.items():
             # Its conversation ended at a /clear, and the lookups would still find it (Codex).
             if not agent_session["process_id"] or self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
@@ -1399,7 +1451,7 @@ class DashboardCore:
         runs isn't started again. Returns one ActionResult whose message names each saved session
         that failed and why, with details {"restored_conversation_ids": [...]}, the conversations
         whose agent was seen running in its tab within SECONDS_A_RESTORED_AGENT_HAS_TO_START,
-        which the app then takes out of the saved list (user request, 2026-11-06): one whose
+        which the app then takes out of the saved list: one whose
         command failed (a launch command naming a program that isn't installed) stays saved."""
         conversation_ids_running_now = await self.list_conversation_ids_running_now()
         conversation_ids_running_before_this_restore = set(conversation_ids_running_now)
@@ -1498,7 +1550,8 @@ class DashboardCore:
                 failures.append(f'"{name}": Settings has no launch command for {agent_tool_name}')
                 continue
             resume_command = adapter.build_launch_command_to_resume(launch_command, saved_session["conversation_id"],
-                                                                    saved_session["claude_config_folder"])
+                                                                    saved_session["claude_config_folder"],
+                                                                    saved_session["codex_home_folder"])
             reason_it_cant_start = explain_why_an_agent_session_cant_start(saved_session["folder"], resume_command)
             if reason_it_cant_start:
                 failures.append(f'"{name}": {reason_it_cant_start}')
@@ -1549,8 +1602,10 @@ class DashboardCore:
     async def resume_in_the_saved_sessions_own_tab(self, saved_session, resume_command, terminal_session_ids_typed_into):
         """Types Ctrl+E and Ctrl+U (clearing what the shell's line holds), then `cd <folder> && <resume
         command>`, into the tab a session was saved from, when that tab is still there (the caller
-        checks saved_window_ids_still_name_what_they_named) and waits at a shell prompt, with no
-        agent in it and nothing typed into it by a restore that hasn't ended
+        checks saved_window_ids_still_name_what_they_named) and waits at a shell prompt (a shell
+        running a script would get the keys and the command as input:
+        command_line_is_a_shell_with_no_script_or_command), with no agent in it and nothing typed
+        into it by a restore that hasn't ended
         (self.terminal_session_ids_restores_typed_into, which gets it added, as this restore's
         terminal_session_ids_typed_into does). Returns (ActionResult, terminal backend, window ID,
         tab ID), or None when there is no such tab."""
@@ -1562,7 +1617,8 @@ class DashboardCore:
         gathered_tab = next(gathered_tab for gathered_tab in gathered_window["tabs"]
                             if gathered_tab["first_session"] is not None and gathered_tab["first_session"]["session_id"] == session_id)
         terminal_session = terminal_backend.find_session(session_id)
-        if terminal_session is None or not command_line_runs_a_shell(gathered_tab["first_session"].get("command_line")):
+        if terminal_session is None or not command_line_is_a_shell_with_no_script_or_command(
+                gathered_tab["first_session"].get("command_line")):
             return None
         terminal_session_ids_typed_into.add(session_id)  # before anything is awaited
         self.terminal_session_ids_restores_typed_into.add(session_id)
@@ -1675,6 +1731,13 @@ class DashboardCore:
                 live_session_ids.add(session_id)
                 previous_tracking = self.session_tracking_by_session_id.get(session_id)
                 agent_session = self.agent_sessions.get(session_id)
+                agent_process_id = (agent_session or {}).get("process_id")
+                if previous_tracking is not None and agent_process_id and previous_tracking.get("agent_process_id") not in (
+                        None, agent_process_id):
+                    # Another agent runs in the tab now (one restored there, say): the turns the last
+                    # one started, ended or had cleared aren't its own.
+                    previous_tracking = {key: value for key, value in previous_tracking.items()
+                                         if key not in TRACKING_KEYS_OF_AN_AGENTS_TURNS}
                 if (previous_tracking is not None and not first_session["status_set_in_iterm2"] and agent_session is not None
                         and agent_session["process_id"] and (process_is_stopped(agent_session["process_id"])
                                                              or first_session.get("job_pid") != agent_session["process_id"])):
@@ -1698,31 +1761,36 @@ class DashboardCore:
                     if (find_when_the_hooks_ended_the_turn(hook_state, status_set_in_iterm2_and_since[2]) is not None
                             and not self.claude_code_reports_the_turn_going_on(agent_session)):
                         first_session["status"] = "idle"  # its turn ended, though iTerm2 still says working while a background task runs
-                    elif self.claude_code_reports_the_turn_over(agent_session, now - max(
-                            status_set_in_iterm2_and_since[1], (hook_state or {}).get("last_prompt_at") or float("-inf"))):
-                        first_session["status"] = "idle"
-                        # Without a turn end from the hooks, the working it replaces may be one iTerm2 set with
-                        # no turn at all (as the app restarted, say), so it ends no turn (code review, 2026-10-28).
-                        ends_no_turn = find_when_the_hooks_ended_the_turn(hook_state, float("-inf")) is None
+                    else:
+                        seconds_working_has_held = now - max(status_set_in_iterm2_and_since[1],
+                                                             (hook_state or {}).get("last_prompt_at") or float("-inf"))
+                        if self.claude_code_reports_the_turn_over(agent_session, seconds_working_has_held):
+                            first_session["status"] = "idle"
+                            # Without a turn end from the hooks, the working it replaces may be one iTerm2 set with
+                            # no turn at all (as the app restarted, say), so it ends no turn.
+                            ends_no_turn = find_when_the_hooks_ended_the_turn(hook_state, float("-inf")) is None
+                        elif (seconds_working_has_held < SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING
+                              and self.read_claude_code_status_of_agent_process(agent_session["process_id"]) == "idle"):
+                            self.own_idle_counts_at_by_session_id[session_id] = (
+                                now + SECONDS_BEFORE_CLAUDE_CODES_OWN_IDLE_COUNTS_OVER_WORKING - seconds_working_has_held)
                 tracking = track_status_value(previous_tracking, first_session["status"], now,
-                                              self.screen_readings_by_session_id.get(session_id), ends_no_turn)
+                                              self.session_readings_by_session_id.get(session_id), ends_no_turn)
+                if agent_process_id and tracking.get("agent_process_id") != agent_process_id:
+                    tracking = dict(tracking, agent_process_id=agent_process_id)
                 self.session_tracking_by_session_id[session_id] = tracking
                 if (previous_tracking is not None and tracking is not previous_tracking
                         and map_iterm2_status_value_to_state(first_session["status"]) == "asking"):
                     self.screen_check_needed.set()
-        for session_id in set(self.session_tracking_by_session_id) - live_session_ids:
-            del self.session_tracking_by_session_id[session_id]
-        for session_id in set(self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id) - live_session_ids:
-            del self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id[session_id]
-        for session_id in set(self.status_set_in_iterm2_and_since_by_session_id) - live_session_ids:
-            del self.status_set_in_iterm2_and_since_by_session_id[session_id]
-        for session_id in set(self.own_status_value_by_session_id) - live_session_ids:
-            del self.own_status_value_by_session_id[session_id]
+        for value_by_session_id in (self.session_tracking_by_session_id, self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id,
+                                    self.status_set_in_iterm2_and_since_by_session_id, self.own_status_value_by_session_id,
+                                    self.own_idle_counts_at_by_session_id):
+            for session_id in set(value_by_session_id) - live_session_ids:
+                del value_by_session_id[session_id]
 
     def read_own_status_value_of_the_tabs_agent(self, session_id):
         """Returns the status value of a tab in a terminal that reports no agent status (tmux),
         from its agent's own report (read_status_value_of_the_tabs_own_agent), or None for a tab
-        without an agent; remembered for watch_the_own_status_of_agents_in_terminals_without_status_reports."""
+        without an agent; remembered for watch_the_own_status_of_agents_whose_terminal_reports_none."""
         agent_session = self.agent_sessions.get(session_id)
         status_value = (self.read_status_value_of_the_tabs_own_agent(session_id, agent_session)
                         if agent_session is not None and agent_session["process_id"] else None)
@@ -1734,7 +1802,7 @@ class DashboardCore:
         program runs inside the tab's agent (a `claude -p` its shell tool started, waited on or left
         running in the background), and after it ends until iTerm2's value fits the tab's agent
         again. That agent fires the same user-level hooks, so it sets the tab's status too, and its
-        last value stays until the tab's agent sets another (Phase 0).
+        last value stays until the tab's agent sets another.
         Meanwhile the row goes by the tab's own agent (read_status_value_of_the_tabs_own_agent)
         and turns back to iTerm2's value once the two agree; for a tool without such a report, it
         keeps its value until iTerm2's changes after the inner agent ended. The agent's processes
@@ -1745,8 +1813,7 @@ class DashboardCore:
         agent_session = self.agent_sessions.get(session_id)
         status_seen_while_an_inner_agent_ran = self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id
         # Checked also when the dashboard first sees the tab (no previous_tracking): after a restart
-        # while an inner agent ran, iTerm2's value stayed the same and the check never came
-        # (code review, 2026-10-29).
+        # while an inner agent ran, iTerm2's value stayed the same and the check never came.
         if agent_session is None or not agent_session["process_id"]:
             status_seen_while_an_inner_agent_ran.pop(session_id, None)
             return status_set_in_iterm2
@@ -1758,7 +1825,7 @@ class DashboardCore:
         if not goes_by_its_own_agent:
             if not an_inner_agent_runs:
                 return status_set_in_iterm2
-            self.screen_readings_by_session_id.setdefault(session_id, {}).pop("turn_shows_on_screen", None)  # an earlier one's
+            self.session_readings_by_session_id.setdefault(session_id, {}).pop("turn_shows_on_screen", None)  # an earlier one's
             self.screen_check_needed.set()
         own_status_value = self.read_status_value_of_the_tabs_own_agent(session_id, agent_session)
         if an_inner_agent_runs:
@@ -1774,32 +1841,34 @@ class DashboardCore:
         inside it writes, or None when its tool reports nothing of the kind: for Claude Code its own
         report of its session (read_claude_code_session_status); for a tool whose screen shows a
         turn under way (Codex's "(5s • esc to interrupt)"), the screen check made while the row
-        goes by its own agent ("turn_shows_on_screen")."""
+        goes by its own agent ("turn_shows_on_screen"). Codex hides that timer while answer text
+        streams, so a turn its conversation file shows under way still counts."""
         process_id = agent_session["process_id"]
         if isinstance(agent_session["adapter"], ClaudeCodeAdapter):
             return CLAUDE_CODE_SESSION_STATUSES_TO_ITERM2_STATUS_VALUES.get(read_claude_code_session_status(
                 (self.claude_agents_by_process_id.get(process_id) or {}).get("config_folder"), process_id))
-        turn_shows_on_screen = self.screen_readings_by_session_id.get(session_id, {}).get("turn_shows_on_screen")
-        if turn_shows_on_screen is None:
+        reading = self.session_readings_by_session_id.get(session_id, {})
+        if reading.get("turn_shows_on_screen") is None:
             return None
-        return "working" if turn_shows_on_screen else "idle"
+        return "working" if reading["turn_shows_on_screen"] or reading.get("conversation_shows_a_turn_under_way") else "idle"
+
+    def iterate_gathered_tabs_with_a_first_session(self):
+        """Yields (gathered window, gathered tab, its first-pane session) for each gathered tab
+        that has a first-pane session, from the last gather."""
+        for gathered_window in self.gathered_windows:
+            for gathered_tab in gathered_window["tabs"]:
+                if gathered_tab["first_session"]:
+                    yield gathered_window, gathered_tab, gathered_tab["first_session"]
 
     def find_command_line_of_the_session(self, session_id):
         """Returns the gathered commandLine of a tab's first-pane session (its foreground job), or ""."""
-        for gathered_window in self.gathered_windows:
-            for gathered_tab in gathered_window["tabs"]:
-                first_session = gathered_tab["first_session"]
-                if first_session and first_session["session_id"] == session_id:
-                    return first_session.get("command_line") or ""
-        return ""
+        return next((first_session.get("command_line") or "" for _, _, first_session in self.iterate_gathered_tabs_with_a_first_session()
+                     if first_session["session_id"] == session_id), "")
 
     def find_first_session_id_of_tab(self, tab_id):
         """Returns the first-pane session ID of a gathered tab, or None."""
-        for gathered_window in self.gathered_windows:
-            for gathered_tab in gathered_window["tabs"]:
-                if gathered_tab["tab_id"] == tab_id and gathered_tab["first_session"]:
-                    return gathered_tab["first_session"]["session_id"]
-        return None
+        return next((first_session["session_id"] for _, gathered_tab, first_session in self.iterate_gathered_tabs_with_a_first_session()
+                     if gathered_tab["tab_id"] == tab_id), None)
 
     def find_session_id_in_front(self, the_terminal_must_have_keyboard_focus, a_client_inside_another_terminal_app_counts):
         """Returns the session of the tab in front, or None.
@@ -1912,7 +1981,7 @@ class DashboardCore:
         if claude_code_process_ids - self.process_ids_asked_about_in_claude_agents:
             # Asked about again while this run was under way (a /clear typed then, note_hook_event),
             # so this run may have read the record from before it: the next gather runs again at
-            # once (code review, 2026-10-28).
+            # once.
             self.regather_needed.set()
         retry_is_due = False
         for process_id in claude_code_process_ids - set(self.claude_agents_by_process_id):
@@ -1941,7 +2010,7 @@ class DashboardCore:
 
     def save_pause_records(self):
         """Writes the pause records to their file. A write that fails (a full disk) is reported,
-        not raised: it would end the core, which then restarts and fails the same way (code review, 2026-10-28)."""
+        not raised: it would end the core, which then restarts and fails the same way."""
         if not self.pause_records_file_path:
             return
         try:
@@ -1972,8 +2041,7 @@ class DashboardCore:
         (resolve_agent_sessions follows only a tab's latest agent). Their entries are then kept,
         in the background, while their process lives. A tab whose agents were paused one after
         another lists the last one paused."""
-        gathered_session_ids = {gathered_tab["first_session"]["session_id"] for gathered_window in self.gathered_windows
-                                for gathered_tab in gathered_window["tabs"] if gathered_tab["first_session"]}
+        gathered_session_ids = self.list_gathered_session_ids()
         for (session_id, agent_process_id), pause_record in sorted(self.pause_record_by_tab_and_agent.items(),
                                                                    key=lambda item: item[1].agent_process[1], reverse=True):
             if (session_id in self.agent_sessions or session_id not in gathered_session_ids
@@ -1981,12 +2049,15 @@ class DashboardCore:
                 continue
             # By the tool's name the pause recorded: a wrapped agent ("node .../codex") can't be
             # recognized from its process's name alone.
-            adapter = next((adapter for adapter in self.specific_adapters
-                            if adapter.agent_tool_name == pause_record.agent_tool_name), self.generic_adapter)
+            adapter = self.find_adapter_of_agent_tool(pause_record.agent_tool_name) or self.generic_adapter
             self.agent_sessions[session_id] = {
                 "adapter": adapter, "process_id": agent_process_id, "is_in_background": True, "is_stopped": True,
                 "agent_tool_name": pause_record.agent_tool_name,
                 "working_folder": read_process_current_folder(agent_process_id), "started_at": pause_record.agent_process[1]}
+
+    def list_gathered_session_ids(self):
+        """Returns the session IDs of the gathered tabs' first panes."""
+        return {first_session["session_id"] for _, _, first_session in self.iterate_gathered_tabs_with_a_first_session()}
 
     def note_agents_that_ended_without_a_session_end(self, agent_sessions_before, now):
         """Keeps an "exited" row for each tab, still open, whose agent process is gone
@@ -2001,8 +2072,7 @@ class DashboardCore:
             agent_sessions_before: resolve_agent_sessions's result in the last snapshot.
             now: The current time.
         """
-        gathered_session_ids = {gathered_tab["first_session"]["session_id"] for gathered_window in self.gathered_windows
-                                for gathered_tab in gathered_window["tabs"] if gathered_tab["first_session"]}
+        gathered_session_ids = self.list_gathered_session_ids()
         for session_id, agent_session in agent_sessions_before.items():
             process_id = agent_session["process_id"]
             hook_state = self.hook_state_by_agent_process_id.get(process_id)
@@ -2038,14 +2108,14 @@ class DashboardCore:
         background shells and agents while its hooks have reported it (hook_event_tracking), less
         the shells no process below the agent runs any more
         (list_reported_background_task_ids_still_running), plus the detached jobs it started,
-        which that list doesn't hold (user request, 2026-10-28), otherwise the background shells
+        which that list doesn't hold, otherwise the background shells
         seen below the agent and its detached jobs
         (read_child_processes_periodically). Also whether the hooks report the turn over with
         background tasks running, as Claude Code's "shell" in `claude agents --json` then means
-        (snapshot_builder; code review, 2026-10-29), and whether they report no prompt since
-        the agent started, which makes its idle row "new" (user request, 2026-10-30)."""
+        (snapshot_builder), and whether they report no prompt since
+        the agent started, which makes its idle row "new"."""
         for session_id, agent_session in self.agent_sessions.items():
-            reading = self.screen_readings_by_session_id.setdefault(session_id, {})
+            reading = self.session_readings_by_session_id.setdefault(session_id, {})
             hook_state = self.hook_state_by_agent_process_id.get(agent_session["process_id"])
             reported_background_task_ids = (
                 list_reported_background_task_ids_still_running(hook_state, reading.get("running_claude_code_task_ids"),
@@ -2059,32 +2129,33 @@ class DashboardCore:
                 reported_background_task_ids and find_when_the_hooks_ended_the_turn(hook_state, float("-inf")) is not None)
             reading["hooks_report_no_prompt_since_the_agent_started"] = hooks_report_no_prompt_since_the_agent_started(hook_state)
 
+    def read_the_own_status_of_claude_agents_iterm2_reports_none_for(self):
+        """Returns {process ID: its session file's status (read_claude_code_session_status)} of each
+        Claude Code agent whose tab iTerm2 gives no status (after iTerm2 restarted): its row goes by that."""
+        statuses = {}
+        for _, _, first_session in self.iterate_gathered_tabs_with_a_first_session():
+            if map_iterm2_status_value_to_state(first_session.get("status")) is not None:
+                continue
+            process_id = (self.agent_sessions.get(first_session["session_id"]) or {}).get("process_id")
+            status = self.read_claude_code_status_of_agent_process(process_id)
+            if status is not None:
+                statuses[process_id] = status
+        return statuses
+
     def read_again_the_status_of_claude_agents_iterm2_reports_none_for(self):
         """Returns claude_agents_by_process_id with the status of each Claude Code agent whose tab
-        iTerm2 gives no status read again from its session file (read_claude_code_session_status):
-        its row goes by that status, and the `claude agents --json` record is up to a minute old
-        (code review, 2026-10-29). The stored records stay as they are."""
-        claude_agents_by_process_id = dict(self.claude_agents_by_process_id)
-        for gathered_window in self.gathered_windows:
-            for gathered_tab in gathered_window["tabs"]:
-                first_session = gathered_tab["first_session"]
-                if first_session is None or map_iterm2_status_value_to_state(first_session.get("status")) is not None:
-                    continue
-                process_id = (self.agent_sessions.get(first_session["session_id"]) or {}).get("process_id")
-                claude_agent_record = claude_agents_by_process_id.get(process_id)
-                if claude_agent_record is None:
-                    continue
-                status = read_claude_code_session_status(claude_agent_record.get("config_folder"), process_id)
-                if status is not None:
-                    claude_agents_by_process_id[process_id] = dict(claude_agent_record, status=status)
-        return claude_agents_by_process_id
+        iTerm2 gives no status read again (read_the_own_status_of_claude_agents_iterm2_reports_none_for),
+        since the `claude agents --json` record is up to a minute old. The stored records stay as they are."""
+        return {**self.claude_agents_by_process_id,
+                **{process_id: dict(self.claude_agents_by_process_id[process_id], status=status)
+                   for process_id, status in self.read_the_own_status_of_claude_agents_iterm2_reports_none_for().items()}}
 
     def publish_snapshot_if_changed(self):
         """Builds the snapshot from the cached state and publishes it unless only its time changed."""
         now = time.time()
         # The agents are matched to their tabs first, since the status tracking looks up each
         # tab's agent: after a restart its first pass found none, missed a turn end the hooks had
-        # saved, and the next pass took that turn as one ending then, showing "done" (code review, 2026-10-29).
+        # saved, and the next pass took that turn as one ending then, showing "done".
         agent_sessions_before = self.agent_sessions
         self.agent_sessions = resolve_agent_sessions(
             self.gathered_windows, self.agent_sessions, self.specific_adapters, self.generic_adapter, process_is_alive,
@@ -2108,8 +2179,7 @@ class DashboardCore:
         def build_snapshot_of(agent_sessions, exited_agent_sessions_by_session_id):
             return build_computer_snapshot(
                 self.gathered_windows, agent_sessions, self.monitors, self.window_order, self.session_tracking_by_session_id,
-                self.displayed_state_by_session_id, self.screen_readings_by_session_id, STUCK_THRESHOLD_SECONDS,
-                claude_agents_by_process_id, seen_session_id, highlighted_session_id, self.computer_id,
+                self.displayed_state_by_session_id, self.session_readings_by_session_id, claude_agents_by_process_id, seen_session_id, highlighted_session_id, self.computer_id,
                 self.computer_name, now, exited_agent_sessions_by_session_id, self.hooks_status_per_agent_tool)
         listed_agent_sessions = {session_id: agent_session for session_id, agent_session in self.agent_sessions.items()
                                  if agent_session["agent_tool_name"] not in self.left_out_agent_tool_names}
@@ -2148,7 +2218,7 @@ class DashboardCore:
         socket at hook_events_socket_path, taken over from an earlier run. While another copy of the
         app (one still giving docked windows their room back as it exits, say)
         receives them there, this one goes on without them, and takes the socket over once that
-        copy has ended (code review, 2026-10-28). If the socket can't be made, it goes on without
+        copy has ended. If the socket can't be made, it goes on without
         hook events (this task must not end: that ends the core)."""
         if another_process_listens_at(self.hook_events_socket_path):
             print(f"another copy of the app receives the hook events at {self.hook_events_socket_path}; "
@@ -2203,8 +2273,7 @@ class DashboardCore:
                 and event.get("source") in SESSION_START_SOURCES_OF_ANOTHER_CONVERSATION_IN_THE_SAME_PROCESS):
             # /clear or /resume typed in the terminal: the process goes on in another conversation,
             # whose ID the gather asked for now gets from `claude agents --json`, as after the list's
-            # own /clear (forget_the_cleared_conversation), so Duplicate doesn't fork the old one
-            # (code review, 2026-10-28).
+            # own /clear (forget_the_cleared_conversation), so Duplicate doesn't fork the old one.
             self.process_ids_asked_about_in_claude_agents.discard(process_id)
             self.regather_needed.set()
         self.snapshot_needed.set()
@@ -2236,7 +2305,7 @@ class DashboardCore:
         HOOKS_SEND_NO_EVENTS when a Claude Code session that started after this run first found
         the hooks installed has sent no hook event SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT
         after it started (hooks turned off in Claude Code, or failing for a reason the files don't
-        show; user request, 2026-11-05). Only while this copy receives the hook events. Codex is
+        show). Only while this copy receives the hook events. Codex is
         left out: its hooks report too little to tell.
 
         Args:
@@ -2262,47 +2331,45 @@ class DashboardCore:
                       else status) for agent_tool_name, status in hooks_status_per_agent_tool)
 
     async def read_agent_screens_periodically(self):
-        """Reads the screens the status rules need: the permission dialog of an
-        asking session whose tool needs the check (every SCREEN_CHECK_INTERVAL_SECONDS), and a
-        fingerprint of each working session (every FINGERPRINT_INTERVAL_SECONDS) for "stuck".
-        One screen read serves both. A session that starts asking is read at once, so the count of
-        "Interrupted" lines from before the user could answer is known. A session in a terminal
-        that reports no agent status (tmux) whose tool shows a turn on screen (Codex) is read
-        every time too, since its status comes from there (read_status_value_of_the_tabs_own_agent)."""
+        """Reads the screens the status rules need (every SCREEN_CHECK_INTERVAL_SECONDS): the
+        permission dialog of an asking session whose tool needs the check, and the screen of a
+        session whose status goes by the turn its tool shows on screen (Codex): while an agent runs
+        inside its tab's agent, and always in a terminal that reports no agent status (tmux)
+        (read_status_value_of_the_tabs_own_agent). One screen read serves both. A session that
+        starts asking is read at once, so the count of "Interrupted" lines from before the user
+        could answer is known. Also notes the command each agent waits on
+        (note_command_the_agent_is_waiting_on)."""
         while True:
             try:
                 await asyncio.wait_for(self.screen_check_needed.wait(), SCREEN_CHECK_INTERVAL_SECONDS)
             except asyncio.TimeoutError:
                 pass
             self.screen_check_needed.clear()
-            status_by_session_id = {gathered_tab["first_session"]["session_id"]: gathered_tab["first_session"]["status"]
-                                    for gathered_window in self.gathered_windows for gathered_tab in gathered_window["tabs"]
-                                    if gathered_tab["first_session"]}
+            status_by_session_id = {first_session["session_id"]: first_session["status"]
+                                    for _, _, first_session in self.iterate_gathered_tabs_with_a_first_session()}
             session_ids_whose_terminal_reports_no_agent_status = {
-                gathered_tab["first_session"]["session_id"] for gathered_window in self.gathered_windows
-                if not self.terminal_backend_by_name[gathered_window["terminal_name"]].reports_agent_status
-                for gathered_tab in gathered_window["tabs"] if gathered_tab["first_session"]}
-            for session_id in set(self.screen_readings_by_session_id) - set(self.agent_sessions):
-                del self.screen_readings_by_session_id[session_id]
+                first_session["session_id"] for gathered_window, _, first_session in self.iterate_gathered_tabs_with_a_first_session()
+                if not self.terminal_backend_by_name[gathered_window["terminal_name"]].reports_agent_status}
+            for session_id in set(self.session_readings_by_session_id) - set(self.agent_sessions):
+                del self.session_readings_by_session_id[session_id]
             for session_id, agent_session in list(self.agent_sessions.items()):
                 if agent_session["is_in_background"]:
                     continue
                 state = map_iterm2_status_value_to_state(status_by_session_id.get(session_id))
-                reading = self.screen_readings_by_session_id.setdefault(session_id, {})
+                reading = self.session_readings_by_session_id.setdefault(session_id, {})
                 adapter = agent_session["adapter"]
                 now = time.time()
                 status_change_time = self.session_tracking_by_session_id.get(session_id, {}).get("status_change_time", now)
                 needs_dialog_check = state == "asking" and bool(adapter.permission_dialog_screen_patterns)
-                # An approved tool runs while iTerm2 still says waiting, so it is fingerprinted like "working".
+                # An approved tool runs while iTerm2 still says waiting, so it counts as "working".
                 is_effectively_working = state == "working" or permission_dialog_was_answered(state, status_change_time, reading)
                 await self.note_command_the_agent_is_waiting_on(session_id, agent_session, reading, state, is_effectively_working, now)
-                needs_fingerprint = is_effectively_working and now - reading.get("fingerprint_checked_at", 0) >= FINGERPRINT_INTERVAL_SECONDS
                 # A row that goes by its own agent: while an agent runs inside it (choose_status_value_of_the_tabs_own_agent),
                 # and always in a terminal that reports no agent status.
                 needs_turn_check = ((session_id in self.iterm2_status_seen_while_an_inner_agent_ran_by_session_id
                                      or session_id in session_ids_whose_terminal_reports_no_agent_status)
                                     and adapter.working_screen_pattern is not None)
-                if not (needs_dialog_check or needs_fingerprint or needs_turn_check):
+                if not (needs_dialog_check or needs_turn_check):
                     continue
                 terminal_session = self.find_terminal_session(session_id)
                 if terminal_session is None:
@@ -2315,20 +2382,14 @@ class DashboardCore:
                     reading = update_permission_dialog_reading(
                         reading, screen_shows_permission_dialog(screen_lines, adapter.permission_dialog_screen_patterns),
                         count_lines_matching(screen_lines, adapter.interrupted_turn_screen_pattern), status_change_time, now)
-                    self.screen_readings_by_session_id[session_id] = reading
-                if needs_fingerprint:
-                    fingerprint = compute_screen_fingerprint(screen_lines, adapter.progress_noise_patterns)
-                    if fingerprint != reading.get("fingerprint"):
-                        reading["fingerprint"] = fingerprint
-                        reading["fingerprint_changed_at"] = now
-                    reading["fingerprint_checked_at"] = now
+                    self.session_readings_by_session_id[session_id] = reading
                 if needs_turn_check:
                     reading["turn_shows_on_screen"] = count_lines_matching(screen_lines, adapter.working_screen_pattern) > 0
-                self.snapshot_needed.set()  # also lets "stuck" appear once its time has come
+                self.snapshot_needed.set()
 
     async def read_context_window_usage_periodically(self):
         """Keeps each agent session's context size and open tool call ("context_tokens" and
-        "open_tool_call" in its screen reading) current from the end of its conversation
+        "open_tool_call" in its session reading) current from the end of its conversation
         file (context_window_usage, open_tool_call_reading). The file is looked up
         (Claude Code: from `claude agents --json`; Codex: by its folder and start time) for each new process or Claude
         Code conversation and again every minute, and read again only when it changed."""
@@ -2381,11 +2442,13 @@ class DashboardCore:
         context_tokens = await asyncio.to_thread(agent_session["adapter"].read_context_tokens, path)
         # None means no usage in the file's end (one huge line), so the last size stays.
         context_tokens_kept = (context_tokens if context_tokens is not None
-                               else self.screen_readings_by_session_id.get(session_id, {}).get("context_tokens"))
+                               else self.session_readings_by_session_id.get(session_id, {}).get("context_tokens"))
         context_window_tokens = await asyncio.to_thread(
             agent_session["adapter"].read_context_window_tokens, path, agent_session["process_id"],
             self.claude_agents_by_process_id.get(agent_session["process_id"]), context_tokens_kept)
         open_tool_call = await asyncio.to_thread(agent_session["adapter"].read_open_tool_call, path)
+        turn_is_under_way = await asyncio.to_thread(agent_session["adapter"].read_turn_is_under_way, path)
+        turns_run_outside_the_tab = await asyncio.to_thread(agent_session["adapter"].read_turns_run_outside_the_tab, path)
         if (session_id not in self.agent_sessions or self.conversation_files_by_session_id.get(session_id) is not conversation_file
                 or conversation_file["path"] != path):
             return  # the tab closed, or /clear or a new conversation took this file's place, during the reads
@@ -2395,10 +2458,13 @@ class DashboardCore:
         if context_window_tokens is not None:
             self.note_reading_value(session_id, "context_window_tokens", context_window_tokens)
         self.note_reading_value(session_id, "open_tool_call", open_tool_call)
+        self.note_reading_value(session_id, "conversation_shows_a_turn_under_way", turn_is_under_way)
+        self.note_reading_value(session_id, "process_id_whose_turns_run_outside_the_tab",
+                                agent_session["process_id"] if turns_run_outside_the_tab else None)
         open_tool_started_at = (open_tool_call or {}).get("open_tool_started_at")
         if open_tool_started_at is not None:
             # Its row shows it running once it is that old, and the file may not change by then,
-            # so nothing else would ask for that snapshot (code review, 2026-10-29). A tenth of a
+            # so nothing else would ask for that snapshot. A tenth of a
             # second later, so the snapshot's time is past it.
             seconds_until_it_shows_as_running = SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING - (time.time() - open_tool_started_at)
             if seconds_until_it_shows_as_running > 0:
@@ -2419,10 +2485,10 @@ class DashboardCore:
             return None
         process_id = agent_session["process_id"]
         # The config folders `claude agents` and the hooks installer use, listed now, so one made
-        # after the app started counts too (code review, 2026-10-29).
+        # after the app started counts too.
         return await agent_session["adapter"].find_conversation_file(
             process_id, self.claude_agents_by_process_id.get(process_id) or {},
-            [config_folder or os.path.expanduser("~/.claude") for config_folder in list_claude_config_folders()])
+            list_claude_config_folder_paths())
 
     def forget_conversation_file_readings(self, session_id):
         """Clears the values read from a session's conversation file, when it is no longer its
@@ -2432,16 +2498,16 @@ class DashboardCore:
 
     def note_reading_value(self, session_id, reading_name, value):
         """Stores a value read for a session, from its conversation file ("context_tokens",
-        "open_tool_call") or its processes ("memory_bytes", "cpu_percent"), in its screen
+        "open_tool_call") or its processes ("memory_bytes", "cpu_percent"), in its session
         reading, asking for a snapshot when it changed."""
-        reading = self.screen_readings_by_session_id.setdefault(session_id, {})
+        reading = self.session_readings_by_session_id.setdefault(session_id, {})
         if value != reading.get(reading_name):
             reading[reading_name] = value
             self.snapshot_needed.set()
 
     async def read_resource_usage_periodically(self):
         """Keeps each agent session's memory and CPU use ("memory_bytes", "cpu_percent" in its
-        screen reading) current while the Memory or CPU column is shown: its agent process and
+        session reading) current while the Memory or CPU column is shown: its agent process and
         every process below it, read every RESOURCE_USAGE_CHECK_INTERVAL_SECONDS in a worker
         thread (a few system calls per process, no subprocess). Both are rounded (to the
         megabyte, to a whole percent, and below CPU_PERCENT_SHOWN_AS_IDLE to 0) so that an idle
@@ -2450,7 +2516,7 @@ class DashboardCore:
         A column shown, or the list sorted by memory or CPU, starts the readings at once
         (resource_usage_reading_needed), and a session's first reading, which can't give its CPU
         use yet, is followed by a second after SECONDS_BETWEEN_THE_FIRST_TWO_CPU_READINGS, so the
-        values and the order show up within a second rather than after 3 to 6 (code review, 2026-10-29)."""
+        values and the order show up within a second rather than after 3 to 6."""
         cpu_time_readings_by_session_id = {}  # (process ID, CPU seconds, read at) from the last reading
         seconds_until_the_next_reading = RESOURCE_USAGE_CHECK_INTERVAL_SECONDS
         while True:
@@ -2463,7 +2529,7 @@ class DashboardCore:
             if not self.resource_usage_is_read:
                 # Columns shown again later start over rather than average over the hidden time.
                 cpu_time_readings_by_session_id.clear()
-                for session_id in list(self.screen_readings_by_session_id):
+                for session_id in list(self.session_readings_by_session_id):
                     self.note_reading_value(session_id, "memory_bytes", None)
                     self.note_reading_value(session_id, "cpu_percent", None)
                 continue
@@ -2499,14 +2565,12 @@ class DashboardCore:
         detached processes. Whether it is in a turn goes by the status value its row goes by, the
         tracked one: a paused agent's tab has none from iTerm2 while the shell is in front, and
         its turn goes on once it is back. With no value from iTerm2 at all (after iTerm2
-        restarted), it goes by the state the row shows, from Claude Code's own report (code
-        review, 2026-10-28)."""
+        restarted), it goes by the state the row shows, from Claude Code's own report."""
         def agent_is_in_a_turn(session_id):
             status_value = self.session_tracking_by_session_id.get(session_id, {}).get("status_value")
             if status_value is None:
                 displayed_state = self.displayed_state_by_session_id.get(session_id)
-                return displayed_state is not None and (displayed_state.state in STATES_OF_A_TURN_UNDER_WAY
-                                                        or displayed_state.state == "stuck")
+                return displayed_state is not None and displayed_state.state in STATES_OF_A_TURN_UNDER_WAY
             return map_iterm2_status_value_to_state(status_value) in STATES_OF_A_TURN_UNDER_WAY
         return {
             session_id: (agent_session["process_id"], agent_is_in_a_turn(session_id),
@@ -2517,7 +2581,7 @@ class DashboardCore:
 
     async def read_child_processes_periodically(self):
         """Keeps each agent session's child processes ("child_processes", the sub rows of its open
-        tab row; user request, 2026-10-27) and its background shells ("background_shell_count")
+        tab row) and its background shells ("background_shell_count")
         current, every CHILD_PROCESS_CHECK_INTERVAL_SECONDS, in a worker thread (a few
         system calls per process, no subprocess). While the Memory or CPU column shows, each
         child's use is read too, rounded as the agent's is (read_resource_usage_periodically)."""
@@ -2547,7 +2611,7 @@ class DashboardCore:
 
     def note_child_processes(self, child_processes_by_session_id, cpu_time_readings_by_child, now):
         """Stores one reading of each agent session's child processes (as ChildProcessEntry
-        records) and background shells in its screen reading; returns the CPU time readings for the next one.
+        records) and background shells in its session reading; returns the CPU time readings for the next one.
 
         Args:
             child_processes_by_session_id: {session ID: agent_process_tree.read_child_processes's list}.
@@ -2596,7 +2660,7 @@ class DashboardCore:
             # Kept apart, since it changes at every reading. A reading that can tell whether more of
             # the reported shells still run (list_reported_shells_a_reading_can_check) may change
             # the count with nothing it reads changing, so it asks for a snapshot.
-            reading = self.screen_readings_by_session_id[session_id]
+            reading = self.session_readings_by_session_id[session_id]
             previous_reading_time = reading.get("running_claude_code_task_ids_read_at")
             reading["running_claude_code_task_ids_read_at"] = now
             if list_reported_shells_a_reading_can_check(hook_state, now) != list_reported_shells_a_reading_can_check(
@@ -2605,10 +2669,9 @@ class DashboardCore:
         return new_cpu_time_readings_by_child
 
     async def note_command_the_agent_is_waiting_on(self, session_id, agent_session, reading, state, is_effectively_working, now):
-        """Records in the session's screen reading the command a working agent started in this
-        turn and still runs ("running_command": (the name it was started as, started at)), and
-        when one was last seen running, so "stuck" means thinking with nothing new on screen (user
-        request, milestone 2). Between turns it records the processes running then
+        """Records in the session's session reading the command a working agent started in this
+        turn and still runs ("running_command": (the name it was started as, started at)), which
+        its row names. Between turns it records the processes running then
         ("helper_process_ids", for example MCP servers), which are not commands. A few system
         calls, no subprocess."""
         running_command = None
@@ -2626,8 +2689,6 @@ class DashboardCore:
                 command_process, command_started_at = command
                 running_command = (read_name_the_process_was_started_as(command_process.process_id) or command_process.name,
                                    command_started_at)
-        if running_command is not None:
-            reading["command_last_seen_running_at"] = now
         if running_command != reading.get("running_command"):
             reading["running_command"] = running_command
             self.snapshot_needed.set()
@@ -2701,18 +2762,37 @@ class DashboardCore:
             else:
                 self.publish_snapshot_if_changed()
 
-    async def watch_the_own_status_of_agents_in_terminals_without_status_reports(self):
-        """Asks for a snapshot when the own report of an agent in a terminal that reports no agent
-        status (tmux) changes (read_status_value_of_the_tabs_own_agent): nothing else tells the
-        core when Claude Code's session file changes. Read every SECONDS_BETWEEN_OWN_STATUS_READINGS."""
+    def ask_for_a_snapshot_once_claude_codes_own_idle_counts(self, now):
+        """Asks for a snapshot once the wait before Claude Code's own idle counts over iTerm2's
+        working is over for a row (own_idle_counts_at_by_session_id): as after the app restarted
+        while iTerm2 kept an old working, which no event then ends."""
+        if any(counts_at <= now for counts_at in self.own_idle_counts_at_by_session_id.values()):
+            self.own_idle_counts_at_by_session_id = {session_id: counts_at for session_id, counts_at
+                                                     in self.own_idle_counts_at_by_session_id.items() if counts_at > now}
+            self.snapshot_needed.set()
+
+    async def watch_the_own_status_of_agents_whose_terminal_reports_none(self):
+        """Asks for a snapshot when the own report of an agent whose terminal reports no status
+        for it changes: in a terminal that reports no agent status (tmux,
+        read_status_value_of_the_tabs_own_agent), and a Claude Code tab iTerm2 has no status for
+        (after iTerm2 restarted, read_the_own_status_of_claude_agents_iterm2_reports_none_for).
+        Nothing else tells the core when Claude Code's session file changes. Read every
+        SECONDS_BETWEEN_OWN_STATUS_READINGS, which also asks for a snapshot once Claude Code's own
+        idle counts over iTerm2's working (ask_for_a_snapshot_once_claude_codes_own_idle_counts)."""
+        own_status_of_claude_agents_iterm2_reports_none_for = {}
         while True:
             await asyncio.sleep(SECONDS_BETWEEN_OWN_STATUS_READINGS)
+            self.ask_for_a_snapshot_once_claude_codes_own_idle_counts(time.time())
             for session_id, own_status_value in list(self.own_status_value_by_session_id.items()):
                 agent_session = self.agent_sessions.get(session_id)
                 if agent_session is not None and agent_session["process_id"] and (
                         self.read_status_value_of_the_tabs_own_agent(session_id, agent_session) != own_status_value):
                     self.snapshot_needed.set()
                     break
+            statuses_read_now = self.read_the_own_status_of_claude_agents_iterm2_reports_none_for()
+            if statuses_read_now != own_status_of_claude_agents_iterm2_reports_none_for:
+                own_status_of_claude_agents_iterm2_reports_none_for = statuses_read_now
+                self.snapshot_needed.set()
 
     async def run(self):
         """Runs every terminal backend (each connects when its terminal runs) and the core's own
@@ -2728,7 +2808,7 @@ class DashboardCore:
             self.poll_window_frames_when_they_matter(), self.read_agent_screens_periodically(),
             self.read_context_window_usage_periodically(), self.read_resource_usage_periodically(),
             self.read_child_processes_periodically(), self.check_hooks_periodically(),
-            self.watch_the_own_status_of_agents_in_terminals_without_status_reports(), self.publish_when_needed()]
+            self.watch_the_own_status_of_agents_whose_terminal_reports_none(), self.publish_when_needed()]
         if self.claude_command_path:
             coroutines.append(self.refresh_claude_agents_periodically())
         if self.hook_events_socket_path:
@@ -2749,33 +2829,19 @@ class DashboardCore:
 class DashboardCoreThread(threading.Thread):
     """Runs DashboardCore on its own asyncio event loop, and offers thread-safe entry points."""
 
-    def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None,
-                 pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None, hook_events_socket_path=None,
-                 hook_states_file_path=None, started_at_and_hook_state_by_agent_process_id_to_start_with=None,
-                 report_terminal_problem=None):
+    def __init__(self, *core_arguments, **core_keyword_arguments):
+        """Takes DashboardCore's arguments, which run passes on to it on the thread's own loop."""
         super().__init__(name="dashboard-core", daemon=True)
         self.core_ready = threading.Event()
         self.core = None
         self.event_loop = None
-        self.publish_snapshot = publish_snapshot
-        self.report_connection_lost = report_connection_lost
-        self.report_terminal_problem = report_terminal_problem
-        self.verbose = verbose
-        self.docked_window_frames_file_path = docked_window_frames_file_path
-        self.pause_records_file_path = pause_records_file_path
-        self.pause_record_by_tab_and_agent_to_start_with = pause_record_by_tab_and_agent_to_start_with
-        self.hook_events_socket_path = hook_events_socket_path
-        self.hook_states_file_path = hook_states_file_path
-        self.started_at_and_hook_state_by_agent_process_id_to_start_with = started_at_and_hook_state_by_agent_process_id_to_start_with
+        self.core_arguments = core_arguments
+        self.core_keyword_arguments = core_keyword_arguments
 
     def run(self):
         self.event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.event_loop)
-        self.core = DashboardCore(self.publish_snapshot, self.report_connection_lost, self.verbose,
-                                  self.docked_window_frames_file_path, self.pause_records_file_path,
-                                  self.pause_record_by_tab_and_agent_to_start_with, self.hook_events_socket_path,
-                                  self.hook_states_file_path, self.started_at_and_hook_state_by_agent_process_id_to_start_with,
-                                  self.report_terminal_problem)
+        self.core = DashboardCore(*self.core_arguments, **self.core_keyword_arguments)
         self.core_ready.set()
         self.event_loop.run_until_complete(self.core.run())
 

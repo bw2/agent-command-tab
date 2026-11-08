@@ -5,7 +5,7 @@ def update_window_list_order(previous_window_order, current_window_ids):
     """Returns the new window order after windows opened or closed.
 
     Known windows keep their previous order, closed windows are dropped, and new windows go on
-    top (in the order given). With no previous order (at startup), the given order is used.
+    top (in the order given), so at startup the order is the given one.
 
     Args:
         previous_window_order: Window IDs in list order, from the last update.
@@ -14,8 +14,6 @@ def update_window_list_order(previous_window_order, current_window_ids):
     Returns:
         A list of window IDs.
     """
-    if not previous_window_order:
-        return list(current_window_ids)
     current_window_id_set = set(current_window_ids)
     kept_window_ids = [window_id for window_id in previous_window_order if window_id in current_window_id_set]
     known_window_id_set = set(previous_window_order)
@@ -42,8 +40,7 @@ def move_window_in_window_list_order(window_order, moved_window_id, drop_before_
 def move_id_before_another(ids, moved_id, drop_before_id):
     """Returns the IDs with moved_id just before drop_before_id, or at the end when that isn't
     among them (None, say); unchanged for an ID dropped before itself. moved_id may be new to the
-    IDs (a tab moved from another window). The window list and a window's tabs share it (code
-    review, 2026-10-30: the tabs' copy moved a tab dropped before itself to the end)."""
+    IDs (a tab moved from another window). The window list and a window's tabs share it."""
     if moved_id == drop_before_id:
         return list(ids)
     remaining_ids = [item_id for item_id in ids if item_id != moved_id]

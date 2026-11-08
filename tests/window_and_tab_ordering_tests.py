@@ -40,7 +40,7 @@ class MoveTabInFullTabOrderTests(unittest.TestCase):  # every tab of a window, t
     def test_tab_from_another_window(self):
         self.assertEqual(move_id_before_another(["x", "y"], "moved", "y"), ["x", "moved", "y"])
 
-    def test_drop_on_itself_changes_nothing(self):  # it moved the tab to the end (code review, 2026-10-30)
+    def test_drop_on_itself_changes_nothing(self):
         self.assertEqual(move_id_before_another(["a", "b", "c"], "a", "a"), ["a", "b", "c"])
 
 

@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 
+from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens,
                                                     claude_model_has_a_200k_context_window, find_claude_code_transcript,
                                                     find_codex_conversation_files, format_token_count,
@@ -13,6 +14,7 @@ from agent_command_tab.context_window_usage import (choose_claude_code_context_w
                                                     read_context_tokens_from_codex_conversation_file,
                                                     read_context_window_tokens_from_codex_conversation_file, read_last_lines,
                                                     read_last_records, read_model_from_claude_code_transcript,
+                                                    read_turn_is_under_way_from_codex_conversation_file,
                                                     read_turn_started_at_from_claude_code_transcript,
                                                     read_turn_started_at_from_codex_conversation_file)
 
@@ -56,6 +58,24 @@ class ContextWindowUsageTests(unittest.TestCase):
                                                   {"type": "assistant", "message": {"usage": {"input_tokens": 73525}}}])
         self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 73525)
 
+    def test_a_subagents_replies_dont_count_as_the_main_agents(self):
+        path = self.write_lines("with_a_subagent.jsonl", [
+            {"type": "assistant", "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 300000}}},
+            {"type": "assistant", "isSidechain": True,
+             "message": {"model": "claude-haiku-5-5", "usage": {"input_tokens": 12000}}},
+        ])
+        self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 300000)
+        self.assertEqual(read_model_from_claude_code_transcript(path), "claude-opus-5-5")
+
+    def test_a_codex_turn_is_under_way_from_its_task_started_until_its_task_complete(self):
+        started = {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}}
+        streaming = {"type": "response_item", "payload": {"type": "message"}}
+        completed = {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1"}}
+        self.assertTrue(read_turn_is_under_way_from_codex_conversation_file(self.write_lines("a.jsonl", [started, streaming])))
+        self.assertFalse(read_turn_is_under_way_from_codex_conversation_file(
+            self.write_lines("b.jsonl", [started, streaming, completed])))
+        self.assertIsNone(read_turn_is_under_way_from_codex_conversation_file(self.write_lines("c.jsonl", [streaming])))
+
     def test_codex_conversation_file_uses_the_latest_token_count(self):
         path = self.write_lines("rollout.jsonl", [
             {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"total_tokens": 100}}}},
@@ -85,7 +105,7 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(choose_claude_code_context_window_tokens("sonnet", "claude-sonnet-4-6", 40_000), 200_000)
         self.assertEqual(choose_claude_code_context_window_tokens(None, "claude-opus-4-6", 250_000), 1_000_000)  # more than 200k fits only in 1M
 
-    def test_a_claude_code_sessions_context_window_follows_its_latest_replys_model(self):  # user request, 2026-10-30
+    def test_a_claude_code_sessions_context_window_follows_its_latest_replys_model(self):
         path = self.write_lines("models.jsonl", [
             {"type": "assistant", "message": {"model": "claude-opus-4-6", "usage": {"input_tokens": 5}}},
             {"type": "assistant", "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 175_000}}},  # after /model
@@ -96,7 +116,10 @@ class ContextWindowUsageTests(unittest.TestCase):
         # Claude Code started with no model setting: its default model's own window.
         self.assertEqual(choose_claude_code_context_window_tokens(None, "claude-opus-5-5", 175_000), 1_000_000)
         self.assertEqual(choose_claude_code_context_window_tokens(None, "claude-haiku-4-5-20251001", 50_000), 200_000)
-        self.assertEqual(choose_claude_code_context_window_tokens(None, None, 50_000), 1_000_000)  # not known: 1M
+        # No reply in the file's end (a large paste): not known, so the core keeps the size it had.
+        self.assertIsNone(choose_claude_code_context_window_tokens(None, None, 50_000))
+        self.assertEqual(choose_claude_code_context_window_tokens("opus[1m]", None, 50_000), 1_000_000)  # the setting settles it
+        self.assertEqual(choose_claude_code_context_window_tokens(None, None, 250_000), 1_000_000)  # so does the size
 
     def test_only_claude_3_models_and_those_up_to_opus_and_sonnet_4_6_and_haiku_4_5_have_a_200k_window(self):
         for model in ["claude-3-7-sonnet-20250219", "claude-opus-4-20250514", "claude-opus-4-1-20250805", "claude-opus-4-5",
@@ -116,7 +139,7 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(read_last_lines(path, byte_count=10), ["second"])  # the 10 bytes start inside "first"
         self.assertEqual(read_last_lines(path, byte_count=1000), ["second", "first", "x" * 100])
 
-    def test_a_newest_line_longer_than_the_bytes_read_is_read_whole(self):  # code review, 2026-10-29
+    def test_a_newest_line_longer_than_the_bytes_read_is_read_whole(self):
         path = self.write_lines("long_last_line.jsonl", ["x" * 100, "first", "y" * 100])
         self.assertEqual(read_last_lines(path, byte_count=10), ["y" * 100, "first"])  # 10, then 40, then 160 of its 208 bytes
 
@@ -132,6 +155,14 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "session_meta", "payload": {"cwd": folder, "timestamp": started_at_text, "source": source,
                                                  "originator": originator}}])
 
+    def test_a_codex_conversation_run_by_codexs_shared_server_says_so_in_its_header(self):
+        adapter = CodexAdapter()
+        shared_server_file = self.write_codex_conversation_in_its_start_days_folder("shared.jsonl", "/p", time.time(), "vscode")
+        own_process_file = self.write_codex_conversation_in_its_start_days_folder("own.jsonl", "/p", time.time(), "cli")
+        self.assertEqual((adapter.read_turns_run_outside_the_tab(shared_server_file), adapter.read_turns_run_outside_the_tab(own_process_file)),
+                         (True, False))
+        self.assertFalse(adapter.read_turns_run_outside_the_tab(os.path.join(self.folder.name, "missing.jsonl")))
+
     def test_codex_conversation_file_is_found_by_folder_and_start_time(self):
         now = time.time()
         write_conversation = self.write_codex_conversation_in_its_start_days_folder
@@ -146,7 +177,7 @@ class ContextWindowUsageTests(unittest.TestCase):
 
     def test_a_codex_0_165_terminal_session_is_found_through_its_originator(self):
         # Codex 0.165 runs its terminal sessions through its shared background server, whose
-        # headers say source "vscode" (seen on 2026-11-02); its subagents' say "codex-tui" too.
+        # headers say source "vscode"; its subagents' say "codex-tui" too.
         now = time.time()
         write_conversation = self.write_codex_conversation_in_its_start_days_folder
         own_file = write_conversation("rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl", "/Users/me/code", now - 30,
@@ -202,7 +233,7 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(read_turn_started_at_from_codex_conversation_file(codex_path),
                          datetime.datetime(2026, 10, 19, 2, 43, 17, 92000, datetime.timezone.utc).timestamp())
 
-    def test_a_message_from_another_claude_code_session_starts_a_turn(self):  # code review, 2026-10-28
+    def test_a_message_from_another_claude_code_session_starts_a_turn(self):
         claude_path = self.write_lines("claude_peer.jsonl", [
             {"type": "user", "timestamp": "2026-10-19T14:00:00.000Z", "message": {"content": "fix the bug"}},
             {"type": "user", "timestamp": "2026-10-19T14:28:36.000Z", "isMeta": True, "turnOrigin": "peer",

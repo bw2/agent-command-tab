@@ -11,7 +11,6 @@ from agent_command_tab import dashboard_core
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.dashboard_core import DashboardCore
-from agent_command_tab.snapshot_builder import DisplayedState
 
 
 class StandInAdapter:
@@ -41,12 +40,21 @@ class StandInAdapter:
         self.read_paths.append(conversation_file_path)
         return {"open_tool_name": os.path.basename(conversation_file_path)}
 
+    def read_turn_is_under_way(self, conversation_file_path):
+        return None
+
+    def read_turns_run_outside_the_tab(self, conversation_file_path):
+        return False
+
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         # As CodexAdapter: only when exactly one file fits, so a copy never forks another conversation.
         return os.path.basename(self.paths_that_fit[0]) if len(self.paths_that_fit) == 1 else None
 
-    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
+    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None, codex_home_folder=None):
         return f"{launch_command} fork {conversation_id}" if conversation_id else launch_command
+
+    def find_codex_home_folder_of_process(self, agent_process_id):
+        return None
 
 
 class ClearedConversationTests(unittest.TestCase):
@@ -66,7 +74,7 @@ class ClearedConversationTests(unittest.TestCase):
         return path
 
     def find_the_noted_open_tool_call(self):
-        return self.core.screen_readings_by_session_id.get("s1", {}).get("open_tool_call")
+        return self.core.session_readings_by_session_id.get("s1", {}).get("open_tool_call")
 
     def update_readings_with_a_lookup_due(self):
         if "s1" in self.core.conversation_files_by_session_id:
@@ -134,9 +142,12 @@ class ClearedConversationTests(unittest.TestCase):
             # The one file that fits, as for a session with no file yet while a later one in its folder has one.
             def find_conversation_files(self, agent_process_id):
                 return [later_sessions_file]
+
+            def find_codex_home_folder_of_process(self, agent_process_id):
+                return "/Users/me/.codex"
         self.agent_session.update(adapter=StandInCodexAdapter(), working_folder="/p")
         self.assertEqual(asyncio.run(self.core.look_up_conversation_file("s1", self.agent_session)), later_sessions_file)
-        self.assertEqual(self.duplicate(), "codex fork 0199aaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        self.assertEqual(self.duplicate(), "CODEX_HOME=/Users/me/.codex codex fork 0199aaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         self.core.agent_sessions["s2"] = {"adapter": StandInCodexAdapter(), "process_id": 4343, "is_in_background": False,
                                           "working_folder": "/p"}
         self.assertIsNone(asyncio.run(self.core.look_up_conversation_file("s1", self.agent_session)))
@@ -148,38 +159,19 @@ class ClearedConversationTests(unittest.TestCase):
         self.assertIsNone(asyncio.run(self.core.look_up_conversation_file("s1", self.agent_session)))
         self.assertEqual(self.duplicate(), "codex")
 
-    def test_commands_are_not_typed_into_a_suspended_agent(self):
-        self.agent_session["is_in_background"] = True
-        self.core.displayed_state_by_session_id["s1"] = DisplayedState("idle", 0, 0)  # what its row still shows
-        action_result = asyncio.run(self.core.handle_send_slash_command(
-            ActionRequest("send_slash_command", {"session_id": "s1"}, {"command": "/clear"})))
-        self.assertFalse(action_result.succeeded)
-        self.assertIn("suspended", action_result.message)
-
-
-class OpenToolCallSnapshotTests(unittest.TestCase):  # code review, 2026-10-29
     def test_a_snapshot_is_asked_for_once_an_open_tool_call_is_old_enough_to_show_as_running(self):
         # The conversation file may not change again by then, so the row showed "thinking" until
         # some other change asked for a snapshot.
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        path = os.path.join(folder.name, "conversation.jsonl")
-        with open(path, "w") as file:
-            file.write("{}\n")
-        adapter = StandInAdapter(path)
-        adapter.read_open_tool_call = lambda conversation_file_path: {"open_tool_name": "WebFetch",
-                                                                      "open_tool_started_at": time.time()}
-        core = DashboardCore(lambda snapshot: None, lambda message: None)
-        agent_session = {"adapter": adapter, "process_id": 4242, "is_in_background": False}
-        core.agent_sessions = {"s1": agent_session}
+        self.adapter.read_open_tool_call = lambda conversation_file_path: {"open_tool_name": "WebFetch",
+                                                                           "open_tool_started_at": time.time()}
 
         async def read_the_file_then_wait():
-            await core.update_conversation_file_readings("s1", agent_session)
-            core.snapshot_needed.clear()  # the new reading asked for one at once
+            await self.core.update_conversation_file_readings("s1", self.agent_session)
+            self.core.snapshot_needed.clear()  # the new reading asked for one at once
             await asyncio.sleep(0.1)
-            is_asked_for_before_the_tool_shows_as_running = core.snapshot_needed.is_set()
+            is_asked_for_before_the_tool_shows_as_running = self.core.snapshot_needed.is_set()
             await asyncio.sleep(0.5)
-            return is_asked_for_before_the_tool_shows_as_running, core.snapshot_needed.is_set()
+            return is_asked_for_before_the_tool_shows_as_running, self.core.snapshot_needed.is_set()
         with unittest.mock.patch.object(dashboard_core, "SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING", 0.3):
             self.assertEqual(asyncio.run(read_the_file_then_wait()), (False, True))
 

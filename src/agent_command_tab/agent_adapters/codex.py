@@ -7,14 +7,40 @@ import shlex
 import time
 
 from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMANDS, MESSAGES_THROUGH_CODEX_QUEUE,
-                                                   AgentToolAdapter, split_command_line_into_program_names)
+                                                   AgentToolAdapter, remove_environment_settings_from_launch_command,
+                                                   split_command_line_into_program_names)
 from agent_command_tab.agent_process_tree import (read_process_arguments_and_environment, read_process_current_folder,
                                                   read_process_info)
-from agent_command_tab.context_window_usage import (find_codex_conversation_files,
+from agent_command_tab.context_window_usage import (codex_session_header_says_it_runs_in_the_shared_server,
+                                                    find_codex_conversation_files, read_codex_session_header,
                                                     read_context_tokens_from_codex_conversation_file,
                                                     read_context_window_tokens_from_codex_conversation_file,
+                                                    read_turn_is_under_way_from_codex_conversation_file,
                                                     read_turn_started_at_from_codex_conversation_file)
 from agent_command_tab.open_tool_call_reading import read_open_tool_call_from_codex_conversation_file
+
+
+DEFAULT_CODEX_HOME_FOLDER = os.path.expanduser("~/.codex")  # the one a Codex without CODEX_HOME uses
+
+
+def build_codex_home_setting(codex_home_folder):
+    """Returns "CODEX_HOME=<folder> " to set in front of a command, or "" for None."""
+    return f"CODEX_HOME={shlex.quote(codex_home_folder)} " if codex_home_folder else ""
+
+
+def set_codex_home_in_front_of_launch_command(launch_command, codex_home_folder):
+    """Returns the launch command run with CODEX_HOME set to codex_home_folder, in place of any it
+    sets itself (which would come later, and win); unchanged for None (not known)."""
+    if not codex_home_folder:
+        return launch_command
+    return build_codex_home_setting(codex_home_folder) + remove_environment_settings_from_launch_command(launch_command, "CODEX_HOME")
+
+
+def find_codex_home_folder(environment=None):
+    """Returns the folder Codex keeps its files in: environment's (by default the app's own)
+    CODEX_HOME, or DEFAULT_CODEX_HOME_FOLDER."""
+    return os.path.expanduser((os.environ if environment is None else environment).get("CODEX_HOME") or DEFAULT_CODEX_HOME_FOLDER)
+
 
 # <sessions folder>/2026/10/18/rollout-2026-10-18T15-04-05-<conversation ID>.jsonl
 CONVERSATION_FILE_PATTERN = re.compile(
@@ -32,19 +58,18 @@ class CodexAdapter(AgentToolAdapter):
     """
 
     agent_tool_name = "Codex"
-    progress_noise_patterns = (TURN_TIMER_PATTERN,)
     working_screen_pattern = TURN_TIMER_PATTERN
     helper_process_names = frozenset({"codex-code-mode-host"})  # stays running for the whole session
     slash_commands = COMPACT_AND_CLEAR_SLASH_COMMANDS
     # The input box: "›", then the input, above the line with the model and the folder
-    # ("  GPT-6-Astra low fast · /private/tmp/…", Phase 0).
+    # ("  GPT-6-Astra low fast · /private/tmp/…").
     input_line_marker = "›"
     input_area_end_pattern = re.compile(r"^  \S[^·]* · [~/…]")
     seconds_before_enter = 0.3  # Codex takes keys within 8 ms of each other as a paste, and Enter for 120 ms after it as a newline
     # Codex 0.155.1 hides its turn timer while answer text streams, so a turn can look over on
     # screen; a /compact typed then is refused with this line and dropped from the box.
     slash_command_refused_during_a_turn_pattern = re.compile(r"'/\w+' is disabled while a task is in progress")
-    # `codex queue` reached a busy Codex 0.155.1 session in 0.2 s, which ran the message right after its turn (2026-10-21).
+    # `codex queue` reached a busy Codex 0.155.1 session in 0.2 s, which ran the message right after its turn.
     how_other_agent_sessions_send_it_messages = MESSAGES_THROUGH_CODEX_QUEUE
     can_resume_conversations = True
 
@@ -79,16 +104,24 @@ class CodexAdapter(AgentToolAdapter):
 
     def find_conversation_files(self, agent_process_id):
         """Returns the files that may be the Codex process's conversation, matched by its folder and
-        start time in Codex's sessions folder, newest first (context_window_usage.find_codex_conversation_files;
-        Codex 0.163 doesn't keep the file open, so lsof can't find it). A process started with
-        `codex resume` (or `node .../codex resume`) may be writing an earlier conversation's file."""
+        start time in the sessions folder of its Codex home folder (find_codex_home_folder_of_process),
+        newest first (context_window_usage.find_codex_conversation_files; Codex 0.163 doesn't keep
+        the file open, so lsof can't find it). A process started with `codex resume` (or `node
+        .../codex resume`) may be writing an earlier conversation's file."""
         agent_process = read_process_info(agent_process_id) if agent_process_id else None
         if agent_process is None:
             return []
-        codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
         return find_codex_conversation_files(
-            os.path.join(codex_home, "sessions"), agent_process.started_at, read_process_current_folder(agent_process_id),
-            time.time(), agent_resumed_a_conversation="resume" in read_process_arguments_and_environment(agent_process_id)[0][1:])
+            os.path.join(self.find_codex_home_folder_of_process(agent_process_id), "sessions"), agent_process.started_at,
+            read_process_current_folder(agent_process_id), time.time(),
+            agent_resumed_a_conversation="resume" in read_process_arguments_and_environment(agent_process_id)[0][1:])
+
+    def find_codex_home_folder_of_process(self, agent_process_id):
+        """Returns the folder the Codex process keeps its files in: its own environment's
+        CODEX_HOME (a launch command may set another than the app's), ~/.codex when it has none,
+        or the app's own (find_codex_home_folder) when its environment can't be read."""
+        arguments, environment = read_process_arguments_and_environment(agent_process_id)
+        return find_codex_home_folder(environment if arguments else None)
 
     def read_context_tokens(self, conversation_file_path):
         return read_context_tokens_from_codex_conversation_file(conversation_file_path)
@@ -99,15 +132,23 @@ class CodexAdapter(AgentToolAdapter):
     def read_turn_started_at(self, conversation_file_path):
         return read_turn_started_at_from_codex_conversation_file(conversation_file_path)
 
+    def read_turn_is_under_way(self, conversation_file_path):
+        return read_turn_is_under_way_from_codex_conversation_file(conversation_file_path)
+
+    def read_turns_run_outside_the_tab(self, conversation_file_path):
+        return codex_session_header_says_it_runs_in_the_shared_server(read_codex_session_header(conversation_file_path))
+
     def read_open_tool_call(self, conversation_file_path):
         return read_open_tool_call_from_codex_conversation_file(conversation_file_path)
 
-    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
-        """Continues a copy of the conversation (`codex fork <id>`)."""
+    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None, codex_home_folder=None):
+        """Continues a copy of the conversation (`codex fork <id>`), with the original's CODEX_HOME
+        (build_launch_command_to_resume)."""
         if not conversation_id:
             return launch_command
-        return f"{launch_command} fork {shlex.quote(conversation_id)}"
+        return f"{set_codex_home_in_front_of_launch_command(launch_command, codex_home_folder)} fork {shlex.quote(conversation_id)}"
 
-    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None):
-        """`<launch command> resume <id>`."""
-        return f"{launch_command} resume {shlex.quote(conversation_id)}"
+    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None, codex_home_folder=None):
+        """`<launch command> resume <id>`, with CODEX_HOME set to the conversation's home folder
+        when it is known (Codex finds the conversation only there), in place of the launch command's own."""
+        return f"{set_codex_home_in_front_of_launch_command(launch_command, codex_home_folder)} resume {shlex.quote(conversation_id)}"

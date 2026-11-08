@@ -15,7 +15,7 @@ import unittest.mock
 from agent_command_tab import hook_event_forwarder
 from agent_command_tab.hook_event_forwarder import list_ancestor_processes, reduce_hook_payload
 
-# Trimmed from the payloads Claude Code 2.1.311 sent on 2026-10-27 (spike run in a throwaway folder).
+# Trimmed from the payloads Claude Code 2.1.311 sent (a run in a throwaway folder).
 BACKGROUND_SHELL_LAUNCHED = {
     "session_id": "7699d33f", "hook_event_name": "PostToolUse", "tool_name": "Bash",
     "tool_input": {"command": "python3 -c 'import time; time.sleep(15)'", "description": "Sleep 15 seconds in background",

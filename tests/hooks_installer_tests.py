@@ -16,6 +16,7 @@ from agent_command_tab.hooks_installer import (BACKUP_FILE_SUFFIX, HOOK_EVENTS_B
                                                convert_event_name_to_codex_hook_state_name, install_hooks,
                                                list_positions_of_the_apps_hooks, remove_hooks, remove_the_apps_hooks,
                                                this_copys_hooks_can_run)
+from homebrew_folder_builders import add_the_homebrew_opt_link, make_file_in_a_homebrew_version_folder
 
 COMMAND = build_forwarder_command("Claude Code", "/venv/bin/python", "/code/hook_event_forwarder.py")
 EVENTS = HOOK_EVENTS_BY_AGENT_TOOL_NAME["Claude Code"]
@@ -31,7 +32,7 @@ def write_codex_approvals(config_file_path, hooks_file_path, settings, positions
             config_file.write(f'[hooks.state."{hooks_file_path}:{convert_event_name_to_codex_hook_state_name(event_name)}:'
                               f'{group_index}:{hook_index}"]\ntrusted_hash = '
                               f'"{compute_codex_approval_hash(event_name, settings["hooks"][event_name][group_index])}"\n\n')
-# The user's own settings, as in ~/.claude/settings.json on this Mac (trimmed).
+# A user's own settings, as in a real ~/.claude/settings.json (trimmed).
 USERS_SETTINGS = {
     "model": "opus",
     "hooks": {
@@ -41,21 +42,30 @@ USERS_SETTINGS = {
 }
 
 
+class CodexHomeFoldersTests(unittest.TestCase):
+    def test_the_hooks_also_go_in_the_codex_home_the_codex_launch_command_sets(self):
+        # Its sessions read their hooks only from that home.
+        with tempfile.TemporaryDirectory() as folder:
+            settings_file_path = os.path.join(folder, "settings.json")
+            for launch_command, expected_folders in (("codex", ["/app-codex-home"]),
+                                                     ("RUST_LOG=info CODEX_HOME=/x codex -s read-only", ["/app-codex-home", "/x"]),
+                                                     ("CODEX_HOME=/app-codex-home codex", ["/app-codex-home"])):  # listed once
+                with open(settings_file_path, "w") as settings_file:
+                    json.dump({"agent_tools": [{"agent_tool_name": "Codex", "launch_command": launch_command}]}, settings_file)
+                with unittest.mock.patch.dict(os.environ, {"CODEX_HOME": "/app-codex-home"}):
+                    self.assertEqual(hooks_installer.list_codex_home_folders(settings_file_path), expected_folders, launch_command)
+
+
 class BuildForwarderCommandTests(unittest.TestCase):
     def test_paths_with_spaces_are_quoted(self):
         self.assertEqual(build_forwarder_command("Claude Code", "/My Apps/python", "/code/hook_event_forwarder.py"),
                          "'/My Apps/python' -I -S /code/hook_event_forwarder.py 'Claude Code'")
 
-    def test_a_homebrew_python_is_named_by_its_path_that_survives_an_upgrade(self):  # user request, 2026-10-28
+    def test_a_homebrew_python_is_named_by_its_path_that_survives_an_upgrade(self):
         with tempfile.TemporaryDirectory() as prefix:
-            version_folder = os.path.join(prefix, "Cellar", "agent-command-tab", "0.1.0")
-            os.makedirs(os.path.join(version_folder, "libexec", "bin"))
-            with open(os.path.join(version_folder, "libexec", "bin", "python"), "w"):
-                pass
-            os.makedirs(os.path.join(prefix, "opt"))
-            os.symlink(version_folder, os.path.join(prefix, "opt", "agent-command-tab"))
-            command = build_forwarder_command("Claude Code", os.path.join(version_folder, "libexec", "bin", "python"),
-                                              "/code/hook_event_forwarder.py")
+            python_path = make_file_in_a_homebrew_version_folder(prefix, "libexec/bin/python")
+            add_the_homebrew_opt_link(prefix)
+            command = build_forwarder_command("Claude Code", python_path, "/code/hook_event_forwarder.py")
         self.assertEqual(command, f"{prefix}/opt/agent-command-tab/libexec/bin/python -I -S /code/hook_event_forwarder.py 'Claude Code'")
 
 
@@ -77,6 +87,17 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(remove_the_apps_hooks(add_the_apps_hooks(USERS_SETTINGS, COMMAND, EVENTS)), USERS_SETTINGS)
         self.assertEqual(remove_the_apps_hooks(add_the_apps_hooks({"model": "opus"}, COMMAND, EVENTS)), {"model": "opus"})
         self.assertEqual(remove_the_apps_hooks({"hooks": {"Stop": []}}), {"hooks": {"Stop": []}})  # the user's own empty list
+
+    def test_another_tools_hook_added_to_the_apps_entry_is_kept(self):
+        apps_entry = add_the_apps_hooks({}, COMMAND, EVENTS)["hooks"]["SessionEnd"][0]
+        other_hook = {"type": "command", "command": "/usr/local/bin/notify-done"}
+        settings = add_the_apps_hooks(USERS_SETTINGS, COMMAND, EVENTS)
+        # Another tool's installer appended its hook to the app's entry.
+        settings["hooks"]["SessionEnd"] = [dict(apps_entry, hooks=apps_entry["hooks"] + [other_hook])]
+        self.assertEqual(remove_the_apps_hooks(settings)["hooks"]["SessionEnd"], [{"hooks": [other_hook]}])
+        reinstalled_settings = add_the_apps_hooks(settings, COMMAND, EVENTS)
+        self.assertEqual(reinstalled_settings["hooks"]["SessionEnd"], [{"hooks": [other_hook]}, apps_entry])
+        self.assertIsNotNone(list_positions_of_the_apps_hooks(reinstalled_settings, COMMAND, EVENTS))
 
     def test_positions_need_every_event_with_the_same_command(self):
         settings = add_the_apps_hooks(USERS_SETTINGS, COMMAND, EVENTS)
@@ -101,7 +122,7 @@ class SettingsTests(unittest.TestCase):
         codex_settings = add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME)
         self.assertEqual(codex_settings["hooks"]["Stop"][0]["hooks"][0]["statusMessage"], "Report to AgentCommandTab")
         self.assertNotIn("statusMessage", add_the_apps_hooks({}, COMMAND, EVENTS)["hooks"]["Stop"][0]["hooks"][0])
-        # The unnamed entries installed before 2026-10-27 aren't the app's current ones, so installing replaces them.
+        # The unnamed entries earlier versions installed aren't the app's current ones, so installing replaces them.
         self.assertIsNone(list_positions_of_the_apps_hooks(add_the_apps_hooks({}, CODEX_COMMAND, CODEX_EVENTS),
                                                            CODEX_COMMAND, CODEX_EVENTS, CODEX_HOOK_NAME))
 
@@ -143,11 +164,10 @@ class FilesTests(unittest.TestCase):
         self.codex_home_folder = os.path.join(self.folder, "codex")
         os.mkdir(self.codex_home_folder)
         self.codex_hooks_path = os.path.join(self.codex_home_folder, "hooks.json")
-        for patch in (unittest.mock.patch.object(hooks_installer, "list_settings_file_paths", lambda agent_tool_name: {
-                          "Claude Code": [self.claude_settings_path], "Codex": [self.codex_hooks_path]}[agent_tool_name]),
-                      unittest.mock.patch.object(hooks_installer, "find_codex_home_folder", lambda: self.codex_home_folder)):
-            patch.start()
-            self.addCleanup(patch.stop)
+        patch = unittest.mock.patch.object(hooks_installer, "list_settings_file_paths", lambda agent_tool_name: {
+            "Claude Code": [self.claude_settings_path], "Codex": [self.codex_hooks_path]}[agent_tool_name])
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def read_json(self, file_path):
         with open(file_path) as json_file:
@@ -164,11 +184,12 @@ class FilesTests(unittest.TestCase):
         self.assertEqual(self.read_json(self.claude_settings_path), USERS_SETTINGS)
         self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_MISSING)
         # The backup still holds the file from before the first change, not the app's version
-        # the removal replaced (code review, 2026-10-30).
+        # the removal replaced.
         self.assertEqual(self.read_json(self.claude_settings_path + BACKUP_FILE_SUFFIX), USERS_SETTINGS)
 
-    def test_the_backup_of_a_file_the_app_created_is_empty(self):  # code review, 2026-10-30
-        # The removal that follows copied the app's own hooks.json there, as if it were the original.
+    def test_the_backup_of_a_file_the_app_created_is_empty(self):
+        # Without that empty backup made at install, the removal that follows would copy the app's
+        # own hooks.json there, as if it were the original.
         self.assertEqual(install_hooks("Codex"), [self.codex_hooks_path])  # a new hooks.json
         self.assertEqual(self.read_json(self.codex_hooks_path + BACKUP_FILE_SUFFIX), {})
         self.assertEqual(remove_hooks("Codex"), [self.codex_hooks_path])
@@ -195,7 +216,7 @@ class FilesTests(unittest.TestCase):
         self.assertIn("hooks", self.read_json(linked_file_path))
         self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
 
-    def test_hooks_whose_python_or_forwarder_is_gone_cant_run(self):  # user request, 2026-11-05
+    def test_hooks_whose_python_or_forwarder_is_gone_cant_run(self):
         install_hooks("Claude Code")
         # A pipx environment's bin/python, a link to a Python that a Homebrew upgrade removed.
         python_link_to_a_removed_python = os.path.join(self.folder, "python")

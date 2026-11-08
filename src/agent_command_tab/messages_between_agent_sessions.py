@@ -1,4 +1,4 @@
-"""The message "Talk to Each Other" sends each selected agent session (user request, 2026-10-21).
+"""The message "Talk to Each Other" sends each selected agent session.
 
 Every session gets the user's note, then its own name, then, for each of the other sessions,
 what it needs to send that session a message: a Claude Code session's name, which Claude Code's
@@ -12,6 +12,7 @@ import collections
 import shlex
 
 from agent_command_tab.agent_adapters.base import MESSAGES_THROUGH_CODEX_QUEUE, MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
+from agent_command_tab.agent_adapters.codex import build_codex_home_setting
 
 # A Claude Code session's message is held until it waits at its prompt, for up to this long.
 SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT = 30 * 60
@@ -22,12 +23,13 @@ DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER = (
 AgentSessionForMessages = collections.namedtuple(
     "AgentSessionForMessages",
     ["agent_tool_name", "how_other_agent_sessions_send_it_messages", "address", "process_id", "working_folder", "tab_title",
-     "tab_kind_name"])
+     "tab_kind_name", "codex_home_folder"], defaults=[None])
 AgentSessionForMessages.__doc__ = (
     "What the messages say about one agent session: its tool (\"Codex\"), how other sessions send it messages "
     "(agent_adapters.base: MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL or MESSAGES_THROUGH_CODEX_QUEUE), its address "
     "for that (a Claude Code session's name, a Codex session's conversation ID), its agent's process ID, its "
-    "working folder, its tab's title, and what its terminal calls the tab (\"iTerm2 tab\", \"tmux window\").")
+    "working folder, its tab's title, what its terminal calls the tab (\"iTerm2 tab\", \"tmux window\"), and for "
+    "a Codex session the CODEX_HOME `codex queue` needs to find its conversation (None when not known).")
 
 
 def describe_agent_session_for_messages(agent_session):
@@ -47,11 +49,13 @@ def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_
         recipient: The AgentSessionForMessages it would send a message to.
         recipient_gets_the_message_too: Whether the recipient gets a Talk to Each Other message
             too, so it learns how to message the sender (only the one chosen in the Talk to Each
-            Other window may get it; code review, 2026-10-28).
+            Other window may get it).
     """
     if recipient.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
-        # The message attached to its option, so one starting with "-" isn't read as an option.
-        return (f"To message it, run: codex queue --thread {shlex.quote(recipient.address)} "
+        # The message attached to its option, so one starting with "-" isn't read as an option. Its
+        # CODEX_HOME, since the sender's may differ.
+        return (f"To message it, run: {build_codex_home_setting(recipient.codex_home_folder)}codex queue --thread "
+                f"{shlex.quote(recipient.address)} "
                 f'--message="<your message>"')
     if sender.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL:
         return f'To message it, use your SendMessage tool with to: "{recipient.address}".'

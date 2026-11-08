@@ -1,5 +1,5 @@
 """The saved agent sessions: conversations to resume later, saved from a row's "Save session" or
-"Save sessions" and listed by the Restore sessions window (user request, 2026-11-06). They are
+"Save sessions" and listed by the Restore sessions window. They are
 kept in a file next to the settings. Pure functions apart from the file reading and writing.
 
 A saved window is the terminal window its sessions were saved from:
@@ -14,19 +14,21 @@ A saved session:
     {"conversation_id": str, "agent_tool_name": "Claude Code" or "Codex", "name": str,
      "name_was_set_by_user": bool, "folder": where the agent ran, which a resume needs,
      "claude_config_folder": the Claude Code config folder it ran with, or None for the default,
+     "codex_home_folder": the CODEX_HOME a Codex session ran with, or None when not known (files
+         saved before it was kept) and for other tools,
      "terminal_session_id": its tab's first pane when saved, so a restore can type into that tab
-         when the terminal brought it back (iTerm2 keeps its IDs across a reboot, seen 2026-11-06),
+         when the terminal brought it back (iTerm2 keeps its IDs across a reboot),
      "saved_at": when it was saved, in seconds since 1970}
 A conversation is saved once: saving it again replaces its entry. A saved window is known by its
 terminal, window ID and the time that window was opened (find_saved_window_key), a saved session
 by its conversation ID.
 """
 
-import json
 import os
 
+from agent_command_tab.docked_window_frames_store import frame_is_valid
 from agent_command_tab.hook_states_store import is_number
-from agent_command_tab.settings_store import SETTINGS_FOLDER, write_json_file_atomically
+from agent_command_tab.settings_store import SETTINGS_FOLDER, read_json_file, write_json_file_atomically
 
 SAVED_AGENT_SESSIONS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "saved_agent_sessions.json")
 
@@ -45,11 +47,12 @@ def build_saved_session_from_stored_value(value):
         return None
     if not (isinstance(value.get("name"), str) and isinstance(value.get("name_was_set_by_user"), bool)
             and isinstance(value.get("terminal_session_id"), str) and is_number(value.get("saved_at"))
-            and (value.get("claude_config_folder") is None or isinstance(value["claude_config_folder"], str))):
+            and all(value.get(field_name) is None or isinstance(value[field_name], str)
+                    for field_name in ("claude_config_folder", "codex_home_folder"))):
         return None
     return {field_name: value.get(field_name) for field_name in (
         "conversation_id", "agent_tool_name", "name", "name_was_set_by_user", "folder", "claude_config_folder",
-        "terminal_session_id", "saved_at")}
+        "codex_home_folder", "terminal_session_id", "saved_at")}
 
 
 def build_saved_window_from_stored_value(value):
@@ -62,7 +65,7 @@ def build_saved_window_from_stored_value(value):
     if not (isinstance(value.get("terminal_name"), str) and isinstance(value.get("terminal_window_id"), str)
             and (opened_at is None or is_number(opened_at))
             and isinstance(value.get("name"), str) and isinstance(value.get("name_was_set_by_user"), bool)
-            and (frame is None or (isinstance(frame, list) and len(frame) == 4 and all(map(is_number, frame))))):
+            and (frame is None or frame_is_valid(frame))):
         return None
     saved_sessions = [saved_session for saved_session in map(build_saved_session_from_stored_value, value["saved_sessions"])
                       if saved_session is not None]
@@ -76,12 +79,8 @@ def build_saved_window_from_stored_value(value):
 def load_saved_windows(file_path):
     """Returns the saved windows from the file; [] when it is missing or unreadable, and without
     entries that don't have the right shape."""
-    try:
-        with open(file_path) as file:
-            stored_windows = json.load(file)
-    except (OSError, ValueError):
-        return []
-    if not isinstance(stored_windows, list):
+    stored_windows = read_json_file(file_path, list)
+    if stored_windows is None:
         return []
     return [saved_window for saved_window in map(build_saved_window_from_stored_value, stored_windows)
             if saved_window is not None]
@@ -101,11 +100,11 @@ def build_saved_window(window_entry, saved_sessions, opened_at):
             "saved_sessions": saved_sessions}
 
 
-def build_saved_session(agent_session_entry, folder, conversation_id, claude_config_folder, saved_at):
+def build_saved_session(agent_session_entry, folder, conversation_id, claude_config_folder, saved_at, codex_home_folder=None):
     """Returns the saved session for a list's AgentSessionEntry, whose agent ran in folder."""
     return {"conversation_id": conversation_id, "agent_tool_name": agent_session_entry.agent_tool_name,
             "name": agent_session_entry.tab_title, "name_was_set_by_user": agent_session_entry.tab_title_set_by_user,
-            "folder": folder, "claude_config_folder": claude_config_folder,
+            "folder": folder, "claude_config_folder": claude_config_folder, "codex_home_folder": codex_home_folder,
             "terminal_session_id": agent_session_entry.session_id, "saved_at": saved_at}
 
 

@@ -22,8 +22,8 @@ CLAUDE_CODE_MASCOT_PIXEL_ROWS = [
     "   # #    # #   ",
     "   # #    # #   ",
 ]
-# The OpenAI logo for Codex, in place of the ">_" from Codex's start-up banner (user request,
-# 2026-10-27). The outline is Simple Icons' (simpleicons.org), which they release under CC0.
+# The OpenAI logo for Codex, in place of the ">_" from Codex's start-up banner. The outline is Simple Icons'
+# (simpleicons.org), which they release under CC0.
 OPENAI_LOGO_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="'
     "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9"
@@ -109,7 +109,7 @@ def build_text_image(text, font):
 
 def describe_agent_tool_icon(agent_tool_name):
     """Returns the icon's hover text: the tool's name, with the company for Codex, whose icon is
-    the OpenAI logo (user request, 2026-10-27)."""
+    the OpenAI logo."""
     return {"Codex": "OpenAI Codex"}.get(agent_tool_name, agent_tool_name)
 
 

@@ -7,12 +7,16 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
+from agent_command_tab import start_with_iterm2
 from agent_command_tab.installed_copy_paths import find_python_of_this_copy, replace_homebrew_version_folder_with_its_stable_link
-from agent_command_tab.start_with_iterm2 import (ITERM2_SCRIPTS_FOLDER, build_autolaunch_script_source,
+from agent_command_tab.start_with_iterm2 import (ITERM2_SCRIPTS_FOLDER, PACKAGE_FOLDER_COMMENT_PREFIX, build_autolaunch_script_source,
                                                  build_command_that_starts_this_copy_of_the_app, escape_for_applescript_string,
-                                                 find_iterm2_autolaunch_folder, read_program_of_autolaunch_script,
-                                                 update_autolaunch_script_to_match_setting)
+                                                 find_iterm2_autolaunch_folder, find_package_folder_of_this_copy,
+                                                 read_program_and_package_folder_of_autolaunch_script,
+                                                 update_autolaunch_script_to_match_setting, write_autolaunch_script)
+from homebrew_folder_builders import add_the_homebrew_opt_link, make_file_in_a_homebrew_version_folder
 
 HOMEBREW_PYTHON = "/opt/homebrew/Cellar/agent-command-tab/0.1.0/libexec/bin/python"
 
@@ -33,21 +37,16 @@ class HomebrewStablePathTests(unittest.TestCase):
 
     def test_the_real_file_system_is_checked(self):
         with tempfile.TemporaryDirectory() as folder:
-            version_folder = os.path.join(folder, "Cellar", "agent-command-tab", "0.1.0", "bin")
-            os.makedirs(version_folder)
-            os.makedirs(os.path.join(folder, "opt"))
-            path = os.path.join(version_folder, "agent-command-tab")
-            with open(path, "w"):
-                pass
+            path = make_file_in_a_homebrew_version_folder(folder, "bin/agent-command-tab")
             self.assertEqual(replace_homebrew_version_folder_with_its_stable_link(path), path)  # no opt link yet
-            os.symlink(os.path.dirname(version_folder), os.path.join(folder, "opt", "agent-command-tab"))
+            add_the_homebrew_opt_link(folder)
             self.assertEqual(replace_homebrew_version_folder_with_its_stable_link(path),
                              os.path.join(folder, "opt", "agent-command-tab", "bin", "agent-command-tab"))
 
 
 class PythonOfThisCopyTests(unittest.TestCase):
     def test_a_venv_is_named_by_its_bin_python_whatever_python_version_made_it(self):
-        # The hooks named .venv/bin/python3.11, gone once the venv was made again with Python 3.13 (2026-10-28).
+        # Hooks naming .venv/bin/python3.11 break once the venv is made again with Python 3.13.
         self.assertEqual(find_python_of_this_copy("/code/.venv/bin/python3.11", "/code/.venv", "/Library/Frameworks/Python.framework/Versions/3.11",
                                                   lambda path: True), "/code/.venv/bin/python")
         self.assertEqual(find_python_of_this_copy(HOMEBREW_PYTHON + "3.13", "/opt/homebrew/Cellar/agent-command-tab/0.1.0/libexec",
@@ -61,12 +60,11 @@ class PythonOfThisCopyTests(unittest.TestCase):
 
 
 class CommandThatStartsTheAppTests(unittest.TestCase):
-    def test_a_python_runs_the_command_line_module_by_a_path_that_survives_an_upgrade(self):
-        self.assertEqual(build_command_that_starts_this_copy_of_the_app("/Users/someone/.venv/bin/python"),
-                         ["/Users/someone/.venv/bin/python", "-m", "agent_command_tab.command_line", "run"])
-        homebrew_command = build_command_that_starts_this_copy_of_the_app(HOMEBREW_PYTHON)
-        self.assertEqual(homebrew_command[1:], ["-m", "agent_command_tab.command_line", "run"])
-        self.assertEqual(homebrew_command[0], replace_homebrew_version_folder_with_its_stable_link(HOMEBREW_PYTHON))
+    def test_the_python_of_this_copy_runs_the_command_line_module(self):
+        # find_python_of_this_copy's own tests check that its path survives an upgrade.
+        with unittest.mock.patch.object(start_with_iterm2, "find_python_of_this_copy", return_value="/Users/someone/.venv/bin/python"):
+            self.assertEqual(build_command_that_starts_this_copy_of_the_app(),
+                             ["/Users/someone/.venv/bin/python", "-m", "agent_command_tab.command_line", "run"])
 
 
 class AutoLaunchFolderTests(unittest.TestCase):
@@ -107,15 +105,21 @@ class AutoLaunchScriptTests(unittest.TestCase):
         self.program = os.path.join(self.folder, "python")  # this copy's program, which exists
         with open(self.program, "w"):
             pass
+        self.package_folder = os.path.join(self.folder, "site-packages", "agent_command_tab")  # and its package
+        os.makedirs(self.package_folder)
 
-    def update(self, app_starts_with_iterm2, program=None):
+    def update(self, app_starts_with_iterm2, program=None, package_folder=None):
         return update_autolaunch_script_to_match_setting(
             app_starts_with_iterm2, [program or self.program, "-m", "agent_command_tab.command_line", "run"],
-            self.autolaunch_script_path, self.log_file_path)
+            package_folder or self.package_folder, self.autolaunch_script_path, self.log_file_path)
+
+    def read_program(self):
+        return read_program_and_package_folder_of_autolaunch_script(self.autolaunch_script_path)[0]
 
     def test_the_script_starts_the_command_in_the_background_with_its_output_in_the_log(self):
-        source = build_autolaunch_script_source(["/My Apps/python", "-m", "agent_command_tab.command_line", "run"], "/x/log")
-        self.assertIn("-- program: /My Apps/python\n", source)
+        source = build_autolaunch_script_source(["/My Apps/python", "-m", "agent_command_tab.command_line", "run"],
+                                                "/My Apps/agent_command_tab", "/x/log")
+        self.assertIn("-- program: /My Apps/python\n-- package folder: /My Apps/agent_command_tab\n", source)
         self.assertIn('do shell script "\'/My Apps/python\' -m agent_command_tab.command_line run >> /x/log 2>&1 &"', source)
         self.assertEqual(escape_for_applescript_string('a "b" \\c'), 'a \\"b\\" \\\\c')
 
@@ -124,6 +128,8 @@ class AutoLaunchScriptTests(unittest.TestCase):
         decompiled_source = subprocess.run(["/usr/bin/osadecompile", self.autolaunch_script_path], capture_output=True, text=True,
                                            check=True).stdout
         self.assertIn(f"-- program: {self.program}", decompiled_source)
+        self.assertEqual(read_program_and_package_folder_of_autolaunch_script(self.autolaunch_script_path),
+                         (self.program, self.package_folder))
         self.assertIn(f'do shell script "{self.program} -m agent_command_tab.command_line run >> {self.log_file_path} 2>&1 &"',
                       decompiled_source)
         self.assertEqual(os.listdir(os.path.dirname(self.autolaunch_script_path)), ["AgentCommandTab.scpt"])  # no hidden file left
@@ -132,17 +138,35 @@ class AutoLaunchScriptTests(unittest.TestCase):
         with open(other_program, "w"):
             pass
         self.assertEqual(self.update(True, other_program), "kept")
-        self.assertEqual(read_program_of_autolaunch_script(self.autolaunch_script_path), self.program)
+        self.assertEqual(self.read_program(), self.program)
 
-    def test_a_script_whose_program_is_gone_or_that_cant_be_read_is_written_again(self):
+    def test_a_script_whose_program_or_package_is_gone_that_names_no_package_or_that_cant_be_read_is_written_again(self):
         self.update(True, os.path.join(self.folder, "uninstalled-python"))
         self.assertEqual(self.update(True), "added")
-        self.assertEqual(read_program_of_autolaunch_script(self.autolaunch_script_path), self.program)
+        self.assertEqual(self.read_program(), self.program)
+        # A pip uninstall from a Python that stays: the program is there, its package isn't.
+        os.remove(self.autolaunch_script_path)
+        self.update(True, package_folder=os.path.join(self.folder, "uninstalled", "agent_command_tab"))
+        self.assertEqual(self.update(True), "added")
+        self.assertEqual(read_program_and_package_folder_of_autolaunch_script(self.autolaunch_script_path),
+                         (self.program, self.package_folder))
+        # One written by version 0.3.0 or earlier names no package folder, so its copy may be gone.
+        old_source = "".join(line for line in build_autolaunch_script_source(
+            [self.program, "-m", "agent_command_tab.command_line", "run"], self.package_folder, self.log_file_path).splitlines(True)
+            if not line.startswith(PACKAGE_FOLDER_COMMENT_PREFIX))
+        write_autolaunch_script(old_source, self.autolaunch_script_path)
+        self.assertEqual(read_program_and_package_folder_of_autolaunch_script(self.autolaunch_script_path), (self.program, None))
+        self.assertEqual(self.update(True), "added")
+        self.assertEqual(read_program_and_package_folder_of_autolaunch_script(self.autolaunch_script_path),
+                         (self.program, self.package_folder))
         with open(self.autolaunch_script_path, "w") as autolaunch_script_file:
             autolaunch_script_file.write("not a compiled script")
-        self.assertIsNone(read_program_of_autolaunch_script(self.autolaunch_script_path))
+        self.assertEqual(read_program_and_package_folder_of_autolaunch_script(self.autolaunch_script_path), (None, None))
         self.assertEqual(self.update(True), "added")
-        self.assertEqual(read_program_of_autolaunch_script(self.autolaunch_script_path), self.program)
+        self.assertEqual(self.read_program(), self.program)
+
+    def test_this_copys_package_folder_is_the_one_it_runs_from(self):
+        self.assertTrue(os.path.isfile(os.path.join(find_package_folder_of_this_copy(), "start_with_iterm2.py")))
 
     def test_turned_off_it_removes_the_script(self):
         self.assertEqual(self.update(False), "nothing")

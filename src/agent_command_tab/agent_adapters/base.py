@@ -1,6 +1,7 @@
 """What every agent tool adapter provides."""
 
 import os
+import re
 import shlex
 
 SHELL_PROGRAM_NAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "elvish"}
@@ -9,11 +10,38 @@ SHELL_PROGRAM_NAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"
 COMMAND_THAT_STARTS_A_NEW_CONVERSATION = "/clear"
 # The slash commands of Claude Code and Codex alike, in menu order.
 COMPACT_AND_CLEAR_SLASH_COMMANDS = ("/compact", COMMAND_THAT_STARTS_A_NEW_CONVERSATION)
-# How other agent sessions send a tool's sessions messages ("Talk to Each Other"; user request,
-# 2026-10-21): Claude Code's SendMessage tool, addressed by the session's name, which only Claude
+# How other agent sessions send a tool's sessions messages ("Talk to Each Other"): Claude Code's SendMessage
+# tool, addressed by the session's name, which only Claude
 # Code sessions have; or `codex queue --thread <conversation ID>`, which any agent with a shell can run.
 MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL = "send_message_tool"
 MESSAGES_THROUGH_CODEX_QUEUE = "codex_queue"
+# One "NAME=value " word in front of a launch command's program, the value maybe quoted
+# ("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude").
+LEADING_ENVIRONMENT_SETTING_PATTERN = re.compile(r"""([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])*\s+""")
+
+
+def remove_environment_settings_from_launch_command(launch_command, variable_name):
+    """Returns the launch command without the <variable_name>=... words in front of its program
+    (CLAUDE_CONFIG_DIR, CODEX_HOME), keeping its other environment settings, so a setting put in
+    front of it isn't overridden by the launch command's own."""
+    kept_settings = []
+    rest = launch_command.lstrip()
+    while (match := LEADING_ENVIRONMENT_SETTING_PATTERN.match(rest)):
+        if match.group(1) != variable_name:
+            kept_settings.append(match.group(0))
+        rest = rest[match.end():]
+    return "".join(kept_settings) + rest
+
+
+def split_command_line_into_words(command_line):
+    """Returns the words of a command line (iTerm2's `commandLine` variable for a session, or
+    None), possibly none. Unbalanced quotes fall back to splitting on spaces."""
+    if not command_line:
+        return []
+    try:
+        return shlex.split(command_line)
+    except ValueError:
+        return command_line.split()
 
 
 def split_command_line_into_program_names(command_line):
@@ -28,19 +56,24 @@ def split_command_line_into_program_names(command_line):
     Returns:
         A list of base names, possibly empty.
     """
-    if not command_line:
-        return []
-    try:
-        words = shlex.split(command_line)
-    except ValueError:
-        words = command_line.split()
-    return [os.path.basename(word).lstrip("-") for word in words]
+    return [os.path.basename(word).lstrip("-") for word in split_command_line_into_words(command_line)]
 
 
 def command_line_runs_a_shell(command_line):
     """Returns whether the foreground job described by command_line is a plain shell."""
     program_names = split_command_line_into_program_names(command_line)
     return bool(program_names) and program_names[0] in SHELL_PROGRAM_NAMES
+
+
+def command_line_is_a_shell_with_no_script_or_command(command_line):
+    """Returns whether the foreground job described by command_line is a shell started with
+    nothing to run (`-zsh`, `/bin/bash`, `zsh -l`, `bash --login`), so it waits at its prompt for
+    what is typed into it. Unlike command_line_runs_a_shell, not `bash job.sh` or `zsh -c '...'`; a
+    script with a `#!/bin/bash` line runs as `/bin/bash ./job.sh`. To be safe, any option other
+    than login and interactive (-l, -i, --login, --interactive) counts as running something."""
+    return command_line_runs_a_shell(command_line) and all(
+        word in ("--login", "--interactive") or re.fullmatch(r"-[il]+", word)
+        for word in split_command_line_into_words(command_line)[1:])
 
 
 class AgentToolAdapter:
@@ -50,8 +83,6 @@ class AgentToolAdapter:
         agent_tool_name: The name shown in the list, for example "Claude Code".
         permission_dialog_screen_patterns: Compiled patterns that all appear while the tool's
             permission dialog is showing; empty when the tool's own status already covers it.
-        progress_noise_patterns: Compiled patterns for screen text that changes every second
-            without real progress (screen_readings.compute_screen_fingerprint).
         interrupted_turn_screen_pattern: Compiled pattern for the line the tool prints when a
             permission prompt is denied or the turn is interrupted, or None.
         helper_process_names: Names of processes the tool starts for itself during a turn, which
@@ -76,12 +107,11 @@ class AgentToolAdapter:
         how_other_agent_sessions_send_it_messages: MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL,
             MESSAGES_THROUGH_CODEX_QUEUE, or None when other sessions have no way to.
         can_resume_conversations: Whether a saved session of the tool can be resumed later
-            (build_launch_command_to_resume; Save session, user request, 2026-11-06).
+            (build_launch_command_to_resume; Save session).
     """
 
     agent_tool_name = ""
     permission_dialog_screen_patterns = ()
-    progress_noise_patterns = ()
     interrupted_turn_screen_pattern = None
     helper_process_names = frozenset()
     slash_commands = ()
@@ -141,12 +171,23 @@ class AgentToolAdapter:
         """Returns when the current turn began, from the conversation file, or None."""
         return None
 
+    def read_turn_is_under_way(self, conversation_file_path):
+        """Returns whether the conversation file shows a turn under way, or None when it can't
+        tell. Called in a worker thread."""
+        return None
+
+    def read_turns_run_outside_the_tab(self, conversation_file_path):
+        """Returns whether the conversation's turns and commands run in a process outside the
+        tab (Codex's shared background server), which a pause of the tab's processes can't stop.
+        Called in a worker thread."""
+        return False
+
     def read_open_tool_call(self, conversation_file_path):
         """Returns the tool call the agent waits on, from the end of the conversation file
         (open_tool_call_reading), or None. Called in a worker thread."""
         return None
 
-    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
+    def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None, codex_home_folder=None):
         """Returns the command that starts a copy of a session (Duplicate): one that continues a
         copy of the conversation where the tool can fork it, else a fresh session.
 
@@ -154,18 +195,26 @@ class AgentToolAdapter:
             launch_command: The tool's launch command from the settings.
             conversation_id: From find_conversation_id, or None.
             claude_agent_record: The original's record from `claude agents --json`, or None.
+            codex_home_folder: For Codex, the original's CODEX_HOME, or None when not known.
         """
         return launch_command
 
-    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None):
+    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None, codex_home_folder=None):
         """Returns the command that resumes a saved conversation (can_resume_conversations only).
+        Each tool uses its own folder argument.
 
         Args:
             launch_command: The tool's launch command from the settings.
             conversation_id: The saved conversation's ID.
             claude_config_folder: The Claude Code config folder it ran with, or None for the default.
+            codex_home_folder: The CODEX_HOME a Codex conversation ran with, or None when not known
+                (the launch command's own then applies).
         """
         raise NotImplementedError
+
+    def find_codex_home_folder_of_process(self, agent_process_id):
+        """Returns the CODEX_HOME of a Codex process (codex.CodexAdapter's); None for other tools."""
+        return None
 
     def matches_command_line(self, command_line):
         """Returns whether a tab whose foreground job has this command line runs this tool.

@@ -11,6 +11,8 @@ import unittest.mock
 
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.dashboard_core import DashboardCore, read_claude_agents_by_process_id
+from executable_script_writing import write_executable_script
+from hook_event_builders import make_event
 
 
 class ClaudeAgentsRefreshTests(unittest.TestCase):
@@ -29,15 +31,14 @@ class ClaudeAgentsRefreshTests(unittest.TestCase):
         # 42 still runs, so its record stays (its conversation would look new without it); 99's process is gone.
         self.assertEqual(core.claude_agents_by_process_id, {42: {"sessionId": "a"}, 43: {"sessionId": "b-after-clear"}})
 
-    def test_a_clear_typed_while_a_run_is_under_way_has_the_next_gather_run_again(self):  # code review, 2026-10-28
+    def test_a_clear_typed_while_a_run_is_under_way_has_the_next_gather_run_again(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
         core.claude_command_path = "/stand-in/claude"
         core.agent_sessions = {"s1": {"adapter": ClaudeCodeAdapter(), "process_id": 42}}
         core.process_ids_asked_about_in_claude_agents = {42}
 
         async def read_while_a_clear_is_typed(claude_command_path, config_folders):
-            core.note_hook_event({"agent_tool_name": "Claude Code", "hook_event_name": "SessionStart", "source": "clear",
-                                  "ancestor_processes": [[1042, "sh"], [42, "2.1.311"]], "sent_at": 5.0})
+            core.note_hook_event(make_event("SessionStart", 42, source="clear", sent_at=5.0))
             core.regather_needed.clear()  # the gather it asks for finds this run under way
             return {42: {"sessionId": "before-the-clear"}}
         with unittest.mock.patch("agent_command_tab.dashboard_core.read_claude_agents_by_process_id",
@@ -47,18 +48,11 @@ class ClaudeAgentsRefreshTests(unittest.TestCase):
 
 
 class ReadClaudeAgentsTests(unittest.TestCase):
-    def write_program(self, folder, name, text):
-        path = os.path.join(folder, name)
-        with open(path, "w") as program_file:
-            program_file.write(text)
-        os.chmod(path, 0o755)
-        return path
-
     def test_a_claude_installed_with_npm_runs_with_the_node_next_to_it_on_a_bare_path(self):
         # npm's claude is a `#!/usr/bin/env node` script, and an app started by iTerm2 has launchd's PATH.
         with tempfile.TemporaryDirectory() as npm_folder:
-            self.write_program(npm_folder, "node", '#!/bin/sh\necho \'[{"pid": 42, "sessionId": "s"}]\'\n')
-            claude_path = self.write_program(npm_folder, "claude", "#!/usr/bin/env node\n")
+            write_executable_script(npm_folder, "node", '#!/bin/sh\necho \'[{"pid": 42, "sessionId": "s"}]\'\n')
+            claude_path = write_executable_script(npm_folder, "claude", "#!/usr/bin/env node\n")
             with unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}):
                 self.assertEqual(asyncio.run(read_claude_agents_by_process_id(claude_path, [None])),
                                  {42: {"pid": 42, "sessionId": "s", "config_folder": None}})
@@ -66,7 +60,7 @@ class ReadClaudeAgentsTests(unittest.TestCase):
     def test_a_failed_run_is_printed_on_standard_error_and_gives_no_records(self):
         # Standard output stays clean for dump-snapshot, which prints only its JSON there.
         with tempfile.TemporaryDirectory() as folder:
-            claude_path = self.write_program(folder, "claude", "#!/bin/sh\necho '[]'\necho 'unknown command agents' >&2\nexit 1\n")
+            claude_path = write_executable_script(folder, "claude", "#!/bin/sh\necho '[]'\necho 'unknown command agents' >&2\nexit 1\n")
             printed_on_standard_output, printed_on_standard_error = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(printed_on_standard_output), contextlib.redirect_stderr(printed_on_standard_error):
                 self.assertEqual(asyncio.run(read_claude_agents_by_process_id(claude_path, [None])), {})

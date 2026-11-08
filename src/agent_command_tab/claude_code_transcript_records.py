@@ -46,7 +46,7 @@ def classify_user_record(record, blocks):
         slash command or skill the user typed; "notification" for a
         background task's notification, a message from another Claude Code session (its
         SendMessage tool's) or a notice that one went idle (meta records with turnOrigin "peer"
-        and "system"; code review, 2026-10-28); or None for anything else: not a user record, a
+        and "system"); or None for anything else: not a user record, a
         subagent's record, another meta record (such as a skill's text, written in the middle
         of a turn), the summary after /compact, Claude Code's own texts, or an empty record.
     """

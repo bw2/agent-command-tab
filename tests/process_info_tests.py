@@ -1,4 +1,4 @@
-"""A sub row's Info and Kill (user request, 2026-10-29): the core reads and ends real processes
+"""A sub row's Info and Kill: the core reads and ends real processes
 this test starts, only those a tab row lists, and the Info window shows what it read."""
 
 import asyncio
@@ -21,17 +21,8 @@ from agent_command_tab.snapshot_data_classes import ChildProcessEntry
 from agent_command_tab.user_interface.process_info_alert import (LARGEST_ACCESSORY_HEIGHT, LONGEST_COMMAND_IN_AN_ALERT,
                                                                  build_process_info_alert, list_process_info_lines,
                                                                  shorten_command_for_alert)
-
-SECONDS_TO_WAIT_FOR_A_PROCESS = 5
-
-
-def wait_until(condition):
-    deadline = time.time() + SECONDS_TO_WAIT_FOR_A_PROCESS
-    while not condition():
-        if time.time() > deadline:
-            raise AssertionError("timed out")
-        time.sleep(0.05)
-
+from codex_sandbox_detection import REASON_FOR_SKIPPING_WINDOW_TESTS_IN_CODEX_SANDBOX, RUNNING_IN_CODEX_SANDBOX
+from condition_waiting import wait_until
 
 def start_claude_code_style_shell(folder, agent_command="sleep 60"):
     """Starts bash as Claude Code's shell tool does, running agent_command, which ends by running
@@ -39,20 +30,32 @@ def start_claude_code_style_shell(folder, agent_command="sleep 60"):
     as it ends, as an agent reaps its shells.
 
     Waiting for any process below bash wasn't enough: bash's copy of itself, which becomes sleep a
-    moment later, still had bash's command line when a slow GitHub runner read it (2026-11-05). So
-    this waits for a process below it that isn't bash, which is sleep under whatever name it has
-    (GNU coreutils' sleep, first on PATH on the author's Mac, runs as "gsleep")."""
+    moment later, still had bash's command line when a slow GitHub runner read it. So this waits
+    for a process below it that isn't bash, which is sleep under whatever name it has (GNU
+    coreutils' sleep, when it is first on PATH, runs as "gsleep").
+
+    In a process group of its own, so kill_the_shell_and_what_runs_in_it ends its sleep too."""
     shell = subprocess.Popen(["/bin/bash", "-c", f"true && eval '{agent_command}' < /dev/null && pwd -P >| {folder}/cwd"],
-                             cwd=folder)
+                             cwd=folder, start_new_session=True)
     threading.Thread(target=shell.wait, daemon=True).start()
-    wait_until(lambda: any(process.name != "bash" for process in list_descendant_processes(shell.pid)))
+    if not wait_until(lambda: any(process.name != "bash" for process in list_descendant_processes(shell.pid))):
+        raise AssertionError("the shell's command didn't start")
     return shell
+
+
+def kill_the_shell_and_what_runs_in_it(shell):
+    """Kills a shell start_claude_code_style_shell started and the sleep running in it, which
+    killing the shell alone leaves running."""
+    try:
+        os.killpg(shell.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def make_core_listing(session_id, process_id):
     """Returns a core whose session_id tab row lists the process as a sub row."""
     core = DashboardCore(lambda snapshot: None, lambda message: None)
-    core.screen_readings_by_session_id = {session_id: {"child_processes": (
+    core.session_readings_by_session_id = {session_id: {"child_processes": (
         ChildProcessEntry(process_id, "sleep 60", time.time(), True, None, None),)}}
     return core
 
@@ -64,7 +67,7 @@ class ProcessDetailsTests(unittest.TestCase):
             try:
                 details = read_process_details(shell.pid)
             finally:
-                shell.kill()
+                kill_the_shell_and_what_runs_in_it(shell)
         self.assertEqual(details["agent_command"], "sleep 60")
         self.assertTrue(details["command_line"].startswith("/bin/bash -c true && eval 'sleep 60'"))
         self.assertEqual(details["working_folder"], os.path.realpath(folder))
@@ -87,7 +90,7 @@ class ProcessDetailsTests(unittest.TestCase):
                 unlisted_result = asyncio.run(core.handle_read_child_process_details(
                     ActionRequest("read_child_process_details", {"session_id": "s2"}, {"process_id": shell.pid})))
             finally:
-                shell.kill()
+                kill_the_shell_and_what_runs_in_it(shell)
         self.assertTrue(action_result.succeeded)
         self.assertEqual(action_result.details["cpu_percent"], 0)  # sleeping, and rounded as the row's is
         self.assertEqual(action_result.details["memory_bytes"] % 1024 ** 2, 0)
@@ -104,11 +107,11 @@ class KillProcessTests(unittest.TestCase):
             started_at = time.time()
             action_result = asyncio.run(core.handle_end_child_process(
                 ActionRequest("end_child_process", {"session_id": "s1"}, {"process_id": shell.pid})))
-            wait_until(lambda: shell.returncode is not None)
+            self.assertTrue(wait_until(lambda: shell.returncode is not None))
         self.assertTrue(action_result.succeeded)
         self.assertEqual(shell.returncode, -signal.SIGTERM)  # SIGTERM was enough: no SIGKILL
         self.assertLess(time.time() - started_at, dashboard_core.SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED)
-        wait_until(lambda: not process_is_alive(command_process_id))  # launchd reaps the orphaned sleep
+        self.assertTrue(wait_until(lambda: not process_is_alive(command_process_id)))  # launchd reaps the orphaned sleep
 
     def test_what_ignores_sigterm_gets_sigkill(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -117,7 +120,7 @@ class KillProcessTests(unittest.TestCase):
             with unittest.mock.patch.object(dashboard_core, "SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED", 0.5):
                 asyncio.run(core.handle_end_child_process(
                     ActionRequest("end_child_process", {"session_id": "s1"}, {"process_id": shell.pid})))
-            wait_until(lambda: shell.returncode is not None)
+            self.assertTrue(wait_until(lambda: shell.returncode is not None))
         self.assertEqual(shell.returncode, -signal.SIGKILL)
 
     def test_kill_leaves_a_process_its_tab_row_doesnt_list(self):
@@ -128,10 +131,11 @@ class KillProcessTests(unittest.TestCase):
                     ActionRequest("end_child_process", {"session_id": "s1"}, {"process_id": shell.pid})))
                 self.assertIsNone(shell.poll())
             finally:
-                shell.kill()
+                kill_the_shell_and_what_runs_in_it(shell)
         self.assertFalse(action_result.succeeded)
 
 
+@unittest.skipIf(RUNNING_IN_CODEX_SANDBOX, REASON_FOR_SKIPPING_WINDOW_TESTS_IN_CODEX_SANDBOX)
 class ProcessInfoWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

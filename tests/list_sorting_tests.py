@@ -86,13 +86,7 @@ class SortWindowEntriesTests(unittest.TestCase):
     def test_activity_orders_windows_by_their_most_active_tab(self):
         self.assertEqual([window.window_id for window in sort_window_entries(self.windows, "activity")], ["w3", "w2", "w1", "w4"])
 
-    def test_memory_usage_orders_windows_by_their_largest_tab(self):
-        windows = [make_window("w1", "one", [ENTRIES[0]._replace(memory_bytes=300)]),
-                   make_window("w2", "two", [ENTRIES[1]._replace(memory_bytes=100), ENTRIES[2]._replace(memory_bytes=500)]),
-                   make_window("w3", "three", [ENTRIES[3]]), make_window("w4", "empty", [])]
-        self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")], ["w2", "w1", "w3", "w4"])
-
-    def test_reversed_orders_rank_windows_by_their_first_tab_in_that_direction(self):
+    def test_memory_usage_ranks_windows_by_their_largest_tab_and_reversed_by_their_smallest(self):
         # w1's 300 bytes lie between w2's tabs, so w2 goes first both ways only if it is ranked by
         # its largest tab, then by its smallest.
         windows = [make_window("w1", "one", [ENTRIES[0]._replace(memory_bytes=300)]),
@@ -102,8 +96,6 @@ class SortWindowEntriesTests(unittest.TestCase):
         # The smallest first: w2's smallest tab (100), then w1; unknown usage and no tabs still last.
         self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage", is_reversed=True)],
                          ["w2", "w1", "w3", "w4"])
-        self.assertEqual([window.title for window in sort_window_entries(windows, "alphabet", is_reversed=True)],
-                         ["two", "three", "one", "empty"])
 
     def test_a_window_ranks_by_the_agent_sessions_the_list_shows(self):
         # With Hide Idle on, w1's idle tab (the largest) is hidden, so w2's 800M tab comes first.
@@ -118,7 +110,11 @@ class SortWindowEntriesTests(unittest.TestCase):
         self.assertEqual([window.title for window in sort_window_entries(self.windows, "alphabet")],
                          ["Alpha", "empty", "middle", "zebra"])
 
-    def test_alphabet_puts_windows_with_the_same_title_in_their_numbers_order(self):  # user request, 2026-10-30
+    def test_alphabet_reversed_by_window_title(self):
+        self.assertEqual([window.title for window in sort_window_entries(self.windows, "alphabet", is_reversed=True)],
+                         ["zebra", "middle", "empty", "Alpha"])
+
+    def test_alphabet_puts_windows_with_the_same_title_in_their_numbers_order(self):
         windows = [make_window("w1", "catalogs", [])._replace(number_among_windows_with_the_same_title=2),
                    make_window("w2", "catalogs", []), make_window("w3", "catalogs", [])._replace(number_among_windows_with_the_same_title=3)]
         self.assertEqual([window.window_id for window in sort_window_entries(windows, "alphabet")], ["w2", "w1", "w3"])

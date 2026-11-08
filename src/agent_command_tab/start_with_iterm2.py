@@ -1,18 +1,19 @@
-"""Starting the app whenever iTerm2 starts (user request, 2026-10-28): an AppleScript in iTerm2's
+"""Starting the app whenever iTerm2 starts: an AppleScript in iTerm2's
 AutoLaunch folder, which iTerm2 runs each time it starts, that starts this copy of the app however it
-was installed (pip, pipx or Homebrew).
+was installed (pip or pipx, also with a Homebrew Python).
 
 A program started this way runs with iTerm2's macOS permissions, as one started from an iTerm2 tab
 does, so the keyboard shortcut keeps the Accessibility permission given to iTerm2. A launch agent that
-started the app at login (tried first, 2026-10-28) ran it as the Python interpreter itself, which lacks
-that permission, and macOS listed it in Login Items as "python". iTerm2 runs a .py AutoLaunch script
+starts the app at login would run it as the Python interpreter itself, which lacks
+that permission, and macOS would list it in Login Items as "python". iTerm2 runs a .py AutoLaunch script
 only with its own Python runtime, a separate download, so this one is an AppleScript, which iTerm2 runs
 as it is (checked with iTerm2 3.7.6, and in its source: iTermScriptsMenuController.m).
 
 The app adds the script when it starts while the setting (START_WITH_ITERM2_SETTING_TITLE) is on (the default), and
 takes it out when that is turned off. A script already there is kept while the program it starts
-exists, so the copy that added it keeps starting; one whose program is gone (that copy was uninstalled)
-is written again for this copy. A copy started while another runs exits at once (command_line's running
+and the package folder it names exist, so the copy that added it keeps starting; one whose program
+or package folder is gone (that copy was uninstalled, which leaves a shared Python in place), or
+that names no package folder (written by version 0.3.0 or earlier), is written again for this copy. A copy started while another runs exits at once (command_line's running
 lock), so reopening iTerm2 while the app still runs doesn't start a second copy.
 """
 
@@ -24,15 +25,17 @@ import subprocess
 from agent_command_tab.installed_copy_paths import find_python_of_this_copy, replace_homebrew_version_folder_with_its_stable_link
 
 AUTOLAUNCH_SCRIPT_FILE_NAME = "AgentCommandTab.scpt"
-# The setting's label in the settings window ("Start with iTerm2" until 2026-11-02, user request).
+# The setting's label in the settings window.
 START_WITH_ITERM2_SETTING_TITLE = "Launch AgentCommandTab whenever iTerm2 is started"
 ITERM2_PREFERENCES_FILE_PATH = os.path.expanduser("~/Library/Preferences/com.googlecode.iterm2.plist")
 # iTerm2's scripts folder, unless its settings name another (find_iterm2_autolaunch_folder). iTerm2
 # reaches it through ~/.config/iterm2/AppSupport, a link to ~/Library/Application Support/iTerm2.
 ITERM2_SCRIPTS_FOLDER = os.path.expanduser("~/Library/Application Support/iTerm2/Scripts")
 LOG_FILE_PATH = os.path.expanduser("~/Library/Logs/agent-command-tab.log")
-# The AppleScript's line that names the program it starts, read back by read_program_of_autolaunch_script.
+# The AppleScript's lines that name the program it starts and the folder of the package that
+# program runs, read back by read_program_and_package_folder_of_autolaunch_script.
 PROGRAM_COMMENT_PREFIX = "-- program: "
+PACKAGE_FOLDER_COMMENT_PREFIX = "-- package folder: "
 SECONDS_TO_WAIT_FOR_THE_APPLESCRIPT_COMPILER = 30
 
 
@@ -53,12 +56,22 @@ def find_iterm2_autolaunch_folder(preferences_file_path=ITERM2_PREFERENCES_FILE_
     return os.path.join(ITERM2_SCRIPTS_FOLDER, "AutoLaunch")
 
 
-def build_command_that_starts_this_copy_of_the_app(python_path=None):
+def find_autolaunch_script_path():
+    """Returns where iTerm2 finds the app's AutoLaunch script (find_iterm2_autolaunch_folder)."""
+    return os.path.join(find_iterm2_autolaunch_folder(), AUTOLAUNCH_SCRIPT_FILE_NAME)
+
+
+def build_command_that_starts_this_copy_of_the_app():
     """Returns the program and arguments that start this copy of the app, restarted when iTerm2's
-    connection drops (`agent-command-tab run`): the Python running the app (python_path, or
-    find_python_of_this_copy's), by a path that survives upgrades, running the command line module."""
-    return [replace_homebrew_version_folder_with_its_stable_link(python_path) if python_path else find_python_of_this_copy(),
-            "-m", "agent_command_tab.command_line", "run"]
+    connection drops (`agent-command-tab run`): the Python running the app, by a path that
+    survives upgrades (find_python_of_this_copy's), running the command line module."""
+    return [find_python_of_this_copy(), "-m", "agent_command_tab.command_line", "run"]
+
+
+def find_package_folder_of_this_copy():
+    """Returns the folder of this copy's agent_command_tab package, which uninstalling it deletes,
+    by a path that survives upgrades (replace_homebrew_version_folder_with_its_stable_link)."""
+    return replace_homebrew_version_folder_with_its_stable_link(os.path.dirname(os.path.abspath(__file__)))
 
 
 def escape_for_applescript_string(text):
@@ -66,30 +79,33 @@ def escape_for_applescript_string(text):
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def build_autolaunch_script_source(program_arguments, log_file_path=LOG_FILE_PATH):
+def build_autolaunch_script_source(program_arguments, package_folder, log_file_path=LOG_FILE_PATH):
     """Returns the AppleScript that starts program_arguments in the background, with its output
     appended to log_file_path, and returns at once (do shell script waits for a command unless its
-    output is redirected and it ends in &)."""
+    output is redirected and it ends in &). It names package_folder, the folder of the package the
+    program runs, in a comment."""
     shell_command = (" ".join(shlex.quote(argument) for argument in program_arguments)
                      + f" >> {shlex.quote(log_file_path)} 2>&1 &")
     return ("-- Added by AgentCommandTab, which iTerm2 starts with this script whenever iTerm2 starts.\n"
             f"-- Turning off AgentCommandTab's Settings > {START_WITH_ITERM2_SETTING_TITLE} removes it.\n"
             f"{PROGRAM_COMMENT_PREFIX}{program_arguments[0]}\n"
+            f"{PACKAGE_FOLDER_COMMENT_PREFIX}{package_folder}\n"
             f'do shell script "{escape_for_applescript_string(shell_command)}"\n')
 
 
-def read_program_of_autolaunch_script(autolaunch_script_path):
-    """Returns the program the AutoLaunch script starts (its PROGRAM_COMMENT_PREFIX line, read with
-    osadecompile), or None when there is no such script or it names none."""
+def read_program_and_package_folder_of_autolaunch_script(autolaunch_script_path):
+    """Returns (the program the AutoLaunch script starts, the package folder it names), from its
+    PROGRAM_COMMENT_PREFIX and PACKAGE_FOLDER_COMMENT_PREFIX lines read with osadecompile, each
+    None when there is no such script or it has no such line."""
     if not os.path.exists(autolaunch_script_path):
-        return None
+        return None, None
     try:
         source = subprocess.run(["/usr/bin/osadecompile", autolaunch_script_path], capture_output=True, text=True,
                                 check=True, timeout=SECONDS_TO_WAIT_FOR_THE_APPLESCRIPT_COMPILER).stdout
     except (OSError, subprocess.SubprocessError):
-        return None
-    return next((line[len(PROGRAM_COMMENT_PREFIX):] for line in source.splitlines() if line.startswith(PROGRAM_COMMENT_PREFIX)),
-                None)
+        return None, None
+    return tuple(next((line[len(prefix):] for line in source.splitlines() if line.startswith(prefix)), None)
+                 for prefix in (PROGRAM_COMMENT_PREFIX, PACKAGE_FOLDER_COMMENT_PREFIX))
 
 
 def write_autolaunch_script(source, autolaunch_script_path):
@@ -114,15 +130,16 @@ def write_autolaunch_script(source, autolaunch_script_path):
     os.replace(temporary_path, autolaunch_script_path)
 
 
-def update_autolaunch_script_to_match_setting(app_starts_with_iterm2, program_arguments, autolaunch_script_path,
-                                              log_file_path=LOG_FILE_PATH):
+def update_autolaunch_script_to_match_setting(app_starts_with_iterm2, program_arguments, package_folder,
+                                              autolaunch_script_path, log_file_path=LOG_FILE_PATH):
     """Adds, keeps or removes the AutoLaunch script so that it matches the setting (START_WITH_ITERM2_SETTING_TITLE).
 
     Args:
         app_starts_with_iterm2: The setting.
         program_arguments: build_command_that_starts_this_copy_of_the_app's command, written into a
             new script.
-        autolaunch_script_path: Where iTerm2 finds it (find_iterm2_autolaunch_folder, AUTOLAUNCH_SCRIPT_FILE_NAME).
+        package_folder: find_package_folder_of_this_copy's folder, named in a new script.
+        autolaunch_script_path: Where iTerm2 finds it (find_autolaunch_script_path).
         log_file_path: Where the app started by iTerm2 writes its output.
 
     Returns:
@@ -133,8 +150,12 @@ def update_autolaunch_script_to_match_setting(app_starts_with_iterm2, program_ar
             return "nothing"
         os.remove(autolaunch_script_path)
         return "removed"
-    program = read_program_of_autolaunch_script(autolaunch_script_path)
-    if program is not None and os.path.exists(program):
+    program, package_folder_of_the_script = read_program_and_package_folder_of_autolaunch_script(autolaunch_script_path)
+    # A script written by version 0.3.0 or earlier names no package folder, so whether its copy is
+    # still installed can't be told: it is written again.
+    if (program is not None and os.path.exists(program)
+            and package_folder_of_the_script is not None and os.path.exists(package_folder_of_the_script)):
         return "kept"
-    write_autolaunch_script(build_autolaunch_script_source(program_arguments, log_file_path), autolaunch_script_path)
+    write_autolaunch_script(build_autolaunch_script_source(program_arguments, package_folder, log_file_path),
+                            autolaunch_script_path)
     return "added"

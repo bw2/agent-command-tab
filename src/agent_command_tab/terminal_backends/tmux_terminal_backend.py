@@ -1,4 +1,4 @@
-"""tmux behind the terminal layer (user request, 2026-11-01): the agents running in tmux, in any
+"""tmux behind the terminal layer: the agents running in tmux, in any
 terminal app, listed next to iTerm2's.
 
 A tmux session is a window row, a tmux window is a tab row, and the window's first pane is its
@@ -306,7 +306,7 @@ class TmuxTerminalBackend(TerminalBackend):
         self.client_records = []  # the most recently used first
         self.gathered_windows = []
         # The sessions and tmux windows start_agent_session opened since the last gather, which a
-        # restore adds tabs to and renames before a gather lists them (user request, 2026-11-06).
+        # restore adds tabs to and renames before a gather lists them.
         self.window_and_tab_ids_opened_since_the_last_gather = set()
         self.active_pane_id_by_tab_id = {}  # the pane each tmux window's keys go to, at the last gather
 

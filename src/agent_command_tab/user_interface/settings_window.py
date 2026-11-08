@@ -1,7 +1,4 @@
-"""The settings window. Every change applies at once and is saved.
-
-Settings are added here as the features that use them are built (see settings_store).
-"""
+"""The settings window. Every change applies at once and is saved (see settings_store)."""
 
 import collections
 import threading
@@ -30,15 +27,13 @@ from agent_command_tab.user_interface.sidebar_placement import (describe_sidebar
                                                                 find_outer_screen_edges)
 
 WINDOW_WIDTH = SMALLEST_WINDOW_SIZES["settings_window_frame"][0]  # the rows' layout width; the window only gets wider
-# The look of macOS's System Settings (user request, 2026-10-28; a bold title and a line across over
-# rows of right-aligned labels and controls 30 points apart before): each section's rows in a rounded
-# box under its title, each row's label at the left and its control at the right, thin lines between rows.
+# The look of macOS's System Settings: each section's rows in a rounded box under its title, each row's label at the left and its control at the right, thin lines between rows.
 SIDE_MARGIN = 20  # from the window's sides to the boxes
 TOP_MARGIN = 16  # above the first section's title
 SECTION_TITLE_HEIGHT = 18
 GAP_BELOW_SECTION_TITLE = 6
 GAP_BETWEEN_SECTIONS = 20  # from a box, or the note under it, to the next section's title
-# Below the last box, down to the window's bottom edge (24 below the last control until 2026-10-28; it is 27 now).
+# Below the last box, down to the window's bottom edge (27 below the last control).
 ROOM_BELOW_THE_LAST_SECTION = 20
 ROW_HEIGHT = 36
 ROW_PADDING = 10  # from a box's sides to the labels and controls in it
@@ -46,12 +41,12 @@ INDENT_OF_A_ROW_THAT_CONTINUES_THE_ONE_ABOVE = 16  # a harness's command, under 
 GAP_BEFORE_UNITS = 6  # between a control and its units ("points")
 BOX_CORNER_RADIUS = 8
 MINI_SWITCH_SIZE = (26, 15)  # what a mini NSSwitch draws (checked on macOS 27)
-# The keys that work the focused control (user request, 2026-11-02): Space and Return turn a switch
+# The keys that work the focused control: Space and Return turn a switch
 # on or off and press a button; they and the up and down arrows open a pop-up's menu.
 KEYS_THAT_PRESS_A_CONTROL = frozenset({" ", "\r"})
 KEYS_THAT_OPEN_A_POP_UP = KEYS_THAT_PRESS_A_CONTROL | {NSUpArrowFunctionKey, NSDownArrowFunctionKey}
 NOTE_HEIGHT = 30  # the sidebar's placement note under its box: two lines of small text
-LAUNCH_COMMAND_FIELD_WIDTH = 360  # a longer command scrolls inside the field (user requests, 2026-10-25; 200 until 2026-10-28)
+LAUNCH_COMMAND_FIELD_WIDTH = 360  # a longer command scrolls inside the field
 # A box's fill and border: a little darker than the window in light mode, a little lighter in dark mode.
 make_section_box_fill_color = make_light_and_dark_mode_color_maker(
     lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(0, 0, 0, 0.03), lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(1, 1, 1, 0.04))
@@ -62,7 +57,7 @@ make_section_box_border_color = make_light_and_dark_mode_color_maker(
 # settings' order; setting_choice_titles_tests checks that each table names every choice.
 SHOW_AS_TITLES = {"popup": "Popup", "sidebar": "Sidebar", "window": "Window"}
 GLOBAL_SHORTCUT_TITLES = {"shift_command_tab": "Shift-Command-Tab", "command_fn_tab": "Command-Fn-Tab", "off": "Off"}
-APPEARANCE_TITLES = {"auto": "Auto", "dark": "Dark", "light": "Light"}  # in the user's order (user request, 2026-10-27)
+APPEARANCE_TITLES = {"auto": "Auto", "dark": "Dark", "light": "Light"}
 # System Settings > Privacy & Security > Accessibility, which the global shortcut's key filter needs.
 ACCESSIBILITY_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 SIDEBAR_MODE_TITLES = {
@@ -71,9 +66,8 @@ SIDEBAR_MODE_TITLES = {
     "docked": "Always: Resize iTerm2 windows",
 }
 SIDEBAR_EDGE_TITLES = {"right": "Right", "left": "Left"}
-# The tab rows' information columns, in the order the user listed them (user request, 2026-10-19).
-# Each is labeled with the title over its column in the list (COLUMN_TITLES; user request, 2026-10-28:
-# "Time Since Last Status Change", "Tokens Used" and the like until then).
+# The tab rows' information columns, in the order the Columns section lists them (memory before
+# CPU, unlike LIST_COLUMNS). Each is labeled with the title over its column in the list (COLUMN_TITLES).
 LIST_COLUMN_NAMES_IN_SETTINGS_ORDER = ["state", "context_tokens", "created_time", "existence_duration",
                                        "memory_usage", "cpu_usage"]
 # One row in a section's box: its label at the left, its control at the right, and the units after the
@@ -81,7 +75,7 @@ LIST_COLUMN_NAMES_IN_SETTINGS_ORDER = ["state", "context_tokens", "created_time"
 # the shortcut) has no line above it, and its label is indented.
 SettingsRow = collections.namedtuple("SettingsRow", ["label", "control", "units", "continues_the_row_above"],
                                      defaults=[None, False])
-# A titled section of the window (user request, 2026-10-19): its rows in a rounded box under its title,
+# A titled section of the window: its rows in a rounded box under its title,
 # and, for the sidebar, a note in small text under the box, which takes no room while it is empty.
 SettingsSection = collections.namedtuple("SettingsSection", ["title", "rows", "note_field"], defaults=[None])
 
@@ -97,7 +91,7 @@ class LaunchCommandField(NSTextField):
     """A launch command's field, outlined in red while its command can't be run
     (show_launch_command_problem). Drawn here rather than as its layer's border, whose color is a
     CGColor, which PyObjC without its Quartz package passes only as an untyped pointer, with a
-    warning each time (code review, 2026-10-30)."""
+    warning each time."""
 
     shows_a_problem = False
 
@@ -134,7 +128,7 @@ def can_be_reached_with_tab(control):
 
 
 class KeyboardSwitch(NSSwitch):
-    """A switch that Tab and Shift-Tab reach, and that Space or Return turns on or off (user request, 2026-11-02)."""
+    """A switch that Tab and Shift-Tab reach, and that Space or Return turns on or off."""
 
     def canBecomeKeyView(self):
         return can_be_reached_with_tab(self)
@@ -149,7 +143,7 @@ class KeyboardSwitch(NSSwitch):
 
 class KeyboardPopUpButton(NSPopUpButton):
     """A pop-up that Tab and Shift-Tab reach, and whose menu Space, Return or an up or down arrow
-    opens; the arrows and Return then choose in it, as in any menu (user request, 2026-11-02)."""
+    opens; the arrows and Return then choose in it, as in any menu."""
 
     def canBecomeKeyView(self):
         return can_be_reached_with_tab(self)
@@ -162,7 +156,7 @@ class KeyboardPopUpButton(NSPopUpButton):
 
 
 class KeyboardButton(NSButton):
-    """A button that Tab and Shift-Tab reach, and that Space or Return presses (user request, 2026-11-02)."""
+    """A button that Tab and Shift-Tab reach, and that Space or Return presses."""
 
     def canBecomeKeyView(self):
         return can_be_reached_with_tab(self)
@@ -175,7 +169,7 @@ class KeyboardButton(NSButton):
 
 
 class SettingsWindow(NSWindow):
-    """The settings window: Esc closes it as its close button does (user request, 2026-10-29),
+    """The settings window: Esc closes it as its close button does,
     also while a field is being typed in, whose text field would otherwise take Esc as a request
     for completions. Closing saves that field (SettingsWindowController.windowWillClose_). A
     control that Tab or Shift-Tab reaches scrolls into view when the rows are taller than the window."""
@@ -214,7 +208,7 @@ class SettingsWindowController(WindowFrameSavingController):
         """Opens the window showing these settings, at its last frame while that is on a connected
         screen, else in the middle of the main screen, as tall as its rows; brings an open one
         forward as it is, which every settings change reaches already (it was closed and built
-        again, losing its scroll position and an edit under way; code review, 2026-10-30)."""
+        again, losing its scroll position and an edit under way)."""
         if self.is_open():
             NSApp.activateIgnoringOtherApps_(True)
             self.window.makeKeyAndOrderFront_(None)
@@ -241,7 +235,7 @@ class SettingsWindowController(WindowFrameSavingController):
 
     def windowDidChangeOcclusionState_(self, notification):
         """Closes the window once no part of it shows: other windows cover it, or it is on another
-        desktop, or the screen is locked (user request, 2026-10-25). Each setting is saved as it
+        desktop, or the screen is locked. Each setting is saved as it
         changes, and a field being typed in as the window closes (windowWillClose_)."""
         window = notification.object()
         if window is self.window and window.isVisible() and not window.occlusionState() & NSWindowOcclusionStateVisible:
@@ -251,10 +245,10 @@ class SettingsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def build_window(self):
-        # A pop-up, as the keyboard shortcut's is (radio buttons until 2026-10-26, user request).
+        # A pop-up, as the keyboard shortcut's is.
         self.show_as_popup = self.make_popup(SHOW_AS_TITLES, self.settings["show_as"])
         self.global_shortcut_popup = self.make_popup(GLOBAL_SHORTCUT_TITLES, self.settings["global_shortcut"])
-        self.global_shortcut_popup.setToolTip_("Shows AgentCommandTab, and hides it when pressed again.")  # the user's wording, 2026-10-28
+        self.global_shortcut_popup.setToolTip_("Shows AgentCommandTab, and hides it when pressed again.")
         # Shown, in a row of its own under the shortcut, only while macOS refuses the shortcut's key filter.
         self.accessibility_settings_button = KeyboardButton.buttonWithTitle_target_action_(
             "Needs Accessibility: Open System Settings…", self, "openAccessibilitySettingsClicked:")
@@ -262,13 +256,12 @@ class SettingsWindowController(WindowFrameSavingController):
         self.accessibility_settings_button.setControlSize_(NSControlSizeSmall)
         self.accessibility_settings_button.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.accessibility_settings_button.sizeToFit()
-        self.accessibility_settings_button.setToolTip_(  # the user's wording, 2026-10-28
+        self.accessibility_settings_button.setToolTip_(
             "The shortcut sees key presses before the app switcher does, which needs Accessibility permissions. "
             "Turn it on for the app that starts AgentCommandTab (iTerm2, when you start it from iTerm2), then click "
             "the menu bar icon")
         self.update_accessibility_settings_button()
         self.appearance_popup = self.make_popup(APPEARANCE_TITLES, self.settings["appearance"])
-        # "The menu bar icon keeps the menu bar's own look" after it until 2026-10-28 (user request).
         self.appearance_popup.setToolTip_("Auto follows the Light or Dark setting in System Settings > Appearance")
         self.start_with_iterm2_switch = self.make_switch(self.settings["app_starts_with_iterm2"])
         self.start_with_iterm2_switch.setToolTip_("Starts AgentCommandTab whenever iTerm2 starts, through a script in "
@@ -276,16 +269,14 @@ class SettingsWindowController(WindowFrameSavingController):
         self.sidebar_mode_popup = self.make_popup(SIDEBAR_MODE_TITLES, self.settings["sidebar_mode"])
         self.edge_popup = self.make_popup(SIDEBAR_EDGE_TITLES, self.settings["sidebar_edge"])
         self.sidebar_width_field = self.make_text_field(str(int(self.settings["sidebar_width"])), 80)
-        # Switches, as System Settings has, for the on/off settings (checkboxes until 2026-10-28, user request).
+        # Switches, as System Settings has, for the on/off settings.
         self.column_switches = {column_name: self.make_switch(column_name in self.settings["shown_columns"])
                                 for column_name in LIST_COLUMN_NAMES_IN_SETTINGS_ORDER}
         self.edge_note = NSTextField.wrappingLabelWithString_("")
         self.edge_note.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
         self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
         # A General section first: "Show as", the keyboard shortcut with its accessibility button
-        # under it, then Appearance (user requests, 2026-10-25 to 2026-10-27; Appearance last, the
-        # user's choice over after "Show as"), then whether iTerm2 starts the app (user requests,
-        # 2026-10-28; "Start with iTerm2" until 2026-11-02).
+        # under it, then Appearance, then whether iTerm2 starts the app.
         general_section = SettingsSection("General", [
             SettingsRow("Show as", self.show_as_popup), SettingsRow("Keyboard shortcut", self.global_shortcut_popup),
             SettingsRow(None, self.accessibility_settings_button, continues_the_row_above=True),
@@ -296,25 +287,24 @@ class SettingsWindowController(WindowFrameSavingController):
         sidebar_section = SettingsSection("Sidebar", [
             SettingsRow("Show", self.sidebar_mode_popup), SettingsRow("Window edge", self.edge_popup),
             SettingsRow("Width", self.sidebar_width_field, "points")], self.edge_note)
-        # The columns in a section of their own, above Harnesses (user request, 2026-10-25).
-        # A title on two lines in the list (a "\n" between them) is on one here.
-        columns_section = SettingsSection("Columns", [SettingsRow(COLUMN_TITLES[column_name].replace("\n", " "), column_switch)
+        # The columns in a section of their own, above Harnesses.
+        columns_section = SettingsSection("Columns", [SettingsRow(COLUMN_TITLES[column_name], column_switch)
                                                       for column_name, column_switch in self.column_switches.items()])
-        # Each agent tool: whether it is used, and below that, indented, its launch command (user request, 2026-10-19).
+        # Each agent tool: whether it is used, and below that, indented, its launch command.
         self.include_switches = []
         self.launch_command_fields = []
         harness_rows = []
         for agent_tool in self.settings["agent_tools"]:
             include_switch = self.make_switch(agent_tool["is_included"])
             self.include_switches.append(include_switch)
-            # Right-aligned, so the command fields start together (user request, 2026-10-25).
+            # Right-aligned, so the command fields start together.
             launch_command_field = self.make_text_field(agent_tool["launch_command"], LAUNCH_COMMAND_FIELD_WIDTH,
                                                         LaunchCommandField)
             self.launch_command_fields.append(launch_command_field)
             harness_rows += [SettingsRow(agent_tool["agent_tool_name"], include_switch),
                              SettingsRow("Command", launch_command_field, continues_the_row_above=True)]
         # The Window section shows only while "Show as" is Window, and the Sidebar section only while
-        # it is Sidebar (user request, 2026-10-27); the sidebar shown for a few seconds from the menu
+        # it is Sidebar; the sidebar shown for a few seconds from the menu
         # bar icon's menu's "Show sidebar" still uses the Sidebar section's edge and width. Each
         # section: (the "Show as" choice it shows for, or None for every choice, the section).
         self.sections = [(None, general_section), ("window", window_section), ("sidebar", sidebar_section),
@@ -322,8 +312,8 @@ class SettingsWindowController(WindowFrameSavingController):
         self.update_edge_choices()
         self.show_placement_fallback_note(self.settings)
 
-        # Resizable, with the rows in a scroll view, so a window made shorter than its rows scrolls
-        # (user request, 2026-10-19). The rows' view is flipped: rows go from the top down.
+        # Resizable, with the rows in a scroll view, so a window made shorter than its rows scrolls.
+        # The rows' view is flipped: rows go from the top down.
         rows_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, WINDOW_WIDTH, 0))
         self.rows_view = rows_view
         self.lay_out_sections(self.settings["show_as"])
@@ -340,7 +330,7 @@ class SettingsWindowController(WindowFrameSavingController):
         window.setReleasedWhenClosed_(False)
         window.setContentView_(scroll_view)
         # Tab and Shift-Tab go through the controls from the top one, which has the keyboard when
-        # the window opens (user request, 2026-11-02).
+        # the window opens.
         window.recalculateKeyViewLoop()
         window.setInitialFirstResponder_(self.show_as_popup)
         window.setMinSize_(SMALLEST_WINDOW_SIZES["settings_window_frame"])
@@ -380,9 +370,9 @@ class SettingsWindowController(WindowFrameSavingController):
         control_that_had_the_keyboard = find_the_control_that_has_the_keyboard(self.window)
         self.window.makeFirstResponder_(None)
         self.lay_out_sections(show_as)
-        self.window.recalculateKeyViewLoop()  # Tab goes through the fields shown now (code review, 2026-10-27)
+        self.window.recalculateKeyViewLoop()  # Tab goes through the fields shown now
         # Taken out of the window with the views it was among; the keyboard goes back to the control
-        # that had it, so Tab goes on from there after "Show as" was chosen with it (user request, 2026-11-02).
+        # that had it, so Tab goes on from there after "Show as" was chosen with it.
         self.window.setInitialFirstResponder_(self.show_as_popup)
         if control_that_had_the_keyboard is not None and control_that_had_the_keyboard.window() is self.window:
             self.window.makeFirstResponder_(control_that_had_the_keyboard)
@@ -391,8 +381,8 @@ class SettingsWindowController(WindowFrameSavingController):
     @objc.python_method
     def fit_window_height_to_rows(self):
         """Makes the window as tall as its rows, keeping its top edge and its width, but no taller
-        than the room below its top on its screen, where the rows then scroll (user request,
-        2026-10-27, over keeping the window's height)."""
+        than the room below its top on its screen, where the rows then scroll (over keeping the window's
+        height)."""
         frame = self.window.frame()
         top = frame.origin.y + frame.size.height
         height = self.window.frameRectForContentRect_(
@@ -620,8 +610,7 @@ class SettingsWindowController(WindowFrameSavingController):
     def reflect_settings(self, settings):
         """Shows settings changed elsewhere (a width dragged at the sidebar's edge) in an open
         window; does nothing before the window was first opened."""
-        if self.window is None:
-            self.settings = dict(settings)
+        if self.window is None:  # show takes the settings when it builds the window
             return
         # A width typed but not saved yet is kept (a click on a switch doesn't end its editing);
         # the field saves it once its editing ends. A field that only has the focus, as the first

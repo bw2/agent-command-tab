@@ -17,8 +17,8 @@ from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_C
                                                                  format_elapsed_time, format_memory_size)
 
 
-def make_entry(status, tab_title="reviews"):
-    return AgentSessionEntry(tab_id="1", session_id="s1", tab_title=tab_title, tab_title_set_by_user=False,
+def make_entry(status):
+    return AgentSessionEntry(tab_id="1", session_id="s1", tab_title="reviews", tab_title_set_by_user=False,
                              agent_session_name="", agent_tool_name="Claude Code", working_folder="/x",
                              status=status)
 
@@ -29,10 +29,14 @@ def make_window(statuses):
                        agent_sessions=tuple(make_entry(status) for status in statuses))
 
 
-class FormatElapsedTimeTests(unittest.TestCase):
-    def test_ranges(self):
+class FormatMemorySizeTests(unittest.TestCase):
+    def test_megabytes_and_gigabytes(self):
         self.assertEqual(format_memory_size(512 * 1024 ** 2), "512M")
         self.assertEqual(format_memory_size(int(1.43 * 1024 ** 3)), "1.4G")
+
+
+class FormatElapsedTimeTests(unittest.TestCase):
+    def test_ranges(self):
         self.assertEqual(format_elapsed_time(-3), "0s")
         self.assertEqual(format_elapsed_time(45), "45s")
         self.assertEqual(format_elapsed_time(185), "3m")
@@ -81,7 +85,7 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "green", True))
         self.assertEqual(parts.name_text, "reviews")
         self.assertEqual((parts.agent_tool_name, parts.details_text, parts.state_text),
-                         ("Claude Code", "", "thinking"))  # "working" until 2026-10-28 (user request)
+                         ("Claude Code", "", "thinking"))
         self.assertEqual(parts.dot_tool_tip, "Thinking: the agent is thinking or briefly running tools")
         self.assertEqual(parts.context_text, "")  # the context's size isn't known yet
         filled_entry = make_entry("working")._replace(context_tokens=84_000)
@@ -104,7 +108,7 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual(parts.dot_tool_tip,
                          "Running: the agent is waiting on a tool it started, such as a command, a subagent or a web fetch")
 
-    def test_a_background_session_says_running_in_yellow(self):  # user request, 2026-10-28
+    def test_a_background_session_says_running_in_yellow(self):
         parts = build_agent_session_row_text_parts(make_entry("background"), [True], 280.0)
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "yellow", False))
         self.assertEqual((parts.state_text, parts.state_color_name), ("running", "amber"))
@@ -113,7 +117,7 @@ class RowTextPartsTests(unittest.TestCase):
         window_parts = build_window_row_text_parts(make_window(["background", "idle"]), [], False)
         self.assertEqual((window_parts.dot_color_name, window_parts.details_text), ("yellow", "1 background, 1 idle"))
 
-    def test_the_status_text_has_its_dots_color_but_done_is_gray(self):  # user requests, 2026-10-28
+    def test_the_status_text_has_its_dots_color_but_done_is_gray(self):
         self.assertEqual(set(STATE_TEXT_COLOR_NAME_BY_STATE), set(DOT_GLYPH_AND_COLOR_BY_STATE))
         self.assertEqual([build_agent_session_row_text_parts(make_entry(status), [True], 1.0).state_color_name
                           for status in ("asking", "error", "done", "no such state")],
@@ -134,7 +138,7 @@ class RowTextPartsTests(unittest.TestCase):
         parts = build_agent_session_row_text_parts(make_entry("asking"), [False], 1.0)
         self.assertEqual((parts.dot_glyph, parts.dot_color_name, parts.dot_blinks), ("●", "light_blue", False))
 
-    def test_every_state_dot_says_what_it_means(self):  # user request, 2026-10-27
+    def test_every_state_dot_says_what_it_means(self):
         self.assertEqual(set(MEANING_BY_STATE), set(STATES_IN_URGENCY_ORDER))
         self.assertEqual(build_agent_session_row_text_parts(make_entry("done"), [False], 1.0).dot_tool_tip,
                          "Done: the agent is done and you haven't looked at its last message yet")
@@ -144,7 +148,7 @@ class RowTextPartsTests(unittest.TestCase):
                          "Asking: the agent is waiting for your answer to a question, or for permission to use a tool")
         self.assertEqual(build_monitor_row_text_parts(MonitorEntry("m", "Built-in", (0, 0, 1, 1), (0, 0, 1, 1), ())).dot_tool_tip, "")
 
-    def test_a_window_row_shows_its_number_after_a_title_an_earlier_window_has(self):  # user request, 2026-10-30
+    def test_a_window_row_shows_its_number_after_a_title_an_earlier_window_has(self):
         window = make_window(["idle"])
         self.assertEqual(build_window_row_text_parts(window, [], True).name_text, "project")
         self.assertEqual(build_window_row_text_parts(window._replace(number_among_windows_with_the_same_title=2), [], True).name_text,
@@ -156,7 +160,7 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual((expanded_parts.dot_color_name, expanded_parts.details_text), ("light_blue", ""))
         collapsed_parts = build_window_row_text_parts(window, [], False)
         self.assertEqual(collapsed_parts.details_text, "1 asking, 2 idle")
-        # A window sums up its tabs' thinking and running as working (user request, 2026-10-28).
+        # A window sums up its tabs' thinking and running as working.
         working_window_parts = build_window_row_text_parts(make_window(["working", "working", "idle"]), [], False)
         self.assertEqual((working_window_parts.details_text, working_window_parts.dot_tool_tip),
                          ("2 working, 1 idle", "Working: the agent is thinking or running a command"))

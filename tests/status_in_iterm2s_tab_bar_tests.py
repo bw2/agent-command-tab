@@ -11,6 +11,7 @@ from agent_command_tab import dashboard_core
 from agent_command_tab.dashboard_core import DashboardCore
 from agent_command_tab.terminal_backends import iterm2_terminal_backend
 from agent_command_tab.terminal_backends.iterm2_terminal_backend import Iterm2TerminalBackend, read_status_shown_in_iterm2s_tab_bar
+from condition_waiting import wait_until_in_a_coroutine
 
 
 class StandInSession:
@@ -34,8 +35,10 @@ def make_iterm2_terminal_backend():
     return Iterm2TerminalBackend(lambda: None, lambda: None, lambda terminal_name, message: None)
 
 
-def gather_tab(iterm2_terminal_backend_to_gather_with, command_line, status_variable, session):
-    """Returns the first session that the iTerm2 backend gathers for a tab with this one session."""
+def gather_tab(command_line, status_variable, session, iterm2_terminal_backend_to_gather_with=None):
+    """Returns the first session that the iTerm2 backend (a new one when None) gathers for a tab
+    with this one session."""
+    iterm2_terminal_backend_to_gather_with = iterm2_terminal_backend_to_gather_with or make_iterm2_terminal_backend()
     def read_variables(connection, names, session_id=None, tab_id=None, window_id=None):
         return ["tab title", None] if tab_id is not None else [None, command_line, status_variable, "/p"]
     tab = unittest.mock.Mock(tab_id="1", sessions=[session])
@@ -53,16 +56,13 @@ class StatusInIterm2sTabBarTests(unittest.TestCase):
                         StandInSession(error=iterm2.RPCException("Timeout"))):
             self.assertIsNone(asyncio.run(read_status_shown_in_iterm2s_tab_bar(session)))
 
-    def gather_tab(self, command_line, status_variable, session):
-        return gather_tab(make_iterm2_terminal_backend(), command_line, status_variable, session)
-
     def test_a_gather_reads_it_only_for_a_program_other_than_a_shell_whose_variable_is_empty(self):
         session = StandInSession({"status": "idle"})
-        self.assertEqual(self.gather_tab("claude --verbose", None, session)["status"], "idle")
+        self.assertEqual(gather_tab("claude --verbose", None, session)["status"], "idle")
         self.assertEqual(len(session.invocations), 1)
         session = StandInSession({"status": "idle"})
-        self.assertEqual(self.gather_tab("claude --verbose", "working", session)["status"], "working")  # the variable wins
-        self.assertEqual(self.gather_tab("-zsh", None, session)["status"], None)  # a shell is no agent
+        self.assertEqual(gather_tab("claude --verbose", "working", session)["status"], "working")  # the variable wins
+        self.assertEqual(gather_tab("-zsh", None, session)["status"], None)  # a shell is no agent
         self.assertEqual(session.invocations, [])
 
 
@@ -82,14 +82,13 @@ class TimeIterm2SetTheStatusTests(unittest.TestCase):
         self.assertEqual((first_session["status_set_in_iterm2"], first_session["status_set_in_iterm2_at"]), ("working", 501.0))
         backend.gather_is_in_progress = True
         report_change_at(502.0)  # the gather reads the value, and the time comes from here
-        self.assertEqual(gather_tab(backend, "gh pr view", "working", StandInSession())["status_set_in_iterm2_at"], 502.0)
+        self.assertEqual(gather_tab("gh pr view", "working", StandInSession(), backend)["status_set_in_iterm2_at"], 502.0)
         # No change reported since the dashboard connected: no time.
-        self.assertIsNone(gather_tab(make_iterm2_terminal_backend(), "gh pr view", "idle",
-                                     StandInSession())["status_set_in_iterm2_at"])
+        self.assertIsNone(gather_tab("gh pr view", "idle", StandInSession())["status_set_in_iterm2_at"])
 
 
 class NoStatusAtAllTests(unittest.TestCase):
-    def test_a_tab_iterm2_gives_no_status_goes_by_claude_codes_session_file_read_now(self):  # code review, 2026-10-29
+    def test_a_tab_iterm2_gives_no_status_goes_by_claude_codes_session_file_read_now(self):
         # Not by the `claude agents --json` record, which is up to a minute old.
         core = DashboardCore(lambda snapshot: None, lambda message: None)
         core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [
@@ -104,6 +103,34 @@ class NoStatusAtAllTests(unittest.TestCase):
         self.assertEqual(claude_agents_by_process_id[101]["status"], "busy")
         self.assertEqual(claude_agents_by_process_id[102]["status"], "idle")  # iTerm2 gives this tab a status
         self.assertEqual(core.claude_agents_by_process_id[101]["status"], "idle")  # the stored record stays
+
+    def test_a_change_of_that_session_files_status_asks_for_a_snapshot(self):
+        # Nothing else tells the core, so an "asking" would otherwise show only at the next snapshot.
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [
+            {"tab_id": "t1", "first_session": {"session_id": "s1", "status": None}}]}]
+        core.agent_sessions = {"s1": {"process_id": 101}}
+        core.claude_agents_by_process_id = {101: {"status": "busy", "config_folder": None}}
+        statuses = ["busy", "busy", "waiting"]  # what the session file says at each reading
+        statuses_read = []
+
+        def read_the_session_file(config_folder, process_id):
+            statuses_read.append(statuses[min(len(statuses_read), len(statuses) - 1)])
+            return statuses_read[-1]
+
+        async def watch_three_readings():
+            watching_task = asyncio.ensure_future(core.watch_the_own_status_of_agents_whose_terminal_reports_none())
+            snapshot_asked_for_after_each_reading = []
+            for reading_count in range(1, len(statuses) + 1):
+                self.assertTrue(await wait_until_in_a_coroutine(lambda: len(statuses_read) >= reading_count))
+                snapshot_asked_for_after_each_reading.append(core.snapshot_needed.is_set())
+                core.snapshot_needed.clear()  # well before the next reading
+            watching_task.cancel()
+            return snapshot_asked_for_after_each_reading
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_OWN_STATUS_READINGS", 0.3), \
+                unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status", read_the_session_file):
+            snapshot_asked_for_after_each_reading = asyncio.run(watch_three_readings())
+        self.assertEqual(snapshot_asked_for_after_each_reading, [True, False, True])  # the first reading, then the change
 
 
 if __name__ == "__main__":

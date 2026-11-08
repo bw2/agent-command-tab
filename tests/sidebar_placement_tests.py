@@ -4,36 +4,34 @@ from agent_command_tab.user_interface.sidebar_placement import (choose_sidebar_e
                                                                 compute_sidebar_frame,
                                                                 describe_sidebar_placement_fallback,
                                                                 find_outer_screen_edges, pointer_is_at_edge)
+from monitor_builders import BUILT_IN_SCREEN, DELL_SCREEN_TO_THE_LEFT, STUDIO_SCREEN_TO_THE_RIGHT
 
-LAPTOP = {"name": "Built-in", "frame": (0, 0, 1500, 1000), "visible_frame": (0, 0, 1500, 970)}
-RIGHT_DISPLAY = {"name": "Studio", "frame": (1500, -200, 2500, 1400), "visible_frame": (1500, -200, 2500, 1400)}
-LEFT_DISPLAY = {"name": "Dell", "frame": (-1920, 0, 1920, 1080), "visible_frame": (-1920, 0, 1920, 1080)}
 DISPLAY_ABOVE = {"name": "Above", "frame": (0, 1000, 1500, 900), "visible_frame": (0, 1000, 1500, 900)}
 
 
 class FindOuterScreenEdgesTests(unittest.TestCase):
     def test_one_screen_has_both_edges(self):
-        self.assertEqual(find_outer_screen_edges([LAPTOP["frame"]]), [(0, "right"), (0, "left")])
+        self.assertEqual(find_outer_screen_edges([BUILT_IN_SCREEN["frame"]]), [(0, "right"), (0, "left")])
 
     def test_shared_edge_is_dropped(self):
-        self.assertEqual(find_outer_screen_edges([LAPTOP["frame"], RIGHT_DISPLAY["frame"]]), [(0, "left"), (1, "right")])
+        self.assertEqual(find_outer_screen_edges([BUILT_IN_SCREEN["frame"], STUDIO_SCREEN_TO_THE_RIGHT["frame"]]), [(0, "left"), (1, "right")])
 
     def test_screen_stacked_above_shares_no_side_edge(self):
-        self.assertEqual(len(find_outer_screen_edges([LAPTOP["frame"], DISPLAY_ABOVE["frame"]])), 4)
+        self.assertEqual(len(find_outer_screen_edges([BUILT_IN_SCREEN["frame"], DISPLAY_ABOVE["frame"]])), 4)
 
 
 class ChooseSidebarEdgeTests(unittest.TestCase):
     def test_default_is_the_right_edge_of_the_menu_bar_monitor(self):
-        self.assertEqual(tuple(choose_sidebar_edge("right", [LAPTOP])), (0, "right", True))
+        self.assertEqual(tuple(choose_sidebar_edge("right", [BUILT_IN_SCREEN])), (0, "right", True))
 
     def test_saved_edge_of_the_menu_bar_monitor_with_another_monitor_attached(self):
-        self.assertEqual(tuple(choose_sidebar_edge("left", [LAPTOP, RIGHT_DISPLAY])), (0, "left", True))
+        self.assertEqual(tuple(choose_sidebar_edge("left", [BUILT_IN_SCREEN, STUDIO_SCREEN_TO_THE_RIGHT])), (0, "left", True))
 
     def test_saved_edge_no_longer_outer_uses_the_other_edge_of_the_menu_bar_monitor(self):
-        self.assertEqual(tuple(choose_sidebar_edge("right", [LAPTOP, RIGHT_DISPLAY])), (0, "left", False))
+        self.assertEqual(tuple(choose_sidebar_edge("right", [BUILT_IN_SCREEN, STUDIO_SCREEN_TO_THE_RIGHT])), (0, "left", False))
 
     def test_menu_bar_monitor_in_the_middle_of_three(self):
-        placement = choose_sidebar_edge("right", [LAPTOP, LEFT_DISPLAY, RIGHT_DISPLAY])
+        placement = choose_sidebar_edge("right", [BUILT_IN_SCREEN, DELL_SCREEN_TO_THE_LEFT, STUDIO_SCREEN_TO_THE_RIGHT])
         self.assertEqual(tuple(placement), (2, "right", False))
 
     def test_no_screens(self):
@@ -42,10 +40,10 @@ class ChooseSidebarEdgeTests(unittest.TestCase):
 
 class PlacementFallbackNoteTests(unittest.TestCase):
     def test_no_note_when_the_saved_edge_works(self):
-        self.assertEqual(describe_sidebar_placement_fallback("right", [LAPTOP]), "")
+        self.assertEqual(describe_sidebar_placement_fallback("right", [BUILT_IN_SCREEN]), "")
 
     def test_edge_that_borders_another_monitor(self):
-        self.assertEqual(describe_sidebar_placement_fallback("right", [LAPTOP, RIGHT_DISPLAY]),
+        self.assertEqual(describe_sidebar_placement_fallback("right", [BUILT_IN_SCREEN, STUDIO_SCREEN_TO_THE_RIGHT]),
                          "The saved edge borders another monitor, so the sidebar is on the left edge of Built-in.")
 
 
@@ -69,10 +67,10 @@ class SidebarFrameAndEdgeTests(unittest.TestCase):
         self.assertEqual(compute_dragged_sidebar_width(400, 400, 2000, "left", 200, 1200), 1200)
 
     def test_pointer_at_edge(self):
-        self.assertTrue(pointer_is_at_edge((1499.5, 500), LAPTOP["frame"], "right"))
-        self.assertFalse(pointer_is_at_edge((1490, 500), LAPTOP["frame"], "right"))
-        self.assertFalse(pointer_is_at_edge((1499.5, 1500), LAPTOP["frame"], "right"))
-        self.assertTrue(pointer_is_at_edge((-1920, 10), LEFT_DISPLAY["frame"], "left"))
+        self.assertTrue(pointer_is_at_edge((1499.5, 500), BUILT_IN_SCREEN["frame"], "right"))
+        self.assertFalse(pointer_is_at_edge((1490, 500), BUILT_IN_SCREEN["frame"], "right"))
+        self.assertFalse(pointer_is_at_edge((1499.5, 1500), BUILT_IN_SCREEN["frame"], "right"))
+        self.assertTrue(pointer_is_at_edge((-1920, 10), DELL_SCREEN_TO_THE_LEFT["frame"], "left"))
 
 
 if __name__ == "__main__":

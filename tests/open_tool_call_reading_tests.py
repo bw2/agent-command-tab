@@ -49,12 +49,10 @@ class ReadClaudeCodeOpenToolCallTests(unittest.TestCase):
             dict(claude_bash_call(), timestamp="2026-10-28T11:12:04.500Z"),
         ]), {"open_tool_name": "Bash", "open_tool_started_at": 1793185924.5})
 
-    def test_an_answered_tool_call_or_one_followed_by_text_is_not_open(self):
+    def test_a_tool_call_followed_by_text_is_not_open(self):
         self.assertEqual(self.read([
             claude_user_record("Fix it"),
             claude_bash_call("t1"),
-            claude_user_record([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]),
-            claude_assistant_record({"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "/a"}}),
             claude_assistant_record({"type": "text", "text": "All tests pass."}),
         ]), NO_OPEN_TOOL_CALL)
 
@@ -103,8 +101,8 @@ class ReadClaudeCodeOpenToolCallTests(unittest.TestCase):
             claude_assistant_record({"type": "thinking", "thinking": "..."}),
         ]), NO_OPEN_TOOL_CALL)
 
-    def test_a_message_from_another_claude_code_session_starts_a_turn(self):  # code review, 2026-10-28
-        # As Claude Code wrote one on this Mac (SendMessage from another session).
+    def test_a_message_from_another_claude_code_session_starts_a_turn(self):
+        # As Claude Code writes one (SendMessage from another session).
         peer_message = claude_user_record("Another Claude session sent a message:\n<cross-session-message from-name=\"a7\">I renamed "
                                           "the column.</cross-session-message>", isMeta=True, turnOrigin="peer", promptSource="system",
                                           origin={"kind": "peer", "name": "a7"})
@@ -133,11 +131,14 @@ class ReadCodexOpenToolCallTests(unittest.TestCase):
         ]), {"open_tool_name": "exec", "open_tool_started_at": 1793185852.0})
 
     def test_an_open_polling_call_without_a_command_counts_and_answered_calls_dont(self):
-        # The open wait counts as a tool the agent waits on (user request, 2026-10-28).
-        self.assertEqual(self.read([
+        answered_call = [
             codex_event({"type": "user_message", "message": "Sleep for a while"}),
             codex_response_item({"type": "custom_tool_call", "name": "exec", "call_id": "c1", "input": '{cmd:"sleep 45"}'}),
             codex_response_item({"type": "custom_tool_call_output", "call_id": "c1", "output": "still running"}),
+        ]
+        self.assertEqual(self.read(answered_call), NO_OPEN_TOOL_CALL)
+        # The open wait after it counts as a tool the agent waits on.
+        self.assertEqual(self.read(answered_call + [
             codex_response_item({"type": "function_call", "name": "wait", "call_id": "c2", "arguments": '{"cell_id":"3"}'}),
         ]), {"open_tool_name": "wait", "open_tool_started_at": None})  # no timestamp in this record
 

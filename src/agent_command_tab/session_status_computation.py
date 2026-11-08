@@ -1,19 +1,17 @@
 """Agent session states, their urgency order, and how a session's state is worked out.
 
-A state comes from iTerm2's `status` variable plus the core's readings of the session: whether
-the permission dialog is still on screen, a screen fingerprint (for "stuck"), and the command
-the agent runs (agent_process_tree). A turn end the agent's hooks reported
+A state comes from iTerm2's `status` variable plus the core's reading of whether the permission
+dialog is still on screen. A turn end the agent's hooks reported
 (hook_event_tracking) turns iTerm2's "working" into idle before this module sees the value
 (DashboardCore.update_session_tracking).
 """
 
 # "paused": the agent process is stopped (Pause from the list, or Ctrl+Z) until it is resumed.
-# "background": idle, but with background processes it started still running (user request,
-# 2026-10-28; snapshot_builder.session_has_background_work), so it isn't taken for idle.
-# "new": idle, but no message has been sent to it since it started (user request, 2026-10-30;
-# snapshot_builder.agent_waits_for_its_first_prompt), so Hide Idle doesn't hide it.
-STATES_IN_URGENCY_ORDER = ["asking", "error", "stuck", "working", "background", "done", "new", "idle", "paused", "unknown",
-                           "exited"]
+# "background": idle, but with background processes it started still running
+# (snapshot_builder.session_has_background_work), so it isn't taken for idle.
+# "new": idle, but no message has been sent to it since it started
+# (snapshot_builder.agent_waits_for_its_first_prompt), so Hide Idle doesn't hide it.
+STATES_IN_URGENCY_ORDER = ["asking", "error", "working", "background", "done", "new", "idle", "paused", "unknown", "exited"]
 # Between turns: the agent waits at its prompt, so /compact and /clear can be typed into it.
 STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done", "background", "new"})
 # During a turn, as iTerm2's status shows it: a permission prompt in between doesn't end the turn.
@@ -24,12 +22,6 @@ STATES_OF_A_TURN_UNDER_WAY = frozenset({"working", "asking"})
 # the turn's, or a background task after the turn ended, which the hooks tell apart.
 CLAUDE_CODE_SESSION_STATUSES_TO_ITERM2_STATUS_VALUES = {"idle": "idle", "busy": "working", "shell": "working",
                                                         "waiting": "waiting"}
-
-# Claude Code's tools that finish in seconds, so one its conversation file shows open for the
-# stuck threshold hangs and the row shows "stuck" (user request, 2026-10-30). A command the agent
-# started (Bash), a subagent (Agent, Task) and an MCP tool can take long, so they are left out.
-TOOLS_THAT_FINISH_IN_SECONDS = frozenset({"WebFetch", "WebSearch", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
-                                          "Glob", "Grep"})
 
 ITERM2_STATUS_WORDS_TO_STATES = {
     "idle": "idle",
@@ -57,15 +49,15 @@ def map_iterm2_status_value_to_state(iterm2_status_value):
 
 # The state of a Claude Code session's own report in `claude agents --json`, for a tab for which
 # iTerm2 has no status at all, neither its `status` variable nor what its tab bar shows (for
-# example without iTerm2's Claude Code integration hooks; user request, 2026-10-21). Made from the
-# table above, which a second table kept by hand drifted from (it lacked "shell"; code review, 2026-10-29).
+# example without iTerm2's Claude Code integration hooks). Made from the table above, so the two
+# can't differ.
 CLAUDE_AGENTS_STATUSES_TO_STATES = {status: map_iterm2_status_value_to_state(iterm2_status_value)
                                     for status, iterm2_status_value in CLAUDE_CODE_SESSION_STATUSES_TO_ITERM2_STATUS_VALUES.items()}
 
 
-def update_permission_dialog_reading(screen_reading, dialog_is_showing, interrupted_line_count,
+def update_permission_dialog_reading(session_reading, dialog_is_showing, interrupted_line_count,
                                      iterm2_status_change_time, now):
-    """Returns the screen reading updated with one permission dialog check of an asking session.
+    """Returns the session reading updated with one permission dialog check of an asking session.
 
     The dialog counts as answered once it was seen and then went away: approved, or denied when
     a new "Interrupted" line appeared ("No" or Esc). A dialog never seen since the session
@@ -74,7 +66,7 @@ def update_permission_dialog_reading(screen_reading, dialog_is_showing, interrup
     the match is ambiguous, the request stays open).
 
     Args:
-        screen_reading: The session's reading so far; it is not changed.
+        session_reading: The session's reading so far; it is not changed.
         dialog_is_showing: Whether this check found the adapter's permission dialog.
         interrupted_line_count: How many of the adapter's "Interrupted" lines this check found.
         iterm2_status_change_time: When iTerm2's status last changed; earlier checks belong to
@@ -86,7 +78,7 @@ def update_permission_dialog_reading(screen_reading, dialog_is_showing, interrup
         "interrupted_line_count_while_asking", and once answered "permission_dialog_gone_since"
         and "turn_was_interrupted".
     """
-    reading = dict(screen_reading)
+    reading = dict(session_reading)
     if reading.get("permission_dialog_checked_at", 0) < iterm2_status_change_time:  # a new prompt: forget the last one
         for field_name in ("permission_dialog_is_showing", "permission_dialog_gone_since", "turn_was_interrupted"):
             reading.pop(field_name, None)
@@ -105,13 +97,13 @@ def update_permission_dialog_reading(screen_reading, dialog_is_showing, interrup
     return reading
 
 
-def permission_dialog_was_answered(state, iterm2_status_change_time, screen_reading):
+def permission_dialog_was_answered(state, iterm2_status_change_time, session_reading):
     """Returns whether an asking session's permission dialog was answered, by a screen check made
     after the status last changed (see update_permission_dialog_reading)."""
-    screen_reading = screen_reading or {}
-    return (state == "asking" and screen_reading.get("permission_dialog_checked_at", 0) > iterm2_status_change_time
-            and not screen_reading.get("permission_dialog_is_showing")
-            and "permission_dialog_gone_since" in screen_reading)
+    session_reading = session_reading or {}
+    return (state == "asking" and session_reading.get("permission_dialog_checked_at", 0) > iterm2_status_change_time
+            and not session_reading.get("permission_dialog_is_showing")
+            and "permission_dialog_gone_since" in session_reading)
 
 
 def status_values_put_the_agent_in_the_same_state(first_status_value, second_status_value):
@@ -130,7 +122,7 @@ def status_change_ends_a_turn(previous_state, new_state):
     return new_state == "done" or (new_state == "idle" and previous_state in STATES_OF_A_TURN_UNDER_WAY)
 
 
-def track_status_value(session_tracking, iterm2_status_value, now, screen_reading=None, ends_no_turn=False):
+def track_status_value(session_tracking, iterm2_status_value, now, session_reading=None, ends_no_turn=False):
     """Returns a session's tracking updated for its iTerm2 status value read now.
 
     The tracking records when the value last changed, when the current turn started (working
@@ -144,13 +136,13 @@ def track_status_value(session_tracking, iterm2_status_value, now, screen_readin
             first time; it is not changed.
         iterm2_status_value: iTerm2's `status` variable for the session's first pane.
         now: The time of the reading.
-        screen_reading: The session's screen reading (compute_session_status_from_sources), or
+        session_reading: The session's session reading (compute_session_status_from_sources), or
             None: a permission prompt that a check since it appeared found answered No or Esc
             ended the turn, though iTerm2 still says waiting, so working next is the turn the
-            next prompt starts (code review, 2026-10-28).
+            next prompt starts.
         ends_no_turn: Whether the value replaces one that may belong to no turn at all, so a
             change from working to it records no turn end (Claude Code's own idle over a working
-            that iTerm2 set without a turn; code review, 2026-10-28).
+            that iTerm2 set without a turn).
 
     Returns:
         session_tracking itself when the value is unchanged, else a new dict with "status_value",
@@ -167,8 +159,8 @@ def track_status_value(session_tracking, iterm2_status_value, now, screen_readin
         return session_tracking
     previous_state = map_iterm2_status_value_to_state(session_tracking["status_value"])
     tracking = dict(session_tracking, status_value=iterm2_status_value, status_change_time=now)
-    turn_was_interrupted = (permission_dialog_was_answered(previous_state, session_tracking["status_change_time"], screen_reading)
-                            and bool(screen_reading.get("turn_was_interrupted")))
+    turn_was_interrupted = (permission_dialog_was_answered(previous_state, session_tracking["status_change_time"], session_reading)
+                            and bool(session_reading.get("turn_was_interrupted")))
     if new_state == "working" and (previous_state not in STATES_OF_A_TURN_UNDER_WAY or turn_was_interrupted):
         tracking["turn_started_at"] = now
     if status_change_ends_a_turn(previous_state, new_state) and not ends_no_turn:
@@ -177,20 +169,16 @@ def track_status_value(session_tracking, iterm2_status_value, now, screen_readin
 
 
 def compute_session_status_from_sources(iterm2_status_value, iterm2_status_change_time, last_turn_ended_at,
-                                        last_time_tab_was_seen, tab_is_seen_now, screen_reading, stuck_threshold_seconds,
-                                        now):
+                                        last_time_the_finished_turn_was_seen_or_cleared, tab_is_seen_now, session_reading):
     """Returns (state, reason) for one agent session.
 
     - "asking" ends when a screen check made after the status changed no longer finds the
       tool's permission dialog: Claude Code reports nothing when a prompt is answered, and
-      iTerm2's status stays "waiting" until the approved tool finishes (Phase 0).
-    - "stuck" is working with no screen change (progress noise masked) for the threshold while
-      running no command of its own and with no tool call open, or waiting the threshold on a
-      tool that finishes in seconds (TOOLS_THAT_FINISH_IN_SECONDS, a web fetch say): an agent
-      waiting on a long command it started, a subagent or an MCP tool is working.
+      iTerm2's status stays "waiting" until the approved tool finishes.
     - "done" means the last turn ended after the tab was last seen (selected in the key iTerm2
-      window while iTerm2 was the active app), whether the status now says done or idle, so it
-      lasts until the tab is seen; a turn that ended while the tab was seen counts as idle.
+      window while iTerm2 was the active app) or its finished turn was cleared with /clear,
+      whether the status now says done or idle, so it lasts until either happens; a turn that
+      ended while the tab was seen counts as idle.
 
     Args:
         iterm2_status_value: iTerm2's `status` variable for the session's first pane.
@@ -198,53 +186,30 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         last_turn_ended_at: When the status last changed in a way that ends a turn
             (status_change_ends_a_turn), or None if it hasn't since the session was first seen;
             track_status_value sets it for a session first seen as done.
-        last_time_tab_was_seen: When the tab was last seen, or None if never.
+        last_time_the_finished_turn_was_seen_or_cleared: When the tab was last seen or its finished
+            turn was cleared with /clear, whichever is later, or None if neither happened.
         tab_is_seen_now: Whether the tab is being seen at this moment.
-        screen_reading: {"permission_dialog_is_showing": bool, "permission_dialog_checked_at":
-            float, "permission_dialog_gone_since": float, "turn_was_interrupted": bool,
-            "fingerprint_changed_at": float, "running_command": (name, started at) or None,
-            "command_last_seen_running_at": float, "open_tool_call": {"open_tool_name": str,
-            "open_tool_started_at": float or None}} (any key may be missing), or None.
-        stuck_threshold_seconds: How long a working session may show no screen change.
-        now: The current time.
+        session_reading: {"permission_dialog_is_showing": bool, "permission_dialog_checked_at":
+            float, "permission_dialog_gone_since": float, "turn_was_interrupted": bool} (any key
+            may be missing), or None.
 
     Returns:
         A (state, reason) tuple; state is one of STATES_IN_URGENCY_ORDER.
     """
     state = map_iterm2_status_value_to_state(iterm2_status_value)
-    screen_reading = screen_reading or {}
+    session_reading = session_reading or {}
     if state is None:
         return "unknown", "no status report"
-    working_since = iterm2_status_change_time
-    if permission_dialog_was_answered(state, iterm2_status_change_time, screen_reading):
-        if screen_reading.get("turn_was_interrupted"):
+    if permission_dialog_was_answered(state, iterm2_status_change_time, session_reading):
+        if session_reading.get("turn_was_interrupted"):
             # "No" or Esc ends the turn; Claude Code waits for new instructions while iTerm2 still says waiting.
             return "idle", "turn interrupted"
         state = "working"
-        working_since = screen_reading["permission_dialog_gone_since"]
     if state == "working":
-        if screen_reading.get("running_command"):
-            return "working", f"running {screen_reading['running_command'][0]}"  # waiting on its command, never stuck
-        open_tool_call = screen_reading.get("open_tool_call") or {}
-        open_tool_started_at = open_tool_call.get("open_tool_started_at")
-        if open_tool_started_at is not None:
-            # Waiting on a tool call its conversation file shows open, which starts no command:
-            # stuck only for a tool that finishes in seconds, once open for the threshold (user
-            # request, 2026-10-30); a subagent or an MCP tool may run long. Counted from when
-            # the agent started working, too, so a permission prompt's wait doesn't count (code review, 2026-10-30).
-            open_tool_name = open_tool_call["open_tool_name"]
-            seconds_waited_on_the_tool = now - max(open_tool_started_at, working_since)
-            if open_tool_name in TOOLS_THAT_FINISH_IN_SECONDS and seconds_waited_on_the_tool >= stuck_threshold_seconds:
-                return "stuck", f"waiting on {open_tool_name} for {max(1, round(seconds_waited_on_the_tool / 60))} min"
-            return "working", f"running {open_tool_name}"
-        # Stuck means thinking with nothing new on screen, so the clock also restarts when a command ends.
-        quiet_since = max(screen_reading.get("fingerprint_changed_at", working_since), working_since,
-                          screen_reading.get("command_last_seen_running_at", 0))
-        if now - quiet_since >= stuck_threshold_seconds:
-            return "stuck", f"thinking with no screen change for {max(1, round((now - quiet_since) / 60))} min"
-        return "working", ""
+        return "working", ""  # the tool it waits on: snapshot_builder.choose_tool_the_agent_is_waiting_on
     if state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT and last_turn_ended_at is not None:
-        if tab_is_seen_now or (last_time_tab_was_seen is not None and last_time_tab_was_seen >= last_turn_ended_at):
+        if tab_is_seen_now or (last_time_the_finished_turn_was_seen_or_cleared is not None
+                               and last_time_the_finished_turn_was_seen_or_cleared >= last_turn_ended_at):
             return "idle", "turn finished and seen"
         return "done", "turn finished"
     return state, ""
@@ -260,8 +225,8 @@ def split_agent_sessions_into_pausable_and_resumable(agent_session_entries):
     """Returns (the agent sessions a pause would stop, the paused ones a resume would continue).
     An agent suspended with Ctrl+Z by hand is in both, since a pause still stops the processes
     below it, also in tmux, where a running agent can't be paused; an agent whose process has
-    exited is in neither."""
-    return ([entry for entry in agent_session_entries if entry.status != "exited"
+    exited is in neither, and one whose turns run outside its tab is never paused."""
+    return ([entry for entry in agent_session_entries if entry.status != "exited" and not entry.turns_run_outside_the_tab
              and not (entry.status == "paused" and entry.is_paused_with_the_processes_below_it)
              and (entry.can_be_paused_while_it_runs or entry.status == "paused")],
             [entry for entry in agent_session_entries if entry.status == "paused"])

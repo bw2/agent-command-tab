@@ -1,7 +1,7 @@
 """The tool call an agent session is waiting on, if any, read from the end of its own
-conversation file, the same file the context size comes from (context_window_usage). The
-session's state uses it: a tool call open for a while shows as "running" (snapshot_builder),
-and some tools keep a session "working" while they run (session_status_computation).
+conversation file, the same file the context size comes from (context_window_usage). It names
+the tool a working session waits on: a tool call open for a while shows as "running"
+(snapshot_builder.choose_tool_the_agent_is_waiting_on).
 """
 
 from agent_command_tab.claude_code_transcript_records import (RECORD_KINDS_THAT_START_A_TURN, classify_user_record,
@@ -17,8 +17,7 @@ def build_open_tool_call_fields(open_tool_name, open_tool_started_at):
 def read_record_time(record):
     """Returns a conversation file record's "timestamp", which Claude Code and Codex both write in
     ISO 8601 ("2026-10-28T11:12:04.784Z"), as seconds since 1970, or None without a readable one.
-    parse_iso_time reads the trailing "Z", which datetime.fromisoformat does only from Python 3.11
-    (code review, 2026-10-28)."""
+    parse_iso_time reads the trailing "Z", which datetime.fromisoformat does only from Python 3.11."""
     return parse_iso_time(record.get("timestamp")) or None
 
 

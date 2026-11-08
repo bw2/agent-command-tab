@@ -36,20 +36,20 @@ from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
 from agent_command_tab.saved_agent_sessions_store import (SAVED_AGENT_SESSIONS_FILE_PATH, choose_saved_windows_to_restore,
                                                           delete_saved_items, load_saved_windows, merge_saved_windows,
                                                           rename_saved_session, rename_saved_window, save_saved_windows)
-from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
-                                              load_settings, move_the_settings_folder_of_the_old_name, save_settings)
+from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, find_launch_command,
+                                              list_included_agent_tool_names, load_settings, save_settings)
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list, choose_folder_for_new_agent_window
 from agent_command_tab.terminal_backends.iterm2_terminal_backend import ITERM2_BUNDLE_IDENTIFIER, list_running_iterm2_applications
-from agent_command_tab.start_with_iterm2 import (AUTOLAUNCH_SCRIPT_FILE_NAME, START_WITH_ITERM2_SETTING_TITLE,
-                                                 build_command_that_starts_this_copy_of_the_app,
-                                                 find_iterm2_autolaunch_folder, update_autolaunch_script_to_match_setting)
+from agent_command_tab.start_with_iterm2 import (START_WITH_ITERM2_SETTING_TITLE, build_command_that_starts_this_copy_of_the_app,
+                                                 find_autolaunch_script_path, find_package_folder_of_this_copy,
+                                                 update_autolaunch_script_to_match_setting)
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
 from agent_command_tab.user_interface.app_icon import build_app_icon
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.menu_bar_status_item import MenuBarStatusItemController
 from agent_command_tab.user_interface.popover_container import ListPanelController, build_dropdown_popover
 from agent_command_tab.user_interface.process_info_alert import build_process_info_alert
-from agent_command_tab.user_interface.saved_sessions_window import SavedSessionsWindowController
+from agent_command_tab.user_interface.saved_sessions_window import SavedSessionsWindowController, shorten_home_folder
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
                                                             convert_rect_to_frame_list, grow_frame_to_smallest_size,
                                                             read_monitors_from_screens)
@@ -59,7 +59,7 @@ from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk
 
 SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING = 10
 SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
-# The settings' Appearance (settings_store.APPEARANCE_CHOICES; user request, 2026-10-27): the
+# The settings' Appearance (settings_store.APPEARANCE_CHOICES): the
 # NSAppearance name the app is drawn in, or None to follow macOS's Light or Dark setting.
 APPEARANCE_NAMES_BY_CHOICE = {"auto": None, "dark": NSAppearanceNameDarkAqua, "light": NSAppearanceNameAqua}
 # The settings whose change can put the sidebar where an open settings window is: every setting
@@ -69,7 +69,7 @@ SETTINGS_THAT_PLACE_THE_SIDEBAR = ("show_as", "sidebar_mode", "sidebar_edge", "s
 
 def build_main_menu_with_the_settings_and_edit_shortcuts(settings_target):
     """Returns a main menu holding an app menu whose Settings items open the settings with
-    Command-comma, as in nearly every Mac app, and Command-period (user request, 2026-10-29),
+    Command-comma, as in nearly every Mac app, and Command-period,
     and an Edit menu: Undo, Redo, Cut, Copy, Paste and Select All.
 
     The dashboard, an accessory app, never shows a menu bar, but AppKit finds the Command-key
@@ -109,8 +109,8 @@ def build_main_menu_with_the_settings_and_edit_shortcuts(settings_target):
 
 def choose_what_the_global_shortcut_does(show_as, sidebar_mode, sidebar_is_shown, list_window_is_in_front, dropdown_is_open):
     """Returns what a press of the global shortcut does: it shows the list the way the settings
-    ask, or hides it when it shows (user request, 2026-10-21), except that a sidebar set to stay
-    visible stays, or comes back if the menu bar icon's menu hid it (code review, 2026-10-28).
+    ask, or hides it when it shows, except that a sidebar set to stay
+    visible stays, or comes back if the menu bar icon's menu hid it.
 
     Returns:
         "show_sidebar", "hide_sidebar", "nothing", "show_window", "hide_window",
@@ -128,7 +128,7 @@ def choose_what_the_global_shortcut_does(show_as, sidebar_mode, sidebar_is_shown
 def yield_activation_to(application):
     """Lets an app (an NSRunningApplication) become the active one when it asks: macOS 14 and
     later may refuse another app's activation while this one is active unless this one hands it
-    over. Older macOS has no such hand-over and needs none (code review, 2026-10-28)."""
+    over. Older macOS has no such hand-over and needs none."""
     if NSApp.respondsToSelector_("yieldActivationToApplication:"):
         NSApp.yieldActivationToApplication_(application)
 
@@ -140,7 +140,6 @@ class AppController(NSObject):
         self = objc.super(AppController, self).init()
         if self is None:
             return None
-        move_the_settings_folder_of_the_old_name()  # before the settings and the docked window frames are read
         self.settings = load_settings()
         self.reserved_screen_area = None
         self.application_in_front_before_dropdown = None
@@ -167,10 +166,10 @@ class AppController(NSObject):
         self.list_window_controller = ListWindowController.alloc().initWithOwner_(self)
         for list_controller in self.list_all_list_controllers():
             # Only the list on screen rebuilds its rows for each snapshot and setting; the others
-            # do once they appear (code review, 2026-10-29).
+            # do once they appear.
             list_controller.defers_rebuilding_while_hidden = True
         self.settings_window_controller = SettingsWindowController.alloc().initWithOwner_(self)
-        # The saved sessions (saved_agent_sessions_store; user request, 2026-11-06): the main thread
+        # The saved sessions (saved_agent_sessions_store): the main thread
         # alone reads and writes their file, so a rename or delete never waits on the core.
         self.saved_agent_sessions_file_path = SAVED_AGENT_SESSIONS_FILE_PATH
         self.saved_windows = load_saved_windows(self.saved_agent_sessions_file_path)
@@ -261,7 +260,6 @@ class AppController(NSObject):
         shows its own hint (show_terminal_problem).
         """
         print(f"agent-command-tab: {message}; exiting so the supervisor reconnects", flush=True)
-        # "Retrying soon." is the user's wording, 2026-10-28.
         explanation = f"{message}. Retrying soon."
         for list_panel_controller in self.list_all_list_panel_controllers():
             list_panel_controller.show_message(explanation)
@@ -270,7 +268,7 @@ class AppController(NSObject):
 
     @objc.python_method
     def exit_now_with_reconnect_status(self):
-        self.save_settings_before_exiting()  # as quit does (code review, 2026-10-28)
+        self.save_settings_before_exiting()  # as quit does
         sys.stdout.flush()
         os._exit(RECONNECT_EXIT_STATUS)
 
@@ -290,9 +288,9 @@ class AppController(NSObject):
     def menu_bar_icon_clicked(self):
         """A left click on the menu bar icon shows the list the way the settings ask: the dropdown
         opens or closes, an auto-hiding sidebar slides in for a few seconds or, while it is in, out
-        (user request, 2026-10-28; a sidebar set to stay visible stays, as for the global
+        (a sidebar set to stay visible stays, as for the global
         shortcut, and comes back if the menu's Show popup or Show window hid it), or the window
-        comes to the front. An open settings window closes first (user request, 2026-10-28), so a
+        comes to the front. An open settings window closes first, so a
         dropdown it kept open closes too. It also retries a global shortcut that lacked the
         permission, since the sidebar slides in without making the app active (the other retry)."""
         self.settings_window_controller.close_if_open()
@@ -310,11 +308,11 @@ class AppController(NSObject):
 
     @objc.python_method
     def show_the_list_as(self, show_as_choice):
-        """The menu bar icon's menu's "Show popup", "Show sidebar" and "Show window" (user requests,
-        2026-10-28): shows the list as that "Show as" choice would, whatever "Show as" is, without
+        """The menu bar icon's menu's "Show popup", "Show sidebar" and "Show window": shows the list as that
+        "Show as" choice would, whatever "Show as" is, without
         changing it. Nothing happens while the list already shows that way; otherwise the other
         ways it shows are hidden first, a sidebar set to stay visible too (until it is shown
-        again), and a window behind other windows too (code review, 2026-10-28). A sidebar shown
+        again), and a window behind other windows too. A sidebar shown
         while "Show as" is another slides out again after a few seconds, as an auto-hiding one does."""
         if show_as_choice in self.list_the_ways_the_list_shows():
             return
@@ -323,8 +321,7 @@ class AppController(NSObject):
         if show_as_choice != "sidebar" and self.sidebar_controller.is_shown:
             self.sidebar_controller.hide_until_shown_again()
         if show_as_choice != "window" and self.list_window_controller.window.isVisible():
-            self.list_window_controller.hide()
-            self.list_window_closed()  # the settings window no longer stays level with it, as for the global shortcut
+            self.hide_the_list_window()
         if show_as_choice == "popup":
             self.status_item_controller.show_popover()
         elif show_as_choice == "sidebar":
@@ -336,7 +333,7 @@ class AppController(NSObject):
     def list_the_ways_the_list_shows(self):
         """Returns which of "popup", "sidebar" and "window" show the list right now: the window
         only while it is in front (as for the global shortcut), so Show window brings forward one
-        that other windows cover or that is on another desktop (code review, 2026-10-28)."""
+        that other windows cover or that is on another desktop."""
         return [show_as_choice for show_as_choice, is_shown in (
             ("popup", self.popover.isShown()), ("sidebar", self.sidebar_controller.is_shown),
             ("window", self.list_window_controller.is_in_front())) if is_shown]
@@ -355,7 +352,7 @@ class AppController(NSObject):
     def close_a_dropdown_the_menu_showed(self):
         """Closes a dropdown that the menu bar icon's menu's Show popup opened while "Show as" is
         Sidebar or Window (an open settings window keeps it open), before a click on the icon or
-        the global shortcut shows the list the way the settings ask (code review, 2026-10-28).
+        the global shortcut shows the list the way the settings ask.
         Returns whether it closed one."""
         if self.settings["show_as"] == "popup" or not self.popover.isShown():
             return False
@@ -365,17 +362,16 @@ class AppController(NSObject):
     @objc.python_method
     def global_shortcut_pressed(self):
         """The global shortcut shows the list as the menu bar icon does and, pressed again, hides
-        it, giving the keyboard back to the app that had it (user request, 2026-10-21)
+        it, giving the keyboard back to the app that had it
         (choose_what_the_global_shortcut_does). The list it shows has the first agent asking a
-        question selected (user request, 2026-10-29), or while none asks, the tab in front (user
-        request, 2026-11-03)."""
+        question selected, or while none asks, the tab in front."""
         closed_a_dropdown_the_menu_showed = self.close_a_dropdown_the_menu_showed()
         what_to_do = choose_what_the_global_shortcut_does(
             self.settings["show_as"], self.settings["sidebar_mode"], self.sidebar_controller.is_shown,
             self.list_window_controller.is_in_front(), self.popover.isShown())
         if what_to_do in ("show_sidebar", "hide_sidebar") and closed_a_dropdown_the_menu_showed:
             # The sidebar takes no keyboard, so the app that had it before the dropdown gets it
-            # back, as when the shortcut closes the dropdown itself (code review, 2026-10-29).
+            # back, as when the shortcut closes the dropdown itself.
             self.give_activation_to(self.application_in_front_before_dropdown)
         if what_to_do == "show_sidebar":
             self.show_the_sidebar()  # for a few seconds, or for good if it stays visible
@@ -386,8 +382,7 @@ class AppController(NSObject):
             self.show_the_list_window()
             self.list_window_controller.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
         elif what_to_do == "hide_window":
-            self.list_window_controller.hide()
-            self.list_window_closed()
+            self.hide_the_list_window()
             if NSApp.isActive():  # otherwise (always on top) the app with the keyboard keeps it
                 self.give_activation_to(self.last_other_active_application)
         elif what_to_do == "open_dropdown":
@@ -400,16 +395,15 @@ class AppController(NSObject):
     @objc.python_method
     def close_the_list_after_escape(self, list_controller):
         """Esc in a list closes it and gives the keyboard back to the app that had it, as a second
-        press of the global shortcut does (user request, 2026-10-29); a sidebar set to stay
+        press of the global shortcut does; a sidebar set to stay
         visible stays, and gives the keyboard back."""
         if list_controller is self.dropdown_list_controller:
             self.close_dropdown()
             self.give_activation_to(self.application_in_front_before_dropdown)
             return
         if list_controller is self.list_window_controller.list_controller:
-            self.list_window_controller.hide()
-            self.list_window_closed()
-        elif self.sidebar_controller.hides_by_itself():  # also one the menu's Show sidebar slid in (code review, 2026-10-29)
+            self.hide_the_list_window()
+        elif self.sidebar_controller.hides_by_itself():  # also one the menu's Show sidebar slid in
             self.sidebar_controller.hide_now()
         self.give_activation_to(self.last_other_active_application)
 
@@ -448,7 +442,8 @@ class AppController(NSObject):
         """The list window or the settings window was moved or resized: its frame is kept under
         setting_name (settings_store.SMALLEST_WINDOW_SIZES), so it opens there next time. Nothing
         else depends on a frame, so settings_changed's other steps are skipped, and the settings
-        file is written once the window has stopped moving (a drag moves it at every pointer step)."""
+        file is written at most every SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME while it moves (a
+        drag moves it at every pointer step), the last time after it stops."""
         if frame == self.settings[setting_name]:
             return
         self.settings = dict(self.settings, **{setting_name: frame})
@@ -463,8 +458,8 @@ class AppController(NSObject):
             save_settings(self.settings)
 
     # Dragging the dropdown's top bar detaches it into the list window, and dropping the list
-    # window on the menu bar icon turns it back into the dropdown (user request, 2026-10-19).
-    # Dragging the sidebar's top bar turns it into the list window too (user request, 2026-10-22).
+    # window on the menu bar icon turns it back into the dropdown.
+    # Dragging the sidebar's top bar turns it into the list window too.
 
     @objc.python_method
     def top_bar_dragged(self, list_panel_controller, start_point_on_screen):
@@ -503,11 +498,11 @@ class AppController(NSObject):
             # the dropdown and shows the window only when "Show as" changes.
             self.close_dropdown()
             self.list_window_controller.show(window_frame, takes_keyboard_focus=not self.settings_window_controller.is_open())
+            self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
             if self.settings_window_controller.is_open():  # it stays in front, as when settings_changed shows the window
-                self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
                 self.settings_window_controller.window.orderFront_(None)
         # A window that was open already (behind other windows, say) keeps its frame in show, so
-        # it takes the dragged one here, or pointer_offset wouldn't put its top bar under the pointer (code review, 2026-10-28).
+        # it takes the dragged one here, or pointer_offset wouldn't put its top bar under the pointer.
         list_window.setFrame_display_(NSMakeRect(*window_frame), True)
         self.list_window_controller.follow_the_pointer_until_the_button_comes_up(pointer_offset)
 
@@ -536,15 +531,14 @@ class AppController(NSObject):
     def list_window_drag_ended(self):
         """Dropped on the menu bar icon, the list window turns back into the dropdown: with Show
         as: Window, Show as becomes Popup; a window the menu's Show window opened for another Show
-        as just hides, leaving the settings as they are (code review, 2026-10-28)."""
+        as just hides, leaving the settings as they are."""
         self.status_item_controller.highlight(False)
         if not self.pointer_is_on_the_menu_bar_icon():
             return
         if self.settings["show_as"] == "window":
             self.settings_changed(dict(self.settings, show_as="popup"))
         else:
-            self.list_window_controller.hide()
-            self.list_window_closed()
+            self.hide_the_list_window()
         self.status_item_controller.show_popover()
 
     @objc.python_method
@@ -603,8 +597,8 @@ class AppController(NSObject):
     @objc.python_method
     def update_dropdown_closing_behavior(self):
         """The dropdown closes when you click elsewhere, except while a tab is shown for a moment,
-        while a row is dragged in it (user request, 2026-11-02) and while the settings window is
-        open (user request, 2026-10-19: changing settings mustn't close it)."""
+        while a row is dragged in it and while the settings window is
+        open (changing settings mustn't close it)."""
         keeps_the_dropdown_open = self.a_peek_or_a_drag_keeps_the_dropdown_open() or self.settings_window_controller.is_open()
         self.popover.setBehavior_(NSPopoverBehaviorApplicationDefined if keeps_the_dropdown_open else NSPopoverBehaviorTransient)
 
@@ -618,21 +612,28 @@ class AppController(NSObject):
         self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
 
     @objc.python_method
+    def hide_the_list_window(self):
+        """Hides the list window, as its close button does (list_window_closed)."""
+        self.list_window_controller.hide()
+        self.list_window_closed()
+
+    @objc.python_method
     def note_application_in_front_before_dropdown(self, application):
         """The dropdown activates the dashboard; a peek ends by bringing back what was in front
         before, and Esc or the shortcut give it the keyboard back. When that was the dashboard
         itself with no window left to take the keyboard (the list window that Show popup hid, or
         the settings window that a click on the icon closed), the last other active app stands
-        in; a settings window or list window still open gets the keyboard back (code review, 2026-10-29)."""
+        in; a settings window, Saved sessions window or list window still open gets the keyboard back."""
         if (application is not None and application.processIdentifier() == os.getpid()
-                and not self.settings_window_controller.is_open() and not self.list_window_controller.window.isVisible()):
+                and not self.settings_window_controller.is_open() and not self.saved_sessions_window_controller.is_open()
+                and not self.list_window_controller.window.isVisible()):
             application = self.last_other_active_application
         self.application_in_front_before_dropdown = application
 
     @objc.python_method
     def start_peek(self, session_id):
-        """Pressing and holding a tab row: shows the tab until the button is released (user request,
-        milestone 2). The dropdown stays open meanwhile, though iTerm2 becomes the active app."""
+        """Pressing and holding a tab row: shows the tab until the button is released. The dropdown
+        stays open meanwhile, though iTerm2 becomes the active app."""
         peek_still_being_put_back, self.peek_waiting_for_put_back = self.peek_waiting_for_put_back, None
         if peek_still_being_put_back is not None:
             # Held again before the last peek was put back: iTerm2 is still in front, so take over
@@ -713,7 +714,7 @@ class AppController(NSObject):
         settings_store.ACTIONS_THAT_ASK_FOR_CONFIRMATION); returns True for Yes. No is the default
         button, so Return keeps things as they are. A Yes with "Remember my choice" checked is
         saved, and the action then runs without asking; a No isn't remembered, so a menu item
-        never silently does nothing (user request, 2026-10-27, with no setting to ask again)."""
+        never silently does nothing (with no setting to ask again)."""
         if action_name in self.settings["actions_that_run_without_asking"]:
             return True
         alert = NSAlert.alloc().init()
@@ -724,7 +725,7 @@ class AppController(NSObject):
         alert.addButtonWithTitle_("Yes")
         alert.setShowsSuppressionButton_(True)  # AppKit's "Do not show this message again" checkbox
         alert.suppressionButton().setTitle_("Remember my choice")
-        alert.suppressionButton().setToolTip_(  # the user's wording, 2026-10-28
+        alert.suppressionButton().setToolTip_(
             "With Yes, this action will be applied without asking from now on. A No isn't remembered.")
         answer_is_yes = self.run_alert_in_front(alert) == NSAlertSecondButtonReturn
         if answer_is_yes and alert.suppressionButton().state():
@@ -735,15 +736,15 @@ class AppController(NSObject):
     @objc.python_method
     def install_hooks(self, agent_tool_names):
         """Adds the app's hooks to these agent tools' settings files (the list's Install Hooks
-        button; user request, 2026-10-27), once the user agrees, then has the core check them again."""
+        button), once the user agrees, then has the core check them again."""
         home_folder = os.path.expanduser("~")
-        file_paths = [file_path.replace(home_folder, "~", 1) for agent_tool_name in agent_tool_names
+        file_paths = [shorten_home_folder(file_path, home_folder) for agent_tool_name in agent_tool_names
                       for file_path in list_settings_file_paths(agent_tool_name)]
         alert = NSAlert.alloc().init()
         alert.setMessageText_(f"Install the hooks for {' and '.join(agent_tool_names)}?")
         alert.setInformativeText_(
             "They are added to:\n\n" + "\n".join(file_paths)
-            # The installer copies a file only the first time (code review, 2026-10-30).
+            # The installer copies a file only the first time.
             + f"\n\nThe first time, each file is copied to its name plus {BACKUP_FILE_SUFFIX}, which keeps it as it was "
               "before the app changed it. Sessions started after this will use the hooks."
             + (" Codex then asks you to approve them: type /hooks in Codex." if "Codex" in agent_tool_names else ""))
@@ -751,26 +752,35 @@ class AppController(NSObject):
         alert.addButtonWithTitle_("Cancel")
         if self.run_alert_in_front(alert) != NSAlertFirstButtonReturn:
             return
-        try:
-            for agent_tool_name in agent_tool_names:
+        # Each tool on its own, so a file of one that can't be changed doesn't keep the others' hooks out.
+        failures = []
+        for agent_tool_name in agent_tool_names:
+            try:
                 install_hooks(agent_tool_name)
-        except (OSError, ValueError) as error:
-            failure_alert = NSAlert.alloc().init()
-            failure_alert.setMessageText_("The hooks couldn't be installed")
-            failure_alert.setInformativeText_(str(error))
-            self.run_alert_in_front(failure_alert)
+            except (OSError, ValueError) as error:
+                failures.append(f"{agent_tool_name}: {error}")
+        if failures:
+            self.show_message_alert("The hooks couldn't be installed", "\n".join(failures))
         self.connection_thread.send_hooks_changed()
 
     @objc.python_method
     def ask_for_note_asking_agent_sessions_to_talk_to_each_other(self, agent_session_entries, left_out_agent_session_entries):
-        """Shows the Talk to Each Other window (user request, 2026-10-21); returns (the note as the
-        user left it, the agent session entries chosen to get it: one, or all of them, user request,
-        2026-10-28), or None for Cancel or an empty note."""
+        """Shows the Talk to Each Other window; returns (the note as the
+        user left it, the agent session entries chosen to get it: one, or all of them), or None for Cancel or
+        an empty note."""
         alert, note_text_view, recipient_choices = build_talk_to_each_other_alert(agent_session_entries,
                                                                                   left_out_agent_session_entries)
         if self.run_alert_in_front(alert) != NSAlertFirstButtonReturn or not note_text_view.string().strip():
             return None
         return note_text_view.string().strip(), recipient_choices.list_chosen_recipients()
+
+    @objc.python_method
+    def show_message_alert(self, title, text):
+        """Shows an alert with only an OK button (run_alert_in_front)."""
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(text)
+        self.run_alert_in_front(alert)
 
     @objc.python_method
     def run_alert_in_front(self, alert):
@@ -813,14 +823,11 @@ class AppController(NSObject):
 
     @objc.python_method
     def report_action_failure(self, action_result, failure_title):
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_(failure_title)
-        alert.setInformativeText_(action_result.message[:1].upper() + action_result.message[1:] + ".")
-        self.run_alert_in_front(alert)
+        self.show_message_alert(failure_title, action_result.message[:1].upper() + action_result.message[1:] + ".")
 
     @objc.python_method
     def show_process_info(self, session_id, process_id):
-        """Shows a sub row's Info window (user request, 2026-10-29) once the core has read its
+        """Shows a sub row's Info window once the core has read its
         process's details, or an alert saying why it couldn't."""
         self.submit_action_and_report_failure(
             ActionRequest("read_child_process_details", {"session_id": session_id}, {"process_id": process_id}),
@@ -829,15 +836,13 @@ class AppController(NSObject):
 
     @objc.python_method
     def find_launch_command(self, agent_tool_name):
-        return next((agent_tool["launch_command"] for agent_tool in self.settings["agent_tools"]
-                     if agent_tool["agent_tool_name"] == agent_tool_name), "")
+        return find_launch_command(self.settings, agent_tool_name)
 
     @objc.python_method
     def duplicate_agent_session(self, tab_id, folder, agent_tool_name):
         """Opens a copy of a tab's agent session right after it, continuing a copy of its
-        conversation where the tool allows (like Chrome's Duplicate, user request, milestone 2).
-        A failure (the tab's folder deleted since, say) is reported, as for the other menu actions
-        (code review, 2026-10-30)."""
+        conversation where the tool allows (like Chrome's Duplicate).
+        A failure (the tab's folder deleted since, say) is reported, as for the other menu actions."""
         self.submit_action_and_report_failure(
             ActionRequest("duplicate_agent_session", {"tab_id": tab_id},
                           {"folder": folder or "~", "launch_command": self.find_launch_command(agent_tool_name)}),
@@ -847,8 +852,7 @@ class AppController(NSObject):
     def start_agent_session_from_menu(self, window_id, folder, agent_tool_name):
         """Starts an agent tool in a new tab of a window, or in a new window in the
         folder of the tab in front, else of the tab used most recently within a day, else the
-        home folder (no folder picker: user request, milestone 2). A failure is reported (code
-        review, 2026-10-30)."""
+        home folder (no folder picker). A failure is reported."""
         launch_command = self.find_launch_command(agent_tool_name)
         if window_id is not None:
             self.submit_action_and_report_failure(ActionRequest("start_agent_session", {"window_id": window_id},
@@ -865,14 +869,14 @@ class AppController(NSObject):
     @objc.python_method
     def select_the_new_window_once_it_shows(self, action_result):
         """Has every list select the tab row of the window start_agent_session opened once the
-        window shows in it (user request, 2026-10-30: in the folder of another window, it looked
+        window shows in it (in the folder of another window, it looked
         like that window)."""
         if action_result.details is None:  # iTerm2 gave no window: its session ended right away
             return
         for list_controller in self.list_all_list_controllers():
             list_controller.select_window_once_it_shows(action_result.details["window_id"])
 
-    # ----- saved sessions (user request, 2026-11-06) -----
+    # ----- saved sessions -----
 
     @objc.python_method
     def has_saved_agent_sessions(self):
@@ -882,8 +886,10 @@ class AppController(NSObject):
 
     @objc.python_method
     def open_saved_sessions_window(self):
-        """Opens the Saved sessions window ("Restore sessions…" in the menu bar icon's menu and the row menus)."""
+        """Opens the Saved sessions window ("Restore sessions…" in the menu bar icon's menu and the
+        row menus), clear of a shown sidebar."""
         self.saved_sessions_window_controller.show(self.saved_windows, self.settings["saved_sessions_window_frame"])
+        self.move_window_clear_of_the_sidebar(self.saved_sessions_window_controller)
         self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
 
     @objc.python_method
@@ -909,10 +915,7 @@ class AppController(NSObject):
         try:
             save_saved_windows(self.saved_agent_sessions_file_path, saved_windows)
         except OSError as error:
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_("The saved sessions couldn't be written")
-            alert.setInformativeText_(f"{self.saved_agent_sessions_file_path}: {error}")
-            self.run_alert_in_front(alert)
+            self.show_message_alert("The saved sessions couldn't be written", f"{self.saved_agent_sessions_file_path}: {error}")
         self.saved_sessions_window_controller.show_saved_windows(saved_windows)
 
     @objc.python_method
@@ -931,7 +934,7 @@ class AppController(NSObject):
     def restore_saved_agent_sessions(self, window_keys, conversation_ids):
         """Asks the core to resume the saved sessions of these saved windows and these saved
         sessions, with each agent tool's launch command from the settings. Each one it resumed
-        leaves the saved list (user request, 2026-11-06); an alert names those that failed and
+        leaves the saved list; an alert names those that failed and
         why, and they stay saved."""
         saved_windows_to_restore = choose_saved_windows_to_restore(self.saved_windows, window_keys, conversation_ids)
         saved_session_count = sum(len(saved_window["saved_sessions"]) for saved_window in saved_windows_to_restore)
@@ -950,39 +953,39 @@ class AppController(NSObject):
 
     @objc.python_method
     def open_settings(self):
-        """Opens the settings window; over an open dropdown, which stays open while it is (user request, 2026-10-19),
+        """Opens the settings window; over an open dropdown, which stays open while it is,
         and clear of a shown sidebar."""
         self.settings_window_controller.show(self.settings)
-        self.move_the_settings_window_clear_of_the_sidebar()
+        self.move_window_clear_of_the_sidebar(self.settings_window_controller)
         self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
         self.update_dropdown_closing_behavior()
 
     @objc.python_method
-    def move_the_settings_window_clear_of_the_sidebar(self):
-        """Moves the settings window sideways, keeping its size where the monitor has room, off a
-        shown sidebar's strip: the sidebar is above other windows and would cover it. Beside a
-        sidebar too wide to leave the window its smallest width, it stays where it is: made
-        narrower, its rows were cut off (code review, 2026-10-29)."""
+    def move_window_clear_of_the_sidebar(self, window_controller):
+        """Moves the settings window or the Saved sessions window (window_controller's) sideways,
+        keeping its size where the monitor has room, off a shown sidebar's strip: the sidebar is
+        above other windows and would cover it. Beside a sidebar too wide to leave the window its
+        smallest width (SMALLEST_WINDOW_SIZES of the controller's frame_setting_name), it stays
+        where it is: made narrower, its rows were cut off."""
         sidebar_controller = self.sidebar_controller
         if not sidebar_controller.window.isVisible() or sidebar_controller.placement is None:
             return
-        settings_window = self.settings_window_controller.window
-        settings_frame = convert_rect_to_frame_list(settings_window.frame())
+        window = window_controller.window
+        window_frame = convert_rect_to_frame_list(window.frame())
         frame_clear_of_the_sidebar = compute_frame_clear_of_area(
-            settings_frame, convert_rect_to_frame_list(sidebar_controller.window.frame()), sidebar_controller.placement.edge,
-            sidebar_controller.screens[sidebar_controller.placement.screen_index]["visible_frame"], settings_frame[2])
+            window_frame, convert_rect_to_frame_list(sidebar_controller.window.frame()), sidebar_controller.placement.edge,
+            sidebar_controller.screens[sidebar_controller.placement.screen_index]["visible_frame"], window_frame[2])
         if (frame_clear_of_the_sidebar is not None
-                and frame_clear_of_the_sidebar[2] >= SMALLEST_WINDOW_SIZES["settings_window_frame"][0]):
-            settings_window.setFrame_display_(NSMakeRect(*frame_clear_of_the_sidebar), True)
+                and frame_clear_of_the_sidebar[2] >= SMALLEST_WINDOW_SIZES[window_controller.frame_setting_name][0]):
+            window.setFrame_display_(NSMakeRect(*frame_clear_of_the_sidebar), True)
 
     @objc.python_method
     def place_the_settings_and_saved_sessions_windows_above_the_lists(self, dropdown_is_open):
         """Puts the settings window and the Saved sessions window at the level of the windows they
         would otherwise open under: just above an open dropdown, and level with the list window
         while that is shown and always on top (in front of it when opened); otherwise at the normal
-        level. Not the sidebar's: the settings window opens clear of it instead
-        (move_the_settings_window_clear_of_the_sidebar), so other apps' windows can still cover it
-        and close it."""
+        level. Not the sidebar's: they open clear of it instead (move_window_clear_of_the_sidebar),
+        so other apps' windows can still cover them (and covering the settings window closes it)."""
         window_levels = []
         if dropdown_is_open:
             window_levels.append(self.dropdown_panel_controller.view().window().level() + 1)
@@ -1022,19 +1025,23 @@ class AppController(NSObject):
                 self.list_window_controller.hide()
         self.apply_settings_to_the_core_and_every_list(new_settings, sidebar_settings_changed=sidebar_may_have_moved)
         self.settings_window_controller.reflect_settings(new_settings)
-        if self.settings_window_controller.is_open():
-            if sidebar_may_have_moved:  # a sidebar widened at its edge or in the window would cover it (code review, 2026-10-28)
-                self.move_the_settings_window_clear_of_the_sidebar()
-            self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
-            if list_window_is_shown_now or new_settings["list_window_is_always_on_top"] != list_window_was_always_on_top:
-                self.settings_window_controller.window.orderFront_(None)  # the list window just shown or put on top stays behind it
+        if sidebar_may_have_moved:  # a sidebar widened at its edge or in the window would cover them
+            for window_controller in (self.settings_window_controller, self.saved_sessions_window_controller):
+                if window_controller.is_open():
+                    self.move_window_clear_of_the_sidebar(window_controller)
+        # Also with the settings window closed: an open Saved sessions window stays above a list
+        # window just shown or put on top.
+        self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
+        if self.settings_window_controller.is_open() and (
+                list_window_is_shown_now or new_settings["list_window_is_always_on_top"] != list_window_was_always_on_top):
+            self.settings_window_controller.window.orderFront_(None)  # the list window just shown or put on top stays behind it
 
     @objc.python_method
     def apply_appearance(self, appearance_choice):
         """Draws the app's windows, the sidebar and the dropdown always dark, always light, or, for
         "auto", in macOS's Light or Dark setting. The dropdown is set by itself: a popover takes the
-        look of the menu bar it opens from rather than the app's, and on "auto" it keeps doing so,
-        as before. The menu bar icon keeps the menu bar's look either way."""
+        look of the menu bar it opens from rather than the app's, and on "auto" it keeps doing so.
+        The menu bar icon keeps the menu bar's look either way."""
         appearance_name = APPEARANCE_NAMES_BY_CHOICE[appearance_choice]
         appearance = NSAppearance.appearanceNamed_(appearance_name) if appearance_name else None
         NSApp.setAppearance_(appearance)
@@ -1045,10 +1052,11 @@ class AppController(NSObject):
         """Adds, keeps or removes the script in iTerm2's AutoLaunch folder that starts this copy of
         the app whenever iTerm2 starts (start_with_iterm2), and says so in the output when it adds or
         removes it."""
-        autolaunch_script_path = os.path.join(find_iterm2_autolaunch_folder(), AUTOLAUNCH_SCRIPT_FILE_NAME)
+        autolaunch_script_path = find_autolaunch_script_path()
         try:
             what_was_done = update_autolaunch_script_to_match_setting(
-                app_starts_with_iterm2, build_command_that_starts_this_copy_of_the_app(), autolaunch_script_path)
+                app_starts_with_iterm2, build_command_that_starts_this_copy_of_the_app(), find_package_folder_of_this_copy(),
+                autolaunch_script_path)
         except OSError as error:
             print(f"agent-command-tab: couldn't {'add' if app_starts_with_iterm2 else 'remove'} {autolaunch_script_path} "
                   f"({error})", flush=True)
@@ -1064,7 +1072,7 @@ class AppController(NSObject):
         """Hands the settings to the core, the sidebar, the list window and the three lists: at
         the start and after every change. The core gets them only when its part changed (each time
         it builds a whole snapshot on its thread to compare), and the sidebar only when one of
-        SETTINGS_THAT_PLACE_THE_SIDEBAR changed (code review, 2026-10-29)."""
+        SETTINGS_THAT_PLACE_THE_SIDEBAR changed."""
         core_settings = build_core_settings(settings)
         if core_settings != self.core_settings_sent_last:
             self.core_settings_sent_last = core_settings
@@ -1146,7 +1154,7 @@ class AppController(NSObject):
         # (update_dropdown_closing_behavior); a click in another app still closes it, unless a peek
         # brought iTerm2 forward on purpose or a row is dragged in the dropdown. A drag usually
         # starts as a hold, so it ends a peek right away, and macOS can tell the dashboard it is no
-        # longer active only after that peek is over (it closed the dropdown, 2026-11-02).
+        # longer active only after that peek is over (which closed the dropdown).
         if not self.a_peek_or_a_drag_keeps_the_dropdown_open():
             self.close_dropdown()
 
@@ -1156,7 +1164,7 @@ class AppController(NSObject):
         docked sidebar took."""
         self.save_settings_before_exiting()
         self.give_room_back_before_exiting()
-        sys.stdout.flush()  # os._exit skips it, losing the last lines of the log (code review, 2026-10-29)
+        sys.stdout.flush()  # os._exit skips it, losing the last lines of the log
         os._exit(0)
 
     def applicationWillTerminate_(self, notification):
@@ -1187,7 +1195,7 @@ def run_menu_bar_app(verbose):
     """Runs the menu bar app until it quits; returns the exit status."""
     application = NSApplication.sharedApplication()
     application.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, no Info.plist needed
-    # For anything else that shows NSApp's icon; the dialogs get it from run_alert_in_front (user request, 2026-10-28).
+    # For anything else that shows NSApp's icon; the dialogs get it from run_alert_in_front.
     application.setApplicationIconImage_(build_app_icon())
     app_controller = AppController.alloc().initWithVerbose_(verbose)
     application.setMainMenu_(build_main_menu_with_the_settings_and_edit_shortcuts(app_controller))

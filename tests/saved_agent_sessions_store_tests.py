@@ -1,4 +1,4 @@
-"""The saved agent sessions' file and the pure functions that change the list (user request, 2026-11-06)."""
+"""The saved agent sessions' file and the pure functions that change the list."""
 
 import json
 import os
@@ -9,19 +9,18 @@ from agent_command_tab.saved_agent_sessions_store import (build_saved_session, b
                                                           choose_saved_windows_to_restore, delete_saved_items,
                                                           load_saved_windows, merge_saved_windows, rename_saved_session,
                                                           rename_saved_window, save_saved_windows)
-from agent_command_tab.snapshot_data_classes import AgentSessionEntry, WindowEntry
+from agent_command_tab.snapshot_data_classes import WindowEntry
+from gathered_window_builders import make_agent_session_entry
+from saved_session_builders import build_saved_session_record, build_saved_window_record
 
 
 def make_saved_session(conversation_id, name="", saved_at=1.0):
-    return {"conversation_id": conversation_id, "agent_tool_name": "Claude Code", "name": name or conversation_id,
-            "name_was_set_by_user": False, "folder": "/p", "claude_config_folder": None,
-            "terminal_session_id": f"session-{conversation_id}", "saved_at": saved_at}
+    return build_saved_session_record(conversation_id, "/p", f"session-{conversation_id}", name or conversation_id, saved_at=saved_at)
 
 
 def make_saved_window(window_id, conversation_ids, name=None, name_was_set_by_user=False, frame=(0, 0, 800, 600)):
-    return {"terminal_name": "iTerm2", "terminal_window_id": window_id, "terminal_window_opened_at": None, "name": name or window_id,
-            "name_was_set_by_user": name_was_set_by_user, "frame": list(frame),
-            "saved_sessions": [make_saved_session(conversation_id) for conversation_id in conversation_ids]}
+    return build_saved_window_record([make_saved_session(conversation_id) for conversation_id in conversation_ids], window_id,
+                                     name or window_id, frame, name_was_set_by_user)
 
 
 def list_conversation_ids_by_window(saved_windows):
@@ -37,6 +36,13 @@ class SavedWindowsFileTests(unittest.TestCase):
             saved_windows = [make_saved_window("w1", ["a", "b"]), make_saved_window("w2", ["c"])]
             save_saved_windows(file_path, saved_windows)
             self.assertEqual(load_saved_windows(file_path), saved_windows)
+            # Saved before the CODEX_HOME was kept: the default.
+            for saved_window in saved_windows:
+                for saved_session in saved_window["saved_sessions"]:
+                    del saved_session["codex_home_folder"]
+            save_saved_windows(file_path, saved_windows)
+            self.assertEqual({saved_session["codex_home_folder"] for saved_window in load_saved_windows(file_path)
+                              for saved_session in saved_window["saved_sessions"]}, {None})
 
     def test_entries_without_the_right_shape_are_left_out(self):
         good_window = make_saved_window("w1", ["a"])
@@ -63,15 +69,15 @@ class SavedWindowsFileTests(unittest.TestCase):
 class SavedWindowRecordTests(unittest.TestCase):
     def test_records_are_built_from_the_lists_rows(self):
         window_entry = WindowEntry("w1", "my-project", True, (10, 20, 800, 600), 3, ())
-        agent_session_entry = AgentSessionEntry(tab_id="t1", session_id="s1", tab_title="planning", tab_title_set_by_user=False,
-                                                agent_session_name="", agent_tool_name="Codex", working_folder="/x", status="idle")
-        saved_session = build_saved_session(agent_session_entry, "/p", "conv-1", None, 5.0)
+        agent_session_entry = make_agent_session_entry("s1", "planning", agent_tool_name="Codex")
+        saved_session = build_saved_session(agent_session_entry, "/p", "conv-1", None, 5.0, "/Users/me/.codex-work")
         self.assertEqual(build_saved_window(window_entry, [saved_session], None), {
             "terminal_name": "iTerm2", "terminal_window_id": "w1", "terminal_window_opened_at": None, "name": "my-project",
             "name_was_set_by_user": True,
             "frame": [10, 20, 800, 600], "saved_sessions": [{
                 "conversation_id": "conv-1", "agent_tool_name": "Codex", "name": "planning", "name_was_set_by_user": False,
-                "folder": "/p", "claude_config_folder": None, "terminal_session_id": "s1", "saved_at": 5.0}]})
+                "folder": "/p", "claude_config_folder": None, "codex_home_folder": "/Users/me/.codex-work",
+                "terminal_session_id": "s1", "saved_at": 5.0}]})
         tmux_window_entry = WindowEntry("$1", "tmux: work", False, (0, 0, 0, 0), 1, (), terminal_name="tmux",
                                         can_move_to_another_monitor=False)
         self.assertIsNone(build_saved_window(tmux_window_entry, [saved_session], 1793977852)["frame"])  # it has no frame of its own

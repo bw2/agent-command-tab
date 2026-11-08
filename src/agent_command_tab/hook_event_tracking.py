@@ -25,14 +25,14 @@ AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS = frozenset({"Cla
 STATUSES_OF_A_RUNNING_BACKGROUND_TASK = frozenset({"running", "pending", None})
 # A teammate (a helper agent started with a name, which other agents can send messages to) isn't
 # counted: Claude Code lists it as "running" for as long as it exists, idle or not, so a row kept
-# its lights and its "running" state for days after the teammates' work was done (user request, 2026-11-02).
+# its lights and its "running" state for days after the teammates' work was done.
 TYPES_OF_A_BACKGROUND_TASK_LEFT_UNCOUNTED = frozenset({"teammate"})
 # The type Claude Code's list gives a command its shell tool runs in the background, and also a
 # command its Monitor tool runs (only an MCP server's monitor is a "monitor"; checked with Claude
-# Code 2.1.316 and 2.1.317 on 2026-11-03).
+# Code 2.1.316 and 2.1.317).
 BACKGROUND_SHELL_TASK_TYPE = "shell"
 # The hook events of a tool call starting and finishing (hooks_installer registers both for Claude Code's
-# Bash, Agent and Task); the main agent's, after a Stop, show its turn going on (code review, 2026-10-28).
+# Bash, Agent and Task); the main agent's, after a Stop, show its turn going on.
 TOOL_EVENT_NAMES = frozenset({"PreToolUse", "PostToolUse"})
 
 
@@ -90,12 +90,12 @@ def list_reported_background_task_ids_still_running(hook_state, running_claude_c
     """Returns the background task IDs the hooks reported for an agent process, without the
     shells no process below the agent runs any more: Claude Code sends its list only when a turn
     or an agent ends, so a shell that ended after the last one stayed on it as running, and its
-    row kept a light for days (user request, 2026-11-02). A shell is known by the task output
+    row kept a light for days. A shell is known by the task output
     file its shell writes to (agent_process_tree.find_the_claude_code_task_of_an_output_file). Each
     shell the reading can't tell yet (list_reported_shells_a_reading_can_check) counts. A Monitor
     tool's task is listed as a shell too (BACKGROUND_SHELL_TASK_TYPE), but its shell writes to
     no file, so as many of the shells found ended as Monitor shells run still count: those of
-    the lowest IDs, as only their number shows (user request, 2026-11-03).
+    the lowest IDs, as only their number shows.
 
     Args:
         hook_state: The agent process's hook state (apply_hook_event), its background task IDs known.
@@ -168,7 +168,7 @@ def apply_hook_event(hook_state, event):
 
 def hooks_report_no_prompt_since_the_agent_started(hook_state):
     """Returns whether the hooks reported the agent process starting (its SessionStart for a new
-    process) and no prompt since, which makes its idle row "new" (user request, 2026-10-30). Only
+    process) and no prompt since, which makes its idle row "new". Only
     for the tools whose hooks report prompts (AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS);
     a process whose start came before the app recorded starts (no "startup_reported_at") isn't new."""
     return (hook_state is not None
@@ -181,13 +181,13 @@ def find_when_the_hooks_ended_the_turn(hook_state, iterm2_status_change_time):
     and after iTerm2's status value last changed, else None: the row then goes by the hooks rather
     than an older "working". iTerm2's Claude Code integration keeps the status at working, with
     "1 background task running" in its tab bar, while a background task runs after the turn ended,
-    and Claude Code's own report says "shell" then too (checked with Claude Code 2.1.311 on
-    2026-10-27); a value set after the Stop, or a later prompt, counts again.
+    and Claude Code's own report says "shell" then too (checked with Claude Code 2.1.311); a
+    value set after the Stop, or a later prompt, counts again.
 
     A Stop that another Stop hook blocks (Claude Code's goal feature) doesn't end the turn; when
     iTerm2's value doesn't change as the turn goes on (it already said working), a tool call of
     the main agent after it tells (a background shell fires no hook, and a background agent's
-    events carry its agent_id; code review, 2026-10-28), and so does Claude Code's own report
+    events carry its agent_id), and so does Claude Code's own report
     (DashboardCore.claude_code_reports_the_turn_going_on, which the core checks before going by
     this). Only for the tools whose hooks report prompts
     (AGENT_TOOL_NAMES_WHOSE_HOOKS_REPORT_TURNS_AND_BACKGROUND_TASKS): without them a turn that

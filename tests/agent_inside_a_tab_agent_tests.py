@@ -6,19 +6,18 @@ import unittest
 import unittest.mock
 
 from agent_command_tab import dashboard_core
-from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.agent_adapters.generic import GenericAdapter
 from agent_command_tab.dashboard_core import DashboardCore
+from gathered_window_builders import make_agent_session
 
 
 class AgentInsideATabAgentTests(unittest.TestCase):
     def setUp(self):
         # s1 runs Claude Code, s2 Codex, s3 a tool that reports nothing of its own.
         self.core = DashboardCore(lambda snapshot: None, lambda message: None)
-        self.core.agent_sessions = {"s1": {"adapter": ClaudeCodeAdapter(), "process_id": 101, "is_in_background": False},
-                                    "s2": {"adapter": CodexAdapter(), "process_id": 201, "is_in_background": False},
-                                    "s3": {"adapter": GenericAdapter(), "process_id": 301, "is_in_background": False}}
+        self.core.agent_sessions = {"s1": make_agent_session(101), "s2": make_agent_session(201, CodexAdapter(), "Codex"),
+                                    "s3": make_agent_session(301, GenericAdapter(), "aider")}
         self.first_sessions = {session_id: {"session_id": session_id, "status_set_in_iterm2": "working", "status": "working"}
                                for session_id in ("s1", "s2", "s3")}
         self.core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [
@@ -44,7 +43,7 @@ class AgentInsideATabAgentTests(unittest.TestCase):
         return {session_id: first_session["status"] for session_id, first_session in self.first_sessions.items()}
 
     def show_codex_turn_on_screen(self, turn_shows_on_screen):
-        self.core.screen_readings_by_session_id["s2"]["turn_shows_on_screen"] = turn_shows_on_screen  # as the screen check does
+        self.core.session_readings_by_session_id["s2"]["turn_shows_on_screen"] = turn_shows_on_screen  # as the screen check does
 
     def test_a_tab_goes_by_its_own_agent_while_another_runs_inside_it(self):
         self.an_agent_runs_inside = True
@@ -61,7 +60,7 @@ class AgentInsideATabAgentTests(unittest.TestCase):
         self.assertEqual(self.track(4.0, "done"), {"s1": "done", "s2": "done", "s3": "done"})
         self.assertEqual(self.core.iterm2_status_seen_while_an_inner_agent_ran_by_session_id, {})
 
-    def test_a_tab_first_seen_while_an_agent_runs_inside_its_agent_goes_by_its_own_agent(self):  # code review, 2026-10-29
+    def test_a_tab_first_seen_while_an_agent_runs_inside_its_agent_goes_by_its_own_agent(self):
         # The app restarted while the inner agent ran and had set idle: the check came only once
         # iTerm2's value changed, so Claude Code's busy agent showed idle meanwhile.
         self.core.session_tracking_by_session_id.clear()  # as a new core has it
@@ -86,8 +85,23 @@ class AgentInsideATabAgentTests(unittest.TestCase):
         # The tool without a report of its own counts again once iTerm2's value changes.
         self.assertEqual(self.track(5.0, "done"), {"s1": "done", "s2": "done", "s3": "done"})
 
+    def test_codex_streaming_its_answer_without_its_timer_is_still_in_its_turn(self):
+        self.an_agent_runs_inside = True
+        self.track(2.0, "idle")
+        self.show_codex_turn_on_screen(True)
+        self.an_agent_runs_inside = False
+        self.assertEqual(self.track(3.0)["s2"], "working")
+        # Codex hides its timer while the answer streams; its conversation file shows the turn going on.
+        self.show_codex_turn_on_screen(False)
+        self.core.session_readings_by_session_id["s2"]["conversation_shows_a_turn_under_way"] = True
+        self.assertEqual(self.track(4.0)["s2"], "working")
+        self.assertNotIn("last_turn_ended_at", self.core.session_tracking_by_session_id["s2"])
+        self.core.session_readings_by_session_id["s2"]["conversation_shows_a_turn_under_way"] = False  # its task_complete
+        self.assertEqual(self.track(5.0)["s2"], "idle")
+        self.assertEqual(self.core.session_tracking_by_session_id["s2"]["last_turn_ended_at"], 5.0)
+
     def test_the_processes_are_listed_only_when_the_status_set_in_iterm2_changed(self):
-        # The first sighting (setUp's) counts as a change (code review, 2026-10-29).
+        # The first sighting (setUp's) counts as a change.
         self.assertEqual(self.list_descendant_processes.call_count, 3)
         self.list_descendant_processes.reset_mock()
         self.core.update_session_tracking(2.0)

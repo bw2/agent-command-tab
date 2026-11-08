@@ -1,4 +1,4 @@
-"""The app's own icon (user request, 2026-10-28), drawn in code so no image file ships.
+"""The app's own icon, drawn in code so no image file ships.
 
 The Command key's ⌘, for the Command-Tab that the app's name plays on, white on a dark rounded
 square, with a status dot in each of its loops in the list's colors: background's amber at the

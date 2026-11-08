@@ -7,11 +7,12 @@ from agent_command_tab.hook_event_tracking import (apply_hook_event, find_agent_
                                                    find_when_the_hooks_ended_the_turn,
                                                    hooks_report_no_prompt_since_the_agent_started,
                                                    list_reported_background_task_ids_still_running)
+import hook_event_builders
 
 
-def make_event(hook_event_name, sent_at, **fields):
-    return dict({"agent_tool_name": "Claude Code", "hook_event_name": hook_event_name, "sent_at": sent_at,
-                 "background_tasks": None, "background_task_launched_id": None}, **fields)
+def make_event_of_process_101_sent_at(hook_event_name, sent_at, **fields):
+    """Returns hook_event_builders' event, sent at sent_at by one agent process (101)."""
+    return hook_event_builders.make_event(hook_event_name, 101, sent_at=sent_at, **fields)
 
 
 def apply_events(*events):
@@ -43,55 +44,55 @@ class FindAgentProcessIdOfHookEventTests(unittest.TestCase):
 
 
 class ApplyHookEventTests(unittest.TestCase):
-    def test_no_prompt_since_the_start_until_the_first_one(self):  # user request, 2026-10-30
-        started = apply_events(make_event("SessionStart", 1.0, source="startup"))
+    def test_no_prompt_since_the_start_until_the_first_one(self):
+        started = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"))
         self.assertTrue(hooks_report_no_prompt_since_the_agent_started(started))
         # A /clear before the first prompt keeps it; a prompt ends it, also after a later /clear.
-        cleared = apply_hook_event(started, make_event("SessionStart", 2.0, source="clear"))
+        cleared = apply_hook_event(started, make_event_of_process_101_sent_at("SessionStart", 2.0, source="clear"))
         self.assertTrue(hooks_report_no_prompt_since_the_agent_started(cleared))
-        prompted = apply_hook_event(cleared, make_event("UserPromptSubmit", 3.0))
+        prompted = apply_hook_event(cleared, make_event_of_process_101_sent_at("UserPromptSubmit", 3.0))
         self.assertFalse(hooks_report_no_prompt_since_the_agent_started(prompted))
-        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_hook_event(prompted, make_event("SessionStart", 4.0, source="clear"))))
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_hook_event(prompted, make_event_of_process_101_sent_at("SessionStart", 4.0, source="clear"))))
         # Not without the start (a resumed conversation, or a state from before starts were
         # recorded), nor for Codex, whose hooks report no prompts.
-        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_events(make_event("SessionStart", 1.0, source="resume"))))
-        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_events(make_event("Stop", 1.0))))
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="resume"))))
+        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_events(make_event_of_process_101_sent_at("Stop", 1.0))))
         self.assertFalse(hooks_report_no_prompt_since_the_agent_started(
-            apply_events(make_event("SessionStart", 1.0, source="startup", agent_tool_name="Codex"))))
+            apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup", agent_tool_name="Codex"))))
         self.assertFalse(hooks_report_no_prompt_since_the_agent_started(None))
 
     def test_a_normal_session_end_is_kept_but_clear_goes_on(self):
-        hook_state = apply_events(make_event("SessionStart", 1.0, source="startup"))
+        hook_state = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"))
         self.assertIsNone(hook_state["session_ended_at"])
-        self.assertIsNone(apply_hook_event(hook_state, make_event("SessionEnd", 2.0, reason="clear"))["session_ended_at"])
-        self.assertEqual(apply_hook_event(hook_state, make_event("SessionEnd", 3.0, reason="prompt_input_exit"))["session_ended_at"], 3.0)
-        self.assertEqual(apply_hook_event(hook_state, make_event("SessionEnd", 3.0))["session_ended_at"], 3.0)  # Codex sends none
+        self.assertIsNone(apply_hook_event(hook_state, make_event_of_process_101_sent_at("SessionEnd", 2.0, reason="clear"))["session_ended_at"])
+        self.assertEqual(apply_hook_event(hook_state, make_event_of_process_101_sent_at("SessionEnd", 3.0, reason="prompt_input_exit"))["session_ended_at"], 3.0)
+        self.assertEqual(apply_hook_event(hook_state, make_event_of_process_101_sent_at("SessionEnd", 3.0))["session_ended_at"], 3.0)  # Codex sends none
 
     def test_background_tasks_follow_launches_ends_and_turn_end_lists(self):
-        # The sequence Claude Code 2.1.311 sent on 2026-10-27: a background shell, a background
-        # agent that ends, then a turn end that lists the shell still running.
+        # As Claude Code 2.1.311 sent them: a background shell and a background agent start, the
+        # agent ends while its list still has the shell running, then a turn end lists the shell completed.
         hook_state = apply_events(
-            make_event("SessionStart", 1.0, source="startup"),
-            make_event("PostToolUse", 2.0, background_task_launched_id="bs6"),
-            make_event("PostToolUse", 3.0, background_task_launched_id="a34"))
+            make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"),
+            make_event_of_process_101_sent_at("PostToolUse", 2.0, background_task_launched_id="bs6"),
+            make_event_of_process_101_sent_at("PostToolUse", 3.0, background_task_launched_id="a34"))
         self.assertEqual(hook_state["background_task_ids"], {"bs6", "a34"})
-        hook_state = apply_hook_event(hook_state, make_event("SubagentStop", 4.0, agent_id="a34", background_tasks=[
+        hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("SubagentStop", 4.0, agent_id="a34", background_tasks=[
             {"id": "bs6", "status": "running"}, {"id": "a34", "status": "running"}]))
         self.assertEqual(hook_state["background_task_ids"], {"bs6"})  # its own list still had it running
-        hook_state = apply_hook_event(hook_state, make_event("Stop", 5.0, background_tasks=[{"id": "bs6", "status": "completed"}]))
+        hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("Stop", 5.0, background_tasks=[{"id": "bs6", "status": "completed"}]))
         self.assertEqual(hook_state["background_task_ids"], set())
 
-    def test_teammates_are_left_out_of_the_background_tasks(self):  # user request, 2026-11-02
-        # As Claude Code 2.1.316 listed them on 2026-11-02: teammates that had finished their work
+    def test_teammates_are_left_out_of_the_background_tasks(self):
+        # As Claude Code 2.1.316 listed them: teammates that had finished their work
         # and waited for messages were still "running", next to a running shell and subagent.
-        hook_state = apply_events(make_event("SessionStart", 1.0, source="startup"), make_event("Stop", 2.0, background_tasks=[
+        hook_state = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"), make_event_of_process_101_sent_at("Stop", 2.0, background_tasks=[
             {"id": "t42fbo1j9", "type": "teammate", "status": "running"},
             {"id": "a38b5b409", "type": "subagent", "status": "running"},
             {"id": "bh911cra4", "type": "shell", "status": "running"}]))
         self.assertEqual(hook_state["background_task_ids"], {"a38b5b409", "bh911cra4"})
 
-    def test_a_reported_shell_still_runs_only_while_a_shell_below_the_agent_writes_to_its_task_file(self):  # user request, 2026-11-02
-        hook_state = apply_events(make_event("SessionStart", 1.0, source="startup"), make_event("Stop", 2.0, background_tasks=[
+    def test_a_reported_shell_still_runs_only_while_a_shell_below_the_agent_writes_to_its_task_file(self):
+        hook_state = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"), make_event_of_process_101_sent_at("Stop", 2.0, background_tasks=[
             {"id": "b2", "type": "shell", "status": "running"}, {"id": "b3", "type": "shell", "status": "running"},
             {"id": "b4", "type": "shell", "status": "completed"}, {"id": "a1", "type": "subagent", "status": "running"}]))
         self.assertEqual(hook_state["background_shells_reported_at_by_task_id"], {"b2": 2.0, "b3": 2.0})
@@ -102,9 +103,9 @@ class ApplyHookEventTests(unittest.TestCase):
         self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b2", "b7"), 0, 4.0), {"b2", "a1"})
         self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 0, 4.0), {"a1"})  # a subagent has no shell
 
-    def test_a_monitor_listed_as_a_shell_counts_while_a_monitor_shell_runs(self):  # user request, 2026-11-03
-        # As Claude Code 2.1.316 listed two Monitor tasks on 2026-11-03, next to a background shell.
-        hook_state = apply_events(make_event("SessionStart", 1.0, source="startup"), make_event("Stop", 2.0, background_tasks=[
+    def test_a_monitor_listed_as_a_shell_counts_while_a_monitor_shell_runs(self):
+        # As Claude Code 2.1.316 listed two Monitor tasks, next to a background shell.
+        hook_state = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"), make_event_of_process_101_sent_at("Stop", 2.0, background_tasks=[
             {"id": "bn1eiejdt", "type": "shell", "status": "running"}, {"id": "b2h6kc8nt", "type": "shell", "status": "running"},
             {"id": "b3", "type": "shell", "status": "running"}]))
         self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b3",), 2, 4.0), {"bn1eiejdt", "b2h6kc8nt", "b3"})
@@ -114,13 +115,13 @@ class ApplyHookEventTests(unittest.TestCase):
         # More Monitor shells than shells found ended (one started after the list) keep them all.
         self.assertEqual(list_reported_background_task_ids_still_running(hook_state, ("b3",), 3, 4.0), {"bn1eiejdt", "b2h6kc8nt", "b3"})
 
-    def test_a_shell_started_after_the_list_is_checked_from_its_own_start(self):  # user request, 2026-11-02
+    def test_a_shell_started_after_the_list_is_checked_from_its_own_start(self):
         # No list follows its start (a turn ended with Esc sends no Stop).
         hook_state = apply_events(
-            make_event("SessionStart", 1.0, source="startup"),
-            make_event("Stop", 2.0, background_tasks=[{"id": "b1", "type": "shell", "status": "running"}]),
-            make_event("PostToolUse", 10.0, background_task_launched_id="b2", background_task_launched_type="shell"),
-            make_event("PostToolUse", 10.5, background_task_launched_id="a2", background_task_launched_type="subagent"))
+            make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"),
+            make_event_of_process_101_sent_at("Stop", 2.0, background_tasks=[{"id": "b1", "type": "shell", "status": "running"}]),
+            make_event_of_process_101_sent_at("PostToolUse", 10.0, background_task_launched_id="b2", background_task_launched_type="shell"),
+            make_event_of_process_101_sent_at("PostToolUse", 10.5, background_task_launched_id="a2", background_task_launched_type="subagent"))
         self.assertEqual(hook_state["background_shells_reported_at_by_task_id"], {"b1": 2.0, "b2": 10.0})
         self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 0, 11.0), {"b2", "a2"})  # b2 not readable yet
         self.assertEqual(list_reported_background_task_ids_still_running(hook_state, (), 0, 12.0), {"a2"})
@@ -128,49 +129,49 @@ class ApplyHookEventTests(unittest.TestCase):
 
     def test_background_tasks_are_unknown_until_a_new_start_or_a_list(self):
         # The app started while the session already ran: what it runs isn't known yet.
-        hook_state = apply_events(make_event("SessionStart", 1.0, source="clear"))
+        hook_state = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="clear"))
         self.assertIsNone(hook_state["background_task_ids"])
         # A launch doesn't make it known: others may run (the process tree goes on counting them).
-        hook_state = apply_hook_event(hook_state, make_event("PostToolUse", 1.5, background_task_launched_id="b9"))
+        hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("PostToolUse", 1.5, background_task_launched_id="b9"))
         self.assertIsNone(hook_state["background_task_ids"])
-        hook_state = apply_hook_event(hook_state, make_event("Stop", 2.0, background_tasks=[{"id": "a1", "status": "running"}]))
+        hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("Stop", 2.0, background_tasks=[{"id": "a1", "status": "running"}]))
         self.assertEqual(hook_state["background_task_ids"], {"a1"})
         # Codex's events list none, so its sessions stay unknown (the process tree counts its shells),
         # also after its SessionStart, which has source "startup" too.
-        self.assertIsNone(apply_events(make_event("Stop", 1.0, agent_tool_name="Codex"))["background_task_ids"])
-        self.assertIsNone(apply_events(make_event("SessionStart", 1.0, agent_tool_name="Codex", source="startup"),
-                                       make_event("Stop", 2.0, agent_tool_name="Codex"))["background_task_ids"])
+        self.assertIsNone(apply_events(make_event_of_process_101_sent_at("Stop", 1.0, agent_tool_name="Codex"))["background_task_ids"])
+        self.assertIsNone(apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, agent_tool_name="Codex", source="startup"),
+                                       make_event_of_process_101_sent_at("Stop", 2.0, agent_tool_name="Codex"))["background_task_ids"])
 
     def test_resume_or_a_new_session_in_the_same_process_isnt_its_end(self):
-        hook_state = apply_events(make_event("SessionStart", 1.0, source="startup"), make_event("SessionEnd", 2.0, reason="resume"))
+        hook_state = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"), make_event_of_process_101_sent_at("SessionEnd", 2.0, reason="resume"))
         self.assertIsNone(hook_state["session_ended_at"])  # Claude Code's /resume goes on in the same process
-        hook_state = apply_events(make_event("SessionEnd", 3.0, reason="other"), make_event("SessionStart", 4.0, source="resume"))
+        hook_state = apply_events(make_event_of_process_101_sent_at("SessionEnd", 3.0, reason="other"), make_event_of_process_101_sent_at("SessionStart", 4.0, source="resume"))
         self.assertIsNone(hook_state["session_ended_at"])
 
 
 class TurnEndTests(unittest.TestCase):
     def test_a_turn_end_counts_until_a_later_prompt_or_status_value(self):
-        hook_state = apply_events(make_event("UserPromptSubmit", 10.0), make_event("Stop", 20.0))
+        hook_state = apply_events(make_event_of_process_101_sent_at("UserPromptSubmit", 10.0), make_event_of_process_101_sent_at("Stop", 20.0))
         self.assertEqual(find_when_the_hooks_ended_the_turn(hook_state, 10.5), 20.0)  # iTerm2 still says what it said at 10.5
         self.assertIsNone(find_when_the_hooks_ended_the_turn(hook_state, 21.0))  # iTerm2 set a value since
-        self.assertIsNone(find_when_the_hooks_ended_the_turn(apply_hook_event(hook_state, make_event("UserPromptSubmit", 30.0)), 10.5))
-        self.assertIsNone(find_when_the_hooks_ended_the_turn(apply_events(make_event("UserPromptSubmit", 10.0)), 5.0))
+        self.assertIsNone(find_when_the_hooks_ended_the_turn(apply_hook_event(hook_state, make_event_of_process_101_sent_at("UserPromptSubmit", 30.0)), 10.5))
+        self.assertIsNone(find_when_the_hooks_ended_the_turn(apply_events(make_event_of_process_101_sent_at("UserPromptSubmit", 10.0)), 5.0))
         self.assertIsNone(find_when_the_hooks_ended_the_turn(None, 5.0))
 
-    def test_a_tool_call_of_the_main_agent_after_the_stop_shows_the_turn_going_on(self):  # code review, 2026-10-28
+    def test_a_tool_call_of_the_main_agent_after_the_stop_shows_the_turn_going_on(self):
         # Another Stop hook (Claude Code's goal feature) blocked the Stop, and the turn runs a command.
-        hook_state = apply_events(make_event("UserPromptSubmit", 10.0), make_event("PostToolUse", 15.0), make_event("Stop", 20.0))
+        hook_state = apply_events(make_event_of_process_101_sent_at("UserPromptSubmit", 10.0), make_event_of_process_101_sent_at("PostToolUse", 15.0), make_event_of_process_101_sent_at("Stop", 20.0))
         self.assertEqual(find_when_the_hooks_ended_the_turn(hook_state, 10.5), 20.0)  # its tool call came before the Stop
         # A background agent's tool calls carry its agent_id, so they don't count; the main agent's do.
         self.assertEqual(find_when_the_hooks_ended_the_turn(
-            apply_hook_event(hook_state, make_event("PreToolUse", 25.0, agent_id="a34")), 10.5), 20.0)
-        hook_state = apply_hook_event(hook_state, make_event("PreToolUse", 25.0))
+            apply_hook_event(hook_state, make_event_of_process_101_sent_at("PreToolUse", 25.0, agent_id="a34")), 10.5), 20.0)
+        hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("PreToolUse", 25.0))
         self.assertIsNone(find_when_the_hooks_ended_the_turn(hook_state, 10.5))
-        self.assertEqual(find_when_the_hooks_ended_the_turn(apply_hook_event(hook_state, make_event("Stop", 30.0)), 10.5), 30.0)
+        self.assertEqual(find_when_the_hooks_ended_the_turn(apply_hook_event(hook_state, make_event_of_process_101_sent_at("Stop", 30.0)), 10.5), 30.0)
 
     def test_codex_goes_by_its_own_status(self):
         # Its hooks report no prompts, so a turn right after the Stop (a message `codex queue` held) couldn't undo it.
-        hook_state = apply_events(make_event("Stop", 20.0, agent_tool_name="Codex"))
+        hook_state = apply_events(make_event_of_process_101_sent_at("Stop", 20.0, agent_tool_name="Codex"))
         self.assertIsNone(find_when_the_hooks_ended_the_turn(hook_state, 10.5))
 
 

@@ -24,11 +24,11 @@ class SettingChoiceTitlesTests(unittest.TestCase):
                                          (SIDEBAR_MODE_TITLES, SIDEBAR_MODES),
                                          (SIDEBAR_EDGE_TITLES, SIDEBAR_EDGES), (LIST_SORT_ORDER_TITLES, LIST_SORT_ORDERS)):
             self.assertEqual(list(titles_by_value), choices)
-        # The switches are in the order the user asked for, each labeled with its column's title in the list.
+        # Each switch is labeled with its column's title in the list.
         self.assertEqual(sorted(LIST_COLUMN_NAMES_IN_SETTINGS_ORDER), sorted(LIST_COLUMNS))
         self.assertTrue(all(COLUMN_TITLES.get(column_name) for column_name in LIST_COLUMNS))
 
-    def test_each_sort_order_is_titled_as_a_column_whose_title_chooses_it(self):  # user request, 2026-11-02
+    def test_each_sort_order_is_titled_as_a_column_whose_title_chooses_it(self):
         column_titles_by_list_sort_order = {}
         for column_name, list_sort_order in LIST_SORT_ORDER_BY_TITLE_NAME.items():
             column_title = NAME_COLUMN_TITLE if column_name == "name" else COLUMN_TITLES[column_name]
