@@ -401,7 +401,8 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
                 session_tracking_by_session_id.get(first_session["session_id"]),
                 displayed_state_by_session_id.get(first_session["session_id"]),
                 screen_readings_by_session_id.get(first_session["session_id"]), stuck_threshold_seconds,
-                seen_session_id, highlighted_session_id, now))
+                seen_session_id, highlighted_session_id, now)._replace(
+                    can_be_paused_while_it_runs=gathered_window["terminal_name"] != "tmux"))
         if agent_session_entries:
             window_entry = build_window_entry(gathered_window, agent_session_entries)
             terminal_and_title = (window_entry.terminal_name, window_entry.title)

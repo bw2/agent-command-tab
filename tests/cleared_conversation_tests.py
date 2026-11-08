@@ -17,6 +17,8 @@ from agent_command_tab.snapshot_builder import DisplayedState
 class StandInAdapter:
     """Finds the conversation file at self.path and reads its name back as the preview."""
 
+    can_resume_conversations = True  # as CodexAdapter
+
     def __init__(self, path):
         self.path = path
         self.paths_that_fit = [path]  # the files that may be the process's conversation, newest first

@@ -4,9 +4,12 @@ Set AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the l
 """
 
 import concurrent.futures
+import functools
 import io
+import json
 import math
 import os
+import tempfile
 import threading
 import time
 import unittest
@@ -41,6 +44,7 @@ from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGH
                                                                 SMALLEST_POPOVER_WIDTH, SMALLEST_SORT_POPUP_WIDTH,
                                                                 TOP_BAR_HEIGHT, ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
+from agent_command_tab.saved_agent_sessions_store import rename_saved_session
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
                                                                          DIM_DOT_ALPHA,
                                                                          GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT,
@@ -62,8 +66,9 @@ from agent_command_tab.user_interface.screen_layout import (compute_list_window_
                                                             grow_frame_to_smallest_size, list_screen_frames,
                                                             place_window_at_saved_frame_or_center)
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
-from agent_command_tab.user_interface.menu_bar_status_item import (choose_icon_color_name,
+from agent_command_tab.user_interface.menu_bar_status_item import (MenuBarStatusItemController, choose_icon_color_name,
                                                                    choose_what_a_click_on_the_icon_does_to_the_dropdown)
+from agent_command_tab.user_interface.saved_sessions_window import SavedSessionsWindowController
 from agent_command_tab.user_interface.settings_window import (GAP_BELOW_SECTION_TITLE, GAP_BETWEEN_SECTIONS,
                                                               LAUNCH_COMMAND_FIELD_WIDTH, SECTION_TITLE_HEIGHT,
                                                               KeyboardButton, KeyboardPopUpButton, SettingsWindowController)
@@ -93,6 +98,14 @@ class RecordingOwner:
         self.hooks_install_requests = []
         self.process_info_requests = []  # (session ID, process ID)
         self.lists_closed_after_escape = []
+        self.has_saved_sessions = False
+        self.saved_sessions_window_opening_count = 0
+
+    def has_saved_agent_sessions(self):
+        return self.has_saved_sessions
+
+    def open_saved_sessions_window(self):
+        self.saved_sessions_window_opening_count += 1
 
     def submit_action(self, action_request):
         self.submitted_actions.append(action_request)
@@ -927,7 +940,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         outline_view = self.list_controller.outline_view
         studio_display_row = next(row for row in range(outline_view.numberOfRows())
                                   if outline_view.itemAtRow_(row).key == ("monitor", "2"))
-        self.assertEqual(self.build_right_click_menu_titles(studio_display_row), ["Pause 2 sessions"])
+        self.assertEqual(self.build_right_click_menu_titles(studio_display_row),
+                         ["Pause 2 sessions", "---", "Save 2 sessions", "Restore sessions…"])
         # Collapse All collapses that monitor too, though it has no rows below it now (code review, 2026-10-29).
         self.list_controller.set_all_expanded(False)
         self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
@@ -969,10 +983,57 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.assertEqual(self.build_right_click_menu_titles(0),
                          ["Collapse", "---", "Show window", "Rename", "---", "New tab with Claude Code session…",
-                          "New tab with Codex session…", "---", "Pause 3 sessions", "---", "Close window"])
+                          "New tab with Codex session…", "---", "Pause 3 sessions", "---", "Save 3 sessions",
+                          "Restore sessions…", "---", "Close window"])
         self.assertEqual(self.build_right_click_menu_titles(1),
-                         ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Extract to new window", "---",
-                          "/compact", "/clear", "Kill session", "---", "Pause session"])
+                         ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Move to new window", "---",
+                          "Pause session", "---", "Save session", "Restore sessions…", "---",
+                          "/compact", "/clear", "Kill session"])
+
+    def test_save_session_in_the_row_menus(self):  # user request, 2026-11-06
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_two = window_two._replace(agent_sessions=(
+            window_two.agent_sessions[0]._replace(agent_tool_name="Aider"), window_two.agent_sessions[1]._replace(status="exited")))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two)),)))
+        saved_session_ids = []
+        self.owner.save_agent_sessions = saved_session_ids.append
+        tab_menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # "planning", Claude Code
+        self.assertTrue(tab_menu_items_by_title["Save session"].isEnabled())
+        self.list_controller.menuSaveSessions_(tab_menu_items_by_title["Save session"])
+        window_menu_items_by_title = self.build_right_click_menu_items_by_title(0)  # a window row counts its sessions
+        self.list_controller.menuSaveSessions_(window_menu_items_by_title["Save 3 sessions"])
+        self.assertEqual(saved_session_ids, [["s1"], ["s1", "s2", "s3"]])
+        aider_item = self.build_right_click_menu_items_by_title(5)["Save session"]
+        self.assertEqual((aider_item.isEnabled(), aider_item.toolTip()), (False, "Only Claude Code and Codex sessions can be saved"))
+        exited_item = self.build_right_click_menu_items_by_title(6)["Save session"]
+        self.assertEqual((exited_item.isEnabled(), exited_item.toolTip()), (False, "The agent has ended"))
+        self.select_rows(3, 5)  # codex-review and the Aider tab
+        several_rows_item = self.build_right_click_menu_items_by_title(5)["Save 1 session"]  # counts only those it saves
+        self.assertEqual(several_rows_item.toolTip(), "Saves 1 of the 2 sessions: only Claude Code and Codex sessions "
+                                                      "whose agent runs can be saved")
+        self.list_controller.menuSaveSessions_(several_rows_item)
+        self.assertEqual(saved_session_ids[-1], ["s3"])
+
+    def test_restore_sessions_in_the_row_menus(self):  # user request, 2026-11-07
+        snapshot = make_sample_snapshot()
+        window_one, window_two = snapshot.monitors[0].windows
+        window_two = window_two._replace(agent_sessions=(window_two.agent_sessions[0], window_two.agent_sessions[1]._replace(status="exited")))
+        self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(
+            windows=(window_one, window_two)),)))
+        restore_item = self.build_right_click_menu_items_by_title(1)["Restore sessions…"]  # "planning"
+        self.assertEqual((restore_item.isEnabled(), restore_item.toolTip()), (False, "No sessions are saved"))
+        self.owner.has_saved_sessions = True
+        restore_item = self.build_right_click_menu_items_by_title(1)["Restore sessions…"]
+        self.assertEqual((restore_item.isEnabled(), restore_item.toolTip()), (True, None))
+        self.list_controller.menuRestoreSessions_(restore_item)
+        self.assertEqual(self.owner.saved_sessions_window_opening_count, 1)
+        # An ended agent's tab gets no Pause item, and its Save section still starts with one separator.
+        exited_tab_menu_titles = self.build_right_click_menu_titles(6)
+        save_position = exited_tab_menu_titles.index("Save session")
+        self.assertEqual(exited_tab_menu_titles[save_position - 2:save_position + 3],
+                         ["Move to new window", "---", "Save session", "Restore sessions…", "---"])
 
     def test_pause_and_resume_in_the_row_menus_and_the_bottom_bar(self):
         snapshot = make_sample_snapshot()
@@ -1002,8 +1063,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                 ((1, 5), "pause_agent_sessions", ["s10"])):  # while one of the selected rows runs, a click pauses
             self.select_rows(*rows)
             self.assertEqual((button.isHidden(), button.toolTip()), (False, {
-                "pause_agent_sessions": "Pause the selected rows' agent processes by suspending them (Ctrl+Z, or a STOP signal)",
-                "resume_agent_sessions": "Resume the selected rows' paused agent processes (fg, then a CONT signal)"}[action]), rows)
+                "pause_agent_sessions": "Pause the selected rows' agent processes, their shells and the processes below them (a STOP signal)",
+                "resume_agent_sessions": "Resume the selected rows' paused agent processes (a CONT signal)"}[action]), rows)
             panel.pauseOrResumeSelectedRowsClicked_(button)
             self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                              (action, {"session_ids": session_ids}), rows)
@@ -1023,7 +1084,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("pause_agent_sessions", {"session_ids": ["s1"]}))
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(snapshot))
-        self.assertEqual(self.build_right_click_menu_titles(0)[-1], "Pause 3 sessions")  # a monitor row's menu
+        self.assertEqual(self.build_right_click_menu_titles(0)[-4:],  # a monitor row's menu
+                         ["Pause 3 sessions", "---", "Save 3 sessions", "Restore sessions…"])
 
     def test_slash_commands_only_at_the_prompt_and_clear_and_kill_ask_first(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -1135,8 +1197,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(3, 4)  # codex-review (done) and the second window (two idle tabs)
         self.assertEqual(self.build_right_click_menu_titles(4),
-                         ["/compact 3 sessions", "/clear 3 sessions", "Kill 3 sessions", "---", "Pause 3 sessions", "---",
-                          "Talk to each other…"])
+                         ["Pause 3 sessions", "---", "Save 3 sessions", "Restore sessions…", "---", "/compact 3 sessions",
+                          "/clear 3 sessions", "Kill 3 sessions", "---", "Talk to each other…"])
         self.assertIsNone(self.build_right_click_menu_items_by_title(4)["/compact 3 sessions"].toolTip())  # all at their prompt
         self.select_rows(0, 1)  # a window and one of its tabs: each session counts once
         self.assertIn("/compact 3 sessions", self.build_right_click_menu_titles(1))
@@ -1552,7 +1614,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         app_controller = AppController.alloc().init()
         app_controller.dropdown_list_controller = self.list_controller
         app_controller.status_item_controller = unittest.mock.Mock()
-        app_controller.place_the_settings_window_above_the_lists = lambda dropdown_is_open: None
+        app_controller.place_the_settings_and_saved_sessions_windows_above_the_lists = lambda dropdown_is_open: None
         app_controller.popoverWillClose_(None)
         self.assertFalse(self.list_controller.rename_in_progress)
         self.assertEqual(self.submitted_actions, [])  # nothing was renamed
@@ -2310,14 +2372,22 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.list_controller.build_row_text_parts(outline_view.itemAtRow_(row_by_item_id["w2"])).name_text,
                          "tmux: tandem-repeats")
 
-    def test_r_and_command_r_rename_the_one_selected_tab_or_window_row(self):  # user request, 2026-10-29
+    def test_r_command_r_and_command_shift_r_rename_the_one_selected_tab_or_window_row(self):  # user requests, 2026-10-29 and 2026-11-07
         self.list_controller.apply_snapshot(make_sample_snapshot())
-        for row, modifier_flags, renamed_title in ((1, 0, "planning"), (0, NSEventModifierFlagCommand, "agent-command-tab")):
+        for row, characters, modifier_flags, renamed_title in (
+                (1, "r", 0, "planning"), (0, "r", NSEventModifierFlagCommand, "agent-command-tab"),
+                (1, "R", NSEventModifierFlagCommand | NSEventModifierFlagShift, "planning"),  # Shift makes it "R"
+                (0, "r", NSEventModifierFlagCommand | NSEventModifierFlagShift, "agent-command-tab")):
             self.select_rows(row)
-            self.press_key("r", 15, modifier_flags)
-            self.assertTrue(self.list_controller.rename_in_progress)
+            self.press_key(characters, 15, modifier_flags)
+            self.assertTrue(self.list_controller.rename_in_progress, (characters, modifier_flags))
             self.assertEqual(self.list_controller.title_before_rename, renamed_title)
             self.list_controller.cancel_rename()
+        self.select_rows(1)
+        for characters, modifier_flags in (("R", NSEventModifierFlagShift), ("r", NSEventModifierFlagCommand | NSEventModifierFlagControl)):
+            self.list_controller.last_name_letter_typed_at = 0
+            self.press_key(characters, 15, modifier_flags)  # Shift-R alone types a name's letter; Control-Command-R is another key
+            self.assertFalse(self.list_controller.rename_in_progress, (characters, modifier_flags))
         self.select_rows(1, 2)
         self.press_key("r", 15)  # with several rows selected, nothing is renamed
         self.assertFalse(self.list_controller.rename_in_progress)
@@ -2792,7 +2862,7 @@ class SidebarWidthDragTests(unittest.TestCase):
             def close_dropdown(self):
                 pass
 
-            def place_the_settings_window_above_the_lists(self, dropdown_is_open):
+            def place_the_settings_and_saved_sessions_windows_above_the_lists(self, dropdown_is_open):
                 self.settings_window_placements += 1
         stand_in_app_controller = StandInAppController()
         stand_in_app_controller.list_window_controller = list_window_controller
@@ -3128,7 +3198,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
                 (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height))
             stand_in_app_controller.settings_window_controller.set_window_level = levels.append
             AppController.move_the_settings_window_clear_of_the_sidebar(stand_in_app_controller)
-            AppController.place_the_settings_window_above_the_lists(stand_in_app_controller, False)
+            AppController.place_the_settings_and_saved_sessions_windows_above_the_lists(stand_in_app_controller, False)
             self.assertEqual(frames, expected_frames)
             self.assertEqual(levels, [None])  # the normal level, so other apps' windows can cover it and close it
 
@@ -3638,6 +3708,290 @@ class YieldActivationTests(unittest.TestCase):
             application.respondsToSelector_.assert_called_with("yieldActivationToApplication:")
             self.assertEqual(application.yieldActivationToApplication_.call_args_list,
                              [unittest.mock.call(iterm2_application)] if macos_has_it else [])
+
+
+class SavedSessionsRecordingOwner:
+    """Stands in for the app controller: records what the Saved sessions window asks of it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def restore_saved_agent_sessions(self, window_keys, conversation_ids):
+        self.calls.append(("restore", window_keys, conversation_ids))
+
+    def delete_saved_items(self, window_keys, conversation_ids):
+        self.calls.append(("delete", window_keys, conversation_ids))
+
+    def rename_saved_window(self, window_key, new_name):
+        self.calls.append(("rename window", window_key, new_name))
+
+    def rename_saved_session(self, conversation_id, new_name):
+        self.calls.append(("rename session", conversation_id, new_name))
+
+    def window_frame_changed(self, setting_name, frame):
+        pass
+
+
+def make_saved_session_record(conversation_id, name, agent_tool_name="Claude Code", folder="/tmp/x", saved_at=None):
+    return {"conversation_id": conversation_id, "agent_tool_name": agent_tool_name, "name": name, "name_was_set_by_user": False,
+            "folder": folder, "claude_config_folder": None, "terminal_session_id": f"session-{conversation_id}",
+            "saved_at": time.mktime((2026, 11, 6, 7, 52, 0, 0, 0, -1)) if saved_at is None else saved_at}
+
+
+def make_saved_windows():
+    """agent-command-tab (an iTerm2 window: planning, reviews) and tmux: work (a tmux session: notes)."""
+    return [{"terminal_name": "iTerm2", "terminal_window_id": "w1", "terminal_window_opened_at": None, "name": "agent-command-tab",
+             "name_was_set_by_user": False,
+             "frame": [0, 0, 800, 600], "saved_sessions": [
+                 make_saved_session_record("a", "planning", folder=os.path.expanduser("~/code/agent-command-tab")),
+                 make_saved_session_record("b", "reviews", "Codex", saved_at=time.mktime((2026, 11, 5, 23, 28, 0, 0, 0, -1)))]},
+            {"terminal_name": "tmux", "terminal_window_id": "$1", "terminal_window_opened_at": 1793977852, "name": "tmux: work",
+             "name_was_set_by_user": True,
+             "frame": None, "saved_sessions": [make_saved_session_record("c", "notes")]}]
+
+
+class SavedSessionsWindowSmokeTests(unittest.TestCase):  # user request, 2026-11-06
+    @classmethod
+    def setUpClass(cls):
+        NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+    def setUp(self):
+        self.owner = SavedSessionsRecordingOwner()
+        self.controller = SavedSessionsWindowController.alloc().initWithOwner_(self.owner)
+        self.controller.window = self.controller.build_window()  # built without showing it
+        self.controller.window.setFrameOrigin_((-4000, -4000))  # "on screen" for the tests that show it, far outside every monitor
+        self.controller.show_saved_windows(make_saved_windows())
+        self.outline_view = self.controller.outline_view
+
+    def tearDown(self):
+        self.controller.window.orderOut_(None)
+
+    def list_row_texts(self):
+        return [[self.controller.outlineView_objectValueForTableColumn_byItem_(self.outline_view, column, self.outline_view.itemAtRow_(row))
+                 for column in self.outline_view.tableColumns()] for row in range(self.outline_view.numberOfRows())]
+
+    def build_right_click_menu_titles(self, row):
+        """Returns the menu's titles as if the row were right-clicked."""
+        item = self.outline_view.itemAtRow_(row)
+        self.controller.find_clicked_item = lambda: item
+        menu = NSMenu.alloc().initWithTitle_("")
+        self.controller.menuNeedsUpdate_(menu)
+        return [menu_item.title() for menu_item in menu.itemArray()]
+
+    def select_rows(self, *rows):
+        self.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(rows), False)
+
+    def press_key(self, characters, key_code, modifier_flags=0):
+        self.outline_view.keyDown_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+            NSEventTypeKeyDown, NSMakePoint(0, 0), modifier_flags, 0, self.controller.window.windowNumber(), None, characters,
+            characters, False, key_code))
+
+    def test_the_saved_sessions_show_under_the_windows_they_were_saved_from(self):
+        self.assertEqual(self.controller.window.title(), "Saved sessions")  # the user's name for them
+        self.assertEqual([column.title() for column in self.outline_view.tableColumns()], ["Name", "Agent", "Folder", "Saved"])
+        self.assertEqual(self.list_row_texts(), [
+            ["agent-command-tab", "", "", "2026-11-06 07:52"],  # a window's latest save
+            ["planning", "Claude Code", "~/code/agent-command-tab", "2026-11-06 07:52"],
+            ["reviews", "Codex", "/tmp/x", "2026-11-05 23:28"],
+            ["tmux: work", "", "", "2026-11-06 07:52"],
+            ["notes", "Claude Code", "/tmp/x", "2026-11-06 07:52"]])
+
+    def test_the_agent_column_shows_only_while_the_saved_sessions_are_of_two_or_more_tools(self):  # user request, 2026-11-06
+        agent_column = self.outline_view.tableColumnWithIdentifier_("agent_tool_name")
+        self.assertFalse(agent_column.isHidden())  # Claude Code and Codex
+        saved_windows = make_saved_windows()
+        saved_windows[0]["saved_sessions"][1]["agent_tool_name"] = "Claude Code"
+        self.controller.show_saved_windows(saved_windows)
+        self.assertTrue(agent_column.isHidden())
+        self.controller.show_saved_windows(make_saved_windows())  # a Codex session saved again
+        self.assertFalse(agent_column.isHidden())
+
+    def test_rows_cant_be_dragged(self):
+        for selector in ("outlineView:writeItems:toPasteboard:", "outlineView:pasteboardWriterForItem:"):
+            self.assertFalse(self.controller.respondsToSelector_(selector), selector)
+
+    def test_only_names_are_renamed_and_an_empty_or_unchanged_name_changes_nothing(self):
+        name_column, agent_column = self.outline_view.tableColumns()[:2]
+        window_item, session_item = self.outline_view.itemAtRow_(0), self.outline_view.itemAtRow_(1)
+        self.assertTrue(self.controller.outlineView_shouldEditTableColumn_item_(self.outline_view, name_column, session_item))
+        self.assertFalse(self.controller.outlineView_shouldEditTableColumn_item_(self.outline_view, agent_column, session_item))
+        for new_name in ("  Plans ", "", "planning"):
+            self.controller.outlineView_setObjectValue_forTableColumn_byItem_(self.outline_view, new_name, name_column, session_item)
+        self.controller.outlineView_setObjectValue_forTableColumn_byItem_(self.outline_view, "Main", name_column, window_item)
+        self.controller.outlineView_setObjectValue_forTableColumn_byItem_(self.outline_view, "Codex", agent_column, session_item)
+        self.assertEqual(self.owner.calls, [("rename session", "a", "Plans"), ("rename window", ("iTerm2", "w1", None), "Main")])
+
+    def test_esc_during_a_rename_puts_the_old_name_back_and_closing_then_renames_nothing(self):
+        self.controller.window.orderFrontRegardless()
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))
+        self.outline_view.currentEditor().setString_("Cancelled name")
+        self.controller.window.sendEvent_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+            NSEventTypeKeyDown, NSMakePoint(0, 0), 0, 0, self.controller.window.windowNumber(), None, "\x1b", "\x1b", False, 53))
+        self.assertEqual(self.outline_view.editedRow(), -1)
+        self.assertEqual(self.list_row_texts()[1][0], "planning")
+        self.controller.windowWillClose_(type("NotificationStandIn", (), {"object": lambda _: self.controller.window})())
+        self.assertEqual(self.owner.calls, [])
+
+    def test_restore_during_a_rename_keeps_the_new_name_first(self):  # so the restore gives the tab that name
+        self.controller.window.orderFrontRegardless()
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))
+        self.outline_view.currentEditor().setString_("Renamed planning")
+        self.controller.restore_selected_rows()
+        self.assertEqual(self.owner.calls, [("rename session", "a", "Renamed planning"), ("restore", set(), {"a"})])
+
+    def test_rename_edits_the_name_column_also_after_a_header_drag_moved_it(self):
+        self.controller.window.orderFrontRegardless()
+        self.outline_view.moveColumn_toColumn_(0, 2)  # Name dragged to the third place
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))
+        self.assertEqual(self.outline_view.tableColumns()[self.outline_view.editedColumn()].identifier(), "name")
+        self.controller.window.makeFirstResponder_(None)
+
+    def test_a_name_typed_and_ended_shows_in_its_row_once_the_owner_keeps_it(self):
+        saved_windows = make_saved_windows()
+
+        def keep_the_new_name(conversation_id, new_name):  # as the app controller does: the list is shown again at once
+            self.controller.show_saved_windows(rename_saved_session(saved_windows, conversation_id, new_name))
+        self.owner.rename_saved_session = keep_the_new_name
+        self.controller.window.orderFrontRegardless()
+        self.outline_view.editColumn_row_withEvent_select_(0, 1, None, True)
+        self.outline_view.currentEditor().setString_("Plans")
+        self.controller.window.makeFirstResponder_(None)  # a click elsewhere, or closing the window, ends the edit
+        self.assertEqual(self.list_row_texts()[1][0], "Plans")
+        self.assertEqual(self.outline_view.editedRow(), -1)
+
+    def test_the_right_click_menu_renames_or_deletes_and_delete_covers_the_selected_rows_it_was_opened_on(self):
+        self.assertEqual(self.build_right_click_menu_titles(2), ["Rename", "Delete"])
+        self.controller.menuDelete_(None)
+        self.select_rows(0, 2)
+        self.build_right_click_menu_titles(2)
+        self.controller.menuDelete_(None)
+        self.build_right_click_menu_titles(3)  # not selected: it alone
+        self.controller.menuDelete_(None)
+        self.assertEqual(self.owner.calls, [("delete", set(), {"b"}), ("delete", {("iTerm2", "w1", None)}, {"b"}),
+                                            ("delete", {("tmux", "$1", 1793977852)}, set())])
+        self.controller.window.orderFrontRegardless()
+        self.build_right_click_menu_titles(4)
+        self.controller.menuRename_(None)
+        self.assertEqual((self.outline_view.editedRow(), self.outline_view.editedColumn()), (4, 0))
+
+    def test_restore_and_delete_act_on_the_selected_rows_from_the_buttons_and_the_keys(self):
+        self.outline_view.deselectAll_(None)
+        self.assertFalse(self.controller.restore_button.isEnabled() or self.controller.delete_button.isEnabled())
+        self.select_rows(1, 3)
+        self.assertTrue(self.controller.restore_button.isEnabled() and self.controller.delete_button.isEnabled())
+        self.controller.deleteClicked_(None)
+        self.press_key("\x7f", 51)  # Delete
+        self.controller.window.orderFrontRegardless()
+        self.assertTrue(self.controller.is_open())
+        self.controller.restoreClicked_(None)
+        tmux_window_key = ("tmux", "$1", 1793977852)
+        self.assertEqual(self.owner.calls, [("delete", {tmux_window_key}, {"a"})] * 2 + [("restore", {tmux_window_key}, {"a"})])
+        self.assertFalse(self.controller.is_open())  # closed, so the restored tabs show
+
+    def test_return_renames_the_selected_row_and_restores_nothing(self):  # user request, 2026-11-06
+        self.controller.window.orderFrontRegardless()
+        self.select_rows(1, 3)
+        self.press_key("\r", 36)  # two rows selected: which to rename isn't clear, as in Finder
+        self.assertEqual(self.outline_view.editedRow(), -1)
+        self.select_rows(2)
+        self.press_key("\r", 36)
+        self.assertEqual((self.outline_view.editedRow(), self.outline_view.editedColumn()), (2, 0))
+        self.assertEqual(self.owner.calls, [])  # nothing restored
+
+    def test_command_r_and_command_shift_r_rename_the_selected_row_too(self):  # as in the list (user request, 2026-11-07)
+        self.controller.window.orderFrontRegardless()
+        for row, characters, modifier_flags in ((2, "r", NSEventModifierFlagCommand),
+                                                (1, "R", NSEventModifierFlagCommand | NSEventModifierFlagShift)):
+            self.select_rows(row)
+            self.press_key(characters, 15, modifier_flags)
+            self.assertEqual((self.outline_view.editedRow(), self.outline_view.editedColumn()), (row, 0), characters)
+            self.outline_view.abortEditing()
+        self.select_rows(2)
+        self.press_key("r", 15)  # R alone types a name's first letter to select its row, as in Finder
+        self.assertEqual(self.outline_view.editedRow(), -1)
+        self.assertEqual(self.owner.calls, [])  # nothing renamed or restored
+
+    def test_a_new_list_keeps_the_selection_and_esc_or_an_empty_list_closes_the_window(self):
+        self.select_rows(2)  # reviews
+        saved_windows = make_saved_windows()
+        saved_windows[0]["saved_sessions"].insert(0, make_saved_session_record("z", "newly saved"))
+        self.controller.show_saved_windows(saved_windows)
+        self.assertEqual([item.key for item in self.controller.list_selected_items()], [("session", "b")])
+        self.assertEqual(self.outline_view.selectedRow(), 3)
+        self.controller.window.orderFrontRegardless()
+        self.assertTrue(self.controller.is_open())
+        self.controller.window.sendEvent_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+            NSEventTypeKeyDown, NSMakePoint(0, 0), 0, 0, self.controller.window.windowNumber(), None, "\x1b", "\x1b", False, 53))
+        self.assertFalse(self.controller.is_open())
+        self.controller.window.orderFrontRegardless()
+        self.assertTrue(self.controller.is_open())
+        self.controller.show_saved_windows([])  # the last saved session was deleted
+        self.assertFalse(self.controller.is_open())
+
+
+def make_stand_in_app_controller_for_saved_sessions(**attributes):
+    """A stand-in AppController with these attributes whose saved-list and action helpers are the real ones."""
+    stand_in_app_controller = unittest.mock.Mock(**attributes)
+    for method_name in ("change_saved_windows", "submit_action_and_report_failure"):
+        setattr(stand_in_app_controller, method_name, functools.partial(getattr(AppController, method_name), stand_in_app_controller))
+    return stand_in_app_controller
+
+
+class SavedSessionsInTheAppTests(unittest.TestCase):  # user request, 2026-11-06
+    def test_restore_sessions_is_in_the_menu_bar_icons_menu_only_while_sessions_are_saved(self):
+        status_item_controller = MenuBarStatusItemController.alloc().init()  # no status item of its own
+        status_item_controller.owner = unittest.mock.Mock()
+        for has_saved_sessions, expected_titles in (
+                (False, ["Show popup", "Show sidebar", "Show window", "---", "Settings…", "---", "Quit AgentCommandTab"]),
+                (True, ["Show popup", "Show sidebar", "Show window", "---", "Restore sessions…", "Settings…", "---",
+                        "Quit AgentCommandTab"])):
+            status_item_controller.owner.has_saved_agent_sessions.return_value = has_saved_sessions
+            self.assertEqual(["---" if menu_item.isSeparatorItem() else menu_item.title()
+                              for menu_item in status_item_controller.build_right_click_menu().itemArray()], expected_titles)
+        status_item_controller.restoreSessionsClicked_(None)
+        status_item_controller.owner.open_saved_sessions_window.assert_called_once_with()
+
+    def test_a_save_keeps_what_the_core_found_and_names_what_it_couldnt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            stand_in_app_controller = make_stand_in_app_controller_for_saved_sessions(
+                saved_windows=make_saved_windows()[:1], saved_agent_sessions_file_path=os.path.join(folder, "saved.json"))
+            newly_saved_window = make_saved_windows()[1]
+            done_future = concurrent.futures.Future()
+            done_future.set_result(ActionResult(False, '"aider": aider can\'t resume a saved conversation',
+                                                details={"saved_windows": [newly_saved_window]}))
+            stand_in_app_controller.submit_action.return_value = done_future
+            with unittest.mock.patch("agent_command_tab.app_controller.AppHelper.callAfter", lambda function, *arguments: function(*arguments)):
+                AppController.save_agent_sessions(stand_in_app_controller, ["s1", "s9"])
+            self.assertEqual(stand_in_app_controller.submit_action.call_args.args[0],
+                             ActionRequest("save_agent_sessions", {"session_ids": ["s1", "s9"]}))
+            self.assertEqual(stand_in_app_controller.saved_windows, make_saved_windows())
+            with open(os.path.join(folder, "saved.json")) as file:
+                self.assertEqual(json.load(file), make_saved_windows())
+            stand_in_app_controller.saved_sessions_window_controller.show_saved_windows.assert_called_once_with(make_saved_windows())
+            self.assertEqual(stand_in_app_controller.report_action_failure.call_args.args[1], "Not every session was saved")
+
+    def test_restore_sends_the_chosen_sessions_and_takes_those_it_restored_out_of_the_list(self):
+        with tempfile.TemporaryDirectory() as folder:
+            stand_in_app_controller = make_stand_in_app_controller_for_saved_sessions(
+                saved_windows=make_saved_windows(), settings=DEFAULT_SETTINGS,
+                saved_agent_sessions_file_path=os.path.join(folder, "saved.json"))
+            done_future = concurrent.futures.Future()
+            done_future.set_result(ActionResult(False, '"notes": the folder /tmp/x doesn\'t exist',
+                                                details={"restored_conversation_ids": ["a"]}))
+            stand_in_app_controller.submit_action.return_value = done_future
+            with unittest.mock.patch("agent_command_tab.app_controller.AppHelper.callAfter", lambda function, *arguments: function(*arguments)):
+                AppController.restore_saved_agent_sessions(stand_in_app_controller, {("tmux", "$1", 1793977852)}, {"a"})
+            action_request = stand_in_app_controller.submit_action.call_args.args[0]
+            self.assertEqual(action_request.action, "restore_saved_agent_sessions")
+            self.assertEqual([[saved_session["conversation_id"] for saved_session in saved_window["saved_sessions"]]
+                              for saved_window in action_request.arguments["saved_windows"]], [["a"], ["c"]])
+            self.assertEqual(action_request.arguments["launch_command_by_agent_tool_name"], {"Claude Code": "claude", "Codex": "codex"})
+            # The restored session leaves the list (user request, 2026-11-06); the one that failed stays.
+            self.assertEqual([[saved_session["conversation_id"] for saved_session in saved_window["saved_sessions"]]
+                              for saved_window in stand_in_app_controller.saved_windows], [["b"], ["c"]])
+            with open(os.path.join(folder, "saved.json")) as file:
+                self.assertEqual(json.load(file), stand_in_app_controller.saved_windows)
+            self.assertEqual(stand_in_app_controller.report_action_failure.call_args.args[1], "Not every session was restored")
 
 
 if __name__ == "__main__":

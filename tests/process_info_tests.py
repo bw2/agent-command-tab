@@ -34,13 +34,18 @@ def wait_until(condition):
 
 
 def start_claude_code_style_shell(folder, agent_command="sleep 60"):
-    """Starts bash as Claude Code's shell tool does, running agent_command in folder, and waits
-    until the command runs below it; returns the bash process, reaped as soon as it ends, as an
-    agent reaps its shells."""
+    """Starts bash as Claude Code's shell tool does, running agent_command, which ends by running
+    sleep, in folder, and waits until sleep runs below it; returns the bash process, reaped as soon
+    as it ends, as an agent reaps its shells.
+
+    Waiting for any process below bash wasn't enough: bash's copy of itself, which becomes sleep a
+    moment later, still had bash's command line when a slow GitHub runner read it (2026-11-05). So
+    this waits for a process below it that isn't bash, which is sleep under whatever name it has
+    (GNU coreutils' sleep, first on PATH on the author's Mac, runs as "gsleep")."""
     shell = subprocess.Popen(["/bin/bash", "-c", f"true && eval '{agent_command}' < /dev/null && pwd -P >| {folder}/cwd"],
                              cwd=folder)
     threading.Thread(target=shell.wait, daemon=True).start()
-    wait_until(lambda: list_descendant_processes(shell.pid))
+    wait_until(lambda: any(process.name != "bash" for process in list_descendant_processes(shell.pid)))
     return shell
 
 

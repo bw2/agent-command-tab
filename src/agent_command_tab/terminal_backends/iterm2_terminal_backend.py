@@ -106,35 +106,6 @@ def convert_frame_to_iterm2_frame(frame):
     return iterm2.Frame(iterm2.Point(frame[0], frame[1]), iterm2.Size(frame[2], frame[3]))
 
 
-async def read_text_around_the_cursor(session):
-    """Returns (text before the cursor, text after it) on the cursor's line of an iterm2.Session,
-    joining the screen rows a long line wraps over and leaving out empty cells, or None when the
-    cursor isn't on screen."""
-    contents = await session.async_get_screen_contents()
-    cursor = contents.cursor_coord
-    cursor_row = cursor.y - contents.windowed_coord_range.coordRange.start.y
-    if not 0 <= cursor_row < contents.number_of_lines:
-        return None
-    first_row = cursor_row
-    while first_row > 0 and not contents.line(first_row - 1).hard_eol:
-        first_row -= 1
-    cursor_line = contents.line(cursor_row)
-    cells_before_the_cursor = []
-    for x in range(cursor.x):
-        try:
-            cells_before_the_cursor.append(cursor_line.string_at(x))
-        except IndexError:  # past the cells written on this row
-            break
-    text_on_the_row_before_the_cursor = "".join(cells_before_the_cursor)
-    text_before = "".join(contents.line(row).string for row in range(first_row, cursor_row)) + text_on_the_row_before_the_cursor
-    text_after = cursor_line.string[len(text_on_the_row_before_the_cursor):]
-    row = cursor_row
-    while not contents.line(row).hard_eol and row + 1 < contents.number_of_lines:
-        row += 1
-        text_after += contents.line(row).string
-    return text_before.replace("\x00", ""), text_after.replace("\x00", "")
-
-
 def build_new_agent_session_profile(folder, launch_command):
     """Returns profile customizations that start launch_command in folder.
 
@@ -182,12 +153,6 @@ class Iterm2TerminalSession(TerminalSession):
                 (line.string, [bool(style is not None and style.faint) for style in map(line.style_at, range(len(line.string)))]))
         return screen_lines_with_faint_flags
 
-    async def read_text_around_the_cursor(self):
-        try:
-            return await read_text_around_the_cursor(self.session)
-        except iterm2.RPCException as error:
-            raise TerminalRequestFailed(str(error)) from error
-
 
 class Iterm2TerminalBackend(TerminalBackend):
     """iTerm2, through its Python API (the iterm2 package)."""
@@ -196,6 +161,8 @@ class Iterm2TerminalBackend(TerminalBackend):
     tab_kind_name = "iTerm2 tab"
     reports_agent_status = True
     windows_have_frames = True
+    # Its IDs are UUIDs, and the windows and tabs it brought back after a reboot kept theirs (seen 2026-11-06).
+    ids_are_never_reused = True
 
     def __init__(self, request_regather, request_snapshot, report_problem):
         super().__init__(request_regather, request_snapshot, report_problem)
@@ -607,14 +574,16 @@ class Iterm2TerminalBackend(TerminalBackend):
             after_tab_id: The tab the new one goes right after, or None to put it last.
 
         Returns:
-            An ActionResult; a new window's has details {"window_id": its ID}.
+            An ActionResult with details {"tab_id": the new tab's ID}, plus {"window_id": its ID}
+            for a new window; None when iTerm2 gives no tab or window (its session ended right away).
         """
         profile = build_new_agent_session_profile(folder, launch_command)
         if window_id is None:
-            # Its ID lets the lists select it once its agent shows (user request, 2026-10-30); iTerm2
-            # gives no window when its session ended right away.
+            # Its ID lets the lists select it once its agent shows (user request, 2026-10-30), and the
+            # tab's lets a restored session's tab get its saved name (user request, 2026-11-06).
             window = await iterm2.Window.async_create(self.connection, profile_customizations=profile)
-            return ActionResult(True, details={"window_id": window.window_id} if window is not None else None)
+            return ActionResult(True, details={"window_id": window.window_id, "tab_id": window.current_tab.tab_id}
+                                if window is not None and window.current_tab is not None else None)
         window = self.app.get_window_by_id(window_id)
         if window is None:
             return ActionResult(False, "that window no longer exists")
@@ -624,8 +593,8 @@ class Iterm2TerminalBackend(TerminalBackend):
             if after_tab_id not in tab_ids:
                 return ActionResult(False, "that tab no longer exists")
             tab_index = tab_ids.index(after_tab_id) + 1
-        await window.async_create_tab(profile_customizations=profile, index=tab_index)
-        return ActionResult(True)
+        tab = await window.async_create_tab(profile_customizations=profile, index=tab_index)
+        return ActionResult(True, details={"tab_id": tab.tab_id} if tab is not None else None)
 
     async def move_window_to_monitor(self, window_id, monitors, target_monitor_id):
         """Moves a window to another monitor, keeping its size if it fits and its relative position.

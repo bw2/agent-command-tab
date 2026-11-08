@@ -57,7 +57,8 @@ class MenuBarStatusItemController(NSObject):
     for the dropdown); a right click shows a small menu.
 
     The owner (the app controller) has menu_bar_icon_clicked(), show_the_list_as(show_as_choice),
-    open_settings(), quit() and note_application_in_front_before_dropdown(application).
+    has_saved_agent_sessions(), open_saved_sessions_window(), open_settings(), quit() and
+    note_application_in_front_before_dropdown(application).
     """
 
     def initWithPopover_owner_(self, popover, owner):
@@ -162,20 +163,30 @@ class MenuBarStatusItemController(NSObject):
         self.popover.showRelativeToRect_ofView_preferredEdge_(button.bounds(), button, NSMinYEdge)
 
     @objc.python_method
-    def show_right_click_menu(self):
+    def build_right_click_menu(self):
+        """Returns the right-click menu: each way to show the list, whatever "Show as" is, without
+        changing it (user request, 2026-10-28; "Show the sidebar" alone until then), in sentence
+        case as the other menus are; "Restore sessions…" while any are saved (user request,
+        2026-11-06); Settings; Quit."""
         menu = NSMenu.alloc().initWithTitle_("")
-        # Each way to show the list, whatever "Show as" is, without changing it (user request,
-        # 2026-10-28; "Show the sidebar" alone until then), in sentence case as the other menus are.
+        restore_items = (("Restore sessions…", "restoreSessionsClicked:"),) if self.owner.has_saved_agent_sessions() else ()
         for title, action_name in (("Show popup", "showPopupClicked:"), ("Show sidebar", "showSidebarClicked:"),
-                                   ("Show window", "showWindowClicked:"), (None, None), ("Settings…", "settingsClicked:"),
-                                   (None, None), ("Quit AgentCommandTab", "quitClicked:")):
+                                   ("Show window", "showWindowClicked:"), (None, None), *restore_items,
+                                   ("Settings…", "settingsClicked:"), (None, None), ("Quit AgentCommandTab", "quitClicked:")):
             if title is None:
                 menu.addItem_(NSMenuItem.separatorItem())
                 continue
             menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action_name, "")
             menu_item.setTarget_(self)
             menu.addItem_(menu_item)
-        self.status_item.popUpStatusItemMenu_(menu)
+        return menu
+
+    @objc.python_method
+    def show_right_click_menu(self):
+        self.status_item.popUpStatusItemMenu_(self.build_right_click_menu())
+
+    def restoreSessionsClicked_(self, sender):
+        self.owner.open_saved_sessions_window()
 
     def showPopupClicked_(self, sender):
         self.owner.show_the_list_as("popup")

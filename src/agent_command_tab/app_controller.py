@@ -33,6 +33,9 @@ from agent_command_tab.hooks_installer import BACKUP_FILE_SUFFIX, install_hooks,
 from agent_command_tab.dashboard_core import DashboardCoreThread
 from agent_command_tab.monitor_assignment import compute_frame_clear_of_area
 from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
+from agent_command_tab.saved_agent_sessions_store import (SAVED_AGENT_SESSIONS_FILE_PATH, choose_saved_windows_to_restore,
+                                                          delete_saved_items, load_saved_windows, merge_saved_windows,
+                                                          rename_saved_session, rename_saved_window, save_saved_windows)
 from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, list_included_agent_tool_names,
                                               load_settings, move_the_settings_folder_of_the_old_name, save_settings)
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list, choose_folder_for_new_agent_window
@@ -46,6 +49,7 @@ from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.menu_bar_status_item import MenuBarStatusItemController
 from agent_command_tab.user_interface.popover_container import ListPanelController, build_dropdown_popover
 from agent_command_tab.user_interface.process_info_alert import build_process_info_alert
+from agent_command_tab.user_interface.saved_sessions_window import SavedSessionsWindowController
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
                                                             convert_rect_to_frame_list, grow_frame_to_smallest_size,
                                                             read_monitors_from_screens)
@@ -166,6 +170,11 @@ class AppController(NSObject):
             # do once they appear (code review, 2026-10-29).
             list_controller.defers_rebuilding_while_hidden = True
         self.settings_window_controller = SettingsWindowController.alloc().initWithOwner_(self)
+        # The saved sessions (saved_agent_sessions_store; user request, 2026-11-06): the main thread
+        # alone reads and writes their file, so a rename or delete never waits on the core.
+        self.saved_agent_sessions_file_path = SAVED_AGENT_SESSIONS_FILE_PATH
+        self.saved_windows = load_saved_windows(self.saved_agent_sessions_file_path)
+        self.saved_sessions_window_controller = SavedSessionsWindowController.alloc().initWithOwner_(self)
         # Calls back on the key filter's own thread.
         self.global_shortcut_key_filter = GlobalShortcutKeyFilter(lambda: AppHelper.callAfter(self.global_shortcut_pressed))
         self.connection_thread = DashboardCoreThread(self.receive_snapshot_on_background_thread,
@@ -412,7 +421,7 @@ class AppController(NSObject):
         """Brings the list window to the front with the keyboard (the menu bar icon and the shortcut)."""
         self.note_application_unless_it_is_the_dashboard(NSWorkspace.sharedWorkspace().frontmostApplication())
         self.list_window_controller.show(self.settings["list_window_frame"])
-        self.place_the_settings_window_above_the_lists(self.popover.isShown())
+        self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
 
     @objc.python_method
     def give_activation_to(self, application):
@@ -495,7 +504,7 @@ class AppController(NSObject):
             self.close_dropdown()
             self.list_window_controller.show(window_frame, takes_keyboard_focus=not self.settings_window_controller.is_open())
             if self.settings_window_controller.is_open():  # it stays in front, as when settings_changed shows the window
-                self.place_the_settings_window_above_the_lists(self.popover.isShown())
+                self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
                 self.settings_window_controller.window.orderFront_(None)
         # A window that was open already (behind other windows, say) keeps its frame in show, so
         # it takes the dragged one here, or pointer_offset wouldn't put its top bar under the pointer (code review, 2026-10-28).
@@ -577,12 +586,12 @@ class AppController(NSObject):
                 return
 
     def popoverDidShow_(self, notification):
-        self.place_the_settings_window_above_the_lists(dropdown_is_open=True)  # an open settings window stays above it
+        self.place_the_settings_and_saved_sessions_windows_above_the_lists(dropdown_is_open=True)  # an open settings window stays above it
 
     def popoverWillClose_(self, notification):
         self.status_item_controller.note_dropdown_closing()  # so a click on the icon that closed it doesn't open it again
         self.dropdown_list_controller.cancel_rename()  # an open rename would keep the list from updating
-        self.place_the_settings_window_above_the_lists(dropdown_is_open=False)
+        self.place_the_settings_and_saved_sessions_windows_above_the_lists(dropdown_is_open=False)
 
     @objc.python_method
     def a_peek_or_a_drag_keeps_the_dropdown_open(self):
@@ -606,7 +615,7 @@ class AppController(NSObject):
     @objc.python_method
     def list_window_closed(self):
         """The list window's close button hid it: the settings window no longer stays level with it."""
-        self.place_the_settings_window_above_the_lists(self.popover.isShown())
+        self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
 
     @objc.python_method
     def note_application_in_front_before_dropdown(self, application):
@@ -782,13 +791,17 @@ class AppController(NSObject):
             sidebar_window.setLevel_(sidebar_window_level)
 
     @objc.python_method
-    def submit_action_and_report_failure(self, action_request, failure_title, after_success=None, after_failure=None):
+    def submit_action_and_report_failure(self, action_request, failure_title, after_success=None, after_failure=None,
+                                         after_any_result=None):
         """Sends an action the user chose from a menu to the core and, should it fail, says why
         in an alert, since the list alone wouldn't show it (a command not typed, say). Once it
         succeeds, after_success(action_result), if given, runs on the main thread; once it
-        fails, after_failure(), if given, does."""
+        fails, after_failure(), if given, does. after_any_result(action_result), if given, runs
+        on the main thread first either way (for the details of what a partly failed action did)."""
 
         def handle_action_result(action_result):
+            if after_any_result is not None:
+                after_any_result(action_result)
             if not action_result.succeeded:
                 if after_failure is not None:
                     after_failure()
@@ -859,13 +872,89 @@ class AppController(NSObject):
         for list_controller in self.list_all_list_controllers():
             list_controller.select_window_once_it_shows(action_result.details["window_id"])
 
+    # ----- saved sessions (user request, 2026-11-06) -----
+
+    @objc.python_method
+    def has_saved_agent_sessions(self):
+        """Whether anything is saved, which puts "Restore sessions…" in the menu bar icon's menu
+        and makes it clickable in the row menus."""
+        return bool(self.saved_windows)
+
+    @objc.python_method
+    def open_saved_sessions_window(self):
+        """Opens the Saved sessions window ("Restore sessions…" in the menu bar icon's menu and the row menus)."""
+        self.saved_sessions_window_controller.show(self.saved_windows, self.settings["saved_sessions_window_frame"])
+        self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
+
+    @objc.python_method
+    def save_agent_sessions(self, session_ids):
+        """Saves these agent sessions' conversations (a row's "Save session" or "Save sessions"):
+        the core works out each one's conversation; those it found are added to the saved list,
+        also when others weren't saved, which an alert then names with the reason."""
+
+        def keep_the_saved_windows(action_result):
+            saved_windows = (action_result.details or {}).get("saved_windows") or []
+            if saved_windows:
+                self.change_saved_windows(merge_saved_windows(self.saved_windows, saved_windows))
+        self.submit_action_and_report_failure(
+            ActionRequest("save_agent_sessions", {"session_ids": session_ids}),
+            "The session wasn't saved" if len(session_ids) == 1 else "Not every session was saved",
+            after_any_result=keep_the_saved_windows)
+
+    @objc.python_method
+    def change_saved_windows(self, saved_windows):
+        """Keeps the new saved list, writes it to its file and shows it in an open Saved sessions
+        window. A write that fails (a full disk) is reported; the list stays changed until the app quits."""
+        self.saved_windows = saved_windows
+        try:
+            save_saved_windows(self.saved_agent_sessions_file_path, saved_windows)
+        except OSError as error:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("The saved sessions couldn't be written")
+            alert.setInformativeText_(f"{self.saved_agent_sessions_file_path}: {error}")
+            self.run_alert_in_front(alert)
+        self.saved_sessions_window_controller.show_saved_windows(saved_windows)
+
+    @objc.python_method
+    def rename_saved_window(self, window_key, new_name):
+        self.change_saved_windows(rename_saved_window(self.saved_windows, window_key, new_name))
+
+    @objc.python_method
+    def rename_saved_session(self, conversation_id, new_name):
+        self.change_saved_windows(rename_saved_session(self.saved_windows, conversation_id, new_name))
+
+    @objc.python_method
+    def delete_saved_items(self, window_keys, conversation_ids):
+        self.change_saved_windows(delete_saved_items(self.saved_windows, window_keys, conversation_ids))
+
+    @objc.python_method
+    def restore_saved_agent_sessions(self, window_keys, conversation_ids):
+        """Asks the core to resume the saved sessions of these saved windows and these saved
+        sessions, with each agent tool's launch command from the settings. Each one it resumed
+        leaves the saved list (user request, 2026-11-06); an alert names those that failed and
+        why, and they stay saved."""
+        saved_windows_to_restore = choose_saved_windows_to_restore(self.saved_windows, window_keys, conversation_ids)
+        saved_session_count = sum(len(saved_window["saved_sessions"]) for saved_window in saved_windows_to_restore)
+
+        def take_the_restored_sessions_out_of_the_list(action_result):
+            restored_conversation_ids = set((action_result.details or {}).get("restored_conversation_ids") or [])
+            if restored_conversation_ids:
+                self.change_saved_windows(delete_saved_items(self.saved_windows, set(), restored_conversation_ids))
+        self.submit_action_and_report_failure(
+            ActionRequest("restore_saved_agent_sessions", {}, {
+                "saved_windows": saved_windows_to_restore,
+                "launch_command_by_agent_tool_name": {agent_tool["agent_tool_name"]: agent_tool["launch_command"]
+                                                      for agent_tool in self.settings["agent_tools"]}}),
+            "The session wasn't restored" if saved_session_count == 1 else "Not every session was restored",
+            after_any_result=take_the_restored_sessions_out_of_the_list)
+
     @objc.python_method
     def open_settings(self):
         """Opens the settings window; over an open dropdown, which stays open while it is (user request, 2026-10-19),
         and clear of a shown sidebar."""
         self.settings_window_controller.show(self.settings)
         self.move_the_settings_window_clear_of_the_sidebar()
-        self.place_the_settings_window_above_the_lists(self.popover.isShown())
+        self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
         self.update_dropdown_closing_behavior()
 
     @objc.python_method
@@ -887,19 +976,21 @@ class AppController(NSObject):
             settings_window.setFrame_display_(NSMakeRect(*frame_clear_of_the_sidebar), True)
 
     @objc.python_method
-    def place_the_settings_window_above_the_lists(self, dropdown_is_open):
-        """Puts the settings window at the level of the windows it would otherwise open under: just
-        above an open dropdown, and level with the list window while that is shown and always on
-        top (in front of it when opened); otherwise at the normal level. Not the sidebar's: the
-        settings window opens clear of it instead (move_the_settings_window_clear_of_the_sidebar),
-        so other apps' windows can still cover it and close it."""
+    def place_the_settings_and_saved_sessions_windows_above_the_lists(self, dropdown_is_open):
+        """Puts the settings window and the Saved sessions window at the level of the windows they
+        would otherwise open under: just above an open dropdown, and level with the list window
+        while that is shown and always on top (in front of it when opened); otherwise at the normal
+        level. Not the sidebar's: the settings window opens clear of it instead
+        (move_the_settings_window_clear_of_the_sidebar), so other apps' windows can still cover it
+        and close it."""
         window_levels = []
         if dropdown_is_open:
             window_levels.append(self.dropdown_panel_controller.view().window().level() + 1)
         list_window = self.list_window_controller.window
         if list_window.isVisible() and self.settings["list_window_is_always_on_top"]:
             window_levels.append(list_window.level())
-        self.settings_window_controller.set_window_level(max(window_levels) if window_levels else None)
+        for window_controller in (self.settings_window_controller, self.saved_sessions_window_controller):
+            window_controller.set_window_level(max(window_levels) if window_levels else None)
 
     # ----- settings -----
 
@@ -934,7 +1025,7 @@ class AppController(NSObject):
         if self.settings_window_controller.is_open():
             if sidebar_may_have_moved:  # a sidebar widened at its edge or in the window would cover it (code review, 2026-10-28)
                 self.move_the_settings_window_clear_of_the_sidebar()
-            self.place_the_settings_window_above_the_lists(self.popover.isShown())
+            self.place_the_settings_and_saved_sessions_windows_above_the_lists(self.popover.isShown())
             if list_window_is_shown_now or new_settings["list_window_is_always_on_top"] != list_window_was_always_on_top:
                 self.settings_window_controller.window.orderFront_(None)  # the list window just shown or put on top stays behind it
 
@@ -1076,9 +1167,11 @@ class AppController(NSObject):
     @objc.python_method
     def save_settings_before_exiting(self):
         """Saves a launch command or width being typed in the settings window (its field saves it
-        as its editing ends) and a moved window's frame waiting to be saved."""
-        if self.settings_window_controller.window is not None:
-            self.settings_window_controller.window.makeFirstResponder_(None)
+        as its editing ends), a name being typed in the Saved sessions window, and a moved
+        window's frame waiting to be saved."""
+        for window_controller in (self.settings_window_controller, self.saved_sessions_window_controller):
+            if window_controller.window is not None:
+                window_controller.window.makeFirstResponder_(None)
         self.save_settings_if_scheduled()
 
     @objc.python_method

@@ -46,6 +46,7 @@ class CodexAdapter(AgentToolAdapter):
     slash_command_refused_during_a_turn_pattern = re.compile(r"'/\w+' is disabled while a task is in progress")
     # `codex queue` reached a busy Codex 0.155.1 session in 0.2 s, which ran the message right after its turn (2026-10-21).
     how_other_agent_sessions_send_it_messages = MESSAGES_THROUGH_CODEX_QUEUE
+    can_resume_conversations = True
 
     def matches_command_line(self, command_line):
         """Returns whether the command line runs `codex`, directly or as `node <path>/codex`."""
@@ -64,6 +65,12 @@ class CodexAdapter(AgentToolAdapter):
         DashboardCore.codex_conversation_may_be_another_sessions."""
         conversation_files = await asyncio.to_thread(self.find_conversation_files, agent_process_id)
         return CONVERSATION_FILE_PATTERN.search(conversation_files[0]).group(1) if len(conversation_files) == 1 else None
+
+    async def find_conversation_ids_it_may_be_in(self, agent_process_id):
+        """Returns the conversation ID of every file that fits the process: after /new, or with a
+        later Codex session in its folder, more than one does."""
+        conversation_files = await asyncio.to_thread(self.find_conversation_files, agent_process_id)
+        return [CONVERSATION_FILE_PATTERN.search(conversation_file).group(1) for conversation_file in conversation_files]
 
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         """Returns the most recently written file that fits (see find_conversation_files)."""
@@ -100,3 +107,7 @@ class CodexAdapter(AgentToolAdapter):
         if not conversation_id:
             return launch_command
         return f"{launch_command} fork {shlex.quote(conversation_id)}"
+
+    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None):
+        """`<launch command> resume <id>`."""
+        return f"{launch_command} resume {shlex.quote(conversation_id)}"

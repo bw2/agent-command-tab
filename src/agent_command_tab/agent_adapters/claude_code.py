@@ -74,6 +74,7 @@ class ClaudeCodeAdapter(AgentToolAdapter):
     # showed under "Press up to edit queued messages" and ran when the turn ended.
     queues_slash_commands_typed_during_a_turn = True
     how_other_agent_sessions_send_it_messages = MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
+    can_resume_conversations = True
 
     def matches_command_line(self, command_line):
         """Returns whether the command line's program is `claude` (by base name, so full paths match)."""
@@ -109,12 +110,16 @@ class ClaudeCodeAdapter(AgentToolAdapter):
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
         """Continues a copy of the conversation under a new session ID (`--resume <id> --fork-session`),
-        in the original's config folder (Claude Code finds the conversation only there): a
-        CLAUDE_CONFIG_DIR set in front of the launch command gives way to the original's folder,
-        or to none for an original in the default folder."""
+        in the original's config folder (build_launch_command_to_resume)."""
         if not conversation_id:
             return launch_command
-        config_folder = (claude_agent_record or {}).get("config_folder")
-        environment_prefix = f"CLAUDE_CONFIG_DIR={shlex.quote(config_folder)} " if config_folder else ""
+        return self.build_launch_command_to_resume(launch_command, conversation_id,
+                                                   (claude_agent_record or {}).get("config_folder")) + " --fork-session"
+
+    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None):
+        """`<launch command> --resume <id>`, in the conversation's config folder (Claude Code finds
+        the conversation only there): a CLAUDE_CONFIG_DIR set in front of the launch command gives
+        way to that folder, or to none for a conversation in the default folder."""
+        environment_prefix = f"CLAUDE_CONFIG_DIR={shlex.quote(claude_config_folder)} " if claude_config_folder else ""
         return (f"{environment_prefix}{remove_config_folder_settings_from_launch_command(launch_command)}"
-                f" --resume {shlex.quote(conversation_id)} --fork-session")
+                f" --resume {shlex.quote(conversation_id)}")

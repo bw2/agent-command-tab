@@ -19,7 +19,7 @@ AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD = {
     "background_task_count": 0, "ended_abnormally_at": None, "is_in_front": False, "last_time_tab_was_seen": None,
     "running_tool_name": "", "running_tool_started_at": None, "context_tokens": None, "started_at": None,
     "memory_bytes": None, "cpu_percent": None, "slash_commands": (), "is_paused_with_the_processes_below_it": False,
-    "child_processes": (),
+    "child_processes": (), "can_be_paused_while_it_runs": True,
 }
 AgentSessionEntry = collections.namedtuple(
     "AgentSessionEntry",
@@ -45,7 +45,9 @@ AgentSessionEntry.__doc__ = ("One terminal tab (an iTerm2 tab, or a tmux window)
                              "None until they are read. slash_commands are the commands the tab's menu can type "
                              "into its agent tool (its adapter's), in menu order. is_paused_with_the_processes_below_it "
                              "is True for a paused row whose pause also stopped the processes below the agent (Pause "
-                             "from the list), False for an agent suspended with Ctrl+Z by hand. A row whose agent "
+                             "from the list), False for an agent suspended with Ctrl+Z by hand. "
+                             "can_be_paused_while_it_runs is False in tmux, which would undo a pause "
+                             "(agent_session_pausing); a Ctrl+Z there can still be followed by a pause. A row whose agent "
                              "ended without a normal session end (a crash, or killed) has the status "
                              "\"exited\" and ended_abnormally_at, when that was noticed. background_task_count is "
                              "how many background shells and background agents it runs, and "

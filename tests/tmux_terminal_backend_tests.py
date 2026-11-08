@@ -15,7 +15,7 @@ from agent_command_tab.terminal_backends.tmux_terminal_backend import (
     CLIENT_FIELD_NAMES, FIELD_SEPARATOR, PANE_FIELD_NAMES, TmuxTerminalBackend, TmuxTerminalSession,
     apply_sgr_parameters_to_faintness, build_gathered_windows, build_send_keys_commands, build_tmux_format,
     escape_tmux_argument, escape_tmux_format_argument, join_tmux_commands, parse_screen_lines_with_faint_flags,
-    parse_tmux_output_lines, split_line_at_the_cursor)
+    parse_tmux_output_lines)
 
 TMUX_PROGRAM_PATH = find_program_on_path_or_in_the_usual_folders("tmux")  # as the backend finds it
 SECONDS_TO_WAIT_FOR_A_PANE = 5
@@ -76,12 +76,6 @@ class ParsingTests(unittest.TestCase):
     def test_hyperlinks_and_other_escapes_are_left_out_of_the_text(self):
         captured = "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ end\n"
         self.assertEqual(parse_screen_lines_with_faint_flags(captured), [("link end", [False] * 8)])
-
-    def test_the_cursor_splits_its_row_by_screen_cells(self):
-        self.assertEqual(split_line_at_the_cursor(["one", "mac $ fg"], 6, 1), ("mac $ ", "fg"))
-        self.assertEqual(split_line_at_the_cursor(["日本 $ x"], 7, 0), ("日本 $ ", "x"))  # each of 日本 takes two cells
-        self.assertEqual(split_line_at_the_cursor(["mac $"], 6, 0), ("mac $", ""))  # tmux trims the blanks after the cursor
-        self.assertIsNone(split_line_at_the_cursor(["one"], 0, 3))
 
 
 class TypingTests(unittest.TestCase):
@@ -191,8 +185,6 @@ class TmuxServerTests(unittest.TestCase):
         self.assertEqual(line_and_faint_flags[1][:6], [False, False, True, True, True, False])
         asyncio.run(terminal_session.paste_text("echo pasted\n"))  # /bin/sh asks for no bracketed paste: plain text
         self.assertTrue(self.wait_for_screen_text(pane_id, "\npasted"))
-        text_before_the_cursor, text_after_the_cursor = asyncio.run(terminal_session.read_text_around_the_cursor())
-        self.assertEqual((text_before_the_cursor.rstrip()[-1:], text_after_the_cursor), ("$", ""))  # the shell's prompt
         self.assertIn("pasted", "\n".join(asyncio.run(terminal_session.read_screen_lines())))
         self.assertIsNone(self.backend.find_session("%999"))
 
@@ -204,6 +196,7 @@ class TmuxServerTests(unittest.TestCase):
         self.assertTrue(started.succeeded, started)
         gathered_window = self.gather()[0]
         second_tab_id = gathered_window["tabs"][1]["tab_id"]
+        self.assertEqual(started.details, {"tab_id": second_tab_id})  # for a restored session's name (user request, 2026-11-06)
         self.assertTrue(self.wait_for_screen_text(gathered_window["tabs"][1]["first_session"]["session_id"], "started-2"))
         self.assertTrue(asyncio.run(self.backend.rename_tab(second_tab_id, "reviews;")).succeeded)
         self.assertTrue(asyncio.run(self.backend.rename_window(session_id, "renamed")).succeeded)
@@ -223,6 +216,23 @@ class TmuxServerTests(unittest.TestCase):
         self.assertFalse(asyncio.run(self.backend.move_tab_to_new_window(first_tab_id)).succeeded)  # its window's only tab
         self.assertTrue(asyncio.run(self.backend.close_window(moved.details["window_id"])).succeeded)
         self.assertEqual([gathered_window["window_id"] for gathered_window in self.gather()], [session_id])
+
+    def test_a_new_session_and_tab_can_be_renamed_and_tell_when_they_were_opened_before_a_gather_lists_them(self):
+        # As a restore gives a restored session's tab and window their saved names.
+        started = asyncio.run(self.backend.start_agent_session(None, self.folder, "true"))
+        self.assertTrue(started.succeeded, started)
+        new_session_id = started.details["window_id"]
+        added = asyncio.run(self.backend.start_agent_session(new_session_id, self.folder, "true"))
+        self.assertTrue(added.succeeded, added)
+        for tab_id in (started.details["tab_id"], added.details["tab_id"]):
+            self.assertTrue(asyncio.run(self.backend.rename_tab(tab_id, f"tab {tab_id}")).succeeded)
+        self.assertTrue(asyncio.run(self.backend.rename_window(new_session_id, "restored")).succeeded)
+        gathered_window = next(gathered_window for gathered_window in self.gather() if gathered_window["window_id"] == new_session_id)
+        self.assertEqual((gathered_window["title"], [gathered_tab["title"] for gathered_tab in gathered_window["tabs"]]),
+                         ("restored", [f"tab {started.details['tab_id']}", f"tab {added.details['tab_id']}"]))
+        self.assertEqual(self.backend.find_when_the_window_was_opened(new_session_id),
+                         int(self.run_tmux("display-message", "-p", "-t", new_session_id, "#{session_created}")))
+        self.assertIsNone(self.backend.find_when_the_window_was_opened("$999"))
 
     def test_a_hash_sign_in_a_folder_or_a_title_stays_as_it_is(self):
         # tmux expands formats ("#S", "#{...}") in a start folder and in window and session names.
@@ -262,6 +272,9 @@ class TmuxServerTests(unittest.TestCase):
         self.assertTrue(started.succeeded, started)
         self.assertNotIn("terminal_client_process_id", started.details)  # no client shows it
         self.assertEqual(len(self.gather()), 2)
+        new_gathered_window = next(gathered_window for gathered_window in self.gather()
+                                   if gathered_window["window_id"] == started.details["window_id"])
+        self.assertEqual(started.details["tab_id"], new_gathered_window["tabs"][0]["tab_id"])
         focused = asyncio.run(self.backend.focus_window(started.details["window_id"]))
         self.assertFalse(focused.succeeded)
         self.assertIn("tmux attach -t", focused.message)
@@ -309,6 +322,19 @@ class PeekTests(unittest.TestCase):
 def make_backend_without_a_server():
     return TmuxTerminalBackend(lambda: None, lambda: None, lambda terminal_name, message: None,
                                socket_path="/nonexistent/s", tmux_program_path="/nonexistent/tmux")
+
+
+class GatherTests(unittest.TestCase):
+    def test_a_tab_opened_while_a_gather_runs_stays_known_until_a_gather_lists_it(self):
+        backend = make_backend_without_a_server()
+        backend.window_and_tab_ids_opened_since_the_last_gather = {"$5"}  # opened before: its list-panes lists it
+
+        async def run_tmux(arguments, input_text=None):
+            backend.window_and_tab_ids_opened_since_the_last_gather.add("@9")  # a restore's new tab, opened meanwhile
+            return ""
+        backend.run_tmux = run_tmux
+        asyncio.run(backend.gather_windows())
+        self.assertEqual(backend.window_and_tab_ids_opened_since_the_last_gather, {"@9"})
 
 
 class ClientTests(unittest.TestCase):

@@ -75,6 +75,8 @@ class AgentToolAdapter:
             later; None when the tool prints none.
         how_other_agent_sessions_send_it_messages: MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL,
             MESSAGES_THROUGH_CODEX_QUEUE, or None when other sessions have no way to.
+        can_resume_conversations: Whether a saved session of the tool can be resumed later
+            (build_launch_command_to_resume; Save session, user request, 2026-11-06).
     """
 
     agent_tool_name = ""
@@ -90,6 +92,7 @@ class AgentToolAdapter:
     queues_slash_commands_typed_during_a_turn = False
     slash_command_refused_during_a_turn_pattern = None
     how_other_agent_sessions_send_it_messages = None
+    can_resume_conversations = False
 
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         """Returns the ID of the conversation the agent process is in, or None if unknown.
@@ -99,6 +102,11 @@ class AgentToolAdapter:
             claude_agent_record: The process's record from `claude agents --json`, or None.
         """
         return None
+
+    async def find_conversation_ids_it_may_be_in(self, agent_process_id):
+        """Returns the IDs of the conversations the agent process may be in when find_conversation_id
+        can't tell which one it is in: none, unless the tool overrides it."""
+        return []
 
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         """Returns the path of the file the tool writes the conversation to, or None if unknown.
@@ -148,6 +156,16 @@ class AgentToolAdapter:
             claude_agent_record: The original's record from `claude agents --json`, or None.
         """
         return launch_command
+
+    def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None):
+        """Returns the command that resumes a saved conversation (can_resume_conversations only).
+
+        Args:
+            launch_command: The tool's launch command from the settings.
+            conversation_id: The saved conversation's ID.
+            claude_config_folder: The Claude Code config folder it ran with, or None for the default.
+        """
+        raise NotImplementedError
 
     def matches_command_line(self, command_line):
         """Returns whether a tab whose foreground job has this command line runs this tool.

@@ -52,7 +52,8 @@ ACTIONS_THAT_ASK_FOR_CONFIRMATION = ["clear", "kill", "close_window", "kill_proc
                                      "kill_process_with_the_delete_key"]
 # The windows whose frames ([x, y, width, height]) are saved, with their smallest sizes.
 # The settings window is never narrower than the width its rows are laid out for.
-SMALLEST_WINDOW_SIZES = {"list_window_frame": (250, 200), "settings_window_frame": (540, 240)}
+SMALLEST_WINDOW_SIZES = {"list_window_frame": (250, 200), "settings_window_frame": (540, 240),
+                         "saved_sessions_window_frame": (480, 220)}
 SIDEBAR_EDGES = ["right", "left"]
 # auto_hide: slides in when the pointer touches the edge; floating: always visible over windows;
 # docked: always visible, and iTerm2 windows on that monitor are kept out of its area.
@@ -79,6 +80,7 @@ DEFAULT_SETTINGS = {
     "actions_that_run_without_asking": [],
     "list_window_frame": None,  # [x, y, width, height] of the "Show as: Window" window, once it has been shown
     "settings_window_frame": None,  # the settings window's, once it has been moved or resized (user request, 2026-10-19)
+    "saved_sessions_window_frame": None,  # the Saved sessions window's, as the settings window's (user request, 2026-11-06)
     "list_window_is_always_on_top": False,
     "sidebar_mode": "auto_hide",
     "sidebar_edge": "right",  # of the menu-bar monitor

@@ -53,8 +53,8 @@ EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: (ROWS_OPEN_SYMBOL_NAMES[False], "Expand a
 # selected rows only, user request, 2026-11-05; every session in the list before).
 # The tooltips say how (user request, 2026-10-28; agent_session_pausing).
 PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
-    "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes by suspending them (Ctrl+Z, or a STOP signal)"),
-    "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (fg, then a CONT signal)")}
+    "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes, their shells and the processes below them (a STOP signal)"),
+    "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (a CONT signal)")}
 # The top bar's Hide Idle / Show Idle button, left of the expand or collapse button (user
 # requests, 2026-10-21): (title, tooltip), by whether idle tabs are hidden; the title says what a click does.
 # Command-I presses it in the list that has the keyboard, and the tooltips say so (user request, 2026-10-29).

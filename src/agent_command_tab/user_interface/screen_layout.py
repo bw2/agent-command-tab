@@ -2,7 +2,7 @@
 window frames against them, and saves the frames of the windows that keep one. Main thread only."""
 
 import objc
-from AppKit import NSIntersectsRect, NSMakeRect, NSScreen
+from AppKit import NSIntersectsRect, NSMakeRect, NSNormalWindowLevel, NSScreen
 from Foundation import NSObject
 
 
@@ -48,12 +48,29 @@ def compute_list_window_content_rect_for_a_dragged_sidebar(sidebar_frame, pointe
 
 
 class WindowFrameSavingController(NSObject):
-    """The base of the controllers of windows whose frame the settings keep (the list window and
-    the settings window). As the window's delegate it reports the frame to the owner's
+    """The base of the controllers of windows whose frame the settings keep (the list window, the
+    settings window and the Saved sessions window). As the window's delegate it reports the frame to the owner's
     window_frame_changed(frame_setting_name, frame) after each move and resize; a subclass sets
     frame_setting_name (a settings_store.SMALLEST_WINDOW_SIZES name) and self.owner and self.window."""
 
     frame_setting_name = None
+
+    @objc.python_method
+    def is_open(self):
+        return self.window is not None and bool(self.window.isVisible())
+
+    @objc.python_method
+    def close_if_open(self):
+        """Closes the window as its close button does (the settings window's windowWillClose_ saves a field being typed in)."""
+        if self.is_open():
+            self.window.close()
+
+    @objc.python_method
+    def set_window_level(self, window_level):
+        """Puts the window at this level (above an open dropdown, or an always-on-top list window), or
+        back at the normal level for None."""
+        if self.window is not None:
+            self.window.setLevel_(window_level if window_level is not None else NSNormalWindowLevel)
 
     @objc.python_method
     def report_frame(self):

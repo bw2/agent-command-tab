@@ -3,9 +3,28 @@ import os
 import tempfile
 import unittest
 
-from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters, find_agent_tool_adapter_for_tab
+from agent_command_tab.agent_adapters import (build_built_in_agent_tool_adapters, find_agent_tool_adapter_for_tab,
+                                              list_agent_tool_names_whose_conversations_can_be_resumed)
 from agent_command_tab.agent_adapters.base import command_line_runs_a_shell, split_command_line_into_program_names
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_command_tab.agent_adapters.codex import CodexAdapter
+
+
+class ResumeCommandTests(unittest.TestCase):  # Save session and Restore sessions (user request, 2026-11-06)
+    def test_claude_code_resumes_in_the_conversations_config_folder(self):
+        adapter = ClaudeCodeAdapter()
+        self.assertEqual(adapter.build_launch_command_to_resume("yc", "abc-123"), "yc --resume abc-123")
+        self.assertEqual(adapter.build_launch_command_to_resume("CLAUDE_CONFIG_DIR=~/.claude_work yc", "abc-123"),
+                         "yc --resume abc-123")  # a conversation of the default folder
+        self.assertEqual(adapter.build_launch_command_to_resume("yc", "abc 123", "/Users/me/.claude_work"),
+                         "CLAUDE_CONFIG_DIR=/Users/me/.claude_work yc --resume 'abc 123'")
+
+    def test_codex_resumes_with_its_subcommand(self):
+        self.assertEqual(CodexAdapter().build_launch_command_to_resume("/opt/homebrew/bin/codex", "0199-ab"),
+                         "/opt/homebrew/bin/codex resume 0199-ab")
+
+    def test_only_claude_code_and_codex_can_resume(self):
+        self.assertEqual(list_agent_tool_names_whose_conversations_can_be_resumed(), {"Claude Code", "Codex"})
 
 
 class ClaudeCodeTranscriptLookupTests(unittest.TestCase):

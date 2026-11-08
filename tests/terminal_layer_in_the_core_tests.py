@@ -271,6 +271,9 @@ class SnapshotOfATmuxSessionTests(unittest.TestCase):
                           tmux_window_entry.number_among_windows_with_the_same_title), ("tmux", False, 1))
         self.assertEqual(build_window_title_shown_in_the_list(tmux_window_entry), "tmux: project")
         self.assertEqual(build_window_title_shown_in_the_list(windows_by_monitor_id["left"][0]), "project")
+        # tmux would undo a pause of its running agent (agent_session_pausing), so the list offers none.
+        self.assertEqual([window_entries[0].agent_sessions[0].can_be_paused_while_it_runs
+                          for window_entries in (windows_by_monitor_id["left"], windows_by_monitor_id["built-in"])], [True, False])
 
     def test_an_iterm2_window_title_has_no_terminal_prefix_and_is_numbered_when_the_title_repeats(self):
         entry = AgentSessionEntry(tab_id="t", session_id="s", tab_title="", tab_title_set_by_user=False, agent_session_name="",

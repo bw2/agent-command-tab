@@ -10,7 +10,7 @@ import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSBezierPath, NSBox, NSBoxCustom, NSBoxSeparator, NSButton,
                     NSColor, NSControlSizeMini, NSControlSizeSmall, NSEventModifierFlagCommand, NSEventModifierFlagControl,
                     NSDownArrowFunctionKey, NSEventModifierFlagOption, NSEventTypeKeyDown, NSFont, NSInsetRect, NSMakeRect, NSNoTitle,
-                    NSNormalWindowLevel, NSPopUpButton, NSScreen, NSScrollView, NSSwitch, NSText, NSTextField, NSUpArrowFunctionKey, NSView,
+                    NSPopUpButton, NSScreen, NSScrollView, NSSwitch, NSText, NSTextField, NSUpArrowFunctionKey, NSView,
                     NSViewMinXMargin, NSViewWidthSizable,
                     NSWindow, NSWindowOcclusionStateVisible, NSWindowStyleMaskClosable,
                     NSWindowStyleMaskResizable, NSWindowStyleMaskTitled, NSWorkspace)
@@ -226,22 +226,6 @@ class SettingsWindowController(WindowFrameSavingController):
         self.fit_window_height_to_rows()
         NSApp.activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
-
-    @objc.python_method
-    def is_open(self):
-        return self.window is not None and bool(self.window.isVisible())
-
-    @objc.python_method
-    def close_if_open(self):
-        """Closes the window as its close button does (windowWillClose_ saves a field being typed in)."""
-        if self.is_open():
-            self.window.close()
-
-    @objc.python_method
-    def set_window_level(self, window_level):
-        """Puts the window at this level (above an open dropdown), or back at the normal level for None."""
-        if self.window is not None:
-            self.window.setLevel_(window_level if window_level is not None else NSNormalWindowLevel)
 
     def windowDidResize_(self, notification):
         # A scroll view doesn't widen what it holds, so the rows follow the window's width here

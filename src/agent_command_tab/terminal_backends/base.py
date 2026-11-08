@@ -57,11 +57,6 @@ class TerminalSession:
         screen_readings.input_area_is_empty."""
         raise NotImplementedError
 
-    async def read_text_around_the_cursor(self):
-        """Returns (text before the cursor, text after it) on the cursor's line, leaving out empty
-        cells, or None when the cursor isn't on screen."""
-        raise NotImplementedError
-
 
 class TerminalBackend:
     """One terminal the dashboard lists agent sessions from.
@@ -75,6 +70,13 @@ class TerminalBackend:
             set (for the monitor groups and the docked sidebar).
         shows_windows_through_clients: Whether its windows show only through clients running
             inside other terminals (tmux), listed by list_clients.
+        ids_are_never_reused: Whether its window and session IDs each name the same window or
+            tab for good, also after the terminal or the Mac restarts (iTerm2's, which it keeps for
+            the windows and tabs it brings back), so a restore may type into the tab a saved
+            session ID names and open tabs in the window a saved window ID names. tmux numbers
+            its sessions and panes again from $0 and %0 in each new server, so there a restore
+            does so only while the saved session's creation time still matches
+            (find_when_the_window_was_opened).
     """
 
     terminal_name = ""
@@ -82,6 +84,7 @@ class TerminalBackend:
     reports_agent_status = False
     windows_have_frames = False
     shows_windows_through_clients = False
+    ids_are_never_reused = False
 
     def __init__(self, request_regather, request_snapshot, report_problem):
         """
@@ -139,6 +142,12 @@ class TerminalBackend:
         """Returns the TerminalSession of a gathered session, or None when it is gone."""
         raise NotImplementedError
 
+    def find_when_the_window_was_opened(self, window_id):
+        """Returns when a gathered window was opened (seconds since 1970), which tells it apart
+        from a later window given the same ID in a terminal whose IDs are reused (tmux); None in
+        one whose IDs aren't (ids_are_never_reused), or for a window that is gone."""
+        return None
+
     def remember_what_is_in_front(self):
         """Returns what a peek (pressing and holding a tab row) changes, for put_back_what_was_in_front."""
         return None
@@ -180,8 +189,8 @@ class TerminalBackend:
     async def start_agent_session(self, window_id, folder, launch_command, after_tab_id=None):
         """Opens a tab in a window (a new window when window_id is None), right after after_tab_id
         when given, whose shell types launch_command in folder (a folder that exists, and a
-        launch command that isn't empty: the core checks both). A new window's result has details
-        {"window_id": its ID}."""
+        launch command that isn't empty: the core checks both). Its result has details
+        {"tab_id": the new tab's ID}, plus {"window_id": its ID} for a new window."""
         raise NotImplementedError
 
     async def close_window(self, window_id):

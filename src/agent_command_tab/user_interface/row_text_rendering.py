@@ -98,8 +98,8 @@ MEANING_BY_STATE = {  # asking, idle, paused and exited in the user's wording, 2
     "done": "the agent is done and you haven't looked at its last message yet",  # the user's wording, 2026-10-27
     "new": "the agent has started, and no message has been sent to it yet",
     "idle": "nothing new here since you last looked at this tab",
-    # A plain CONT signal would leave it a background job (agent_session_pausing), so Resume types fg.
-    "paused": "the agent process has been suspended (Ctrl+Z, or a STOP signal); Resume types fg to continue it",
+    # A pause stops its shell too, so a CONT signal continues it (agent_session_pausing), but not after a Ctrl+Z.
+    "paused": "the agent process has been suspended (a STOP signal, or Ctrl+Z); Resume continues it, or fg typed in the tab after a Ctrl+Z",
     "unknown": "the app can't tell what the agent is doing",
     "exited": "this status appears for 5 minutes after an agent exits abnormally (a crash, or killed)",
 }

@@ -26,6 +26,13 @@ def list_agent_tool_names_whose_sessions_can_talk_to_each_other():
                      if adapter.how_other_agent_sessions_send_it_messages)
 
 
+def list_agent_tool_names_whose_conversations_can_be_resumed():
+    """Returns the names of the built-in tools whose sessions Save session can save (can_resume_conversations)."""
+    specific_adapters, generic_adapter = build_built_in_agent_tool_adapters()
+    return frozenset(adapter.agent_tool_name for adapter in [*specific_adapters, generic_adapter]
+                     if adapter.can_resume_conversations)
+
+
 def find_agent_tool_adapter_for_tab(command_line, iterm2_status_value, specific_adapters, generic_adapter):
     """Returns the adapter for a tab's first pane, or None when the tab runs no agent.
 

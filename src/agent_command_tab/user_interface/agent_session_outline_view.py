@@ -39,7 +39,8 @@ from AppKit import (NSAnimationContext, NSApp, NSAttributedString, NSBackgroundS
                     NSWindowStyleMaskNonactivatingPanel, NSZeroRect)
 from Foundation import NSMutableIndexSet, NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
-from agent_command_tab.agent_adapters import (list_agent_tool_names_whose_sessions_can_talk_to_each_other,
+from agent_command_tab.agent_adapters import (list_agent_tool_names_whose_conversations_can_be_resumed,
+                                              list_agent_tool_names_whose_sessions_can_talk_to_each_other,
                                               list_slash_commands_of_the_built_in_agent_tools)
 from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
 from agent_command_tab.dashboard_core_api import ActionRequest
@@ -156,11 +157,12 @@ COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usag
                               "agent_tool_icon", "state"]
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
 AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER = list_agent_tool_names_whose_sessions_can_talk_to_each_other()
+AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED = list_agent_tool_names_whose_conversations_can_be_resumed()
 # Not monitor rows or the "+" row (user request, 2026-10-21); process rows only alone or with
 # other process rows (outlineView_selectionIndexesForProposedSelection_; user request, 2026-10-29).
 SELECTABLE_ROW_KINDS = ("window", "tab", "process")
 ESCAPE_CHARACTER = "\x1b"  # the Esc key's characters (AppKit names no constant for it)
-RENAME_KEY = "r"  # alone or with Command (user request, 2026-10-29)
+RENAME_KEY = "r"  # alone, or with Command or Command-Shift (user requests, 2026-10-29 and 2026-11-07)
 # A letter typed this soon after another continues a name typed to select its row, as AppKit's own
 # selecting by name does for about this long.
 SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME = 1.0
@@ -304,6 +306,18 @@ class RowViewWithSelectionOutline(NSTableRowView):
 
     def interiorBackgroundStyle(self):
         return NSBackgroundStyleNormal  # the row's labels keep the colors of an unselected row
+
+
+def is_a_rename_shortcut(characters, modifier_flags):
+    """Whether a key press is Command-R or Command-Shift-R, which rename the selected row in the
+    list and in the Saved sessions window (user request, 2026-11-07); not with Option or Control.
+
+    Args:
+        characters: The key event's charactersIgnoringModifiers, which Shift turns into "R".
+        modifier_flags: The key event's modifierFlags.
+    """
+    return (characters in (RENAME_KEY, RENAME_KEY.upper()) and bool(modifier_flags & NSEventModifierFlagCommand)
+            and not modifier_flags & (NSEventModifierFlagOption | NSEventModifierFlagControl))
 
 
 def describe_session_count(count):
@@ -728,6 +742,8 @@ class AgentSessionListController(NSObject):
             left_out_agent_session_entries): shows the Talk to Each Other window; returns (the
             note the user may have edited, the entries chosen to get it), or None for Cancel.
         show_process_info(session_id, process_id): shows a process row's Info window.
+        save_agent_sessions(session_ids): saves these agent sessions' conversations to resume
+            later (Save session; the owner keeps the saved list).
         close_the_list_after_escape(list_controller): Esc was pressed in the list; the owner
             closes it and gives the keyboard back to the app that had it.
     """
@@ -1482,7 +1498,8 @@ class AgentSessionListController(NSObject):
           processes, asking first (user request, 2026-10-29).
         - Esc closes the list and gives the keyboard back to the app that had it (user request, 2026-10-29).
           With several rows selected, it first keeps only the last one selected (user request, 2026-10-29).
-        - R or Command-R renames the one selected tab or window row (user request, 2026-10-29).
+        - R, Command-R or Command-Shift-R renames the one selected tab or window row (user
+          requests, 2026-10-29 and 2026-11-07).
           An R typed within SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME of another letter goes on
           selecting a row by name instead, or it would rename the row the first letters chose
           and the next letters would replace its title (code review, 2026-10-29).
@@ -1504,8 +1521,9 @@ class AgentSessionListController(NSObject):
                 build_index_set(self.outline_view.rowForItem_(item.parent_item) for item in selected_items), False)
             return True
         is_plain_key = not modifier_flags & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl)
-        if (characters == RENAME_KEY and not modifier_flags & (NSEventModifierFlagOption | NSEventModifierFlagControl)
-                and (not is_plain_key or time.time() - self.last_name_letter_typed_at >= SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME)
+        if ((is_a_rename_shortcut(characters, modifier_flags)
+             or characters == RENAME_KEY and is_plain_key
+             and time.time() - self.last_name_letter_typed_at >= SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME)
                 and self.rename_the_selected_row()):
             return True
         if not is_plain_key:
@@ -2314,6 +2332,7 @@ class AgentSessionListController(NSObject):
             menu.addItem_(NSMenuItem.separatorItem())
         if item.kind == "monitor":  # also when Hide Idle hides all of its window rows
             self.add_pause_and_resume_menu_items(menu, self.list_agent_session_entries_below(item))
+            self.add_save_and_restore_menu_items(menu, self.list_agent_session_entries_below(item))
             return
         if item.kind == "window":
             self.add_menu_item(menu, "Show window", "menuFocus:")
@@ -2325,6 +2344,7 @@ class AgentSessionListController(NSObject):
                                    ).setRepresentedObject_(agent_tool_name)
             menu.addItem_(NSMenuItem.separatorItem())
             self.add_pause_and_resume_menu_items(menu, self.list_agent_session_entries_below(item))
+            self.add_save_and_restore_menu_items(menu, self.list_agent_session_entries_below(item))
             if item.parent_item is not None and item.entry.can_move_to_another_monitor:  # not a tmux session
                 menu.addItem_(NSMenuItem.separatorItem())
                 other_monitor_items = [monitor_item for monitor_item in self.top_level_items if monitor_item is not item.parent_item]
@@ -2360,10 +2380,13 @@ class AgentSessionListController(NSObject):
                 move_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Move to window", None, "")
                 move_item.setSubmenu_(submenu)
                 menu.addItem_(move_item)
-            move_to_new_window_item = self.add_menu_item(menu, "Extract to new window", "menuMoveToNewWindow:")
+            move_to_new_window_item = self.add_menu_item(menu, "Move to new window", "menuMoveToNewWindow:")
             if item.parent_item is not None and item.parent_item.entry.total_tab_count < 2:
                 move_to_new_window_item.setEnabled_(False)
                 move_to_new_window_item.setToolTip_("This tab is its window's only tab")
+            menu.addItem_(NSMenuItem.separatorItem())
+            self.add_pause_and_resume_menu_items(menu, [item.entry])
+            self.add_save_and_restore_menu_items(menu, [item.entry])
             # Typed into the agent only while it waits at its prompt (user request, 2026-10-19).
             menu.addItem_(NSMenuItem.separatorItem())
             for command in SLASH_COMMANDS_IN_THE_TAB_MENU:
@@ -2385,8 +2408,6 @@ class AgentSessionListController(NSObject):
             if item.entry.status == "exited":
                 kill_item.setEnabled_(False)
                 kill_item.setToolTip_("The agent has ended")
-            menu.addItem_(NSMenuItem.separatorItem())
-            self.add_pause_and_resume_menu_items(menu, [item.entry])
 
     @objc.python_method
     def list_agent_session_entries_below(self, item):
@@ -2415,14 +2436,62 @@ class AgentSessionListController(NSObject):
             self.add_menu_item(menu, title, action_name).setRepresentedObject_([entry.session_id for entry in entries])
 
     @objc.python_method
+    def add_save_menu_item(self, menu, agent_session_entries):
+        """Adds "Save session" for one agent session, or, for several (a window or monitor row, or
+        several selected rows; user request, 2026-11-06), "Save 3 sessions" with the count of those
+        it saves, as Pause counts those it pauses: it saves the conversations of those of the agent
+        sessions whose agent runs a tool that can resume one, for "Restore sessions…". Grayed out
+        as "Save sessions", saying why, when none of them can be saved."""
+        sessions_to_save = [entry for entry in agent_session_entries if entry.status != "exited"
+                            and entry.agent_tool_name in AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED]
+        title = ("Save session" if len(agent_session_entries) == 1
+                 else f"Save {describe_session_count(len(sessions_to_save))}" if sessions_to_save else "Save sessions")
+        save_item = self.add_menu_item(menu, title, "menuSaveSessions:")
+        save_item.setRepresentedObject_([entry.session_id for entry in sessions_to_save])
+        tools_that_can_be_saved = " and ".join(sorted(AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED))
+        if not sessions_to_save:
+            save_item.setEnabled_(False)
+            if all(entry.status == "exited" for entry in agent_session_entries):
+                save_item.setToolTip_("The agent has ended" if len(agent_session_entries) == 1 else AGENTS_HAVE_ENDED_TOOL_TIP)
+            else:
+                save_item.setToolTip_(f"Only {tools_that_can_be_saved} sessions can be saved")
+        elif len(sessions_to_save) < len(agent_session_entries):
+            save_item.setToolTip_(f"Saves {len(sessions_to_save)} of the {len(agent_session_entries)} sessions: only "
+                                  f"{tools_that_can_be_saved} sessions whose agent runs can be saved")
+
+    def menuSaveSessions_(self, sender):
+        self.owner.save_agent_sessions(list(sender.representedObject()))
+
+    @objc.python_method
+    def add_save_and_restore_menu_items(self, menu, agent_session_entries):
+        """Adds the Save section of a row's menu (user request, 2026-11-07): after a separator,
+        the Save item (add_save_menu_item), then "Restore sessions…", which opens the Saved
+        sessions window as the menu bar icon's menu does. It is grayed out while nothing is saved
+        (the menu bar icon's menu leaves it out then)."""
+        if menu.numberOfItems() and not menu.itemAtIndex_(menu.numberOfItems() - 1).isSeparatorItem():
+            # None at the top of the menu, and not a second one when Pause and Resume added nothing.
+            menu.addItem_(NSMenuItem.separatorItem())
+        self.add_save_menu_item(menu, agent_session_entries)
+        restore_item = self.add_menu_item(menu, "Restore sessions…", "menuRestoreSessions:")
+        if not self.owner.has_saved_agent_sessions():
+            restore_item.setEnabled_(False)
+            restore_item.setToolTip_("No sessions are saved")
+
+    def menuRestoreSessions_(self, sender):
+        self.owner.open_saved_sessions_window()
+
+    @objc.python_method
     def add_menu_items_for_the_selected_rows(self, menu, agent_session_entries, a_window_row_is_selected):
         """The menu of two or more selected rows, acting on their agent sessions (user request,
-        2026-10-21): /compact, /clear and Kill; Pause and Resume; Talk to Each Other…, last (user
-        request, 2026-10-27).
+        2026-10-21): Pause and Resume; Save and Restore sessions…; /compact, /clear and Kill;
+        Talk to each other…, last (user request, 2026-10-27).
 
         Kill says how many sessions only when a window row is selected, since that row stands for
         all of its window's tabs, hidden idle ones too; for tab rows alone the selection shows it
         (user requests, 2026-10-21)."""
+        self.add_pause_and_resume_menu_items(menu, agent_session_entries)
+        self.add_save_and_restore_menu_items(menu, agent_session_entries)
+        menu.addItem_(NSMenuItem.separatorItem())
         for command in SLASH_COMMANDS_IN_THE_TAB_MENU:
             agent_sessions_that_take_it = list_agent_sessions_that_take_slash_command(agent_session_entries, command)
             command_item = self.add_menu_item(
@@ -2450,8 +2519,6 @@ class AgentSessionListController(NSObject):
         if not agent_session_entries:  # every selected row has exited (code review, 2026-10-28)
             kill_item.setEnabled_(False)
             kill_item.setToolTip_(AGENTS_HAVE_ENDED_TOOL_TIP)
-        menu.addItem_(NSMenuItem.separatorItem())
-        self.add_pause_and_resume_menu_items(menu, agent_session_entries)
         menu.addItem_(NSMenuItem.separatorItem())
         talk_item = self.add_menu_item(menu, "Talk to each other…", "menuTalkToEachOther:")
         if len(self.list_agent_sessions_that_can_talk_to_each_other(agent_session_entries)) < 2:

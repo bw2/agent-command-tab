@@ -9,6 +9,7 @@ action requests (through the thread-safe methods of DashboardCoreThread).
 import asyncio
 import json
 import os
+import shlex
 import signal
 import socket
 import sys
@@ -20,7 +21,7 @@ from agent_command_tab.agent_process_tree import (an_agent_program_runs_through_
                                                   choose_command_the_agent_is_waiting_on,
                                                   choose_detached_processes_of_the_conversation, choose_helper_process_ids,
                                                   compute_cpu_percent, list_descendant_processes, list_detached_processes,
-                                                  list_the_process_and_its_ancestor_ids, process_has_its_terminal, process_is_alive,
+                                                  list_the_process_and_its_ancestor_ids, process_is_alive,
                                                   process_is_stopped, read_child_processes,
                                                   read_name_the_process_was_started_as, read_process_arguments_and_environment,
                                                   read_process_current_folder, read_process_details, read_process_info,
@@ -33,8 +34,8 @@ from agent_command_tab.hook_event_tracking import (SESSION_START_SOURCES_OF_ANOT
                                                    list_reported_shells_a_reading_can_check)
 from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, HOOKS_ARE_INSTALLED, HOOKS_SEND_NO_EVENTS, check_hooks
 from agent_command_tab.hook_states_store import load_hook_states, save_hook_states
-from agent_command_tab.agent_session_pausing import (continue_processes_stopped_at_pause, pause_agent_session,
-                                                     pause_has_ended, resume_agent_session, send_signal_to_processes)
+from agent_command_tab.agent_session_pausing import (continue_what_the_pause_stopped, pause_agent_session, pause_has_ended,
+                                                     resume_agent_session, send_signal_to_processes)
 from agent_command_tab.pause_records_store import load_pause_records, save_pause_records
 from agent_command_tab.settings_store import (build_environment_with_the_programs_folder_first_on_path,
                                               find_program_on_path_or_in_the_usual_folders)
@@ -51,7 +52,8 @@ from agent_command_tab.snapshot_builder import (SECONDS_BEFORE_AN_OPEN_TOOL_CALL
                                                 build_computer_snapshot, resolve_agent_sessions)
 from agent_command_tab.docked_window_frames_store import (adopt_records_of_restored_windows,
                                                           load_docked_window_frames, save_docked_window_frames)
-from agent_command_tab.monitor_assignment import compute_frame_clear_of_area, frames_are_within_tolerance
+from agent_command_tab.monitor_assignment import compute_frame_clear_of_area, compute_overlap_area, frames_are_within_tolerance
+from agent_command_tab.saved_agent_sessions_store import build_saved_session, build_saved_window
 from agent_command_tab.screen_readings import (compute_screen_fingerprint, count_lines_matching,
                                                screen_shows_permission_dialog)
 from agent_command_tab.session_status_computation import (CLAUDE_CODE_SESSION_STATUSES_TO_ITERM2_STATUS_VALUES,
@@ -119,12 +121,32 @@ SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT = 120
 LONGEST_HOOK_EVENT_LINE = 1024 ** 2
 # How often a copy that left the hook events socket to another copy checks whether that one has ended.
 SECONDS_BETWEEN_CHECKS_FOR_ANOTHER_HOOK_EVENTS_LISTENER = 5
+# Ctrl+E, to the end of the shell's input line, then Ctrl+U, which deletes up to its start (in
+# bash and fish only what is before the cursor): a restore clears the line so before typing its command.
+KEYS_THAT_CLEAR_THE_SHELLS_LINE = "\x05\x15"
+# How long a restore waits to see each resumed agent running in its tab, and how often it looks:
+# Claude Code and Codex start within a few seconds.
+SECONDS_A_RESTORED_AGENT_HAS_TO_START = 15
+SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT = 1
 
 
 def find_claude_command_path():
     """Returns the path of the `claude` command (the stable link on PATH or in the usual folders,
     not a versioned file), or None."""
     return find_program_on_path_or_in_the_usual_folders("claude")
+
+
+async def give_a_restored_tab_or_window_its_saved_name(rename, renamed_thing):
+    """Awaits rename (a terminal backend's rename_tab or rename_window call) for a restored tab or
+    window (renamed_thing), printing why it failed, as a restored window's saved frame is
+    reported: the session itself was restored, and a name tmux refuses (another session's) doesn't
+    end the restore."""
+    try:
+        action_result = await rename
+    except TerminalRequestFailed as error:
+        action_result = ActionResult(False, str(error))
+    if not action_result.succeeded:
+        print(f"a restored {renamed_thing} didn't get its saved name: {action_result.message}", file=sys.stderr)
 
 
 async def read_claude_agents_by_process_id(claude_command_path, config_folders):
@@ -325,6 +347,12 @@ class DashboardCore:
         self.process_ids_asked_about_in_claude_agents = set()
         self.claude_agents_retry_count_by_process_id = {}
         self.agent_sessions = {}
+        # The conversations restores are starting, until their requests end (their agents may not
+        # show in a gather before that), so another restore meanwhile doesn't start them too.
+        self.conversation_ids_being_restored = set()
+        # The tabs restores have typed a resume command into, until their requests end, so another
+        # restore meanwhile opens a new tab rather than type into one of them too.
+        self.terminal_session_ids_restores_typed_into = set()
         self.claude_agents_refresh_is_running = False
         self.computer_id = socket.gethostname()
         self.computer_name = socket.gethostname().split(".")[0]
@@ -363,7 +391,6 @@ class DashboardCore:
         # record. By agent too: a tab can hold a paused agent and, at the shell, a newer one.
         self.pause_record_by_tab_and_agent = (load_pause_records(pause_records_file_path) if pause_records_file_path
                                               else dict(pause_record_by_tab_and_agent_to_start_with or {}))
-        self.session_ids_being_paused_or_resumed = set()
         self.reserved_screen_area = None
         self.frames_before_making_room_by_window_id = (load_docked_window_frames(docked_window_frames_file_path)
                                                        if docked_window_frames_file_path else {})
@@ -456,6 +483,8 @@ class DashboardCore:
         register("pause_agent_sessions", self.handle_pause_agent_sessions)
         register("resume_agent_sessions", self.handle_resume_agent_sessions)
         register("ask_agent_sessions_to_talk_to_each_other", self.handle_ask_agent_sessions_to_talk_to_each_other)
+        register("save_agent_sessions", self.handle_save_agent_sessions)
+        register("restore_saved_agent_sessions", self.handle_restore_saved_agent_sessions)
 
     async def perform_action(self, action_request):
         """Runs an action request, then asks for a fresh gather and snapshot.
@@ -855,12 +884,15 @@ class DashboardCore:
     async def handle_end_agent_process(self, action_request):
         """Ends a tab's agent process ("Kill Session"; the tab and its shell stay): SIGTERM, then
         SIGCONT so an agent suspended with Ctrl+Z wakes up to handle it (as a shell's kill does
-        for a stopped job), also for the stopped processes below a paused agent, and SIGKILL if it
-        is still running SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later."""
+        for a stopped job), also for the stopped processes below a paused agent and the rest of
+        what its pause stopped, its shell included, which would otherwise show no prompt once the
+        agent has ended, and SIGKILL if it is still running
+        SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED later."""
         agent_session = self.agent_sessions.get(action_request.target["session_id"])
         if agent_session is None or not agent_session["process_id"]:
             return ActionResult(False, "that tab no longer runs an agent")
         process_id = agent_session["process_id"]
+        pause_record = self.pause_record_by_tab_and_agent.get((action_request.target["session_id"], process_id))
         self.process_ids_ended_from_the_list.add(process_id)  # its row goes, rather than show "exited"
         # Listed first: once the agent ends, the processes below it are no longer its descendants.
         stopped_process_ids_below = [process.process_id for process in list_descendant_processes(process_id, maximum_depth=None)
@@ -871,6 +903,8 @@ class DashboardCore:
         except ProcessLookupError:
             return ActionResult(True)  # it had ended already
         send_signal_to_processes(stopped_process_ids_below, signal.SIGCONT)  # a paused session's: none stays stopped
+        if pause_record is not None:
+            continue_what_the_pause_stopped(pause_record)
         deadline = time.time() + SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED
         while time.time() < deadline:
             await asyncio.sleep(0.2)
@@ -944,24 +978,16 @@ class DashboardCore:
             list_detached_processes(agent_started_at), conversation_id, agent_started_at)]
 
     async def handle_pause_agent_sessions(self, action_request):
-        """Pauses the agent sessions of target {"session_ids": [...]}: each agent as Ctrl+Z does,
-        and every process below it (agent_session_pausing; user request, 2026-10-20)."""
+        """Pauses the agent sessions of target {"session_ids": [...]}: each agent, its shell and
+        every process below it, with STOP signals (agent_session_pausing; user requests,
+        2026-10-20 and 2026-11-06)."""
 
-        async def pause_one(session_id, agent_session, terminal_session):
+        def pause_one(session_id, agent_session):
             agent_process_id = agent_session["process_id"]
-            # Ctrl+Z goes to the agent only while its group has the terminal (asked of the kernel)
-            # and no other program, such as the editor Claude Code's Ctrl+G opens in the agent's
-            # own group, is in front. iTerm2 still names the shell in front for a while after fg,
-            # so a shell there doesn't count.
-            if not process_is_stopped(agent_process_id) and (
-                    not process_has_its_terminal(agent_process_id)
-                    or (agent_session["is_in_background"]
-                        and not command_line_runs_a_shell(self.find_command_line_of_the_session(session_id)))):
-                return ActionResult(False, "another program is in front of the agent")
             if (session_id, agent_process_id) in self.pause_record_by_tab_and_agent:
-                return ActionResult(True)  # paused already (a new record would lose the prompt seen then)
-            action_result, pause_record = await pause_agent_session(
-                terminal_session, agent_process_id, agent_session["agent_tool_name"],
+                return ActionResult(True)  # paused already
+            action_result, pause_record = pause_agent_session(
+                agent_process_id, agent_session["agent_tool_name"],
                 detached_processes=self.list_detached_processes_of_the_agent_session(agent_session))
             if pause_record is not None:
                 self.pause_record_by_tab_and_agent[(session_id, agent_process_id)] = pause_record
@@ -970,42 +996,29 @@ class DashboardCore:
         return await self.pause_or_resume_each_agent_session(action_request.target["session_ids"], pause_one)
 
     async def handle_resume_agent_sessions(self, action_request):
-        """Resumes the paused agent sessions of target {"session_ids": [...]}; one suspended with
-        Ctrl+Z by hand gets an explanation instead, since no pause recorded its prompt."""
+        """Resumes the paused agent sessions of target {"session_ids": [...]} with CONT signals; one
+        suspended with Ctrl+Z gets an explanation instead, since its shell has the terminal."""
 
-        async def resume_one(session_id, agent_session, terminal_session):
+        def resume_one(session_id, agent_session):
             tab_and_agent = (session_id, agent_session["process_id"])
-            action_result = await resume_agent_session(terminal_session, agent_session["process_id"],
-                                                       self.pause_record_by_tab_and_agent.get(tab_and_agent))
+            action_result = resume_agent_session(agent_session["process_id"], self.pause_record_by_tab_and_agent.get(tab_and_agent))
             if action_result.succeeded and self.pause_record_by_tab_and_agent.pop(tab_and_agent, None) is not None:
                 self.save_pause_records()
             return action_result
         return await self.pause_or_resume_each_agent_session(action_request.target["session_ids"], resume_one)
 
     async def pause_or_resume_each_agent_session(self, session_ids, pause_or_resume_one):
-        """Runs pause_or_resume_one(session_id, agent_session, terminal_session) for every session
-        at once, each holding its tab's typing lock, as every typing into a tab does: its Ctrl+Z or
-        fg can't come between a held message's paste and its Enter (code review, 2026-10-28).
-        Returns one ActionResult whose message names each tab that failed and why."""
+        """Runs pause_or_resume_one(session_id, agent_session) for every session, each holding its
+        tab's typing lock, as every typing into a tab does: a pause can't stop the agent between a
+        held message's paste and its Enter (code review, 2026-10-28). Returns one ActionResult
+        whose message names each tab that failed and why."""
 
         async def run_for(session_id):
             agent_session = self.agent_sessions.get(session_id)
-            terminal_session = self.find_terminal_session(session_id)
-            if agent_session is None or not agent_session["process_id"] or terminal_session is None:
+            if agent_session is None or not agent_session["process_id"]:
                 return ActionResult(False, "that tab no longer runs an agent")
-            if session_id in self.session_ids_being_paused_or_resumed:
-                # A second click while the first is under way (both could see the same empty prompt and type fg twice).
-                return ActionResult(True)
-            self.session_ids_being_paused_or_resumed.add(session_id)
-            try:
-                async with self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock()):
-                    return await pause_or_resume_one(session_id, agent_session, terminal_session)
-            except TerminalTypingRefused as error:
-                return ActionResult(False, str(error))
-            except TerminalRequestFailed:
-                return ActionResult(False, "the tab closed meanwhile")
-            finally:
-                self.session_ids_being_paused_or_resumed.discard(session_id)
+            async with self.message_typing_lock_by_session_id.setdefault(session_id, asyncio.Lock()):
+                return pause_or_resume_one(session_id, agent_session)
         action_results = await asyncio.gather(*(run_for(session_id) for session_id in session_ids))
         return self.combine_results_naming_the_tabs_that_failed(session_ids, action_results)
 
@@ -1267,14 +1280,9 @@ class DashboardCore:
         terminal_backend, gathered_window = self.find_terminal_backend_and_gathered_window(tab_id=tab_id)
         if agent_session is None or terminal_backend is None:
             return ActionResult(False, "that tab no longer runs an agent session")
-        process_id = agent_session["process_id"]
-        claude_agent_record = self.claude_agents_by_process_id.get(process_id)
-        conversation_is_shared_with_another_codex_session = self.codex_conversation_may_be_another_sessions(
-            session_id, agent_session)
-        if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id) or conversation_is_shared_with_another_codex_session:
-            conversation_id = None  # start fresh rather than fork a conversation that may not be this session's
-        else:
-            conversation_id = await agent_session["adapter"].find_conversation_id(process_id, claude_agent_record)
+        claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
+        # None (the copy starts fresh) rather than fork a conversation that may not be this session's.
+        conversation_id, _, _ = await self.find_conversation_to_save_or_copy(session_id, agent_session)
         launch_command_for_the_copy = agent_session["adapter"].build_launch_command_for_a_copy(
             action_request.arguments["launch_command"], conversation_id, claude_agent_record)
         # Without the conversation's ID, the copy starts a new conversation, silently: nothing showed
@@ -1285,6 +1293,297 @@ class DashboardCore:
             return ActionResult(False, reason_it_cant_start)
         return await terminal_backend.start_agent_session(gathered_window["window_id"], folder, launch_command_for_the_copy,
                                                           after_tab_id=tab_id)
+
+    # ----- saved sessions: Save session and Restore sessions (user request, 2026-11-06) -----
+
+    async def find_conversation_to_save_or_copy(self, session_id, agent_session):
+        """Returns (the agent session's conversation ID, the Claude Code config folder it runs
+        with or None, "") for Save session and Duplicate, or (None, None, why it can't be saved)
+        when it isn't certainly this session's."""
+        if not agent_session["adapter"].can_resume_conversations:
+            return None, None, f"{agent_session['agent_tool_name']} can't resume a saved conversation"
+        if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
+            return None, None, "it has had no conversation since its /clear"
+        if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
+            return None, None, "its conversation can't be told apart from another Codex session's in the same folder"
+        claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
+        conversation_id = await agent_session["adapter"].find_conversation_id(agent_session["process_id"], claude_agent_record)
+        if await self.find_current_conversation_file(session_id, agent_session) is None:
+            return None, None, "it has no conversation yet (no message was sent to it)"
+        if not conversation_id:  # Codex after /new: more than one conversation file fits its process
+            return None, None, "it has started more than one conversation, and which one runs now can't be told"
+        return conversation_id, (claude_agent_record or {}).get("config_folder"), ""
+
+    async def handle_save_agent_sessions(self, action_request):
+        """Target {"session_ids": [...]}: works out the conversation of each of these agent
+        sessions, to resume it later. Returns details {"saved_windows": [...]}
+        (saved_agent_sessions_store), in the list's order, with every session it could save, also
+        when it couldn't save others, which its message names with the reason."""
+        session_ids = action_request.target["session_ids"]
+        snapshot = self.last_published_snapshot_without_time
+        action_result_by_session_id = {}
+        saved_sessions_by_window_id = {}
+        window_entry_by_window_id = {}
+        saved_at = time.time()
+        for _, window_entry, agent_session_entry in (iterate_agent_session_entries(snapshot) if snapshot is not None else ()):
+            session_id = agent_session_entry.session_id
+            if session_id not in session_ids:
+                continue
+            agent_session = self.agent_sessions.get(session_id)
+            if agent_session is None or not agent_session["process_id"] or agent_session_entry.status == "exited":
+                action_result_by_session_id[session_id] = ActionResult(False, "the agent has ended")
+                continue
+            conversation_id, claude_config_folder, reason_it_cant_be_saved = await self.find_conversation_to_save_or_copy(
+                session_id, agent_session)
+            if reason_it_cant_be_saved:
+                action_result_by_session_id[session_id] = ActionResult(False, reason_it_cant_be_saved)
+                continue
+            window_entry_by_window_id[window_entry.window_id] = window_entry
+            saved_sessions_by_window_id.setdefault(window_entry.window_id, []).append(build_saved_session(
+                agent_session_entry, agent_session["working_folder"] or agent_session_entry.working_folder, conversation_id,
+                claude_config_folder, saved_at))
+            action_result_by_session_id[session_id] = ActionResult(True)
+        combined_result = self.combine_results_naming_the_tabs_that_failed(session_ids, [
+            action_result_by_session_id.get(session_id, ActionResult(False, "that tab no longer runs an agent"))
+            for session_id in session_ids])
+        saved_windows = []
+        for window_id, saved_sessions in saved_sessions_by_window_id.items():
+            window_entry = window_entry_by_window_id[window_id]
+            terminal_backend = self.terminal_backend_by_name[window_entry.terminal_name]
+            if terminal_backend.windows_have_frames:
+                # The snapshot's frame may be old: iTerm2 reports no moves, and frames are polled
+                # only while they matter (poll_window_frames_when_they_matter).
+                try:
+                    window_entry = window_entry._replace(frame=await terminal_backend.read_window_frame(window_id))
+                except TerminalRequestFailed:  # closed meanwhile: the snapshot's will do
+                    pass
+            saved_windows.append(build_saved_window(window_entry, saved_sessions,
+                                                    terminal_backend.find_when_the_window_was_opened(window_id)))
+        return combined_result._replace(details={"saved_windows": saved_windows})
+
+    async def list_conversation_ids_running_now(self):
+        """Returns the conversation IDs of the agent sessions that run now, from their tools, so
+        a restore never starts a conversation a second time. For an agent whose tool doesn't name
+        its conversation, each it may be in (Codex, when more than one conversation file fits),
+        and every word of its command line, which holds the ID of one a restore's `--resume <ID>`
+        just started (Claude Code doesn't list it yet); not for a Duplicate's (`--fork-session`,
+        Codex's `fork`), which runs a new conversation."""
+        conversation_ids = set()
+        for session_id, agent_session in self.agent_sessions.items():
+            # Its conversation ended at a /clear, and the lookups would still find it (Codex).
+            if not agent_session["process_id"] or self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
+                continue
+            conversation_id = await agent_session["adapter"].find_conversation_id(
+                agent_session["process_id"], self.claude_agents_by_process_id.get(agent_session["process_id"]))
+            if conversation_id:
+                conversation_ids.add(conversation_id)
+                continue
+            conversation_ids.update(await agent_session["adapter"].find_conversation_ids_it_may_be_in(agent_session["process_id"]))
+            command_line_words = self.find_command_line_of_the_session(session_id).split()
+            if not {"--fork-session", "fork"} & set(command_line_words):
+                conversation_ids.update(command_line_words)
+        return conversation_ids
+
+    async def handle_restore_saved_agent_sessions(self, action_request):
+        """Arguments {"saved_windows": [...] (saved_agent_sessions_store), "launch_command_by_agent_tool_name":
+        {agent tool name: its launch command in the settings}}: resumes each saved session
+        (Restore sessions). A saved window's sessions are resumed in order, each:
+        - in its own tab, while that is still there (iTerm2 keeps its tabs' IDs across a reboot;
+          a tmux pane while its tmux session runs: saved_window_ids_still_name_what_they_named)
+          and waits at a shell prompt (resume_in_the_saved_sessions_own_tab);
+        - else in a new tab of the window its saved window's other sessions went to, or of the
+          saved window itself while that is open;
+        - else in a new window, of the saved window's terminal while that runs, else of the first
+          that does, which gets the saved frame while that is on a monitor.
+        A name the user gave the tab or the window goes back to it. A conversation that already
+        runs isn't started again. Returns one ActionResult whose message names each saved session
+        that failed and why, with details {"restored_conversation_ids": [...]}, the conversations
+        whose agent was seen running in its tab within SECONDS_A_RESTORED_AGENT_HAS_TO_START,
+        which the app then takes out of the saved list (user request, 2026-11-06): one whose
+        command failed (a launch command naming a program that isn't installed) stays saved."""
+        conversation_ids_running_now = await self.list_conversation_ids_running_now()
+        conversation_ids_running_before_this_restore = set(conversation_ids_running_now)
+        failures = []
+        started_sessions = []
+        terminal_session_ids_typed_into = set()  # a tab two saved sessions came from gets only the first
+        try:
+            for saved_window in action_request.arguments["saved_windows"]:
+                failures += await self.restore_saved_window(
+                    saved_window, action_request.arguments["launch_command_by_agent_tool_name"], conversation_ids_running_now,
+                    started_sessions, terminal_session_ids_typed_into)
+            sessions_whose_agent_didnt_start = await self.wait_for_the_agents_of_restored_sessions(started_sessions)
+        finally:  # the conversations and tabs this restore took (restore_saved_window)
+            self.conversation_ids_being_restored -= conversation_ids_running_now - conversation_ids_running_before_this_restore
+            self.terminal_session_ids_restores_typed_into -= terminal_session_ids_typed_into
+        failures += [f'"{name}": its agent didn\'t start in its tab (see the tab, and the launch command in Settings)'
+                     for _, name, _ in sessions_whose_agent_didnt_start]
+        return ActionResult(not failures, "; ".join(failures), details={"restored_conversation_ids": [
+            conversation_id for conversation_id, name, tab_id in started_sessions
+            if (conversation_id, name, tab_id) not in sessions_whose_agent_didnt_start]})
+
+    def an_agent_runs_in_the_tab(self, tab_id):
+        """Whether the last gather found an agent process in the tab's first pane."""
+        session_id = self.find_first_session_id_of_tab(tab_id)
+        return session_id is not None and bool((self.agent_sessions.get(session_id) or {}).get("process_id"))
+
+    async def wait_for_the_agents_of_restored_sessions(self, started_sessions):
+        """Asks for gathers until an agent runs in the tab of each of the started_sessions
+        ((conversation ID, name, tab ID) of each saved session whose command was typed into a
+        tab), for at most SECONDS_A_RESTORED_AGENT_HAS_TO_START; returns those whose agent wasn't seen."""
+        deadline = time.monotonic() + SECONDS_A_RESTORED_AGENT_HAS_TO_START
+        sessions_to_wait_for = list(started_sessions)
+        while True:
+            sessions_to_wait_for = [started_session for started_session in sessions_to_wait_for
+                                    if not self.an_agent_runs_in_the_tab(started_session[2])]
+            if not sessions_to_wait_for or time.monotonic() >= deadline:
+                return sessions_to_wait_for
+            self.regather_needed.set()  # publish_when_needed gathers while this waits
+            await asyncio.sleep(SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT)
+
+    def find_adapter_of_agent_tool(self, agent_tool_name):
+        """Returns the built-in adapter of an agent tool named as the list names it, or None."""
+        return next((adapter for adapter in self.specific_adapters if adapter.agent_tool_name == agent_tool_name), None)
+
+    def choose_terminal_backend_for_a_restored_window(self, saved_window):
+        """Returns the saved window's terminal while it is connected, else the one a new window opens in."""
+        terminal_backend = self.terminal_backend_by_name.get(saved_window["terminal_name"])
+        if terminal_backend is not None and terminal_backend.is_connected():
+            return terminal_backend
+        return self.choose_terminal_backend_for_a_new_window()
+
+    def saved_window_ids_still_name_what_they_named(self, saved_window):
+        """Whether the saved window's window ID and its sessions' tab IDs still name the window and
+        tabs they were saved from, while those are open: always in a terminal that never gives an ID
+        out again (ids_are_never_reused); in tmux, whose new server numbers its sessions from $0
+        again, while the session with the saved ID was created when the saved one was."""
+        terminal_backend = self.terminal_backend_by_name.get(saved_window["terminal_name"])
+        if terminal_backend is None:
+            return False
+        if terminal_backend.ids_are_never_reused:
+            return True
+        return (saved_window["terminal_window_opened_at"] is not None
+                and terminal_backend.find_when_the_window_was_opened(saved_window["terminal_window_id"])
+                == saved_window["terminal_window_opened_at"])
+
+    async def restore_saved_window(self, saved_window, launch_command_by_agent_tool_name, conversation_ids_running_now,
+                                   started_sessions, terminal_session_ids_typed_into):
+        """Resumes one saved window's sessions (handle_restore_saved_agent_sessions). Returns the
+        failures, each naming its saved session; adds each conversation it tries to start to
+        conversation_ids_running_now and to self.conversation_ids_being_restored, and
+        (conversation ID, name, tab ID) of each it starts to the started_sessions list, and each tab
+        it types into to terminal_session_ids_typed_into."""
+        failures = []
+        restored_session_count = 0
+        ids_still_name_the_saved_ones = self.saved_window_ids_still_name_what_they_named(saved_window)
+        # Where the next new tab goes, (terminal backend, window ID): the saved window while it is open.
+        terminal_backend, _ = self.find_terminal_backend_and_gathered_window(window_id=saved_window["terminal_window_id"])
+        target_window = ((terminal_backend, saved_window["terminal_window_id"])
+                         if terminal_backend is not None and terminal_backend.terminal_name == saved_window["terminal_name"]
+                         and ids_still_name_the_saved_ones else None)
+        for saved_session in saved_window["saved_sessions"]:
+            name = saved_session["name"] or saved_session["conversation_id"]
+            agent_tool_name = saved_session["agent_tool_name"]
+            adapter = self.find_adapter_of_agent_tool(agent_tool_name)
+            launch_command = launch_command_by_agent_tool_name.get(agent_tool_name, "")
+            if saved_session["conversation_id"] in conversation_ids_running_now:
+                failures.append(f'"{name}": its conversation already runs in a tab')
+                continue
+            if saved_session["conversation_id"] in self.conversation_ids_being_restored:
+                failures.append(f'"{name}": another restore is starting it')
+                continue
+            if adapter is None or not adapter.can_resume_conversations:
+                failures.append(f'"{name}": {agent_tool_name} can\'t resume a saved conversation')
+                continue
+            if not launch_command.strip():
+                failures.append(f'"{name}": Settings has no launch command for {agent_tool_name}')
+                continue
+            resume_command = adapter.build_launch_command_to_resume(launch_command, saved_session["conversation_id"],
+                                                                    saved_session["claude_config_folder"])
+            reason_it_cant_start = explain_why_an_agent_session_cant_start(saved_session["folder"], resume_command)
+            if reason_it_cant_start:
+                failures.append(f'"{name}": {reason_it_cant_start}')
+                continue
+            # Before anything is awaited; the request releases it when it ends.
+            conversation_ids_running_now.add(saved_session["conversation_id"])
+            self.conversation_ids_being_restored.add(saved_session["conversation_id"])
+            resumed_in_its_own_tab = (await self.resume_in_the_saved_sessions_own_tab(saved_session, resume_command,
+                                                                                      terminal_session_ids_typed_into)
+                                      if ids_still_name_the_saved_ones else None)
+            try:  # a terminal's failure (tmux refusing to type with synchronize-panes on) is this session's only
+                if resumed_in_its_own_tab is not None:
+                    action_result, terminal_backend, window_id, tab_id = resumed_in_its_own_tab
+                elif target_window is not None:
+                    terminal_backend, window_id = target_window
+                    action_result = await terminal_backend.start_agent_session(window_id, saved_session["folder"], resume_command)
+                    tab_id = (action_result.details or {}).get("tab_id")
+                else:
+                    terminal_backend = self.choose_terminal_backend_for_a_restored_window(saved_window)
+                    if terminal_backend is None:
+                        failures.append(f'"{name}": {self.explain_why_no_terminal_can_open_a_window()}')
+                        continue
+                    action_result = await terminal_backend.start_agent_session(None, saved_session["folder"], resume_command)
+                    window_id, tab_id = (action_result.details or {}).get("window_id"), (action_result.details or {}).get("tab_id")
+                    if action_result.succeeded and window_id is not None:
+                        await self.give_a_restored_window_its_saved_frame(terminal_backend, window_id, saved_window["frame"])
+            except TerminalRequestFailed as error:
+                failures.append(f'"{name}": {error}')
+                continue
+            if not action_result.succeeded:
+                failures.append(f'"{name}": {action_result.message}')
+                continue
+            if tab_id is None:  # iTerm2 gave no tab: its session ended at once
+                failures.append(f'"{name}": its new tab closed at once')
+                continue
+            started_sessions.append((saved_session["conversation_id"], name, tab_id))
+            restored_session_count += 1
+            if target_window is None and window_id is not None:
+                target_window = (terminal_backend, window_id)
+            if saved_session["name_was_set_by_user"]:
+                await give_a_restored_tab_or_window_its_saved_name(terminal_backend.rename_tab(tab_id, saved_session["name"]), "tab")
+        # Not a window still open whose sessions were all refused: it keeps the name it has now.
+        if target_window is not None and saved_window["name_was_set_by_user"] and restored_session_count:
+            await give_a_restored_tab_or_window_its_saved_name(
+                target_window[0].rename_window(target_window[1], saved_window["name"]), "window")
+        return failures
+
+    async def resume_in_the_saved_sessions_own_tab(self, saved_session, resume_command, terminal_session_ids_typed_into):
+        """Types Ctrl+E and Ctrl+U (clearing what the shell's line holds), then `cd <folder> && <resume
+        command>`, into the tab a session was saved from, when that tab is still there (the caller
+        checks saved_window_ids_still_name_what_they_named) and waits at a shell prompt, with no
+        agent in it and nothing typed into it by a restore that hasn't ended
+        (self.terminal_session_ids_restores_typed_into, which gets it added, as this restore's
+        terminal_session_ids_typed_into does). Returns (ActionResult, terminal backend, window ID,
+        tab ID), or None when there is no such tab."""
+        session_id = saved_session["terminal_session_id"]
+        terminal_backend, gathered_window = self.find_terminal_backend_and_gathered_window(session_id=session_id)
+        if (terminal_backend is None or session_id in self.agent_sessions
+                or session_id in self.terminal_session_ids_restores_typed_into):
+            return None
+        gathered_tab = next(gathered_tab for gathered_tab in gathered_window["tabs"]
+                            if gathered_tab["first_session"] is not None and gathered_tab["first_session"]["session_id"] == session_id)
+        terminal_session = terminal_backend.find_session(session_id)
+        if terminal_session is None or not command_line_runs_a_shell(gathered_tab["first_session"].get("command_line")):
+            return None
+        terminal_session_ids_typed_into.add(session_id)  # before anything is awaited
+        self.terminal_session_ids_restores_typed_into.add(session_id)
+        try:
+            await terminal_session.send_text(
+                f"{KEYS_THAT_CLEAR_THE_SHELLS_LINE}cd {shlex.quote(saved_session['folder'])} && {resume_command}\r")
+            action_result = ActionResult(True)
+        except TerminalRequestFailed as error:
+            action_result = ActionResult(False, str(error))
+        return action_result, terminal_backend, gathered_window["window_id"], gathered_tab["tab_id"]
+
+    async def give_a_restored_window_its_saved_frame(self, terminal_backend, window_id, frame):
+        """Gives a window a restore opened its saved frame, in a terminal whose windows have
+        frames, while that frame overlaps a monitor (its monitor may be unplugged since)."""
+        if frame is None or not terminal_backend.windows_have_frames or not any(
+                compute_overlap_area(frame, monitor["visible_frame"]) > 0 for monitor in self.monitors):
+            return
+        try:
+            await terminal_backend.set_window_frame(window_id, tuple(frame))
+        except TerminalRequestFailed as error:
+            print(f"a restored window didn't get its saved frame: {error}", file=sys.stderr)
 
     async def handle_close_window(self, action_request):
         terminal_backend = self.find_terminal_backend_of(window_id=action_request.target["window_id"])
@@ -1626,13 +1925,14 @@ class DashboardCore:
         self.snapshot_needed.set()
 
     def continue_the_processes_of_agents_no_longer_paused(self):
-        """Continues the processes a pause stopped below an agent that runs again without Resume
-        (fg typed by hand) or is gone (its tab closed, also from iTerm2), so none stays stopped,
+        """Continues what a pause stopped once its agent runs again without Resume (fg typed by
+        hand after a Ctrl+Z), is gone, or holds a terminal that has hung up (its tab closed, also
+        from iTerm2, or iTerm2 quit), so none stays stopped and those whose terminal is gone end,
         and marks the agent sessions whose pause stopped the processes below them."""
         ended_tabs_and_agents = [tab_and_agent for tab_and_agent, pause_record in self.pause_record_by_tab_and_agent.items()
                                  if pause_has_ended(pause_record)]
         for tab_and_agent in ended_tabs_and_agents:
-            continue_processes_stopped_at_pause(self.pause_record_by_tab_and_agent.pop(tab_and_agent).stopped_processes)
+            continue_what_the_pause_stopped(self.pause_record_by_tab_and_agent.pop(tab_and_agent))
         if ended_tabs_and_agents:
             self.save_pause_records()
         for session_id, agent_session in self.agent_sessions.items():
@@ -2420,9 +2720,9 @@ class DashboardCore:
         fails. Every way this ends calls report_connection_lost, so the app exits and its
         supervisor restarts it (the iterm2 package can't reconnect within one process).
         """
-        # Before connecting: once iTerm2 quits, its paused agents are gone, and what their pauses
-        # stopped below them (in sessions of their own, which closing the tabs doesn't reach) is
-        # continued even while no connection can be made.
+        # Before connecting: once iTerm2 quits, the terminals of its paused agents have hung up,
+        # and what their pauses stopped (the agents and their shells too, which can't act on the
+        # hangup while stopped) is continued even while no connection can be made, so they end.
         self.continue_the_processes_of_agents_no_longer_paused()
         coroutines = [terminal_backend.run() for terminal_backend in self.terminal_backends] + [
             self.poll_window_frames_when_they_matter(), self.read_agent_screens_periodically(),

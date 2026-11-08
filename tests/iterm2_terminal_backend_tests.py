@@ -20,7 +20,9 @@ def make_iterm2_terminal_backend(app=None):
 
 class StartAgentSessionTests(unittest.TestCase):
     def test_a_new_window_returns_its_id_for_the_lists_to_select_it(self):  # user request, 2026-10-30
-        for new_window, expected_result in ((unittest.mock.Mock(window_id="w9"), ActionResult(True, details={"window_id": "w9"})),
+        # And its tab's, which a restored session's name is given to (user request, 2026-11-06).
+        for new_window, expected_result in ((unittest.mock.Mock(window_id="w9", current_tab=unittest.mock.Mock(tab_id="t9")),
+                                             ActionResult(True, details={"window_id": "w9", "tab_id": "t9"})),
                                             (None, ActionResult(True))):  # iTerm2 gives no window when its session ended right away
             with unittest.mock.patch.object(iterm2.Window, "async_create", unittest.mock.AsyncMock(return_value=new_window)):
                 self.assertEqual(asyncio.run(make_iterm2_terminal_backend().start_agent_session(None, "/tmp", "claude")),
@@ -28,9 +30,10 @@ class StartAgentSessionTests(unittest.TestCase):
 
     def test_a_duplicate_goes_right_after_its_tab(self):
         window = unittest.mock.Mock(tabs=[unittest.mock.Mock(tab_id="t1"), unittest.mock.Mock(tab_id="t2")],
-                                    async_create_tab=unittest.mock.AsyncMock())
+                                    async_create_tab=unittest.mock.AsyncMock(return_value=unittest.mock.Mock(tab_id="t3")))
         backend = make_iterm2_terminal_backend(unittest.mock.Mock(get_window_by_id=lambda window_id: window))
-        self.assertTrue(asyncio.run(backend.start_agent_session("w1", "/tmp", "claude", after_tab_id="t1")).succeeded)
+        self.assertEqual(asyncio.run(backend.start_agent_session("w1", "/tmp", "claude", after_tab_id="t1")),
+                         ActionResult(True, details={"tab_id": "t3"}))
         self.assertEqual(window.async_create_tab.call_args.kwargs["index"], 1)
         self.assertFalse(asyncio.run(backend.start_agent_session("w1", "/tmp", "claude", after_tab_id="gone")).succeeded)
 
@@ -78,8 +81,7 @@ class Iterm2TerminalSessionTests(unittest.TestCase):
         session = unittest.mock.Mock(async_send_text=unittest.mock.AsyncMock(side_effect=iterm2.RPCException("SESSION_NOT_FOUND")),
                                      async_get_screen_contents=unittest.mock.AsyncMock(side_effect=iterm2.RPCException("SESSION_NOT_FOUND")))
         for read_or_type in (lambda: Iterm2TerminalSession(session).send_text("x"),
-                             lambda: Iterm2TerminalSession(session).read_screen_lines(),
-                             lambda: Iterm2TerminalSession(session).read_text_around_the_cursor()):
+                             lambda: Iterm2TerminalSession(session).read_screen_lines()):
             with self.assertRaises(TerminalRequestFailed):
                 asyncio.run(read_or_type())
 

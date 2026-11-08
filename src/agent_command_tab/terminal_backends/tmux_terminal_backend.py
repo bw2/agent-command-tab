@@ -22,7 +22,6 @@ import asyncio
 import os
 import re
 import shlex
-import unicodedata
 
 from agent_command_tab.agent_process_tree import (find_foreground_job_process_id, find_text_editor_opened_by_the_job,
                                                   read_process_arguments_and_environment, read_process_current_folder,
@@ -41,8 +40,8 @@ FIELD_SEPARATOR = "\x1f"  # between the fields of one line of tmux's output: nam
 # (`exec claude` in the shell), which keeps its process ID (parse_pane_records_with_the_process_in_front
 # notices the other changes); the poll must notice it even in a renamed window. pane_active marks
 # the pane each window's keys go to, which a peek puts back.
-PANE_FIELD_NAMES = ("session_id", "session_name", "window_id", "window_active", "automatic-rename", "window_name",
-                    "pane_id", "pane_index", "pane_pid", "pane_current_path", "pane_current_command", "pane_active")
+PANE_FIELD_NAMES = ("session_id", "session_name", "session_created", "window_id", "window_active", "automatic-rename",
+                    "window_name", "pane_id", "pane_index", "pane_pid", "pane_current_path", "pane_current_command", "pane_active")
 CLIENT_FIELD_NAMES = ("client_pid", "client_tty", "session_id", "window_id", "client_activity")
 # Followed by the pane's number: one buffer per pane, since tmux's buffers are the server's, and
 # messages for several panes are pasted at the same time (a pane gets one paste at a time).
@@ -159,27 +158,6 @@ def parse_screen_lines_with_faint_flags(captured_text):
     if captured_text.endswith("\n"):
         screen_lines_with_faint_flags.pop()  # the newline after the last line
     return screen_lines_with_faint_flags
-
-
-def count_characters_in_cells(text, cell_count):
-    """Returns how many of text's first characters fill cell_count screen cells (a wide character,
-    such as 日, takes two)."""
-    cells = 0
-    for index, character in enumerate(text):
-        if cells >= cell_count:
-            return index
-        cells += 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
-    return len(text)
-
-
-def split_line_at_the_cursor(screen_lines, cursor_x, cursor_y):
-    """Returns (text before the cursor, text after it) on the cursor's row, or None when it is off
-    screen. tmux trims each line's trailing blanks, which are empty cells too."""
-    if not 0 <= cursor_y < len(screen_lines):
-        return None
-    line = screen_lines[cursor_y]
-    split_index = count_characters_in_cells(line, cursor_x)
-    return line[:split_index], line[split_index:]
 
 
 def find_process_in_front_of_the_pane(pane_process_id):
@@ -306,15 +284,6 @@ class TmuxTerminalSession(TerminalSession):
     async def read_screen_lines_with_faint_flags(self):
         return parse_screen_lines_with_faint_flags(await self.tmux_backend.run_tmux(["capture-pane", "-p", "-e", "-t", self.pane_id]))
 
-    async def read_text_around_the_cursor(self):
-        output = await self.tmux_backend.run_tmux(join_tmux_commands([
-            ["display-message", "-p", "-t", self.pane_id, FIELD_SEPARATOR.join(["cursor", "#{cursor_x}", "#{cursor_y}"])],
-            ["capture-pane", "-p", "-t", self.pane_id]]))
-        cursor_line, _, captured_text = output.partition("\n")
-        _, cursor_x, cursor_y = cursor_line.split(FIELD_SEPARATOR)
-        return split_line_at_the_cursor([text for text, _ in parse_screen_lines_with_faint_flags(captured_text)],
-                                        int(cursor_x), int(cursor_y))
-
 
 class TmuxTerminalBackend(TerminalBackend):
     """The default tmux server, through the tmux command."""
@@ -336,6 +305,9 @@ class TmuxTerminalBackend(TerminalBackend):
         self.pane_records_of_the_last_gather = None  # compared with each poll's, to notice changes
         self.client_records = []  # the most recently used first
         self.gathered_windows = []
+        # The sessions and tmux windows start_agent_session opened since the last gather, which a
+        # restore adds tabs to and renames before a gather lists them (user request, 2026-11-06).
+        self.window_and_tab_ids_opened_since_the_last_gather = set()
         self.active_pane_id_by_tab_id = {}  # the pane each tmux window's keys go to, at the last gather
 
     async def run_tmux(self, arguments, input_text=None):
@@ -411,17 +383,25 @@ class TmuxTerminalBackend(TerminalBackend):
         return self.tmux_program_path is not None and another_process_listens_at(self.socket_path)
 
     async def gather_windows(self):
+        # Those start_agent_session opens while this gather runs aren't in its records yet.
+        ids_opened_before_this_gather = set(self.window_and_tab_ids_opened_since_the_last_gather)
         pane_records = await asyncio.to_thread(parse_pane_records_with_the_process_in_front,
                                                await self.run_tmux(build_list_panes_command()))
         self.pane_records_of_the_last_gather = pane_records
         self.active_pane_id_by_tab_id = {pane_record["window_id"]: pane_record["pane_id"] for pane_record in pane_records
                                          if pane_record["pane_active"] == "1"}
         self.gathered_windows = await asyncio.to_thread(build_gathered_windows, pane_records)
+        self.window_and_tab_ids_opened_since_the_last_gather -= ids_opened_before_this_gather
         return self.gathered_windows
 
     def find_gathered_window(self, window_id):
         return next((gathered_window for gathered_window in self.gathered_windows if gathered_window["window_id"] == window_id),
                     None)
+
+    def find_when_the_window_was_opened(self, window_id):
+        """Returns when the tmux session was created, at the last gather."""
+        return next((int(pane_record["session_created"]) for pane_record in self.pane_records_of_the_last_gather or ()
+                     if pane_record["session_id"] == window_id), None)
 
     def find_gathered_window_of_tab(self, tab_id):
         return next((gathered_window for gathered_window in self.gathered_windows
@@ -513,7 +493,7 @@ class TmuxTerminalBackend(TerminalBackend):
 
     async def rename_tab(self, tab_id, new_title):
         """Renames a tmux window, which turns its automatic naming off; an empty title turns it back on."""
-        if self.find_gathered_window_of_tab(tab_id) is None:
+        if self.find_gathered_window_of_tab(tab_id) is None and tab_id not in self.window_and_tab_ids_opened_since_the_last_gather:
             return ActionResult(False, "that tab no longer exists")
         if new_title.strip():
             await self.run_tmux(["rename-window", "-t", tab_id, "--", escape_tmux_format_argument(new_title.strip())])
@@ -523,7 +503,7 @@ class TmuxTerminalBackend(TerminalBackend):
 
     async def rename_window(self, window_id, new_title):
         """Renames a tmux session (it has no default name to go back to)."""
-        if self.find_gathered_window(window_id) is None:
+        if self.find_gathered_window(window_id) is None and window_id not in self.window_and_tab_ids_opened_since_the_last_gather:
             return ActionResult(False, "that window no longer exists")
         if not new_title.strip():
             return ActionResult(False, "a tmux session needs a name")
@@ -570,22 +550,28 @@ class TmuxTerminalBackend(TerminalBackend):
         """Opens a tmux window in a session (a new session when window_id is None), right after
         after_tab_id when given, and types launch_command into its shell, so the window keeps a
         shell when the agent exits (as iTerm2's do). A new session is shown in the most recently
-        used client, if any; its result has details {"window_id"} and, when a client shows it,
-        {"terminal_client_process_id"}. The core has checked the folder and the launch command."""
-        details = None
+        used client, if any. Its result has details {"tab_id": the new tmux window's ID}, plus
+        {"window_id"} for a new session and, when a client shows it, {"terminal_client_process_id"}.
+        The core has checked the folder and the launch command."""
         start_folder = escape_tmux_format_argument(folder)  # tmux expands -c as a format ("C#Projects")
-        if window_id is None:
-            window_id, pane_id = (await self.run_tmux(
-                ["new-session", "-d", "-c", start_folder, "-P", "-F", FIELD_SEPARATOR.join(["#{session_id}", "#{pane_id}"])]
-            )).strip().split(FIELD_SEPARATOR)
-            details = {"window_id": window_id}
+        opens_a_new_session = window_id is None
+        if opens_a_new_session:
+            window_id, tab_id, pane_id = (await self.run_tmux(
+                ["new-session", "-d", "-c", start_folder, "-P", "-F",
+                 FIELD_SEPARATOR.join(["#{session_id}", "#{window_id}", "#{pane_id}"])])).strip().split(FIELD_SEPARATOR)
+            details = {"window_id": window_id, "tab_id": tab_id}
+            self.window_and_tab_ids_opened_since_the_last_gather.add(window_id)
         else:
-            if self.find_gathered_window(window_id) is None:
+            if self.find_gathered_window(window_id) is None and window_id not in self.window_and_tab_ids_opened_since_the_last_gather:
                 return ActionResult(False, "that window no longer exists")
             target_arguments = ["-a", "-t", after_tab_id] if after_tab_id is not None else ["-t", f"{window_id}:"]
-            pane_id = (await self.run_tmux(["new-window", "-c", start_folder, "-P", "-F", "#{pane_id}"] + target_arguments)).strip()
+            tab_id, pane_id = (await self.run_tmux(["new-window", "-c", start_folder, "-P", "-F",
+                                                    FIELD_SEPARATOR.join(["#{window_id}", "#{pane_id}"])] + target_arguments)
+                               ).strip().split(FIELD_SEPARATOR)
+            details = {"tab_id": tab_id}
+        self.window_and_tab_ids_opened_since_the_last_gather.add(tab_id)
         await TmuxTerminalSession(self, pane_id).send_text(launch_command + "\r")
-        if details is not None:
+        if opens_a_new_session:
             client_process_id = await self.show_session_in_a_client(window_id)
             if client_process_id is not None:
                 details["terminal_client_process_id"] = client_process_id

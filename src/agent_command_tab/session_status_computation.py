@@ -259,9 +259,11 @@ def pick_most_urgent_state(states):
 def split_agent_sessions_into_pausable_and_resumable(agent_session_entries):
     """Returns (the agent sessions a pause would stop, the paused ones a resume would continue).
     An agent suspended with Ctrl+Z by hand is in both, since a pause still stops the processes
-    below it; an agent whose process has exited is in neither."""
+    below it, also in tmux, where a running agent can't be paused; an agent whose process has
+    exited is in neither."""
     return ([entry for entry in agent_session_entries if entry.status != "exited"
-             and not (entry.status == "paused" and entry.is_paused_with_the_processes_below_it)],
+             and not (entry.status == "paused" and entry.is_paused_with_the_processes_below_it)
+             and (entry.can_be_paused_while_it_runs or entry.status == "paused")],
             [entry for entry in agent_session_entries if entry.status == "paused"])
 
 

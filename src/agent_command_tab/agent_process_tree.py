@@ -1,7 +1,9 @@
 """Facts about an agent's processes, read from macOS's libproc and sysctl without starting a subprocess.
 
 - The agent's current folder (iTerm2's `path` variable can be empty or stale).
-- Whether a process still exists, and whether it is stopped (a paused agent session).
+- Whether a process still exists, and whether it is stopped (a paused agent session); the job and
+  the shells an agent runs under, whether it runs in a tmux pane, and whether its terminal has
+  hung up (agent_session_pausing).
 - The agent's descendant processes, to tell an agent that is waiting on a command it started
   (a pipeline, a test run) from one that is thinking (and turns "stuck" when that lasts), and the
   name that command was started as.
@@ -13,9 +15,14 @@ import collections
 import ctypes
 import os
 import re
+import select
+import stat
 
 LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
 LIBC = ctypes.CDLL("/usr/lib/libc.dylib")
+LIBC.devname.restype = ctypes.c_char_p  # a device's name in /dev, or NULL
+LIBC.devname.argtypes = [ctypes.c_int32, ctypes.c_uint16]  # dev_t, mode_t
+NO_TERMINAL_DEVICE = 0xFFFFFFFF  # NODEV, proc_bsdinfo's e_tdev of a process without a terminal
 CTL_KERN = 1
 KERN_PROCARGS2 = 49  # sysctl that returns a process's argument count, executable path and arguments (what ps reads)
 PROC_PIDTBSDINFO = 3  # proc_pidinfo flavor that returns struct proc_bsdinfo (refused for another user's process)
@@ -265,30 +272,74 @@ def process_is_stopped(process_id):
     return bsd_info is not None and bsd_info.pbi_status == STOPPED_PROCESS_STATUS
 
 
-def find_the_shell_running_the_agent(agent_process_id):
-    """Returns the ID of the shell that runs the agent as a job: the parent of the agent's job
-    leader (the process its group is named after), or None if the agent is gone."""
+def find_the_agents_job_leader_id(agent_process_id):
+    """Returns the ID of the leader of the agent's job: the process the agent's process group is
+    named after, the one its shell started for the command line (Codex's `node .../codex`, which
+    runs the codex program in its group). The agent's own ID when that process is gone or is
+    neither the agent nor one of its ancestors; None when the agent is gone."""
     agent = read_process_bsd_info(agent_process_id)
     if agent is None:
         return None
-    job_leader = read_process_bsd_info(agent.pbi_pgid)
-    return job_leader.pbi_ppid if job_leader is not None else agent.pbi_ppid
+    return agent.pbi_pgid if agent.pbi_pgid in list_the_process_and_its_ancestor_ids(agent_process_id) else agent_process_id
 
 
-def list_other_stopped_jobs_of_the_agents_shell(agent_process_id):
-    """Returns the IDs of the stopped processes that the shell running the agent
-    (find_the_shell_running_the_agent) started besides the agent's own job: other suspended
-    jobs, one of which a bare `fg` could bring back instead."""
-    agent = read_process_bsd_info(agent_process_id)
-    shell_process_id = find_the_shell_running_the_agent(agent_process_id)
-    if agent is None or shell_process_id is None:
+def list_the_shells_the_job_runs_under(job_leader_id):
+    """Returns the ProcessInfo of each process above the job leader in its terminal session,
+    outermost first: the shell that runs the job with job control, and, for an agent started
+    from a second shell typed in the tab (`bash` in a zsh tab, `nix develop`), the shell that
+    runs that one as its job, and so on. Empty when the job leader is the session's first process
+    (an agent started as the tab's own command) or is gone."""
+    try:
+        session_id = os.getsid(job_leader_id)
+    except OSError:  # gone
         return []
-    other_stopped_job_process_ids = []
-    for child_process_id in list_child_process_ids(shell_process_id):
-        child = read_process_bsd_info(child_process_id)
-        if child is not None and child.pbi_pgid != agent.pbi_pgid and child.pbi_status == STOPPED_PROCESS_STATUS:
-            other_stopped_job_process_ids.append(child_process_id)
-    return other_stopped_job_process_ids
+    shells = []
+    for process_id in list_the_process_and_its_ancestor_ids(job_leader_id)[1:]:
+        try:
+            if os.getsid(process_id) != session_id:
+                break
+        except OSError:  # gone meanwhile
+            break
+        shell = read_process_info(process_id)
+        if shell is None:  # gone meanwhile, or run as another user (sudo -s)
+            break
+        shells.append(shell)
+    return shells[::-1]
+
+
+def process_runs_in_a_tmux_pane(process_id):
+    """Returns whether the process runs in a tmux pane: the first process of its terminal session
+    (the pane's shell, or the program the pane runs) was started by a tmux server."""
+    try:
+        session_leader = read_process_info(os.getsid(process_id))
+    except OSError:  # gone
+        return False
+    return session_leader is not None and read_name_of_any_process(session_leader.parent_process_id) == "tmux"
+
+
+def process_terminal_has_hung_up(process_id):
+    """Returns whether the process's terminal has been closed at its other end (its tab closed,
+    or the terminal app or the tmux server quit) while the process still holds it open. A stopped
+    process can't act on the hangup, and nothing in its process info changes (checked on
+    2026-11-06), so this opens the terminal and asks the kernel, reading nothing from it: keys
+    typed into the tab stay there for the process. False when the process is gone, has no
+    terminal, or its terminal can't be opened."""
+    bsd_info = read_process_bsd_info(process_id)
+    if bsd_info is None or bsd_info.e_tdev == NO_TERMINAL_DEVICE:
+        return False
+    device_name = LIBC.devname(ctypes.c_int32(bsd_info.e_tdev).value, stat.S_IFCHR)
+    if not device_name:
+        return False
+    try:
+        terminal_file_descriptor = os.open(DEVICES_FOLDER + device_name.decode(), os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        poller = select.poll()
+        poller.register(terminal_file_descriptor, select.POLLIN)
+        return any(events & select.POLLHUP for _, events in poller.poll(0))
+    finally:
+        os.close(terminal_file_descriptor)
 
 
 def find_foreground_job_process_id(process_id):
