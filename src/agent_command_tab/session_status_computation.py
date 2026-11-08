@@ -203,8 +203,8 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
         screen_reading: {"permission_dialog_is_showing": bool, "permission_dialog_checked_at":
             float, "permission_dialog_gone_since": float, "turn_was_interrupted": bool,
             "fingerprint_changed_at": float, "running_command": (name, started at) or None,
-            "command_last_seen_running_at": float, "conversation_preview": {"open_tool_name": str,
-            "open_tool_started_at": float or None, ...}} (any key may be missing), or None.
+            "command_last_seen_running_at": float, "open_tool_call": {"open_tool_name": str,
+            "open_tool_started_at": float or None}} (any key may be missing), or None.
         stuck_threshold_seconds: How long a working session may show no screen change.
         now: The current time.
 
@@ -225,14 +225,14 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
     if state == "working":
         if screen_reading.get("running_command"):
             return "working", f"running {screen_reading['running_command'][0]}"  # waiting on its command, never stuck
-        preview_fields = screen_reading.get("conversation_preview") or {}
-        open_tool_started_at = preview_fields.get("open_tool_started_at")
+        open_tool_call = screen_reading.get("open_tool_call") or {}
+        open_tool_started_at = open_tool_call.get("open_tool_started_at")
         if open_tool_started_at is not None:
             # Waiting on a tool call its conversation file shows open, which starts no command:
             # stuck only for a tool that finishes in seconds, once open for the threshold (user
             # request, 2026-10-30); a subagent or an MCP tool may run long. Counted from when
             # the agent started working, too, so a permission prompt's wait doesn't count (code review, 2026-10-30).
-            open_tool_name = preview_fields["open_tool_name"]
+            open_tool_name = open_tool_call["open_tool_name"]
             seconds_waited_on_the_tool = now - max(open_tool_started_at, working_since)
             if open_tool_name in TOOLS_THAT_FINISH_IN_SECONDS and seconds_waited_on_the_tool >= stuck_threshold_seconds:
                 return "stuck", f"waiting on {open_tool_name} for {max(1, round(seconds_waited_on_the_tool / 60))} min"

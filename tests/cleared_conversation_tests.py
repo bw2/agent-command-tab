@@ -15,7 +15,7 @@ from agent_command_tab.snapshot_builder import DisplayedState
 
 
 class StandInAdapter:
-    """Finds the conversation file at self.path and reads its name back as the preview."""
+    """Finds the conversation file at self.path and reads its name back as the open tool call's."""
 
     can_resume_conversations = True  # as CodexAdapter
 
@@ -37,9 +37,9 @@ class StandInAdapter:
     def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
         return 200_000
 
-    def read_preview_fields(self, conversation_file_path):
+    def read_open_tool_call(self, conversation_file_path):
         self.read_paths.append(conversation_file_path)
-        return {"last_prompt": os.path.basename(conversation_file_path)}
+        return {"open_tool_name": os.path.basename(conversation_file_path)}
 
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         # As CodexAdapter: only when exactly one file fits, so a copy never forks another conversation.
@@ -65,8 +65,8 @@ class ClearedConversationTests(unittest.TestCase):
             file.write("{}\n")
         return path
 
-    def read_preview(self):
-        return self.core.screen_readings_by_session_id.get("s1", {}).get("conversation_preview")
+    def find_the_noted_open_tool_call(self):
+        return self.core.screen_readings_by_session_id.get("s1", {}).get("open_tool_call")
 
     def update_readings_with_a_lookup_due(self):
         if "s1" in self.core.conversation_files_by_session_id:
@@ -82,24 +82,24 @@ class ClearedConversationTests(unittest.TestCase):
     def test_a_clear_before_the_first_lookup_keeps_the_old_file_away_until_a_new_one_appears(self):
         self.clear()
         self.update_readings_with_a_lookup_due()  # Codex's lookup still finds the old file
-        self.assertIsNone(self.read_preview())
+        self.assertIsNone(self.find_the_noted_open_tool_call())
         self.adapter.path = self.write_file("new.jsonl")  # the new chat's first prompt
         self.update_readings_with_a_lookup_due()
-        self.assertEqual(self.read_preview(), {"last_prompt": "new.jsonl"})
+        self.assertEqual(self.find_the_noted_open_tool_call(), {"open_tool_name": "new.jsonl"})
 
-    def test_a_clear_after_reading_forgets_the_old_preview(self):
+    def test_a_clear_after_reading_forgets_the_old_readings(self):
         self.update_readings_with_a_lookup_due()
-        self.assertEqual(self.read_preview(), {"last_prompt": "old.jsonl"})
+        self.assertEqual(self.find_the_noted_open_tool_call(), {"open_tool_name": "old.jsonl"})
         self.clear()
-        self.assertIsNone(self.read_preview())
+        self.assertIsNone(self.find_the_noted_open_tool_call())
         self.update_readings_with_a_lookup_due()
-        self.assertIsNone(self.read_preview())
+        self.assertIsNone(self.find_the_noted_open_tool_call())
 
     def test_a_clear_during_the_reads_drops_their_results_instead_of_stopping_the_core(self):
         self.adapter.while_reading = lambda: self.core.forget_the_cleared_conversation("s1", self.agent_session, self.old_path)
         self.update_readings_with_a_lookup_due()  # raised TypeError when the second read took the cleared path
         self.assertEqual(self.adapter.read_paths, [self.old_path, self.old_path])
-        self.assertIsNone(self.read_preview())
+        self.assertIsNone(self.find_the_noted_open_tool_call())
 
     def duplicate(self):
         """Returns the launch command a Duplicate of the tab would run."""
@@ -167,7 +167,7 @@ class OpenToolCallSnapshotTests(unittest.TestCase):  # code review, 2026-10-29
         with open(path, "w") as file:
             file.write("{}\n")
         adapter = StandInAdapter(path)
-        adapter.read_preview_fields = lambda conversation_file_path: {"open_tool_name": "WebFetch",
+        adapter.read_open_tool_call = lambda conversation_file_path: {"open_tool_name": "WebFetch",
                                                                       "open_tool_started_at": time.time()}
         core = DashboardCore(lambda snapshot: None, lambda message: None)
         agent_session = {"adapter": adapter, "process_id": 4242, "is_in_background": False}
@@ -175,7 +175,7 @@ class OpenToolCallSnapshotTests(unittest.TestCase):  # code review, 2026-10-29
 
         async def read_the_file_then_wait():
             await core.update_conversation_file_readings("s1", agent_session)
-            core.snapshot_needed.clear()  # the new preview asked for one at once
+            core.snapshot_needed.clear()  # the new reading asked for one at once
             await asyncio.sleep(0.1)
             is_asked_for_before_the_tool_shows_as_running = core.snapshot_needed.is_set()
             await asyncio.sleep(0.5)

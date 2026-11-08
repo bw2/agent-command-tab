@@ -14,7 +14,7 @@ from agent_command_tab.context_window_usage import (choose_claude_code_context_w
                                                     read_context_tokens_from_claude_code_transcript,
                                                     read_model_from_claude_code_transcript,
                                                     read_turn_started_at_from_claude_code_transcript)
-from agent_command_tab.session_preview_computation import read_preview_fields_from_claude_code_transcript
+from agent_command_tab.open_tool_call_reading import read_open_tool_call_from_claude_code_transcript
 
 ELAPSED_TIME = r"(?:\d+h )?(?:\d+m )?\d+s"
 # One "NAME=value " word in front of a launch command's program, the value maybe quoted
@@ -105,8 +105,8 @@ class ClaudeCodeAdapter(AgentToolAdapter):
     def read_turn_started_at(self, conversation_file_path):
         return read_turn_started_at_from_claude_code_transcript(conversation_file_path)
 
-    def read_preview_fields(self, conversation_file_path):
-        return read_preview_fields_from_claude_code_transcript(conversation_file_path)
+    def read_open_tool_call(self, conversation_file_path):
+        return read_open_tool_call_from_claude_code_transcript(conversation_file_path)
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):
         """Continues a copy of the conversation under a new session ID (`--resume <id> --fork-session`),

@@ -86,7 +86,7 @@ SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED = 5  # "Kill Session": SIGTERM,
 SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER = 0.5  # a sub row's Info
 CONVERSATION_FILE_RETRY_SECONDS = 15  # a conversation file not found yet (Codex writes it at the first prompt)
 CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up again in case the conversation changed
-CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "conversation_preview")  # screen reading values read from it
+CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "open_tool_call")  # screen reading values read from it
 # How long a working agent may think with nothing new on screen before its row shows "stuck"; no
 # longer a setting (user request, 2026-10-26).
 STUCK_THRESHOLD_SECONDS = 600
@@ -867,7 +867,7 @@ class DashboardCore:
         return await self.look_up_conversation_file(session_id, agent_session)
 
     def forget_the_cleared_conversation(self, session_id, agent_session, cleared_path):
-        """After /clear: the old conversation's size and preview no longer apply, and its finished
+        """After /clear: the old conversation's size and open tool call no longer apply, and its finished
         turn no longer waits to be seen. Its file (cleared_path) is ignored until the agent writes
         a new one: Codex keeps its process and starts the new chat's file only with its first
         prompt, so looking the file up again finds the old one. Claude Code's new session ID is
@@ -2327,9 +2327,9 @@ class DashboardCore:
                 self.snapshot_needed.set()  # also lets "stuck" appear once its time has come
 
     async def read_context_window_usage_periodically(self):
-        """Keeps each agent session's context size and preview fields ("context_tokens" and
-        "conversation_preview" in its screen reading) current from the end of its conversation
-        file (context_window_usage, session_preview_computation). The file is looked up
+        """Keeps each agent session's context size and open tool call ("context_tokens" and
+        "open_tool_call" in its screen reading) current from the end of its conversation
+        file (context_window_usage, open_tool_call_reading). The file is looked up
         (Claude Code: from `claude agents --json`; Codex: by its folder and start time) for each new process or Claude
         Code conversation and again every minute, and read again only when it changed."""
         while True:
@@ -2385,7 +2385,7 @@ class DashboardCore:
         context_window_tokens = await asyncio.to_thread(
             agent_session["adapter"].read_context_window_tokens, path, agent_session["process_id"],
             self.claude_agents_by_process_id.get(agent_session["process_id"]), context_tokens_kept)
-        preview_fields = await asyncio.to_thread(agent_session["adapter"].read_preview_fields, path)
+        open_tool_call = await asyncio.to_thread(agent_session["adapter"].read_open_tool_call, path)
         if (session_id not in self.agent_sessions or self.conversation_files_by_session_id.get(session_id) is not conversation_file
                 or conversation_file["path"] != path):
             return  # the tab closed, or /clear or a new conversation took this file's place, during the reads
@@ -2394,8 +2394,8 @@ class DashboardCore:
             self.note_reading_value(session_id, "context_tokens", context_tokens)
         if context_window_tokens is not None:
             self.note_reading_value(session_id, "context_window_tokens", context_window_tokens)
-        self.note_reading_value(session_id, "conversation_preview", preview_fields)
-        open_tool_started_at = (preview_fields or {}).get("open_tool_started_at")
+        self.note_reading_value(session_id, "open_tool_call", open_tool_call)
+        open_tool_started_at = (open_tool_call or {}).get("open_tool_started_at")
         if open_tool_started_at is not None:
             # Its row shows it running once it is that old, and the file may not change by then,
             # so nothing else would ask for that snapshot (code review, 2026-10-29). A tenth of a
@@ -2414,7 +2414,7 @@ class DashboardCore:
         """Returns the path of the agent session's conversation file as its adapter finds it, or
         None. None also for a Codex session that shares or shared its folder with another, whose file
         can't be told apart from the other's (codex_conversation_may_be_another_sessions): its row
-        then shows no context size or preview rather than the other session's."""
+        then shows no context size or open tool call rather than the other session's."""
         if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
             return None
         process_id = agent_session["process_id"]
@@ -2432,7 +2432,7 @@ class DashboardCore:
 
     def note_reading_value(self, session_id, reading_name, value):
         """Stores a value read for a session, from its conversation file ("context_tokens",
-        "conversation_preview") or its processes ("memory_bytes", "cpu_percent"), in its screen
+        "open_tool_call") or its processes ("memory_bytes", "cpu_percent"), in its screen
         reading, asking for a snapshot when it changed."""
         reading = self.screen_readings_by_session_id.setdefault(session_id, {})
         if value != reading.get(reading_name):

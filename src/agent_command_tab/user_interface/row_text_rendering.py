@@ -16,10 +16,10 @@ from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_
 RowTextParts = collections.namedtuple(
     "RowTextParts", ["connector_text", "dot_glyph", "dot_color_name", "dot_blinks", "name_text", "details_text",
                      "agent_tool_name", "state_text", "context_text",
-                     "created_time_text", "existence_duration_text", "memory_text", "cpu_text", "preview_connector_text",
-                     "preview_text", "details_color_name", "dot_tool_tip", "details_tool_tip",
+                     "created_time_text", "existence_duration_text", "memory_text", "cpu_text",
+                     "details_color_name", "dot_tool_tip", "details_tool_tip",
                      "context_fill_percent_color_name", "state_color_name", "state_text_is_semibold"],
-    defaults=["", "", "", "", "", "", "", "", "", "gray", "", "", "", "", False])
+    defaults=["", "", "", "", "", "", "", "gray", "", "", "", "", False])
 RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working session's dot. A tab row ends "
                         "in columns that line up from row to row (agent_session_outline_view.TAB_ROW_COLUMNS): "
                         "context_text (the context's size and its share of the context window, "
@@ -27,10 +27,8 @@ RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working sessi
                         "column's color for \"\"), created_time_text (when the agent session "
                         "started) and existence_duration_text (how long ago), memory_text and cpu_text (what the "
                         "agent and the processes it started use), the icon for agent_tool_name and state_text "
-                        "(in state_color_name, semibold for state_text_is_semibold). Under it, a tab "
-                        "row has a gray preview line: "
-                        "preview_connector_text continues the tree's lines, and preview_text starts under "
-                        "the name. A tab row's details are its background task lights, in details_color_name. "
+                        "(in state_color_name, semibold for state_text_is_semibold). "
+                        "A tab row's details are its background task lights, in details_color_name. "
                         "dot_tool_tip and details_tool_tip are what the dot and the details mean, shown when the "
                         "pointer rests on them, or \"\" for none (user request, 2026-10-27).")
 
@@ -195,12 +193,6 @@ def build_tree_connector_text(is_last_child_at_each_level):
     return "".join(ancestor_parts) + ("└─ " if is_last_child_at_each_level[-1] else "├─ ")
 
 
-def build_tree_continuation_text(is_last_child_at_each_level):
-    """Returns the gray prefix for a second line under a row: the tree's vertical lines carried
-    down, for example "│  │  " under "│  ├─ ", and "   " under a last child's "└─ "."""
-    return "".join("   " if is_last else "│  " for is_last in is_last_child_at_each_level)
-
-
 def build_background_task_lights_text(background_task_count):
     """Returns "••" for two background tasks, "•×6" beyond MOST_BACKGROUND_TASK_LIGHTS, "" for none."""
     if background_task_count > MOST_BACKGROUND_TASK_LIGHTS:
@@ -259,7 +251,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         dot_color_name=dot_color_name,
         dot_blinks=agent_session_entry.status == "working",
         name_text=agent_session_entry.tab_title,
-        details_text=build_background_task_lights_text(agent_session_entry.background_task_count),  # the preview has its own line
+        details_text=build_background_task_lights_text(agent_session_entry.background_task_count),
         details_color_name=BACKGROUND_TASK_LIGHTS_COLOR_NAME,
         dot_tool_tip=dot_tool_tip,
         details_tool_tip=describe_background_task_lights(agent_session_entry.background_task_count),
@@ -274,8 +266,6 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         existence_duration_text=format_elapsed_time(now - started_at) if started_at is not None else "",
         memory_text=memory_text,
         cpu_text=cpu_text,
-        preview_connector_text=build_tree_continuation_text(is_last_child_at_each_level),
-        preview_text=agent_session_entry.preview_line,
     )
 
 

@@ -15,7 +15,7 @@ import collections
 
 # Each optional field beside its default, so a field added or moved can't take another's default.
 AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD = {
-    "status_reason": "", "status_since": 0.0, "preview_line": "", "context_fill_percent": None,
+    "status_reason": "", "status_since": 0.0, "context_fill_percent": None,
     "background_task_count": 0, "ended_abnormally_at": None, "is_in_front": False, "last_time_tab_was_seen": None,
     "running_tool_name": "", "running_tool_started_at": None, "context_tokens": None, "started_at": None,
     "memory_bytes": None, "cpu_percent": None, "slash_commands": (), "is_paused_with_the_processes_below_it": False,
@@ -38,8 +38,6 @@ AgentSessionEntry.__doc__ = ("One terminal tab (an iTerm2 tab, or a tmux window)
                              "tokens its context holds, from its conversation file, or None if unknown, and "
                              "context_fill_percent that as a whole percent of its context window, or None. "
                              "started_at is when the agent's process started (the Created Time column), or None. "
-                             "preview_line is the gray line under the tab row: what the agent asks or runs, what "
-                             "it said since the last prompt, or that prompt (session_preview_computation). "
                              "memory_bytes and cpu_percent are what the agent process and all the processes below it "
                              "use (physical memory to the megabyte; percent of one CPU core, a whole number), or "
                              "None until they are read. slash_commands are the commands the tab's menu can type "

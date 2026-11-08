@@ -1,11 +1,21 @@
 """Helpers for buttons and pop-ups shared by the list's rows, the panel around the list and the settings window."""
 
-from AppKit import NSFontWeightBold, NSImage, NSImageOnly, NSImageSymbolConfiguration
+from AppKit import (NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagOption, NSFontWeightBold, NSImage,
+                    NSImageOnly, NSImageSymbolConfiguration)
 
-# The SF Symbols of the buttons that open or close several rows at once (the top bar's expand or
-# collapse all, a window row's previews), by whether those rows are open: the symbol shows the
-# current state (user request, 2026-10-19).
-ROWS_OPEN_SYMBOL_NAMES = {False: "rectangle.compress.vertical", True: "rectangle.expand.vertical"}
+
+def is_a_command_press_of_letter(letter, characters, modifier_flags):
+    """Whether a key press is Command and the letter, with or without Shift, and without Option or
+    Control: Command-R and Command-Shift-R rename the selected row, in the list and in the Saved
+    sessions window, and Command-E and Command-Shift-E expand or collapse all (user requests, 2026-11-07).
+
+    Args:
+        letter: The lowercase letter, such as "r".
+        characters: The key event's charactersIgnoringModifiers, which Shift turns into the uppercase letter.
+        modifier_flags: The key event's modifierFlags.
+    """
+    return (characters in (letter, letter.upper()) and bool(modifier_flags & NSEventModifierFlagCommand)
+            and not modifier_flags & (NSEventModifierFlagOption | NSEventModifierFlagControl))
 
 
 def show_symbol_on_button(button, symbol_name, fallback_title, accessibility_description, point_size=None):

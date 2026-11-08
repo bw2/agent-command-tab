@@ -141,9 +141,9 @@ class AgentToolAdapter:
         """Returns when the current turn began, from the conversation file, or None."""
         return None
 
-    def read_preview_fields(self, conversation_file_path):
-        """Returns the conversation's last prompt, what the agent said since and its open tool
-        call (session_preview_computation), or None. Called in a worker thread."""
+    def read_open_tool_call(self, conversation_file_path):
+        """Returns the tool call the agent waits on, from the end of the conversation file
+        (open_tool_call_reading), or None. Called in a worker thread."""
         return None
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None):

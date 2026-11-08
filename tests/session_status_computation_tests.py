@@ -138,16 +138,16 @@ class ComputeSessionStatusTests(unittest.TestCase):
 
     def test_waiting_on_an_open_tool_call_is_stuck_only_for_a_tool_that_finishes_in_seconds(self):  # user request, 2026-10-30
         reading = {"fingerprint_changed_at": 150, "running_command": None,
-                   "conversation_preview": {"open_tool_name": "WebFetch", "open_tool_started_at": 1500}}
+                   "open_tool_call": {"open_tool_name": "WebFetch", "open_tool_started_at": 1500}}
         self.assertEqual(compute_session_status_from_sources("working", 100, None, None, False, reading, 600, 2000),
                          ("working", "running WebFetch"))  # open for 500 seconds, under the threshold
         self.assertEqual(compute_session_status_from_sources("working", 100, None, None, False, reading, 600, 2220),
                          ("stuck", "waiting on WebFetch for 12 min"))
         for tool_that_may_run_long in ("mcp__github__search_code", "Agent"):  # never stuck, however long
-            reading["conversation_preview"] = {"open_tool_name": tool_that_may_run_long, "open_tool_started_at": 160}
+            reading["open_tool_call"] = {"open_tool_name": tool_that_may_run_long, "open_tool_started_at": 160}
             self.assertEqual(compute_session_status_from_sources("working", 100, None, None, False, reading, 600, 5000),
                              ("working", f"running {tool_that_may_run_long}"))
-        reading["conversation_preview"] = {"open_tool_name": None, "open_tool_started_at": None}  # the call returned
+        reading["open_tool_call"] = {"open_tool_name": "", "open_tool_started_at": None}  # the call returned
         self.assertEqual(compute_state("working", 100, screen_reading=reading, now=2000), "stuck")
 
     def test_the_stuck_clock_restarts_when_the_command_ends(self):
@@ -170,7 +170,7 @@ class ComputeSessionStatusTests(unittest.TestCase):
                    "permission_dialog_gone_since": 760, "fingerprint_changed_at": 90}
         self.assertEqual(compute_state("waiting", 100, screen_reading=reading, now=880), "working")
         # So too for a tool that finishes in seconds, open since before the prompt (code review, 2026-10-30).
-        reading["conversation_preview"] = {"open_tool_name": "Edit", "open_tool_started_at": 99}
+        reading["open_tool_call"] = {"open_tool_name": "Edit", "open_tool_started_at": 99}
         self.assertEqual(compute_session_status_from_sources("waiting", 100, None, None, False, reading, 600, 880),
                          ("working", "running Edit"))
         self.assertEqual(compute_session_status_from_sources("waiting", 100, None, None, False, reading, 600, 1400),

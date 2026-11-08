@@ -23,7 +23,8 @@ from Foundation import NSIndexSet, NSMutableIndexSet, NSNotFound, NSObject
 
 from agent_command_tab.saved_agent_sessions_store import find_saved_window_key
 from agent_command_tab.settings_store import SMALLEST_WINDOW_SIZES
-from agent_command_tab.user_interface.agent_session_outline_view import ESCAPE_CHARACTER, is_a_rename_shortcut
+from agent_command_tab.user_interface.agent_session_outline_view import ESCAPE_CHARACTER, RENAME_KEY
+from agent_command_tab.user_interface.control_helpers import is_a_command_press_of_letter
 from agent_command_tab.user_interface.screen_layout import WindowFrameSavingController, place_window_at_saved_frame_or_center
 from agent_command_tab.user_interface.settings_window import is_a_plain_press_of
 
@@ -90,7 +91,7 @@ class SavedSessionsOutlineView(NSOutlineView):
         if is_a_plain_press_of(event, {NSDeleteCharacter, NSDeleteFunctionKey}):
             self.delegate().delete_items(self.delegate().list_selected_items())
         elif (is_a_plain_press_of(event, {NSCarriageReturnCharacter, NSEnterCharacter})
-              or is_a_rename_shortcut(event.charactersIgnoringModifiers(), event.modifierFlags())):
+              or is_a_command_press_of_letter(RENAME_KEY, event.charactersIgnoringModifiers(), event.modifierFlags())):
             self.delegate().rename_the_selected_row()
         else:
             objc.super(SavedSessionsOutlineView, self).keyDown_(event)

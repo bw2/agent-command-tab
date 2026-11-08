@@ -1,6 +1,6 @@
 """A button that shows the pointing hand while the pointer is over it (user request, 2026-10-19).
 
-Used for the list's icon buttons (a row's arrow, a window's preview button, the "+" row) and the
+Used for the list's icon buttons (a row's arrow, the "+" row's button) and the
 top and bottom bars' buttons. The sidebar window turns cursor rects off (they reset its edge's
 left-right arrows), so the hand is set from a tracking area, which also works while another app
 is in front (sidebar_panel.allow_pointer_changes_while_another_app_is_in_front); the cursor rect

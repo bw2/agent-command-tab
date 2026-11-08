@@ -1,6 +1,6 @@
 """Which records of a Claude Code transcript start a turn, the one rule for both readers of a
-transcript's end: when the current turn began (context_window_usage) and the preview's last
-prompt (session_preview_computation). Pure functions."""
+transcript's end: when the current turn began (context_window_usage) and which tool call is
+open in it (open_tool_call_reading). Pure functions."""
 
 import re
 
@@ -14,7 +14,6 @@ GENERATED_USER_TEXT_PATTERN = re.compile(
 # A slash command or skill the user typed is written as "<command-message>…<command-name>/x</command-name>
 # <command-args>…</command-args>".
 COMMAND_NAME_PATTERN = re.compile(r"<command-name>(.*?)</command-name>", re.S)
-COMMAND_ARGUMENTS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 TURN_STARTING_NOTIFICATION_START = "<task-notification>"  # a background task's notification starts a turn too
 # So do another Claude Code session's message ("peer") and its "[Cross-session idle notice]"
 # ("system"), meta records that Claude Code 2.1 writes with these turnOrigin values.
@@ -44,7 +43,7 @@ def classify_user_record(record, blocks):
 
     Returns:
         "tool_result" for a tool's result; "prompt" for text the user typed; "command" for a
-        slash command or skill the user typed (describe_typed_command); "notification" for a
+        slash command or skill the user typed; "notification" for a
         background task's notification, a message from another Claude Code session (its
         SendMessage tool's) or a notice that one went idle (meta records with turnOrigin "peer"
         and "system"; code review, 2026-10-28); or None for anything else: not a user record, a
@@ -67,9 +66,3 @@ def classify_user_record(record, blocks):
     if text and not GENERATED_USER_TEXT_PATTERN.match(text):
         return "prompt"
     return None
-
-
-def describe_typed_command(text):
-    """Returns "/name arguments" for a typed slash command's record text."""
-    command_arguments_match = COMMAND_ARGUMENTS_PATTERN.search(text)
-    return f"{COMMAND_NAME_PATTERN.search(text).group(1)} {command_arguments_match.group(1) if command_arguments_match else ''}"

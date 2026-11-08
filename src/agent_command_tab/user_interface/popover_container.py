@@ -16,9 +16,8 @@ from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeIns
 
 from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL, HOOKS_CANT_RUN, HOOKS_SEND_NO_EVENTS
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
-from agent_command_tab.user_interface.control_helpers import (ROWS_OPEN_SYMBOL_NAMES, add_popup_choices,
-                                                              read_popup_choice, select_popup_choice,
-                                                              show_symbol_on_button)
+from agent_command_tab.user_interface.control_helpers import (add_popup_choices, is_a_command_press_of_letter,
+                                                              read_popup_choice, select_popup_choice, show_symbol_on_button)
 from agent_command_tab.user_interface.named_colors import appearance_is_dark
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 
@@ -43,10 +42,13 @@ TOP_BAR_DRAG_DISTANCE_TO_DETACH = 6  # points: a shorter drag is a click
 PANEL_SIDE_MARGIN = 6  # between the panel's edges and the expand or collapse, the Settings and the pause or resume buttons
 EXPAND_OR_COLLAPSE_ALL_BUTTON_SIZE = (24, 22)
 # The top bar's one expand or collapse button (user requests, 2026-10-19): (SF Symbol, text
-# fallback, tooltip), by whether the list is fully expanded. The symbol shows the current state;
-# the fallback text and the tooltip say what a click does.
-EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: (ROWS_OPEN_SYMBOL_NAMES[False], "Expand all", "Expand all"),
-                                True: (ROWS_OPEN_SYMBOL_NAMES[True], "Collapse all", "Collapse all")}
+# fallback, tooltip), by whether the list is fully expanded. The symbol, the fallback text and
+# the tooltip all say what a click does (the symbol showed the current state until 2026-11-07,
+# user request). Command-E and Command-Shift-E press it in the list that has the keyboard, and
+# the tooltips say so (user requests, 2026-11-07).
+EXPAND_OR_COLLAPSE_ALL_KEY = "e"
+EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: ("rectangle.expand.vertical", "Expand all", "Expand all (⌘-e)"),
+                                True: ("rectangle.compress.vertical", "Collapse all", "Collapse all (⌘-e)")}
 # The bottom bar's pause or resume button, at the right (user requests, 2026-10-20 and
 # 2026-10-21): (SF Symbol, text fallback, tooltip), by what a click does: pause the agent
 # sessions of the selected rows that run, or, once all of those are paused, resume them (the
@@ -105,6 +107,18 @@ def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
     if list_listed_agent_tools_whose_hooks_are(HOOKS_SEND_NO_EVENTS):
         return "No events from the Claude Code hooks", HOOKS_SEND_NO_EVENTS_TOOL_TIP, []
     return "", HOOKS_NOTE_TOOL_TIP, []
+
+
+class ExpandOrCollapseAllButton(PointingHandButton):
+    """The top bar's expand or collapse button, which Command-E and Command-Shift-E press too
+    while it shows (a button's own key equivalent matches only one of them)."""
+
+    def performKeyEquivalent_(self, event):
+        if not self.isHiddenOrHasHiddenAncestor() and is_a_command_press_of_letter(
+                EXPAND_OR_COLLAPSE_ALL_KEY, event.charactersIgnoringModifiers(), event.modifierFlags()):
+            self.performClick_(None)
+            return True
+        return objc.super(ExpandOrCollapseAllButton, self).performKeyEquivalent_(event)
 
 
 class ListPanelView(NSView):
@@ -235,7 +249,7 @@ class ListPanelController(NSViewController):
         root_view.addSubview_(self.idle_tabs_button)
         self.update_idle_tabs_button()
         button_width, button_height = EXPAND_OR_COLLAPSE_ALL_BUTTON_SIZE
-        self.expand_or_collapse_all_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(  # update_top_and_bottom_bar_buttons gives its look
+        self.expand_or_collapse_all_button = ExpandOrCollapseAllButton.alloc().initWithFrame_(NSMakeRect(  # update_top_and_bottom_bar_buttons gives its look
             width - PANEL_SIDE_MARGIN - button_width, height - TOP_BAR_HEIGHT + 3, button_width, button_height))
         self.expand_or_collapse_all_button.setBordered_(False)
         self.expand_or_collapse_all_button.setTarget_(self)
@@ -371,7 +385,7 @@ class ListPanelController(NSViewController):
 
     def expandOrCollapseAllClicked_(self, sender):
         """Collapses all monitor and window rows when the list is fully expanded, and otherwise
-        expands them all (the tabs' previews stay as they are)."""
+        expands them all (the tab rows stay open or closed as they are)."""
         self.list_controller.set_all_expanded(not self.list_controller.is_fully_expanded())
 
     def pauseOrResumeSelectedRowsClicked_(self, sender):

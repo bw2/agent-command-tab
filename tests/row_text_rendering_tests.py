@@ -11,7 +11,6 @@ from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_C
                                                                  build_child_process_row_text_parts,
                                                                  build_monitor_row_text_parts,
                                                                  build_tree_connector_text,
-                                                                 build_tree_continuation_text,
                                                                  build_window_row_text_parts,
                                                                  choose_context_fill_percent_color_name,
                                                                  format_clock_time, format_context_text,
@@ -73,11 +72,6 @@ class TreeConnectorTests(unittest.TestCase):
         self.assertEqual(build_tree_connector_text([True]), "└─ ")
         self.assertEqual(build_tree_connector_text([False, True]), "│  └─ ")
         self.assertEqual(build_tree_connector_text([True, False]), "   ├─ ")
-
-    def test_continuation_under_a_row_carries_the_vertical_lines_down(self):
-        self.assertEqual(build_tree_continuation_text([False]), "│  ")
-        self.assertEqual(build_tree_continuation_text([True]), "   ")
-        self.assertEqual(build_tree_continuation_text([False, True]), "│     ")
 
 
 class RowTextPartsTests(unittest.TestCase):

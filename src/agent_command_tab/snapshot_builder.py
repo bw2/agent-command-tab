@@ -23,7 +23,6 @@ import os
 
 from agent_command_tab.agent_adapters import find_agent_tool_adapter_for_tab
 from agent_command_tab.monitor_assignment import assign_windows_to_monitors_by_largest_overlap
-from agent_command_tab.session_preview_computation import choose_preview_text
 from agent_command_tab.session_status_computation import (CLAUDE_AGENTS_STATUSES_TO_STATES,
                                                           compute_session_status_from_sources,
                                                           map_iterm2_status_value_to_state)
@@ -62,15 +61,15 @@ def choose_tool_the_agent_is_waiting_on(state, screen_reading, now):
     """Returns (name, started at) of the tool a working agent waits on, or None: the command it
     started, found from its processes at once ("running_command"), else the newest tool call of
     any kind (a subagent, a web fetch, an MCP tool) that its conversation file has shown open for
-    SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING or more ("conversation_preview")."""
+    SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING or more ("open_tool_call")."""
     if state != "working":
         return None
     if screen_reading.get("running_command"):
         return screen_reading["running_command"]
-    preview_fields = screen_reading.get("conversation_preview") or {}
-    open_tool_started_at = preview_fields.get("open_tool_started_at")
+    open_tool_call = screen_reading.get("open_tool_call") or {}
+    open_tool_started_at = open_tool_call.get("open_tool_started_at")
     if open_tool_started_at is not None and now - open_tool_started_at >= SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING:
-        return preview_fields["open_tool_name"], open_tool_started_at
+        return open_tool_call["open_tool_name"], open_tool_started_at
     return None
 
 
@@ -291,7 +290,6 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         last_time_tab_was_seen=session_tracking.get("last_time_tab_was_seen"),
         running_tool_name=running_tool[0] if running_tool else "",
         running_tool_started_at=running_tool[1] if running_tool else None,
-        preview_line=choose_preview_text(state, (screen_reading or {}).get("conversation_preview")),
         context_tokens=(screen_reading or {}).get("context_tokens"),
         context_fill_percent=compute_context_fill_percent((screen_reading or {}).get("context_tokens"),
                                                           (screen_reading or {}).get("context_window_tokens")),
@@ -306,7 +304,7 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
 
 def build_exited_agent_session_entry(last_agent_session_entry, ended_at, highlighted_session_id, gathered_tab):
     """Returns the row of an agent that ended without a normal session end (a crash, or
-    killed), kept for EXITED_ROW_SECONDS: what its row last showed (name, tool, folder, preview),
+    killed), kept for EXITED_ROW_SECONDS: what its row last showed (name, tool, folder),
     gray and "exited" since it ended, without the readings of a running agent. A title the user
     gives the tab meanwhile (Rename stays in its menu) is its name.
 

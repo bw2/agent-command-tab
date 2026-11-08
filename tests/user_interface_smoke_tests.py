@@ -47,10 +47,10 @@ from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKIN
 from agent_command_tab.saved_agent_sessions_store import rename_saved_session
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
                                                                          DIM_DOT_ALPHA,
-                                                                         GAP_BEFORE_DETAILS, GAP_BETWEEN_COLUMNS, ROW_HEIGHT,
+                                                                         GAP_BEFORE_DETAILS, ROW_HEIGHT, ROW_RIGHT_MARGIN,
                                                                          SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW,
                                                                          SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW, SMALLEST_TAB_NAME_WIDTH,
-                                                                         TAB_ROW_HEIGHT_WITH_PREVIEW, TEXT_FIELD_INSETS,
+                                                                         TEXT_FIELD_INSETS,
                                                                          AgentSessionListController, RowButton,
                                                                          RowViewWithSelectionOutline, build_index_set,
                                                                          choose_room_for_a_columns_texts,
@@ -906,16 +906,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.list_controller.set_all_expanded(False)  # the expand or collapse button's look changes
             self.assertEqual(show_symbol.call_count, 2)
 
-    def test_hide_idle_keeps_hidden_rows_collapsed_or_with_their_previews_open(self):
-        outline_view = self.apply_snapshot_with_previews()
-        self.click_row_arrow(5)  # opens analysis-0's preview (idle)
+    def test_hide_idle_keeps_hidden_rows_collapsed_or_with_their_process_rows_open(self):
+        outline_view = self.apply_snapshot_with_processes_on_three_tabs()
+        self.click_row_arrow(5)  # opens analysis-0's process rows (idle)
         self.click_row_arrow(4)  # collapses tandem-repeats (both tabs idle)
         self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)
         self.assertEqual(outline_view.numberOfRows(), 5)  # w1, its three tabs, "+"
         self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
         self.assertEqual(outline_view.numberOfRows(), 6)  # tandem-repeats comes back collapsed
         self.click_row_arrow(4)
-        self.assertEqual(outline_view.rectOfRow_(5).size.height, TAB_ROW_HEIGHT_WITH_PREVIEW)  # and the preview open
+        self.assertEqual(outline_view.itemAtRow_(6).kind, "process")  # and analysis-0 open
         self.click_row_arrow(4)  # collapsed again
         self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)
         self.list_controller.set_all_expanded(False)  # Collapse All: agent-command-tab, and tandem-repeats stays collapsed
@@ -1649,18 +1649,19 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual([(action.action, action.arguments) for action in self.submitted_actions],
                              [("rename_tab", {"new_title": f"renamed {collapse_number}"})])
 
-    def test_opening_previews_during_a_rename_submits_the_rename_first(self):
-        self.apply_snapshot_with_previews()
+    def test_opening_a_tab_row_during_a_rename_submits_the_rename_first(self):
+        self.apply_snapshot_with_processes_on_three_tabs()
         self.window.contentView().layoutSubtreeIfNeeded()
         tab_item = self.list_controller.outline_view.itemAtRow_(1)
         self.list_controller.begin_rename(tab_item)
         self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False).name_text_field.currentEditor() \
             .setString_("renamed")
-        self.list_controller.set_previews_open([tab_item], True)
+        self.list_controller.set_tab_rows_open([tab_item], True)
         self.assertFalse(self.list_controller.rename_in_progress)
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].arguments),
                          ("rename_tab", {"new_title": "renamed"}))
-        self.assertTrue(self.lay_out_row_view(1).has_preview_line)  # refilled now that its name isn't being edited
+        # Refilled now that its name isn't being edited: the arrow points down.
+        self.assertEqual(self.lay_out_row_view(1).disclosure_button.image().accessibilityDescription(), "Close")
 
     def test_expand_or_collapse_from_the_right_click_menu(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -1745,32 +1746,27 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         details_text_field = row_view.details_text_field
         self.assertGreaterEqual(details_text_field.frame().size.width, details_text_field.fittingSize().width)
 
-    def apply_snapshot_with_previews(self):
-        """Applies the sample snapshot with previews on both tabs of the second window and the first tab of the first."""
+    def apply_snapshot_with_processes_on_three_tabs(self):
+        """Applies the sample snapshot with a process on both tabs of the second window and on the first tab of the first."""
         snapshot = make_sample_snapshot()
-        previews = {"1": "Bash: python3 -m unittest", "10": "You: compare the calls", "11": "All tests pass."}
         snapshot = snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=tuple(
-            window._replace(agent_sessions=tuple(entry._replace(preview_line=previews.get(entry.tab_id, ""))
-                                                 for entry in window.agent_sessions))
+            window._replace(agent_sessions=tuple(
+                entry._replace(child_processes=(ChildProcessEntry(300 + int(entry.tab_id), "sleep 600", 900.0, False, None, None),))
+                if entry.tab_id in ("1", "10", "11") else entry for entry in window.agent_sessions))
             for window in snapshot.monitors[0].windows)),))
         self.list_controller.apply_snapshot(snapshot)
         return self.list_controller.outline_view
 
-    def test_the_previews_button_has_a_column_of_its_own_at_the_right_edge(self):
-        self.apply_snapshot_with_previews()
+    def test_the_columns_and_their_titles_end_at_the_right_margin(self):
+        self.apply_snapshot_with_processes_on_three_tabs()
         self.window.contentView().layoutSubtreeIfNeeded()
-        button_frame = self.lay_out_row_view(0).preview_toggle_button.frame()  # the first window's row
-        last_column_frame = self.lay_out_row_view(1).column_views["state"].frame()  # its first tab's
-        # The tab rows' columns and their titles end a gap before the button, which has no title.
-        self.assertEqual(last_column_frame.origin.x + last_column_frame.size.width + GAP_BETWEEN_COLUMNS, button_frame.origin.x)
+        tab_row_view = self.lay_out_row_view(1)
+        last_column_frame = tab_row_view.column_views["state"].frame()
+        self.assertEqual(last_column_frame.origin.x + last_column_frame.size.width, tab_row_view.frame().size.width - ROW_RIGHT_MARGIN)
         titles_row_view = self.list_controller.column_titles_row_view
         titles_row_view.layoutSubtreeIfNeeded()
         last_title_frame = titles_row_view.column_title_text_fields["state"].frame()
         self.assertEqual(last_title_frame.origin.x + last_title_frame.size.width, last_column_frame.origin.x + last_column_frame.size.width)
-        self.list_controller.apply_snapshot(make_sample_snapshot())  # no previews, so no button: the columns end at the right margin
-        self.window.contentView().layoutSubtreeIfNeeded()
-        last_column_frame = self.lay_out_row_view(1).column_views["state"].frame()
-        self.assertEqual(last_column_frame.origin.x + last_column_frame.size.width, button_frame.origin.x + button_frame.size.width)
 
     def click_row_arrow(self, row):
         outline_view = self.list_controller.outline_view
@@ -1783,60 +1779,47 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         row_view.layoutSubtreeIfNeeded()
         return row_view
 
-    def test_the_arrow_on_a_tab_opens_its_preview_under_the_name_and_closes_it_again(self):
-        outline_view = self.apply_snapshot_with_previews()
-        self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)  # closed at first
+    def test_the_arrow_on_a_tab_shows_only_while_it_has_process_rows_to_open(self):  # user request, 2026-11-07
+        outline_view = self.apply_snapshot_with_processes_on_three_tabs()
         self.window.contentView().layoutSubtreeIfNeeded()
         arrow = self.lay_out_row_view(1).disclosure_button
         self.assertFalse(arrow.isHidden())
         self.assertEqual(arrow.image().accessibilityDescription(), "Open")
-        self.assertTrue(self.lay_out_row_view(2).disclosure_button.isHidden())  # no preview: no arrow, names still line up
+        self.assertTrue(self.lay_out_row_view(2).disclosure_button.isHidden())  # no processes: no arrow, names still line up
         self.assertEqual(self.lay_out_row_view(1).name_text_field.frame().origin.x,
                          self.lay_out_row_view(2).name_text_field.frame().origin.x)
         self.click_row_arrow(1)
-        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in range(3)],
-                         [ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT])
+        self.assertEqual(outline_view.numberOfRows(), 9)
         self.assertEqual(self.submitted_actions, [])  # opening doesn't show the tab
-        self.window.setContentSize_((POPOVER_WIDTH + 200, 400))
-        self.window.contentView().layoutSubtreeIfNeeded()
-        row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, True)
-        row_view.layoutSubtreeIfNeeded()
-        preview_frame = row_view.preview_text_field.frame()
-        self.assertEqual(row_view.preview_text_field.stringValue(), "Bash: python3 -m unittest")
-        self.assertFalse(row_view.preview_text_field.isHidden())
-        self.assertEqual(row_view.preview_text_field.maximumNumberOfLines(), 2)
-        self.assertEqual(preview_frame.origin.x, row_view.name_text_field.frame().origin.x)  # starts under the name
-        self.assertLessEqual(preview_frame.origin.y + preview_frame.size.height, row_view.name_text_field.frame().origin.y)
-        self.assertEqual(row_view.preview_connector_text_field.stringValue(), "│  \n│  ")  # the window's tree line carries on
-        self.assertEqual(self.list_controller.measure_fully_expanded_list_height(), 7 * ROW_HEIGHT + TAB_ROW_HEIGHT_WITH_PREVIEW)
+        self.assertEqual(self.list_controller.measure_fully_expanded_list_height(), 9 * ROW_HEIGHT)
         self.assertEqual(self.lay_out_row_view(1).disclosure_button.image().accessibilityDescription(), "Close")
         self.click_row_arrow(1)
-        self.assertEqual(outline_view.rectOfRow_(1).size.height, ROW_HEIGHT)
+        self.assertEqual(outline_view.numberOfRows(), 8)
 
     def test_a_single_click_on_a_row_opens_and_closes_nothing(self):
-        outline_view = self.apply_snapshot_with_previews()
+        outline_view = self.apply_snapshot_with_processes_on_three_tabs()
         for row in (0, 1):
             item = outline_view.itemAtRow_(row)
             self.list_controller.find_clicked_item = lambda: item
             self.list_controller.rowClicked_(None)
-        self.assertEqual((outline_view.numberOfRows(), outline_view.rectOfRow_(1).size.height), (8, ROW_HEIGHT))
+        self.assertEqual(outline_view.numberOfRows(), 8)
 
     def test_the_arrow_on_a_window_collapses_just_that_window(self):
-        outline_view = self.apply_snapshot_with_previews()
-        self.click_row_arrow(5)  # a preview in the second window
+        outline_view = self.apply_snapshot_with_processes_on_three_tabs()
+        self.click_row_arrow(5)  # a tab in the second window
         self.click_row_arrow(4)  # the second window
         self.assertEqual((outline_view.numberOfRows(), self.list_controller.collapsed_item_keys), (6, {("window", "w2")}))
         self.click_row_arrow(4)
-        self.assertEqual(outline_view.rectOfRow_(5).size.height, TAB_ROW_HEIGHT_WITH_PREVIEW)  # comes back as it was
+        self.assertEqual(outline_view.itemAtRow_(6).kind, "process")  # the tab comes back open, as it was
 
-    def test_expand_all_and_collapse_all_leave_the_previews_as_they_are(self):
-        outline_view = self.apply_snapshot_with_previews()
-        self.click_row_arrow(1)  # opens one preview
+    def test_expand_all_and_collapse_all_leave_the_tab_rows_as_they_are(self):
+        outline_view = self.apply_snapshot_with_processes_on_three_tabs()
+        self.click_row_arrow(1)  # opens one tab row
         self.list_controller.set_all_expanded(False)
         self.assertEqual(outline_view.numberOfRows(), 3)  # 2 windows and the "+" row
         self.list_controller.set_all_expanded(True)
-        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 5, 6)],
-                         [TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT, ROW_HEIGHT])
+        self.assertEqual([outline_view.itemAtRow_(row).kind for row in range(outline_view.numberOfRows())],
+                         ["window", "tab", "process", "tab", "tab", "window", "tab", "tab", "new_window"])
 
     def test_the_top_bar_has_one_button_that_expands_or_collapses_all(self):
         panel = self.dropdown_panel_controller
@@ -1844,13 +1827,32 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         button = panel.expand_or_collapse_all_button
         panel_width = panel.view().bounds().size.width
         self.assertEqual(button.frame().origin.x + button.frame().size.width, panel_width - PANEL_SIDE_MARGIN)  # the top right corner
-        self.assertEqual(button.toolTip(), "Collapse all")  # fully expanded: a click collapses
+        self.assertEqual(button.toolTip(), "Collapse all (⌘-e)")  # fully expanded: a click collapses
         panel.expandOrCollapseAllClicked_(button)
-        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (3, "Expand all"))
+        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (3, "Expand all (⌘-e)"))
         self.list_controller.toggle_expansion(self.list_controller.outline_view.itemAtRow_(0))  # one window expanded
-        self.assertEqual(button.toolTip(), "Expand all")
+        self.assertEqual(button.toolTip(), "Expand all (⌘-e)")
         panel.expandOrCollapseAllClicked_(button)
-        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (8, "Collapse all"))
+        self.assertEqual((self.list_controller.outline_view.numberOfRows(), button.toolTip()), (8, "Collapse all (⌘-e)"))
+
+    def test_command_e_and_command_shift_e_expand_or_collapse_all(self):  # user request, 2026-11-07
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+
+        def press_e(characters, modifier_flags):
+            return self.window.performKeyEquivalent_(NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+                NSEventTypeKeyDown, NSMakePoint(0, 0), modifier_flags, 0, self.window.windowNumber(), None, characters, characters, False, 14))
+        for characters, modifier_flags, row_count in (("e", NSEventModifierFlagCommand, 3),
+                                                      ("E", NSEventModifierFlagCommand | NSEventModifierFlagShift, 8)):  # Shift makes it "E"
+            self.assertTrue(press_e(characters, modifier_flags))
+            self.assertEqual(outline_view.numberOfRows(), row_count, (characters, modifier_flags))
+        self.assertFalse(press_e("e", NSEventModifierFlagCommand | NSEventModifierFlagControl))  # another key
+        self.assertEqual(outline_view.numberOfRows(), 8)
+        one_window_snapshot = make_sample_snapshot()
+        self.list_controller.apply_snapshot(one_window_snapshot._replace(monitors=(one_window_snapshot.monitors[0]._replace(
+            windows=one_window_snapshot.monitors[0].windows[:1]),)))
+        self.assertFalse(press_e("e", NSEventModifierFlagCommand))  # the button is hidden with one window, and so is its key
+        self.assertEqual(outline_view.numberOfRows(), 5)
 
     def test_a_collapsed_monitor_left_without_windows_doesnt_count_as_collapsed(self):
         two_monitor_snapshot = make_two_monitor_snapshot(make_sample_snapshot())
@@ -1863,7 +1865,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertTrue(self.list_controller.is_fully_expanded())
 
     def test_a_snapshot_waits_while_a_row_button_is_held(self):
-        outline_view = self.apply_snapshot_with_previews()
+        outline_view = self.apply_snapshot_with_processes_on_three_tabs()
         arrow = self.lay_out_row_view(1).disclosure_button
         self.assertIsInstance(arrow, RowButton)
         self.assertIs(arrow.target(), self.list_controller)
@@ -1927,31 +1929,6 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel.show_message("")
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))  # one window per monitor
         self.assertFalse(button.isHidden())
-
-    def test_an_expanded_window_row_has_a_button_that_opens_or_closes_its_tabs_previews(self):
-        outline_view = self.apply_snapshot_with_previews()
-        self.window.contentView().layoutSubtreeIfNeeded()
-        lay_out_row_view = self.lay_out_row_view
-        window_row_view = lay_out_row_view(4)  # tandem-repeats: both of its tabs have previews
-        button = window_row_view.preview_toggle_button
-        self.assertFalse(button.isHidden())
-        self.assertLessEqual(window_row_view.name_text_field.frame().origin.x + window_row_view.name_text_field.frame().size.width,
-                             button.frame().origin.x)
-        self.assertEqual(button.image().accessibilityDescription(), "Show the tabs' previews")
-        self.click_row_arrow(5)  # one open: the button still opens the rest
-        with unittest.mock.patch.object(outline_view, "rowForView_", return_value=4):
-            self.list_controller.previewToggleButtonClicked_(button)
-            self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 5, 6)],
-                             [ROW_HEIGHT, TAB_ROW_HEIGHT_WITH_PREVIEW, TAB_ROW_HEIGHT_WITH_PREVIEW])
-            self.assertEqual(lay_out_row_view(4).preview_toggle_button.image().accessibilityDescription(),
-                             "Hide the tabs' previews")
-            self.list_controller.previewToggleButtonClicked_(button)
-        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (5, 6)], [ROW_HEIGHT, ROW_HEIGHT])
-        self.list_controller.toggle_expansion(outline_view.itemAtRow_(4))  # collapsed: no button
-        self.assertTrue(lay_out_row_view(4).preview_toggle_button.isHidden())
-        self.assertTrue(lay_out_row_view(1).preview_toggle_button.isHidden())  # a tab row
-        self.list_controller.apply_snapshot(make_sample_snapshot())  # no previews at all: nothing to open
-        self.assertTrue(lay_out_row_view(0).preview_toggle_button.isHidden())
 
     def lay_out_tab_row_views(self, snapshot):
         self.list_controller.apply_snapshot(snapshot)
@@ -2041,15 +2018,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     # ----- process rows, background lights, exited rows and the hooks note (user requests, 2026-10-27) -----
 
-    def apply_snapshot_with_child_processes(self, child_processes=None, preview_line=""):
-        """Applies the sample snapshot with child processes (and a preview, if given) on the first tab."""
+    def apply_snapshot_with_child_processes(self, child_processes=None):
+        """Applies the sample snapshot with child processes on the first tab."""
         snapshot = make_sample_snapshot()
         child_processes = child_processes if child_processes is not None else (
             ChildProcessEntry(201, "caffeinate -i -t 300", 900.0, False, None, None),
             ChildProcessEntry(202, "python3 -c import time; time.sleep(600) " + "x" * 300, 950.0, True, 300 * 1024 ** 2, 12))
         window_one, window_two = snapshot.monitors[0].windows
         window_one = window_one._replace(agent_sessions=(
-            window_one.agent_sessions[0]._replace(child_processes=child_processes, preview_line=preview_line),)
+            window_one.agent_sessions[0]._replace(child_processes=child_processes),)
             + window_one.agent_sessions[1:])
         self.list_controller.apply_snapshot(snapshot._replace(monitors=(snapshot.monitors[0]._replace(windows=(window_one, window_two)),)))
         return self.list_controller.outline_view
@@ -2422,16 +2399,6 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.click_row_arrow(1)
         self.assertEqual(outline_view.numberOfRows(), 8)  # held while the button is down
         self.list_controller.row_released()
-        self.assertEqual(outline_view.numberOfRows(), 10)
-
-    def test_the_line_down_to_the_process_rows_runs_beside_the_preview(self):
-        outline_view = self.apply_snapshot_with_child_processes(preview_line="Bash: sleep 600")
-        self.click_row_arrow(1)
-        self.assertEqual([outline_view.rectOfRow_(row).size.height for row in (1, 2, 3)],
-                         [TAB_ROW_HEIGHT_WITH_PREVIEW, ROW_HEIGHT, ROW_HEIGHT])
-        self.assertEqual(self.lay_out_row_view(1).preview_connector_text_field.stringValue(), "│  │\n│  │")
-        self.list_controller.set_all_expanded(False)  # collapsing all leaves the tab row open
-        self.list_controller.set_all_expanded(True)
         self.assertEqual(outline_view.numberOfRows(), 10)
 
     def test_background_tasks_light_up_after_the_tab_name(self):

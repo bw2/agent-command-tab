@@ -1,12 +1,12 @@
 """The shared list of monitors, windows and agent session tabs.
 
 Three instances exist (dropdown, sidebar and list window), each with its own NSOutlineView,
-expanded rows, open previews and selection, fed the same snapshots. Main thread only.
+expanded rows, open tab rows and selection, fed the same snapshots. Main thread only.
 
 How snapshots are applied without breaking expansion, renames or drags:
 - one OutlineListItem per (kind, ID) lives as long as that ID exists, so expansion and
   selection, which NSOutlineView tracks by item identity, survive updates;
-- when the rows' structure (which rows, in which order, how tall) is unchanged, the items'
+- when the rows' structure (which rows, in which order) is unchanged, the items'
   entries are replaced and only the visible rows are redrawn; when rows came, went or moved
   within their parent (Hide Idle, Show Idle, a tab opening or closing, a sort), just those are
   removed, moved and inserted (update_rows_in_place); otherwise (rows changing parent, as when
@@ -51,7 +51,7 @@ from agent_command_tab.settings_store import DEFAULT_SETTINGS
 from agent_command_tab.snapshot_data_classes import (build_window_title_shown_in_the_list, iterate_agent_session_entries,
                                                      rename_window_entry, replace_title_in_snapshot)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image, describe_agent_tool_icon
-from agent_command_tab.user_interface.control_helpers import ROWS_OPEN_SYMBOL_NAMES, show_symbol_on_button
+from agent_command_tab.user_interface.control_helpers import is_a_command_press_of_letter, show_symbol_on_button
 from agent_command_tab.user_interface.named_colors import build_color_from_name, choose_list_background_color
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 from agent_command_tab.user_interface.process_info_alert import shorten_command_for_alert
@@ -65,23 +65,13 @@ from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_C
 from agent_command_tab.user_interface.talk_to_each_other_alert import list_tab_titles_for_alert
 
 ROW_HEIGHT = 20
-PREVIEW_LINE_HEIGHT = 16  # the height of a 12-point line, so the tree's lines carry on beside the preview
-PREVIEW_LINE_COUNT = 2
-PREVIEW_AREA_HEIGHT = PREVIEW_LINE_HEIGHT * PREVIEW_LINE_COUNT
-TAB_ROW_HEIGHT_WITH_PREVIEW = ROW_HEIGHT + PREVIEW_AREA_HEIGHT  # a tab row whose preview is open
 FONT_SIZE = 12
-PREVIEW_FONT_SIZE = 11
-PREVIEW_BUTTON_SIZE = 16  # an expanded window row's button that opens or closes its tabs' previews
+ROW_ICON_BUTTON_SIZE = 16  # the "+" row's button
 # Each row's arrow (closed ›, open ⌄) opens or closes just that row (user request, 2026-10-19);
 # every row keeps the arrow's room, so names line up whether or not a row has one.
 DISCLOSURE_ARROW_SLOT_WIDTH = 14
 DISCLOSURE_ARROW_POINT_SIZE = 9
 DISCLOSURE_ARROW_LOOKS = {False: ("chevron.right", ">", "Open"), True: ("chevron.down", "v", "Close")}  # by whether the row is open
-# The button's (SF Symbol, text fallback, description), by whether all of the window's previews
-# are open. The symbol shows the current state, as the top bar's expand or collapse button's
-# does; the fallback text and the description say what a click does.
-PREVIEW_BUTTON_LOOKS = {False: (ROWS_OPEN_SYMBOL_NAMES[False], "+", "Show the tabs' previews"),
-                        True: (ROWS_OPEN_SYMBOL_NAMES[True], "−", "Hide the tabs' previews")}
 ROW_LEFT_MARGIN = 8
 GAP_AFTER_PREFIX = 2
 NAME_FIELD_PADDING = 4
@@ -308,18 +298,6 @@ class RowViewWithSelectionOutline(NSTableRowView):
         return NSBackgroundStyleNormal  # the row's labels keep the colors of an unselected row
 
 
-def is_a_rename_shortcut(characters, modifier_flags):
-    """Whether a key press is Command-R or Command-Shift-R, which rename the selected row in the
-    list and in the Saved sessions window (user request, 2026-11-07); not with Option or Control.
-
-    Args:
-        characters: The key event's charactersIgnoringModifiers, which Shift turns into "R".
-        modifier_flags: The key event's modifierFlags.
-    """
-    return (characters in (RENAME_KEY, RENAME_KEY.upper()) and bool(modifier_flags & NSEventModifierFlagCommand)
-            and not modifier_flags & (NSEventModifierFlagOption | NSEventModifierFlagControl))
-
-
 def describe_session_count(count):
     """Returns "1 session" or "3 sessions", for menu item titles, which are in sentence case (user request, 2026-10-27)."""
     return f"{count} session{'' if count == 1 else 's'}"
@@ -348,8 +326,8 @@ def window_row_is_hidden(window_entry, idle_tabs_are_hidden):
 
 def list_window_and_tab_item_keys(snapshot):
     """Returns the item keys of every window and agent session tab in the snapshot, also those
-    whose rows Hide Idle hides, so a hidden window keeps its collapsed state and a hidden tab its
-    open preview for when its row shows again."""
+    whose rows Hide Idle hides, so a hidden window keeps its collapsed state and a hidden tab
+    whether it is open for when its row shows again."""
     return ({("window", window_entry.window_id) for monitor_entry in snapshot.monitors for window_entry in monitor_entry.windows}
             | {("tab", entry.tab_id) for _, _, entry in iterate_agent_session_entries(snapshot)})
 
@@ -443,7 +421,7 @@ class RowButton(PointingHandButton):
 def make_row_icon_button():
     """Returns a small borderless gray button for a row, without a tooltip, since the list's rows
     have no hover popups (user request, 2026-10-19); show_symbol_on_button gives it its icon."""
-    button = RowButton.alloc().initWithFrame_(NSMakeRect(0, 0, PREVIEW_BUTTON_SIZE, PREVIEW_BUTTON_SIZE))
+    button = RowButton.alloc().initWithFrame_(NSMakeRect(0, 0, ROW_ICON_BUTTON_SIZE, ROW_ICON_BUTTON_SIZE))
     button.setBordered_(False)
     button.setImagePosition_(NSImageOnly)
     button.setContentTintColor_(NSColor.secondaryLabelColor())
@@ -511,7 +489,6 @@ class ColumnTitlesRowView(NSView):
         for subview in (self.name_title_text_field, *self.column_title_text_fields.values()):
             self.addSubview_(subview)
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}  # set by the list controller
-        self.room_for_the_previews_button = 0  # set by the list controller; the column at the right edge has no title
         self.laid_out_for_list_width = None  # the list's width at the last layout
         self.on_title_clicked = lambda title_name: None  # set by the list controller
         self.title_name_under_press = None
@@ -579,8 +556,7 @@ class ColumnTitlesRowView(NSView):
     def layout(self):
         objc.super(ColumnTitlesRowView, self).layout()
         self.laid_out_for_list_width = self.outline_view.frame().size.width
-        placed_columns = place_columns_from_the_right(
-            self.laid_out_for_list_width - ROW_RIGHT_MARGIN - self.room_for_the_previews_button, self.column_widths)
+        placed_columns = place_columns_from_the_right(self.laid_out_for_list_width - ROW_RIGHT_MARGIN, self.column_widths)
         # "Name" is centered over the room the rows' names have, up to the columns.
         names_right_edge = min((column_x for column_x, _ in placed_columns.values()), default=ROW_LEFT_MARGIN) - GAP_BEFORE_DETAILS
         name_title_size = self.name_title_text_field.fittingSize()
@@ -599,12 +575,9 @@ class ColumnTitlesRowView(NSView):
 class AgentListRowView(NSTableCellView):
     """A row: [tree connector] [arrow] [dot] [name] [details] ... then, on a tab row and a
     process row, the TAB_ROW_COLUMNS at the right edge. The arrow opens or closes the row (a
-    monitor's or window's rows below it, a tab's preview and process rows); rows without one keep its room. The list
+    monitor's or window's rows below it, a tab's process rows); rows without one keep its room. The list
     controller sets each column's width, 0 for a hidden column, so the columns line up from row
-    to row. A tab row whose preview is open has two more lines, [tree lines] [preview], with the
-    preview starting under the name. An expanded window row with previews ends in a button that
-    opens or closes them all, in a column of its own at the right edge: the tab rows' columns
-    end room_for_the_previews_button before it (user request, 2026-10-26)."""
+    to row."""
 
     def initWithFrame_(self, frame):
         self = objc.super(AgentListRowView, self).initWithFrame_(frame)
@@ -620,23 +593,16 @@ class AgentListRowView(NSTableCellView):
         self.column_views = {column_name: make_label_text_field() if parts_field_name else icon_image_view
                              for column_name, parts_field_name in TAB_ROW_COLUMNS}
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}  # set by the list controller
-        self.room_for_the_previews_button = 0  # set by the list controller
-        self.preview_connector_text_field = make_multiline_label_text_field(PREVIEW_LINE_COUNT)
-        self.preview_text_field = make_multiline_label_text_field(PREVIEW_LINE_COUNT)
-        self.preview_toggle_button = make_row_icon_button()
         self.new_window_button = make_row_icon_button()  # the "+" row's only content
         show_symbol_on_button(self.new_window_button, "plus", "+", "New window with an agent session")
         for subview in (self.prefix_text_field, self.disclosure_button, self.dot_text_field, self.name_text_field,
-                        self.details_text_field, *self.column_views.values(), self.preview_connector_text_field,
-                        self.preview_text_field, self.preview_toggle_button, self.new_window_button):
+                        self.details_text_field, *self.column_views.values(), self.new_window_button):
             self.addSubview_(subview)
         self.setTextField_(self.name_text_field)
-        self.has_preview_line = False  # a tab row whose preview is open
         self.shows_columns = False  # tab and process rows
         self.name_runs_over_empty_columns = False  # process rows
         self.details_are_right_aligned = False  # window rows
         self.shows_disclosure_button = False  # a row that can open or close
-        self.shows_preview_toggle_button = False  # an expanded window row with a preview to show
         self.tree_line_x = None  # set on the "+" row: its button is centered on the tree's vertical line
         self.look = None  # what the row shows, set by the list controller's fill_row_view
         return self
@@ -644,15 +610,13 @@ class AgentListRowView(NSTableCellView):
     def layout(self):
         objc.super(AgentListRowView, self).layout()
         bounds = self.bounds()
-        preview_area_height = PREVIEW_AREA_HEIGHT if self.has_preview_line else 0  # at the bottom (y grows upward)
-        main_line_height = bounds.size.height - preview_area_height
         text_height = self.name_text_field.fittingSize().height
-        y = preview_area_height + (main_line_height - text_height) / 2
+        y = (bounds.size.height - text_height) / 2
         prefix_width = self.prefix_text_field.fittingSize().width
         self.prefix_text_field.setFrame_(NSMakeRect(ROW_LEFT_MARGIN, y, prefix_width, text_height))
         arrow_x = ROW_LEFT_MARGIN + prefix_width
         self.disclosure_button.setHidden_(not self.shows_disclosure_button)
-        self.disclosure_button.setFrame_(NSMakeRect(arrow_x, preview_area_height, DISCLOSURE_ARROW_SLOT_WIDTH, main_line_height))
+        self.disclosure_button.setFrame_(NSMakeRect(arrow_x, 0, DISCLOSURE_ARROW_SLOT_WIDTH, bounds.size.height))
         dot_x = arrow_x + DISCLOSURE_ARROW_SLOT_WIDTH
         dot_width = self.dot_text_field.fittingSize().width
         self.dot_text_field.setFrame_(NSMakeRect(dot_x, y, dot_width, text_height))
@@ -660,25 +624,19 @@ class AgentListRowView(NSTableCellView):
         text_right_limit = bounds.size.width - ROW_RIGHT_MARGIN  # where the name and details end; a window's details are right-aligned there
         self.new_window_button.setHidden_(self.tree_line_x is None)
         if self.tree_line_x is not None:
-            self.new_window_button.setFrame_(NSMakeRect(self.tree_line_x - PREVIEW_BUTTON_SIZE / 2,
-                                                        (bounds.size.height - PREVIEW_BUTTON_SIZE) / 2,
-                                                        PREVIEW_BUTTON_SIZE, PREVIEW_BUTTON_SIZE))
-        self.preview_toggle_button.setHidden_(not self.shows_preview_toggle_button)
-        if self.shows_preview_toggle_button:  # at the right edge
-            button_x = bounds.size.width - ROW_RIGHT_MARGIN - PREVIEW_BUTTON_SIZE
-            self.preview_toggle_button.setFrame_(NSMakeRect(
-                button_x, preview_area_height + (main_line_height - PREVIEW_BUTTON_SIZE) / 2, PREVIEW_BUTTON_SIZE, PREVIEW_BUTTON_SIZE))
-            text_right_limit = button_x - GAP_BEFORE_DETAILS
-        placed_columns = (place_columns_from_the_right(bounds.size.width - ROW_RIGHT_MARGIN - self.room_for_the_previews_button,
-                                                       self.column_widths) if self.shows_columns else {})
+            self.new_window_button.setFrame_(NSMakeRect(self.tree_line_x - ROW_ICON_BUTTON_SIZE / 2,
+                                                        (bounds.size.height - ROW_ICON_BUTTON_SIZE) / 2,
+                                                        ROW_ICON_BUTTON_SIZE, ROW_ICON_BUTTON_SIZE))
+        placed_columns = (place_columns_from_the_right(bounds.size.width - ROW_RIGHT_MARGIN, self.column_widths)
+                          if self.shows_columns else {})
         for column_name, parts_field_name in TAB_ROW_COLUMNS:
             column_view = self.column_views[column_name]
             column_view.setHidden_(column_name not in placed_columns)
             if column_name not in placed_columns:
                 continue
             column_x, column_width = placed_columns[column_name]
-            if parts_field_name is None:  # the icon, centered in the row's main line
-                column_view.setFrame_(NSMakeRect(column_x, preview_area_height, column_width, main_line_height))
+            if parts_field_name is None:  # the icon, centered in the row
+                column_view.setFrame_(NSMakeRect(column_x, 0, column_width, bounds.size.height))
             else:
                 column_view.setFrame_(NSMakeRect(column_x, y, column_width, text_height))
         # A process row's command runs on over the columns it leaves empty (Tokens, Status), up to its first one with text.
@@ -702,13 +660,6 @@ class AgentListRowView(NSTableCellView):
         if not self.details_are_right_aligned:  # only as wide as its text, so the lights' hover text shows only over them
             details_width = min(details_fitting_width, details_width)
         self.details_text_field.setFrame_(NSMakeRect(details_x, y, details_width, text_height))
-        self.preview_connector_text_field.setHidden_(not self.has_preview_line)
-        self.preview_text_field.setHidden_(not self.has_preview_line)
-        if self.has_preview_line:  # under the columns too, up to the right margin; a label's text starts at its top
-            self.preview_connector_text_field.setFrame_(NSMakeRect(
-                ROW_LEFT_MARGIN, 0, self.preview_connector_text_field.fittingSize().width, preview_area_height))
-            self.preview_text_field.setFrame_(NSMakeRect(
-                name_x, 0, max(bounds.size.width - ROW_RIGHT_MARGIN - name_x, 0), preview_area_height))
 
 
 class AgentSessionListController(NSObject):
@@ -768,8 +719,9 @@ class AgentSessionListController(NSObject):
         self.top_level_items = []
         self.new_window_row_item = OutlineListItem.alloc().initWithKind_itemId_("new_window", "new_window")
         self.collapsed_item_keys = set()
-        # Tab rows whose preview is open: one more level that opens and closes, closed at first (user request, 2026-10-19).
-        self.open_preview_item_keys = set()
+        # Tab rows that are open, showing their process rows: one more level that opens and closes,
+        # closed at first (user request, 2026-10-19).
+        self.open_tab_item_keys = set()
         self.row_structure = []
         # Each item's row view and the outer row view around it, kept across reloads
         # (outlineView_viewForTableColumn_item_, outlineView_rowViewForItem_).
@@ -818,7 +770,6 @@ class AgentSessionListController(NSObject):
         # The status text, easier to read and still lighter than the front tab's bold name (user
         # request, 2026-10-28). Every weight of the font is as wide, so columns are measured in the regular one.
         self.semibold_font = NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, NSFontWeightSemibold)
-        self.preview_font = NSFont.monospacedSystemFontOfSize_weight_(PREVIEW_FONT_SIZE, NSFontWeightRegular)
         self.column_title_font = NSFont.monospacedSystemFontOfSize_weight_(COLUMN_TITLE_FONT_SIZE, NSFontWeightMedium)
         # The longer line of each column's title with a sort arrow after it: a shown column is at
         # least this wide, so sorting by another column doesn't change the columns' widths.
@@ -830,24 +781,15 @@ class AgentSessionListController(NSObject):
         self.right_aligned_paragraph_style.setAlignment_(NSTextAlignmentRight)
         self.right_aligned_paragraph_style.setLineBreakMode_(NSLineBreakByTruncatingTail)
         # Styled text overrides the field's own line breaking, so a name too long for its room (a
-        # process row's command) ends in "…" rather than at the last space that fits, and the
-        # preview's wrapping is set in its text too.
+        # process row's command) ends in "…" rather than at the last space that fits.
         self.truncating_paragraph_style = NSMutableParagraphStyle.alloc().init()
         self.truncating_paragraph_style.setLineBreakMode_(NSLineBreakByTruncatingTail)
-        self.wrapping_paragraph_style = NSMutableParagraphStyle.alloc().init()
-        self.wrapping_paragraph_style.setLineBreakMode_(NSLineBreakByWordWrapping)
-        self.preview_connector_paragraph_style = NSMutableParagraphStyle.alloc().init()  # one tree line per preview line
-        self.preview_connector_paragraph_style.setMinimumLineHeight_(PREVIEW_LINE_HEIGHT)
-        self.preview_connector_paragraph_style.setMaximumLineHeight_(PREVIEW_LINE_HEIGHT)
         self.agent_tool_icons_by_name = build_agent_tool_icons()
         # Each TAB_ROW_COLUMNS column's width, 0 while it is hidden or no row has text for it (measure_right_columns).
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}
         # In the sidebar and the list window, the room each column keeps for its texts (choose_room_for_a_columns_texts).
         self.room_for_texts_by_column_name = {}
         self.character_width = self.measure_text_width("0", self.regular_font)
-        # The room the window rows' previews button takes at the right edge, in a column of its
-        # own, while a tab has a preview (measure_right_columns; user request, 2026-10-26).
-        self.room_for_the_previews_button = 0
         self.list_width_at_the_last_measure = None  # the outline view's width measure_right_columns last fit the columns to
         self.width_is_set_by_the_user = False  # True for the sidebar's and the list window's lists; the dropdown fits its width to the rows
         self.list_sort_order = "manual"  # set by the Sort pop-up or a column title's click (list_sorting.py)
@@ -997,7 +939,7 @@ class AgentSessionListController(NSObject):
             gone_item.parent_item = None
             gone_item.child_items = []
         self.collapsed_item_keys &= keys_with_saved_row_state
-        self.open_preview_item_keys &= keys_with_saved_row_state
+        self.open_tab_item_keys &= keys_with_saved_row_state
         # A row's views stay while its window or tab is in the snapshot, also while Hide Idle hides
         # it, so Show Idle puts them back rather than building new ones (code review, 2026-10-29).
         for views_by_item_key in (self.row_views_by_item_key, self.outer_row_views_by_item_key):
@@ -1008,9 +950,8 @@ class AgentSessionListController(NSObject):
         if new_row_structure == self.row_structure:
             self.redraw_visible_rows()
         else:
-            heights_before_by_key = {(kind, item_id): height for kind, item_id, _, height in self.row_structure}
             self.row_structure = new_row_structure
-            if not self.update_rows_in_place(children_before_by_parent, heights_before_by_key):
+            if not self.update_rows_in_place(children_before_by_parent):
                 self.reload_and_restore_expansion()
         self.select_the_window_that_showed()
         self.on_snapshot_expansion_or_selection_changed()  # a closed window may be gone
@@ -1096,9 +1037,8 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def list_row_structure(self):
-        """Returns the (kind, ID) keys of all items in display order, with each parent's child
-        count and each row's height (measure_row_height)."""
-        return [(item.kind, item.item_id, len(item.child_items), self.measure_row_height(item)) for item in self.list_all_items()]
+        """Returns the (kind, ID) keys of all items in display order, with each parent's child count."""
+        return [(item.kind, item.item_id, len(item.child_items)) for item in self.list_all_items()]
 
     @objc.python_method
     def list_children_by_parent(self):
@@ -1108,7 +1048,7 @@ class AgentSessionListController(NSObject):
                 **{item: list(item.child_items) for item in self.list_all_items()}}
 
     @objc.python_method
-    def update_rows_in_place(self, children_before_by_parent, heights_before_by_key):
+    def update_rows_in_place(self, children_before_by_parent):
         """Takes the outline view from the rows it shows (children_before_by_parent) to the
         rebuilt ones by removing, moving and inserting only the rows that went, moved or came, so
         the other rows keep their views, layout and drawing: Hide Idle, Show Idle, a tab opening or
@@ -1123,7 +1063,6 @@ class AgentSessionListController(NSObject):
 
         Args:
             children_before_by_parent: list_children_by_parent's, from before the rebuild.
-            heights_before_by_key: Each row's height before the rebuild, by item key.
         """
         children_after_by_parent = self.list_children_by_parent()
         parent_before_by_item = {child: parent for parent, children in children_before_by_parent.items() for child in children}
@@ -1175,12 +1114,6 @@ class AgentSessionListController(NSObject):
             return False
         run_without_animation(lambda: self.apply_expansion_state(
             [children_after_by_parent[parent][index] for parent, _, _, came in changes for index in came]))
-        rows_whose_height_changed = [self.outline_view.rowForItem_(item) for item in parent_after_by_item
-                                     if item.key in heights_before_by_key
-                                     and heights_before_by_key[item.key] != self.measure_row_height(item)]
-        if any(row >= 0 for row in rows_whose_height_changed):
-            run_without_animation(lambda: self.outline_view.noteHeightOfRowsWithIndexesChanged_(
-                build_index_set(row for row in rows_whose_height_changed if row >= 0)))
         self.redraw_visible_rows()  # a row's tree connector follows whether it is its window's last
         return True
 
@@ -1246,10 +1179,10 @@ class AgentSessionListController(NSObject):
             return  # a descendant reported along with the row that actually changed
         self.item_whose_expansion_is_changing = None
         if item.kind == "tab":
-            # A tab row's process rows follow whether it is open (open_preview_item_keys); one the
+            # A tab row's process rows follow whether it is open (open_tab_item_keys); one the
             # outline view collapses itself (the Left arrow key) closes.
             if not is_expanded and not self.applying_expansion_state:
-                self.set_previews_open([item], False)
+                self.set_tab_rows_open([item], False)
             return
         key = item.key
         if is_expanded:
@@ -1351,17 +1284,12 @@ class AgentSessionListController(NSObject):
             row_view = AgentListRowView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, ROW_HEIGHT))
             self.row_views_by_item_key[item.key] = row_view
             row_view.name_text_field.setDelegate_(self)
-            row_view.preview_toggle_button.setTarget_(self)
-            row_view.preview_toggle_button.setAction_("previewToggleButtonClicked:")
             row_view.disclosure_button.setTarget_(self)
             row_view.disclosure_button.setAction_("disclosureButtonClicked:")
             row_view.new_window_button.setTarget_(self)
             row_view.new_window_button.setAction_("newWindowButtonClicked:")
         self.fill_row_view(row_view, item)
         return row_view
-
-    def outlineView_heightOfRowByItem_(self, outline_view, item):
-        return self.measure_row_height(item)
 
     def outlineView_rowViewForItem_(self, outline_view, item):
         # Kept per item, as its row view is: in a new outer row view, AppKit would lay out and draw
@@ -1442,9 +1370,9 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def row_can_open(self, item):
         """Whether the row has an arrow: a monitor or window row (it has rows below it), or a tab
-        row with a preview or processes its agent started."""
+        row whose agent started processes."""
         if item.kind == "tab":
-            return bool(item.entry.preview_line or item.entry.child_processes)
+            return bool(item.entry.child_processes)
         return item.kind != "process" and bool(item.child_items)
 
     @objc.python_method
@@ -1454,14 +1382,14 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def tab_row_is_open(self, item):
-        """Whether a tab row shows its preview and its process rows: it was opened, and has one of them to show."""
-        return item.kind == "tab" and item.key in self.open_preview_item_keys and self.row_can_open(item)
+        """Whether a tab row shows its process rows: it was opened, and its agent has started processes."""
+        return item.kind == "tab" and item.key in self.open_tab_item_keys and self.row_can_open(item)
 
     @objc.python_method
     def toggle_row(self, item):
-        """Opens or closes just this row: a monitor's or window's rows below it, or a tab's preview and process rows."""
+        """Opens or closes just this row: a monitor's or window's rows below it, or a tab's process rows."""
         if item.kind == "tab":
-            self.set_previews_open([item], not self.tab_row_is_open(item))
+            self.set_tab_rows_open([item], not self.tab_row_is_open(item))
         else:
             self.toggle_expansion(item)
 
@@ -1482,7 +1410,7 @@ class AgentSessionListController(NSObject):
                 or not all(item.kind == "tab" and self.row_can_open(item) for item in selected_items)
                 or all(self.tab_row_is_open(item) == is_open for item in selected_items)):
             return False
-        self.set_previews_open(selected_items, is_open)
+        self.set_tab_rows_open(selected_items, is_open)
         return True
 
     @objc.python_method
@@ -1521,7 +1449,7 @@ class AgentSessionListController(NSObject):
                 build_index_set(self.outline_view.rowForItem_(item.parent_item) for item in selected_items), False)
             return True
         is_plain_key = not modifier_flags & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl)
-        if ((is_a_rename_shortcut(characters, modifier_flags)
+        if ((is_a_command_press_of_letter(RENAME_KEY, characters, modifier_flags)
              or characters == RENAME_KEY and is_plain_key
              and time.time() - self.last_name_letter_typed_at >= SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME)
                 and self.rename_the_selected_row()):
@@ -1679,22 +1607,10 @@ class AgentSessionListController(NSObject):
             self.toggle_row(item)
 
     @objc.python_method
-    def preview_is_open(self, item):
-        """Whether a tab row shows its preview: it is open, and there is one to show."""
-        return self.tab_row_is_open(item) and bool(item.entry.preview_line)
-
-    @objc.python_method
-    def measure_row_height(self, item):
-        """A tab row whose preview is open is taller; list_row_structure notes each row's height,
-        so a preview appearing or going away in a snapshot reloads the rows."""
-        return TAB_ROW_HEIGHT_WITH_PREVIEW if self.preview_is_open(item) else ROW_HEIGHT
-
-    @objc.python_method
     def measure_fully_expanded_list_height(self):
         """Returns the height of the rows the list has with every row expanded (list_all_items),
-        with the previews that are open (counting every preview would leave the dropdown mostly
-        empty while they are closed) and the "+" row."""
-        return sum(self.measure_row_height(item) for item in self.list_all_items()) + ROW_HEIGHT
+        with the process rows of the open tab rows, and the "+" row."""
+        return (len(self.list_all_items()) + 1) * ROW_HEIGHT
 
     @objc.python_method
     def build_is_last_child_at_each_level(self, item):
@@ -1723,9 +1639,6 @@ class AgentSessionListController(NSObject):
             return  # never overwrite text the user is typing
         parts = self.build_row_text_parts(item)
         is_in_front = item.kind == "tab" and item.entry.is_in_front
-        tabs_that_open = self.list_tabs_that_open(item) if item.kind == "window" else []
-        shows_preview_toggle_button = bool(tabs_that_open) and self.row_is_open(item)
-        all_previews_are_open = all(self.tab_row_is_open(tab_item) for tab_item in tabs_that_open)
         shows_disclosure_button = self.row_can_open(item)
         # A working dot blinks by its field's opacity alone, which needs neither a refill nor a
         # layout, so a blink isn't part of the look (code review, 2026-10-29).
@@ -1734,9 +1647,8 @@ class AgentSessionListController(NSObject):
             row_view.dot_text_field.setAlphaValue_(dot_alpha)
         # Everything else the row's look depends on: an unchanged row is neither refilled nor laid out
         # again, which keeps the 0.6-second refresh cheap with many rows.
-        look = (parts, item.kind, is_in_front, self.preview_is_open(item),
-                shows_disclosure_button, self.row_is_open(item), shows_preview_toggle_button, all_previews_are_open,
-                tuple(self.column_widths.values()), self.room_for_the_previews_button, bool(item.child_items))
+        look = (parts, item.kind, is_in_front, shows_disclosure_button, self.row_is_open(item),
+                tuple(self.column_widths.values()), bool(item.child_items))
         if look == row_view.look:
             return
         row_view.look = look
@@ -1754,7 +1666,7 @@ class AgentSessionListController(NSObject):
         row_view.dot_text_field.setToolTip_(parts.dot_tool_tip or None)
         row_view.details_text_field.setToolTip_(parts.details_tool_tip or None)
         # The tab in front is marked by its bold name only, in the same color as the others (blue
-        # until 2026-10-26, user request). A process row's command is gray, as a preview is.
+        # until 2026-10-26, user request). A process row's command is gray.
         row_view.name_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             parts.name_text, {NSFontAttributeName: self.choose_name_font(item), NSForegroundColorAttributeName:
                               NSColor.secondaryLabelColor() if item.kind == "process" else NSColor.labelColor(),
@@ -1794,23 +1706,9 @@ class AgentSessionListController(NSObject):
                         (0, len(parts.state_text)))
                 column_view.setAttributedStringValue_(column_text)
         row_view.column_widths = dict(self.column_widths)
-        row_view.room_for_the_previews_button = self.room_for_the_previews_button
-        row_view.has_preview_line = self.preview_is_open(item)
         row_view.shows_columns = item.kind in ("tab", "process")
         row_view.name_runs_over_empty_columns = item.kind == "process"
         row_view.tree_line_x = self.measure_tree_line_x() if item.kind == "new_window" else None
-        row_view.shows_preview_toggle_button = shows_preview_toggle_button
-        if shows_preview_toggle_button:  # it shows whether all are open; a click then closes them all
-            show_symbol_on_button(row_view.preview_toggle_button, *PREVIEW_BUTTON_LOOKS[all_previews_are_open])
-        # Beside the preview, the line down to the tab's process rows under it starts too.
-        preview_connector_text = parts.preview_connector_text + ("│" if item.child_items else "")
-        row_view.preview_connector_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
-            "\n".join([preview_connector_text] * PREVIEW_LINE_COUNT),
-            {NSFontAttributeName: self.regular_font, NSForegroundColorAttributeName: NSColor.tertiaryLabelColor(),
-             NSParagraphStyleAttributeName: self.preview_connector_paragraph_style}))
-        row_view.preview_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
-            parts.preview_text, {NSFontAttributeName: self.preview_font, NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
-                                 NSParagraphStyleAttributeName: self.wrapping_paragraph_style}))
         row_view.setNeedsLayout_(True)
 
     @objc.python_method
@@ -1871,9 +1769,6 @@ class AgentSessionListController(NSObject):
         all_parts = [build_agent_session_row_text_parts(entry, [], now) for entry in agent_session_entries] + [
             build_child_process_row_text_parts(child_process, [], now)
             for entry in agent_session_entries for child_process in entry.child_processes]
-        self.room_for_the_previews_button = (PREVIEW_BUTTON_SIZE + GAP_BETWEEN_COLUMNS
-                                             if any(entry.preview_line or entry.child_processes for entry in agent_session_entries)
-                                             else 0)
         for column_name, parts_field_name in TAB_ROW_COLUMNS:
             if parts_field_name is None:
                 agent_tool_names = {entry.agent_tool_name for entry in agent_session_entries}
@@ -1903,11 +1798,9 @@ class AgentSessionListController(NSObject):
         it when it needs another height. The row is laid out again only when the widths changed:
         the 0.6-second refresh calls this every time (code review, 2026-10-29)."""
         if (self.column_widths != self.column_titles_row_view.column_widths
-                or self.room_for_the_previews_button != self.column_titles_row_view.room_for_the_previews_button
                 # A scroll bar that takes room narrows the list but not the titles row.
                 or self.outline_view.frame().size.width != self.column_titles_row_view.laid_out_for_list_width):
             self.column_titles_row_view.column_widths = dict(self.column_widths)
-            self.column_titles_row_view.room_for_the_previews_button = self.room_for_the_previews_button
             self.column_titles_row_view.setNeedsLayout_(True)
         if self.measure_column_titles_row_height() != self.column_titles_row_view.frame().size.height:
             self.on_column_titles_row_height_changed()
@@ -1932,10 +1825,9 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def measure_right_columns_width(self):
         """Returns the width of a tab row's right-hand columns with the gaps between them (0-width
-        columns are hidden), and the previews button's column after them."""
+        columns are hidden)."""
         shown_column_widths = [width for width in self.column_widths.values() if width]
-        return (sum(shown_column_widths) + GAP_BETWEEN_COLUMNS * max(len(shown_column_widths) - 1, 0)
-                + self.room_for_the_previews_button)
+        return sum(shown_column_widths) + GAP_BETWEEN_COLUMNS * max(len(shown_column_widths) - 1, 0)
 
     @objc.python_method
     def choose_name_font(self, item):
@@ -1962,21 +1854,19 @@ class AgentSessionListController(NSObject):
         dropdown keeps one size while rows are expanded and collapsed (user request, milestone 2)."""
         measure_text_width = self.measure_text_width
         widest_row_width = 0
-        preview_buttons_width = GAP_BEFORE_DETAILS + PREVIEW_BUTTON_SIZE
         for item in self.list_all_items():
             if item.kind == "process":
                 continue  # a command, often long, is cut short to the room the other rows leave it
-            if item.kind == "window":  # expanded, it ends in the preview button
+            if item.kind == "window":  # its details differ while it is expanded and collapsed
                 last_child_flags = self.build_is_last_child_at_each_level(item)
-                parts_and_button_widths = [(build_window_row_text_parts(item.entry, last_child_flags, is_expanded),
-                                            preview_buttons_width if is_expanded else 0) for is_expanded in (True, False)]
+                all_parts = [build_window_row_text_parts(item.entry, last_child_flags, is_expanded) for is_expanded in (True, False)]
             else:
-                parts_and_button_widths = [(self.build_row_text_parts(item), 0)]
-            for parts, button_width in parts_and_button_widths:
+                all_parts = [self.build_row_text_parts(item)]
+            for parts in all_parts:
                 row_width = (self.measure_name_x(parts.connector_text, self.widest_dot_glyph if parts.dot_glyph else "")
                              + measure_text_width(parts.name_text, self.choose_name_font(item)) + NAME_FIELD_PADDING
                              + GAP_BEFORE_DETAILS + measure_text_width(parts.details_text + ROOM_FOR_GROWING_DETAILS, self.regular_font)
-                             + 2 * TEXT_FIELD_INSETS + ROW_RIGHT_MARGIN + button_width)
+                             + 2 * TEXT_FIELD_INSETS + ROW_RIGHT_MARGIN)
                 if parts.state_text:  # the columns at the right edge
                     row_width += GAP_BEFORE_DETAILS + self.measure_right_columns_width()
                 widest_row_width = max(widest_row_width, row_width)
@@ -2011,19 +1901,16 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def find_where_the_keyboard_opens_a_rows_menu(self, row):
         """Returns the point in the outline view where Control-Return opens a row's menu: the middle
-        of the row's main line, across from the middle of the Tokens column, where a tab row shows
-        its tokens, or the middle of the row while the Tokens column is hidden (user request,
-        2026-10-29)."""
+        of the row, across from the middle of the Tokens column, where a tab row shows its tokens,
+        or the middle of the row while the Tokens column is hidden (user request, 2026-10-29)."""
         row_rect = self.outline_view.rectOfRow_(row)
-        main_line_height = row_rect.size.height - (PREVIEW_AREA_HEIGHT if self.preview_is_open(self.outline_view.itemAtRow_(row)) else 0)
-        placed_columns = place_columns_from_the_right(
-            self.outline_view.frame().size.width - ROW_RIGHT_MARGIN - self.room_for_the_previews_button, self.column_widths)
+        placed_columns = place_columns_from_the_right(self.outline_view.frame().size.width - ROW_RIGHT_MARGIN, self.column_widths)
         if "context_tokens" in placed_columns:
             tokens_column_x, tokens_column_width = placed_columns["context_tokens"]
             x = tokens_column_x + tokens_column_width / 2
         else:
             x = row_rect.origin.x + row_rect.size.width / 2
-        return (x, row_rect.origin.y + main_line_height / 2)  # the outline view is flipped: its main line is at the top
+        return (x, row_rect.origin.y + row_rect.size.height / 2)
 
     def rowClicked_(self, sender):
         current_event = NSApp.currentEvent()
@@ -2098,8 +1985,8 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def set_all_expanded(self, expanded):
-        """Expands or collapses every monitor and window row, leaving the tabs' previews
-        as they are (user request, 2026-10-19). Collapsing keeps the windows collapsed before,
+        """Expands or collapses every monitor and window row, leaving the tab rows open or
+        closed as they are (user request, 2026-10-19). Collapsing keeps the windows collapsed before,
         and collapses those whose rows Hide Idle hides too, also those hidden since they first
         appeared, which have no row item yet, as expanding expands them (code review, 2026-10-29)."""
         self.finish_rename()
@@ -2126,7 +2013,7 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def is_fully_expanded(self):
-        """Whether every monitor and window row with rows below it is expanded (the previews don't
+        """Whether every monitor and window row with rows below it is expanded (open tab rows don't
         count). A collapsed monitor whose windows all moved away keeps its choice for later but
         hides nothing now."""
         return not any(self.items_by_key[key].child_items for key in self.collapsed_item_keys if key in self.items_by_key)
@@ -2137,44 +2024,17 @@ class AgentSessionListController(NSObject):
         return len(self.list_window_items())
 
     @objc.python_method
-    def set_previews_open(self, tab_items, is_open):
-        """Opens or closes these tab rows at once: their previews and process rows."""
+    def set_tab_rows_open(self, tab_items, is_open):
+        """Opens or closes these tab rows at once. Their process rows come or go, so the rows are
+        built again (when the click's button comes up, should a snapshot be held while it is down)."""
         self.finish_rename()
         for tab_item in tab_items:
             if is_open:
-                self.open_preview_item_keys.add(tab_item.key)
+                self.open_tab_item_keys.add(tab_item.key)
             else:
-                self.open_preview_item_keys.discard(tab_item.key)
-        if any(tab_item.entry.child_processes for tab_item in tab_items):
-            # Their process rows come or go: the rows are built again (when the click's button
-            # comes up, should a snapshot be held while it is down).
-            self.show_snapshot(self.held_snapshot or self.snapshot)
-        else:
-            self.apply_row_heights()
-            self.redraw_visible_rows()
+                self.open_tab_item_keys.discard(tab_item.key)
+        self.show_snapshot(self.held_snapshot or self.snapshot)
         self.on_row_count_changed()  # the dropdown fits its height again
-
-    @objc.python_method
-    def apply_row_heights(self):
-        """Has the outline view take each row's current height (measure_row_height) at once,
-        without its animation, and records the rows as shown so the next snapshot doesn't reload them."""
-        self.row_structure = self.list_row_structure()
-        run_without_animation(lambda: self.outline_view.noteHeightOfRowsWithIndexesChanged_(
-            build_index_set(range(self.outline_view.numberOfRows()))))
-
-    def previewToggleButtonClicked_(self, sender):
-        """Closes the tab rows (previews and process rows) in the window whose row holds this
-        button when all are open, and otherwise opens them all."""
-        row = self.outline_view.rowForView_(sender)
-        window_item = self.outline_view.itemAtRow_(row) if row >= 0 else None
-        if window_item is not None and window_item.kind == "window":
-            tabs_that_open = self.list_tabs_that_open(window_item)
-            self.set_previews_open(tabs_that_open, not all(self.tab_row_is_open(tab_item) for tab_item in tabs_that_open))
-
-    @objc.python_method
-    def list_tabs_that_open(self, window_item):
-        """Returns the window's tab items that have a preview or process rows to show."""
-        return [tab_item for tab_item in window_item.child_items if self.row_can_open(tab_item)]
 
     # ----- renaming in place -----
 

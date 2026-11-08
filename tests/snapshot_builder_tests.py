@@ -157,13 +157,6 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         entry = snapshot.monitors[0].windows[0].agent_sessions[0]
         self.assertEqual((entry.status, entry.status_reason), ("stuck", "thinking with no screen change for 13 min"))
 
-    def test_the_preview_follows_the_state(self):
-        preview = {"last_prompt": "Fix it", "message_since_prompt": "Looking now.", "open_tool_call": "Bash: pytest"}
-        for status, expected_preview_line in (("working", "Bash: pytest"), ("idle", "Looking now.")):
-            snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
-                                      screen_readings={"session-1": {"conversation_preview": preview}})
-            self.assertEqual(snapshot.monitors[0].windows[0].agent_sessions[0].preview_line, expected_preview_line)
-
     def test_an_idle_session_with_background_processes_is_background(self):  # user request, 2026-10-28
         def build_entry(status, screen_reading):
             return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
@@ -192,15 +185,15 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         def build_entry(screen_reading, status="working"):
             return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
                                   screen_readings={"session-1": screen_reading}, now=1000.0).monitors[0].windows[0].agent_sessions[0]
-        subagent_call = {"open_tool_call": "Agent: review the diff", "open_tool_name": "Agent", "open_tool_started_at": 995.0}
-        entry = build_entry({"conversation_preview": subagent_call})
+        subagent_call = {"open_tool_name": "Agent", "open_tool_started_at": 995.0}
+        entry = build_entry({"open_tool_call": subagent_call})
         self.assertEqual((entry.running_tool_name, entry.running_tool_started_at), ("Agent", 995.0))
         quick_call = dict(subagent_call, open_tool_started_at=996.0)  # open 4 seconds: likely a file read, still thinking
-        self.assertEqual(build_entry({"conversation_preview": quick_call}).running_tool_name, "")
+        self.assertEqual(build_entry({"open_tool_call": quick_call}).running_tool_name, "")
         # A command found from the agent's processes counts at once, and from its own start.
-        entry = build_entry({"conversation_preview": quick_call, "running_command": ("pytest", 990.0)})
+        entry = build_entry({"open_tool_call": quick_call, "running_command": ("pytest", 990.0)})
         self.assertEqual((entry.running_tool_name, entry.running_tool_started_at), ("pytest", 990.0))
-        self.assertEqual(build_entry({"conversation_preview": subagent_call}, status="idle").running_tool_name, "")
+        self.assertEqual(build_entry({"open_tool_call": subagent_call}, status="idle").running_tool_name, "")
 
     def test_snapshot_converts_to_json(self):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="waiting")])])
@@ -291,8 +284,7 @@ class BuildComputerSnapshotTests(unittest.TestCase):
     def test_an_agent_that_ended_without_a_session_end_keeps_an_exited_row_in_its_tab(self):
         running = [make_window("w", [make_tab("1", "claude", status="working", job_pid=42),
                                      make_tab("2", "claude", status="idle", job_pid=43)])]
-        last_entry = build_snapshot(running, screen_readings={"session-1": {
-            "memory_bytes": 1024 ** 2, "conversation_preview": {"open_tool_call": "Bash: pytest"}}}).monitors[0].windows[0].agent_sessions[0]
+        last_entry = build_snapshot(running, screen_readings={"session-1": {"memory_bytes": 1024 ** 2}}).monitors[0].windows[0].agent_sessions[0]
         # The first tab's agent is gone: its shell is in front again.
         after_the_crash = [make_window("w", [make_tab("1", "-zsh", job_pid=80), make_tab("2", "claude", status="idle", job_pid=43)])]
         snapshot = build_snapshot(after_the_crash, exited_agent_sessions_by_session_id={"session-1": (last_entry, 1500.0)},
@@ -300,8 +292,7 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         exited_entry, other_entry = snapshot.monitors[0].windows[0].agent_sessions
         self.assertEqual((exited_entry.tab_id, exited_entry.status, exited_entry.status_since, exited_entry.ended_abnormally_at),
                          ("1", "exited", 1500.0, 1500.0))
-        self.assertEqual((exited_entry.preview_line, exited_entry.memory_bytes, exited_entry.slash_commands),
-                         ("Bash: pytest", None, ()))  # what it was doing; nothing of a running agent
+        self.assertEqual((exited_entry.memory_bytes, exited_entry.slash_commands), (None, ()))  # nothing of a running agent
         self.assertEqual(other_entry.tab_id, "2")
         # A window whose only agent crashed stays for its row.
         alone = build_snapshot([make_window("w", [make_tab("1", "-zsh", job_pid=80)])],
