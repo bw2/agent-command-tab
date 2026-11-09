@@ -185,6 +185,21 @@ class ChildProcessTests(unittest.TestCase):
                          [(run_in_scratchpad, ["python3", "train.py"]), (script_run, ["bash", f"{scratchpad}/run.sh"])])
         self.assertEqual(choose_detached_processes_of_the_conversation(detached_processes, None, 1000.0), [])  # Codex: no ID
 
+    def test_codex_shared_background_server_started_in_the_scratchpad_is_not_the_conversation_job(self):
+        # As Codex 0.167 starts it: a codex run in the scratchpad starts the server, which keeps that folder.
+        scratchpad = f"/private/tmp/claude-502/-Users-someone-code-x/{CONVERSATION_ID}/scratchpad"
+        codex_program = "/Users/someone/.codex/packages/app-server-daemon/releases/0.167.0-aarch64-apple-darwin/bin/codex"
+        server = ProcessInfo(50, 1, "codex", 1010.0)
+        server_helper = ProcessInfo(51, 1, "codex", 1011.0)
+        job = ProcessInfo(52, 1, "python3", 1012.0)
+        detached_processes = [
+            (server, [codex_program, "app-server", "--listen", "unix://", "--analytics-default-enabled", "--managed-daemon"],
+             scratchpad + "/test_folder"),
+            (server_helper, [codex_program, "app-server", "daemon", "pid-update-loop"], scratchpad + "/test_folder"),
+            (job, ["python3", "train.py"], scratchpad + "/test_folder")]
+        self.assertEqual(choose_detached_processes_of_the_conversation(detached_processes, CONVERSATION_ID, 1000.0),
+                         [(job, ["python3", "train.py"])])
+
     def test_a_real_detached_process_is_found_and_listed_in_the_background(self):
         # A shell starts python3 in the background and ends, so launchd adopts python3.
         started_at = time.time() - 1

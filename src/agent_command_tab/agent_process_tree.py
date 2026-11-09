@@ -530,14 +530,26 @@ def list_detached_processes(earliest_started_at):
     return detached_processes
 
 
+def process_is_codex_shared_background_server(process, arguments):
+    """Returns whether a process is Codex's shared background server (`codex app-server`, which
+    Codex 0.165 and later start when none runs) or its helper (`codex app-server daemon pid-update-loop`)."""
+    return process.name == "codex" and arguments[1:2] == ["app-server"]
+
+
 def choose_detached_processes_of_the_conversation(detached_processes, conversation_id, agent_started_at):
     """Returns [(ProcessInfo, arguments)] for the detached processes (list_detached_processes) that
     an agent's conversation started, oldest first: started after the
     agent, with the conversation's ID in their arguments or current folder, as every path in a
-    Claude Code session's scratchpad folder has it. A job run from elsewhere isn't found."""
+    Claude Code session's scratchpad folder has it. A job run from elsewhere isn't found.
+
+    Codex's shared background server (process_is_codex_shared_background_server) is never one, even
+    when a codex run in the scratchpad started it: launchd adopts it and it keeps that folder, but
+    it serves every Codex session, so it isn't the conversation's job, and a pause of the
+    conversation must not stop it."""
     return sorted(((process, arguments) for process, arguments, current_folder in detached_processes
                    if conversation_id and process.started_at >= agent_started_at
-                   and (conversation_id in " ".join(arguments) or conversation_id in (current_folder or ""))),
+                   and (conversation_id in " ".join(arguments) or conversation_id in (current_folder or ""))
+                   and not process_is_codex_shared_background_server(process, arguments)),
                   key=lambda process_and_arguments: process_and_arguments[0].started_at)
 
 
