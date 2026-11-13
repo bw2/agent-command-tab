@@ -846,16 +846,16 @@ class AppController(NSObject):
                 build_session_info_alert(agent_session_entry, action_result.details, time.time())))
 
     @objc.python_method
-    def copy_messaging_instructions(self, session_id):
+    def copy_contact_info(self, session_id):
         """Puts on the clipboard what another agent session needs to send this one a message
-        (a tab row's "Copy messaging instructions"), or says why it can't take messages."""
+        (a tab row's "Copy contact info"), or says why it can't take messages."""
 
         def put_text_on_the_clipboard(action_result):
             pasteboard = NSPasteboard.generalPasteboard()
             pasteboard.clearContents()
             pasteboard.setString_forType_(action_result.details["text"], NSPasteboardTypeString)
-        self.submit_action_and_report_failure(ActionRequest("build_messaging_instructions", {"session_id": session_id}),
-                                              "The messaging instructions weren't copied", put_text_on_the_clipboard)
+        self.submit_action_and_report_failure(ActionRequest("build_contact_info", {"session_id": session_id}),
+                                              "The contact info wasn't copied", put_text_on_the_clipboard)
 
     @objc.python_method
     def find_launch_command(self, agent_tool_name):

@@ -53,7 +53,7 @@ EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: ("rectangle.expand.vertical", "Expand all
 # sessions of the selected rows that run, or, once all of those are paused, resume them.
 # The tooltips say how (agent_session_pausing).
 PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
-    "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes, their shells and the processes below them (a STOP signal)"),
+    "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes, their shells and any subprocesses that they started (a STOP signal)"),
     "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (a CONT signal)")}
 # The top bar's Hide Idle / Show Idle button, left of the expand or collapse button: (title, tooltip), by
 # whether idle tabs are hidden; the title says what a click does.

@@ -60,8 +60,8 @@ def explain_why_sessions_of_agent_tool_cant_take_messages(agent_tool_name):
     return f"{agent_tool_name} sessions can't take messages from other sessions"
 
 
-def build_messaging_instructions(agent_session):
-    """Returns what a tab row's "Copy messaging instructions" puts on the clipboard, to paste into
+def build_contact_info(agent_session):
+    """Returns what a tab row's "Copy contact info" puts on the clipboard, to paste into
     another agent session so it can message this one: the session as Talk to Each Other names it,
     then how to send it a message, for example 'The Claude Code session "analysis-1d" (process ID
     4242, folder /x, iTerm2 tab "analysis"). To message it, use your SendMessage tool with to:
@@ -71,11 +71,11 @@ def build_messaging_instructions(agent_session):
         agent_session: The AgentSessionForMessages of the session to message.
     """
     description = describe_agent_session_for_messages(agent_session)
-    instructions = f"{description[:1].upper()}{description[1:]}. {explain_how_to_send_a_message_to(agent_session)}"
+    contact_info = f"{description[:1].upper()}{description[1:]}. {explain_how_to_send_a_message_to(agent_session)}"
     if agent_session.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL:
-        # Pasted into a Codex session, the instructions would otherwise ask it for a tool it lacks.
-        return f"{instructions} Only Claude Code sessions have that tool, so a Codex session can't message it."
-    return instructions
+        # Pasted into a Codex session, the contact info would otherwise ask it for a tool it lacks.
+        return f"{contact_info} Only Claude Code sessions have that tool, so a Codex session can't message it."
+    return contact_info
 
 
 def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_too):

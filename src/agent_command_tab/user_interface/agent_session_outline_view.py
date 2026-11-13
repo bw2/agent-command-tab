@@ -144,6 +144,9 @@ COLUMN_TITLES_ROW_PADDING = 2  # above and below the titles
 COLUMN_NAMES_IN_DROP_ORDER = ["created_time", "existence_duration", "memory_usage", "cpu_usage", "context_tokens",
                               "agent_tool_icon", "state"]
 SLASH_COMMANDS_IN_THE_TAB_MENU = list_slash_commands_of_the_built_in_agent_tools()
+# What each of those commands does, for its menu item's tooltip.
+WHAT_EACH_SLASH_COMMAND_DOES = {"/compact": "summarizes its conversation so far to free up room in its context window",
+                                "/clear": "starts a new conversation"}
 AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER = list_agent_tool_names_whose_sessions_can_talk_to_each_other()
 AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED = list_agent_tool_names_whose_conversations_can_be_resumed()
 # Not monitor rows or the "+" row; process rows only alone or with
@@ -156,6 +159,8 @@ RENAME_KEY = "r"  # alone, or with Command or Command-Shift
 SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME = 1.0
 # The hover text of the greyed-out items in the menu of several selected rows that have all exited.
 AGENTS_HAVE_ENDED_TOOL_TIP = "The agents have ended"
+# "Restore sessions…" in the row menus and the menu bar icon's menu.
+RESTORE_SESSIONS_TOOL_TIP = "Opens the Saved sessions window, to continue sessions saved earlier"
 SELECTION_OUTLINE_WIDTH = 1.5
 SELECTION_OUTLINE_INSET = 1
 SELECTION_OUTLINE_CORNER_RADIUS = 4
@@ -705,7 +710,7 @@ class AgentSessionListController(NSObject):
             note the user may have edited, the entries chosen to get it), or None for Cancel.
         show_process_info(session_id, process_id): shows a process row's Info window.
         show_agent_session_info(agent_session_entry): shows a tab row's Session info window.
-        copy_messaging_instructions(session_id): puts on the clipboard what another agent session
+        copy_contact_info(session_id): puts on the clipboard what another agent session
             needs to send this one a message.
         save_agent_sessions(session_ids): saves these agent sessions' conversations to resume
             later (Save session; the owner keeps the saved list).
@@ -2181,13 +2186,18 @@ class AgentSessionListController(NSObject):
             selected_items = self.list_selected_items()
             self.menu_target_processes = list_sessions_and_processes_of_process_rows(
                 selected_items if any(selected_item is item for selected_item in selected_items) else [item])
-            info_item = self.add_menu_item(menu, "Info", "menuShowProcessInfo:")
+            info_item = self.add_menu_item(
+                menu, "Info", "menuShowProcessInfo:",
+                "Shows the process's ID, start time, folder, subprocesses, CPU and memory use, and command line")
             if len(self.menu_target_processes) > 1:
                 info_item.setEnabled_(False)
                 info_item.setToolTip_("Info shows one process at a time")
             menu.addItem_(NSMenuItem.separatorItem())
-            self.add_menu_item(menu, "Kill" if len(self.menu_target_processes) == 1
-                               else f"Kill {len(self.menu_target_processes)} processes", "menuKillProcess:")
+            if len(self.menu_target_processes) == 1:
+                self.add_menu_item(menu, "Kill", "menuKillProcess:", "Ends this process and any subprocesses that it started")
+            else:
+                self.add_menu_item(menu, f"Kill {len(self.menu_target_processes)} processes", "menuKillProcess:",
+                                   "Ends these processes and any subprocesses that they started")
             return
         selected_items = self.list_selected_items()
         if item is not None and len(selected_items) >= 2 and any(selected_item is item for selected_item in selected_items):
@@ -2202,8 +2212,10 @@ class AgentSessionListController(NSObject):
             self.add_new_window_menu_items(menu)  # empty space, or the "+" row
             return
         if item.child_items and item.kind in ("monitor", "window"):  # (a tab row opens with its arrow)
-            self.add_menu_item(menu, "Collapse" if self.outline_view.isItemExpanded_(item) else "Expand",
-                               "menuToggleExpansion:")
+            if self.outline_view.isItemExpanded_(item):
+                self.add_menu_item(menu, "Collapse", "menuToggleExpansion:", "Hides the rows under this one")
+            else:
+                self.add_menu_item(menu, "Expand", "menuToggleExpansion:", "Shows the rows under this one")
             menu.addItem_(NSMenuItem.separatorItem())
         if item.kind == "monitor":  # also when Hide Idle hides all of its window rows
             agent_session_entries = self.list_agent_session_entries_below(item)
@@ -2212,12 +2224,13 @@ class AgentSessionListController(NSObject):
             self.add_save_and_restore_menu_items(menu, agent_session_entries, offers_save=bool(agent_session_entries))
             return
         if item.kind == "window":
-            self.add_menu_item(menu, "Show window", "menuFocus:")
-            self.add_menu_item(menu, "Rename", "menuRename:")
+            self.add_menu_item(menu, "Show window", "menuFocus:", "Brings this window to the front")
+            self.add_menu_item(menu, "Rename", "menuRename:", "Renames this window")
             menu.addItem_(NSMenuItem.separatorItem())
             # A new tab in this window, in the folder of its selected tab's agent session.
             for agent_tool_name in self.owner.list_agent_tool_names():
-                self.add_menu_item(menu, f"New tab with {agent_tool_name} session…", "menuNewAgentSessionInWindow:"
+                self.add_menu_item(menu, f"New tab with {agent_tool_name} session…", "menuNewAgentSessionInWindow:",
+                                   f"Opens {agent_tool_name} in a new tab of this window, in the folder of its current tab"
                                    ).setRepresentedObject_(agent_tool_name)
             menu.addItem_(NSMenuItem.separatorItem())
             self.add_pause_and_resume_menu_items(menu, self.list_agent_session_entries_below(item))
@@ -2226,14 +2239,17 @@ class AgentSessionListController(NSObject):
                 menu.addItem_(NSMenuItem.separatorItem())
                 self.add_submenu(menu, "Move to monitor", "menuMoveToMonitor:", [
                     (monitor_item.entry.name or "Monitor", monitor_item.item_id)
-                    for monitor_item in self.top_level_items if monitor_item is not item.parent_item])
+                    for monitor_item in self.top_level_items if monitor_item is not item.parent_item],
+                    "Moves this window to another monitor")
             menu.addItem_(NSMenuItem.separatorItem())
-            self.add_menu_item(menu, "Close window", "menuCloseWindow:")
+            self.add_menu_item(menu, "Close window", "menuCloseWindow:", "Closes this window and all of its tabs, ending their agents")
             return
         if item.kind == "tab":
-            self.add_menu_item(menu, "Show tab", "menuFocus:")
-            self.add_menu_item(menu, "Rename", "menuRename:")
-            duplicate_item = self.add_menu_item(menu, "Duplicate this tab", "menuDuplicate:")
+            self.add_menu_item(menu, "Show tab", "menuFocus:", "Brings this tab to the front")
+            self.add_menu_item(menu, "Rename", "menuRename:", "Renames this tab")
+            duplicate_item = self.add_menu_item(
+                menu, "Duplicate this tab", "menuDuplicate:",
+                "Opens a copy of this tab right after it: the same agent, continuing a copy of its conversation where the agent can")
             if item.entry.status == "exited":  # the copy would continue its conversation, found through its process
                 duplicate_item.setEnabled_(False)
                 duplicate_item.setToolTip_("The agent has ended")
@@ -2245,24 +2261,27 @@ class AgentSessionListController(NSObject):
                                   and window_item.entry.terminal_name == item.parent_item.entry.terminal_name]
             if other_window_items:
                 self.add_submenu(menu, "Move to window", "menuMoveToWindow:", [
-                    (build_window_title_shown_in_the_list(window_item.entry), window_item.item_id) for window_item in other_window_items])
-            move_to_new_window_item = self.add_menu_item(menu, "Move to new window", "menuMoveToNewWindow:")
+                    (build_window_title_shown_in_the_list(window_item.entry), window_item.item_id) for window_item in other_window_items],
+                    "Moves this tab into another window")
+            move_to_new_window_item = self.add_menu_item(menu, "Move to new window", "menuMoveToNewWindow:",
+                                                         "Moves this tab into a new window of its own")
             if item.parent_item is not None and item.parent_item.entry.total_tab_count < 2:
                 move_to_new_window_item.setEnabled_(False)
                 move_to_new_window_item.setToolTip_("This tab is its window's only tab")
             menu.addItem_(NSMenuItem.separatorItem())
-            session_info_item = self.add_menu_item(menu, "Session info", "menuShowSessionInfo:")
-            copy_messaging_instructions_item = self.add_menu_item(menu, "Copy messaging instructions",
-                                                                  "menuCopyMessagingInstructions:")
-            copy_messaging_instructions_item.setToolTip_(
+            session_info_item = self.add_menu_item(
+                menu, "Session info", "menuShowSessionInfo:",
+                "Shows the session's name, process ID, age, conversation, CPU and memory use, and command line")
+            copy_contact_info_item = self.add_menu_item(
+                menu, "Copy contact info", "menuCopyContactInfo:",
                 "Copies text to paste into another agent session so that it can message this one")
             if item.entry.status == "exited":
-                for menu_item in (session_info_item, copy_messaging_instructions_item):
+                for menu_item in (session_info_item, copy_contact_info_item):
                     menu_item.setEnabled_(False)
                     menu_item.setToolTip_("The agent has ended")
             elif item.entry.agent_tool_name not in AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER:
-                copy_messaging_instructions_item.setEnabled_(False)
-                copy_messaging_instructions_item.setToolTip_(
+                copy_contact_info_item.setEnabled_(False)
+                copy_contact_info_item.setToolTip_(
                     explain_why_sessions_of_agent_tool_cant_take_messages(item.entry.agent_tool_name or "This agent"))
             menu.addItem_(NSMenuItem.separatorItem())
             self.add_pause_and_resume_menu_items(menu, [item.entry])
@@ -2270,7 +2289,8 @@ class AgentSessionListController(NSObject):
             # Typed into the agent only while it waits at its prompt.
             menu.addItem_(NSMenuItem.separatorItem())
             for command in SLASH_COMMANDS_IN_THE_TAB_MENU:
-                command_item = self.add_menu_item(menu, command, "menuSendSlashCommand:")
+                command_item = self.add_menu_item(menu, command, "menuSendSlashCommand:",
+                                                  f"Types {command} into the agent, which {WHAT_EACH_SLASH_COMMAND_DOES[command]}")
                 command_item.setRepresentedObject_(command)
                 if item.entry.status == "exited":
                     command_item.setEnabled_(False)
@@ -2284,7 +2304,8 @@ class AgentSessionListController(NSObject):
                     # With the state as the row names it ("thinking", not "working").
                     shown_state = build_agent_session_row_text_parts(item.entry, [], time.time()).state_text
                     command_item.setToolTip_(f"Only available when the agent waits at its prompt (it is currently {shown_state})")
-            kill_item = self.add_menu_item(menu, "Kill session", "menuKillSession:")
+            kill_item = self.add_menu_item(menu, "Kill session", "menuKillSession:",
+                                           "Ends the agent's process; the tab stays open with its shell")
             if item.entry.status == "exited":
                 kill_item.setEnabled_(False)
                 kill_item.setToolTip_("The agent has ended")
@@ -2307,12 +2328,17 @@ class AgentSessionListController(NSObject):
         """Adds "Pause session" for those of the agent sessions that run and "Resume session" for
         those that are paused, with the count when the row holds several ("Pause 3 sessions")."""
         sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(agent_session_entries)
-        for verb, entries, action_name in (("Pause", sessions_to_pause, "menuPauseSessions:"),
-                                           ("Resume", sessions_to_resume, "menuResumeSessions:")):
+        for verb, entries, action_name, tool_tip_for_one, tool_tip_for_several in (
+                ("Pause", sessions_to_pause, "menuPauseSessions:",
+                 "Pauses the agent process, its shell and any subprocesses that they started (a STOP signal)",
+                 "Pauses the agent processes, their shells and any subprocesses that they started (a STOP signal)"),
+                ("Resume", sessions_to_resume, "menuResumeSessions:",
+                 "Resumes the paused agent process (a CONT signal)", "Resumes the paused agent processes (a CONT signal)")):
             if not entries:
                 continue
             title = f"{verb} session" if len(agent_session_entries) == 1 else f"{verb} {describe_session_count(len(entries))}"
-            self.add_menu_item(menu, title, action_name).setRepresentedObject_([entry.session_id for entry in entries])
+            self.add_menu_item(menu, title, action_name, tool_tip_for_one if len(entries) == 1 else tool_tip_for_several
+                               ).setRepresentedObject_([entry.session_id for entry in entries])
 
     @objc.python_method
     def add_save_menu_item(self, menu, agent_session_entries):
@@ -2325,7 +2351,10 @@ class AgentSessionListController(NSObject):
                             and entry.agent_tool_name in AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED]
         title = ("Save session" if len(agent_session_entries) == 1
                  else f"Save {describe_session_count(len(sessions_to_save))}" if sessions_to_save else "Save sessions")
-        save_item = self.add_menu_item(menu, title, "menuSaveSessions:")
+        save_item = self.add_menu_item(menu, title, "menuSaveSessions:",
+                                       "Saves the conversation so that Restore sessions… can continue it later"
+                                       if len(sessions_to_save) == 1 else
+                                       "Saves the conversations so that Restore sessions… can continue them later")
         save_item.setRepresentedObject_([entry.session_id for entry in sessions_to_save])
         tools_that_can_be_saved = " and ".join(sorted(AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED))
         if not sessions_to_save:
@@ -2352,7 +2381,8 @@ class AgentSessionListController(NSObject):
             menu.addItem_(NSMenuItem.separatorItem())
         if offers_save:
             self.add_save_menu_item(menu, agent_session_entries)
-        restore_item = self.add_menu_item(menu, "Restore sessions…", "menuRestoreSessions:")
+        restore_item = self.add_menu_item(menu, "Restore sessions…", "menuRestoreSessions:",
+                                          RESTORE_SESSIONS_TOOL_TIP)
         if not self.owner.has_saved_agent_sessions():
             restore_item.setEnabled_(False)
             restore_item.setToolTip_("No sessions are saved")
@@ -2373,9 +2403,10 @@ class AgentSessionListController(NSObject):
         menu.addItem_(NSMenuItem.separatorItem())
         for command in SLASH_COMMANDS_IN_THE_TAB_MENU:
             agent_sessions_that_take_it = list_agent_sessions_that_take_slash_command(agent_session_entries, command)
+            what_the_command_does = f"Types {command} into each selected agent, which {WHAT_EACH_SLASH_COMMAND_DOES[command]}"
             command_item = self.add_menu_item(
                 menu, f"{command} {describe_session_count(len(agent_sessions_that_take_it))}" if agent_sessions_that_take_it else command,
-                "menuSendSlashCommandToSelectedSessions:")
+                "menuSendSlashCommandToSelectedSessions:", what_the_command_does)
             command_item.setRepresentedObject_(command)
             if not agent_sessions_that_take_it:
                 agent_tool_names = sorted({entry.agent_tool_name or "these agents" for entry in agent_session_entries})
@@ -2385,24 +2416,28 @@ class AgentSessionListController(NSObject):
                                          if any(command in entry.slash_commands for entry in agent_session_entries)
                                          else f"AgentCommandTab can't type commands into {' or '.join(agent_tool_names)}")
                 continue
-            tool_tip_lines = []
+            tool_tip_lines = [what_the_command_does]
             if len(agent_sessions_that_take_it) < len(agent_session_entries):
                 # Paused sessions, left out too, are counted as not supported.
                 tool_tip_lines.append(f"Typed only into the {len(agent_sessions_that_take_it)} of "
                                       f"{len(agent_session_entries)} where this command is supported.")
             if any(entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT for entry in agent_sessions_that_take_it):
                 tool_tip_lines.append("A session in the middle of a turn will get this command when the turn ends")
-            command_item.setToolTip_("\n".join(tool_tip_lines) or None)
+            command_item.setToolTip_("\n".join(tool_tip_lines))
         kill_item = self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}" if a_window_row_is_selected
-                                       else "Kill sessions", "menuKillSelectedSessions:")
+                                       else "Kill sessions", "menuKillSelectedSessions:",
+                                       "Ends the selected agents' processes; their tabs stay open with their shells")
         if not agent_session_entries:  # every selected row has exited
             kill_item.setEnabled_(False)
             kill_item.setToolTip_(AGENTS_HAVE_ENDED_TOOL_TIP)
         menu.addItem_(NSMenuItem.separatorItem())
-        talk_item = self.add_menu_item(menu, "Talk to each other…", "menuTalkToEachOther:")
+        agent_tool_names_that_can_talk = " or ".join(sorted(AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER))
+        talk_item = self.add_menu_item(menu, "Talk to each other…", "menuTalkToEachOther:",
+                                       f"Sends each selected {agent_tool_names_that_can_talk} session your note "
+                                       "and how to message the others")
         if len(self.list_agent_sessions_that_can_talk_to_each_other(agent_session_entries)) < 2:
             talk_item.setEnabled_(False)
-            talk_item.setToolTip_(f"Select two or more {' or '.join(sorted(AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER))} "
+            talk_item.setToolTip_(f"Select two or more {agent_tool_names_that_can_talk} "
                                   f"sessions to send a 'Talk to each other...' message.")
 
     @objc.python_method
@@ -2477,7 +2512,8 @@ class AgentSessionListController(NSObject):
         each starts that tool in a new window of the first terminal that runs (iTerm2, else a new
         tmux session; DashboardCore.choose_terminal_backend_for_a_new_window)."""
         for agent_tool_name in self.owner.list_agent_tool_names():
-            self.add_menu_item(menu, f"New {agent_tool_name} window", "menuNewWindowWithAgentSession:"
+            self.add_menu_item(menu, f"New {agent_tool_name} window", "menuNewWindowWithAgentSession:",
+                               f"Opens {agent_tool_name} in a new window, in the folder of the tab in front"
                                ).setRepresentedObject_(agent_tool_name)
 
     def newWindowButtonClicked_(self, sender):
@@ -2486,20 +2522,24 @@ class AgentSessionListController(NSObject):
         menu.popUpMenuPositioningItem_atLocation_inView_(None, (0, sender.frame().size.height), sender)
 
     @objc.python_method
-    def add_menu_item(self, menu, title, action_name):
+    def add_menu_item(self, menu, title, action_name, tool_tip=None):
+        """Adds an item sending action_name, with tool_tip, a short summary of what it does, as its
+        mouse-over help (a grayed-out item's caller replaces it with why)."""
         menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action_name, "")
         menu_item.setTarget_(self)
+        menu_item.setToolTip_(tool_tip)
         menu.addItem_(menu_item)
         return menu_item
 
     @objc.python_method
-    def add_submenu(self, menu, title, action_name, titles_and_represented_objects):
-        """Adds an item titled title whose submenu has one item per (title, represented object),
-        each sending action_name."""
+    def add_submenu(self, menu, title, action_name, titles_and_represented_objects, tool_tip):
+        """Adds an item titled title, with tool_tip as its mouse-over help, whose submenu has one
+        item per (title, represented object), each sending action_name."""
         submenu = NSMenu.alloc().initWithTitle_(title)
         for item_title, represented_object in titles_and_represented_objects:
             self.add_menu_item(submenu, item_title, action_name).setRepresentedObject_(represented_object)
         submenu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+        submenu_item.setToolTip_(tool_tip)
         submenu_item.setSubmenu_(submenu)
         menu.addItem_(submenu_item)
 
@@ -2571,8 +2611,8 @@ class AgentSessionListController(NSObject):
     def menuShowSessionInfo_(self, sender):
         self.owner.show_agent_session_info(self.menu_target_item.entry)
 
-    def menuCopyMessagingInstructions_(self, sender):
-        self.owner.copy_messaging_instructions(self.menu_target_item.entry.session_id)
+    def menuCopyContactInfo_(self, sender):
+        self.owner.copy_contact_info(self.menu_target_item.entry.session_id)
 
     def menuShowProcessInfo_(self, sender):
         session_id, child_process_entry = self.menu_target_processes[0]  # the row clicked: Info is off for several

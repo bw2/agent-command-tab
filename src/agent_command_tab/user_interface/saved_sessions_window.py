@@ -319,8 +319,14 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         selected_items = self.list_selected_items()
         self.menu_target_items = (selected_items if any(item is self.menu_clicked_item for item in selected_items)
                                   else [self.menu_clicked_item])
-        for title, action_name in (("Rename", "menuRename:"), ("Delete", "menuDelete:")):
-            menu.addItemWithTitle_action_keyEquivalent_(title, action_name, "").setTarget_(self)
+        deletes_one_session = len(self.menu_target_items) == 1 and self.menu_target_items[0].kind == "session"
+        for title, action_name, tool_tip in (
+                ("Rename", "menuRename:", f"Renames this saved {self.menu_clicked_item.kind}"),
+                ("Delete", "menuDelete:", "Deletes this saved session from the list; its conversation file stays on disk"
+                 if deletes_one_session else "Deletes these saved sessions from the list; their conversation files stay on disk")):
+            menu_item = menu.addItemWithTitle_action_keyEquivalent_(title, action_name, "")
+            menu_item.setTarget_(self)
+            menu_item.setToolTip_(tool_tip)
 
     def menuRename_(self, sender):
         self.start_renaming(self.menu_clicked_item)

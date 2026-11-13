@@ -1,12 +1,12 @@
 """The message each agent session gets from "Talk to Each Other", and the text a tab row's "Copy
-messaging instructions" copies (messages_between_agent_sessions)."""
+contact info" copies (messages_between_agent_sessions)."""
 
 import unittest
 
 from agent_command_tab.agent_adapters.base import MESSAGES_THROUGH_CODEX_QUEUE, MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
 from agent_command_tab.messages_between_agent_sessions import (AgentSessionForMessages,
                                                                build_message_asking_agent_session_to_talk_to_the_others,
-                                                               build_messaging_instructions)
+                                                               build_contact_info)
 
 PLANNING = AgentSessionForMessages("Claude Code", MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, "planning-3a", 101,
                                    "/Users/me/project", "planning", "iTerm2 tab")
@@ -63,15 +63,15 @@ class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
         self.assertIn("folder unknown", message)
 
 
-class MessagingInstructionsTests(unittest.TestCase):
+class ContactInfoTests(unittest.TestCase):
     def test_a_claude_code_session_is_named_as_talk_to_each_other_names_it_with_its_send_message_address(self):
-        self.assertEqual(build_messaging_instructions(PLANNING),
+        self.assertEqual(build_contact_info(PLANNING),
                          'The Claude Code session "planning-3a" (process ID 101, folder /Users/me/project, iTerm2 tab '
                          '"planning"). To message it, use your SendMessage tool with to: "planning-3a". Only Claude Code '
                          "sessions have that tool, so a Codex session can't message it.")
 
     def test_a_codex_session_comes_with_its_codex_queue_command_and_its_own_codex_home(self):
-        self.assertEqual(build_messaging_instructions(CODEX_DOCS._replace(codex_home_folder="/Users/me/Codex Work")),
+        self.assertEqual(build_contact_info(CODEX_DOCS._replace(codex_home_folder="/Users/me/Codex Work")),
                          "The Codex session 01a15e4e-facd-7073-85e7-90d8392b1d54 (process ID 104, folder /Users/me/project/docs, "
                          "iTerm2 tab \"codex docs\"). To message it, run: CODEX_HOME='/Users/me/Codex Work' codex queue --thread "
                          '01a15e4e-facd-7073-85e7-90d8392b1d54 --message="<your message>"')

@@ -9,6 +9,7 @@ from Foundation import NSObject, NSProcessInfo
 
 from agent_command_tab.session_status_computation import pick_most_urgent_state
 from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
+from agent_command_tab.user_interface.agent_session_outline_view import RESTORE_SESSIONS_TOOL_TIP
 from agent_command_tab.user_interface.named_colors import build_color_from_name
 from agent_command_tab.user_interface.row_text_rendering import DOT_GLYPH_AND_COLOR_BY_STATE
 
@@ -165,15 +166,21 @@ class MenuBarStatusItemController(NSObject):
         """Returns the right-click menu: each way to show the list, whatever "Show as" is, without
         changing it, in sentence case as the other menus are; "Restore sessions…" while any are saved; Settings; Quit."""
         menu = NSMenu.alloc().initWithTitle_("")
-        restore_items = (("Restore sessions…", "restoreSessionsClicked:"),) if self.owner.has_saved_agent_sessions() else ()
-        for title, action_name in (("Show popup", "showPopupClicked:"), ("Show sidebar", "showSidebarClicked:"),
-                                   ("Show window", "showWindowClicked:"), (None, None), *restore_items,
-                                   ("Settings…", "settingsClicked:"), (None, None), ("Quit AgentCommandTab", "quitClicked:")):
+        restore_items = ((("Restore sessions…", "restoreSessionsClicked:", RESTORE_SESSIONS_TOOL_TIP),)
+                         if self.owner.has_saved_agent_sessions() else ())
+        for title, action_name, tool_tip in (
+                ("Show popup", "showPopupClicked:", "Shows the list as a popup under this icon, leaving Show as in Settings as it is"),
+                ("Show sidebar", "showSidebarClicked:", "Shows the list as a sidebar, leaving Show as in Settings as it is"),
+                ("Show window", "showWindowClicked:", "Shows the list in a window, leaving Show as in Settings as it is"),
+                (None, None, None), *restore_items,
+                ("Settings…", "settingsClicked:", "Opens the Settings window"), (None, None, None),
+                ("Quit AgentCommandTab", "quitClicked:", "Quits AgentCommandTab; the agents in your tabs are left as they are")):
             if title is None:
                 menu.addItem_(NSMenuItem.separatorItem())
                 continue
             menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action_name, "")
             menu_item.setTarget_(self)
+            menu_item.setToolTip_(tool_tip)
             menu.addItem_(menu_item)
         return menu
 

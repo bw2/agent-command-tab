@@ -111,7 +111,7 @@ class RecordingOwner:
         self.hooks_install_requests = []
         self.process_info_requests = []  # (session ID, process ID)
         self.session_info_requests = []  # agent session entries
-        self.messaging_instructions_requests = []  # session IDs
+        self.contact_info_requests = []  # session IDs
         self.lists_closed_after_escape = []
         self.has_saved_sessions = False
         self.saved_sessions_window_opening_count = 0
@@ -184,8 +184,8 @@ class RecordingOwner:
     def show_agent_session_info(self, agent_session_entry):
         self.session_info_requests.append(agent_session_entry)
 
-    def copy_messaging_instructions(self, session_id):
-        self.messaging_instructions_requests.append(session_id)
+    def copy_contact_info(self, session_id):
+        self.contact_info_requests.append(session_id)
 
     def close_the_list_after_escape(self, list_controller):
         self.lists_closed_after_escape.append(list_controller)
@@ -284,6 +284,13 @@ def make_two_monitor_snapshot(one_monitor_snapshot):
 
 # A monitor far outside every monitor, so a window placed on it (a sidebar a test shows) stays out of sight.
 FAR_AWAY_SCREEN = {"name": "Far away", "frame": (-4000, -4000, 1500, 1000), "visible_frame": (-4000, -4000, 1500, 970)}
+COMPACT_IN_THE_MENU_OF_SEVERAL_ROWS_TOOL_TIP = ("Types /compact into each selected agent, which summarizes its conversation "
+                                                "so far to free up room in its context window")
+
+
+def list_menu_items_without_a_tool_tip(menu):
+    """Returns the titles of the menu's items, those of its submenus' items left out, that have no tooltip."""
+    return [menu_item.title() for menu_item in menu.itemArray() if not menu_item.isSeparatorItem() and not menu_item.toolTip()]
 
 
 def replace_windows_of_the_first_monitor(snapshot, windows):
@@ -1061,29 +1068,29 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                           "Restore sessions…", "---", "Close window"])
         self.assertEqual(self.build_right_click_menu_titles(1),
                          ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Move to new window", "---",
-                          "Session info", "Copy messaging instructions", "---",
+                          "Session info", "Copy contact info", "---",
                           "Pause session", "---", "Save session", "Restore sessions…", "---",
                           "/compact", "/clear", "Kill session"])
 
-    def test_session_info_and_copy_messaging_instructions_in_the_tab_menu(self):
+    def test_session_info_and_copy_contact_info_in_the_tab_menu(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id(
             {"10": dict(agent_tool_name="Aider"), "11": dict(status="exited")}))
         menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # "planning", Claude Code
-        copy_item = menu_items_by_title["Copy messaging instructions"]
+        copy_item = menu_items_by_title["Copy contact info"]
         self.assertTrue(menu_items_by_title["Session info"].isEnabled())
         self.assertEqual((copy_item.isEnabled(), copy_item.toolTip()),
                          (True, "Copies text to paste into another agent session so that it can message this one"))
         self.list_controller.menuShowSessionInfo_(menu_items_by_title["Session info"])
-        self.list_controller.menuCopyMessagingInstructions_(copy_item)
+        self.list_controller.menuCopyContactInfo_(copy_item)
         self.assertEqual([entry.session_id for entry in self.owner.session_info_requests], ["s1"])
-        self.assertEqual(self.owner.messaging_instructions_requests, ["s1"])
+        self.assertEqual(self.owner.contact_info_requests, ["s1"])
         aider_menu_items_by_title = self.build_right_click_menu_items_by_title(5)
         self.assertTrue(aider_menu_items_by_title["Session info"].isEnabled())
-        self.assertEqual((aider_menu_items_by_title["Copy messaging instructions"].isEnabled(),
-                          aider_menu_items_by_title["Copy messaging instructions"].toolTip()),
+        self.assertEqual((aider_menu_items_by_title["Copy contact info"].isEnabled(),
+                          aider_menu_items_by_title["Copy contact info"].toolTip()),
                          (False, "Aider sessions can't take messages from other sessions"))
         exited_menu_items_by_title = self.build_right_click_menu_items_by_title(6)
-        for title in ("Session info", "Copy messaging instructions"):
+        for title in ("Session info", "Copy contact info"):
             self.assertEqual((exited_menu_items_by_title[title].isEnabled(), exited_menu_items_by_title[title].toolTip()),
                              (False, "The agent has ended"))
 
@@ -1115,14 +1122,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual((restore_item.isEnabled(), restore_item.toolTip()), (False, "No sessions are saved"))
         self.owner.has_saved_sessions = True
         restore_item = self.build_right_click_menu_items_by_title(1)["Restore sessions…"]
-        self.assertEqual((restore_item.isEnabled(), restore_item.toolTip()), (True, None))
+        self.assertEqual((restore_item.isEnabled(), restore_item.toolTip()),
+                         (True, "Opens the Saved sessions window, to continue sessions saved earlier"))
         self.list_controller.menuRestoreSessions_(restore_item)
         self.assertEqual(self.owner.saved_sessions_window_opening_count, 1)
         # An ended agent's tab gets no Pause item, and its Save section still starts with one separator.
         exited_tab_menu_titles = self.build_right_click_menu_titles(6)
         save_position = exited_tab_menu_titles.index("Save session")
         self.assertEqual(exited_tab_menu_titles[save_position - 2:save_position + 3],
-                         ["Copy messaging instructions", "---", "Save session", "Restore sessions…", "---"])
+                         ["Copy contact info", "---", "Save session", "Restore sessions…", "---"])
 
     def test_pause_and_resume_in_the_row_menus_and_the_bottom_bar(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(
@@ -1147,7 +1155,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                 ((1, 5), "pause_agent_sessions", ["s10"])):  # while one of the selected rows runs, a click pauses
             self.select_rows(*rows)
             self.assertEqual((button.isHidden(), button.toolTip()), (False, {
-                "pause_agent_sessions": "Pause the selected rows' agent processes, their shells and the processes below them (a STOP signal)",
+                "pause_agent_sessions": ("Pause the selected rows' agent processes, their shells and any subprocesses that they "
+                                         "started (a STOP signal)"),
                 "resume_agent_sessions": "Resume the selected rows' paused agent processes (a CONT signal)"}[action]), rows)
             panel.pauseOrResumeSelectedRowsClicked_(button)
             self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
@@ -1291,7 +1300,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.build_right_click_menu_titles(4),
                          ["Pause 3 sessions", "---", "Save 3 sessions", "Restore sessions…", "---", "/compact 3 sessions",
                           "/clear 3 sessions", "Kill 3 sessions", "---", "Talk to each other…"])
-        self.assertIsNone(self.build_right_click_menu_items_by_title(4)["/compact 3 sessions"].toolTip())  # all at their prompt
+        self.assertEqual(self.build_right_click_menu_items_by_title(4)["/compact 3 sessions"].toolTip(),
+                         COMPACT_IN_THE_MENU_OF_SEVERAL_ROWS_TOOL_TIP)  # all at their prompt: what it does, alone
         self.select_rows(0, 1)  # a window and one of its tabs: each session counts once
         self.assertIn("/compact 3 sessions", self.build_right_click_menu_titles(1))
         self.assertIn("Kill 3 sessions", self.build_right_click_menu_titles(1))  # a window row is selected
@@ -1299,8 +1309,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         menu_items_by_title = self.build_right_click_menu_items_by_title(1)
         self.assertIn("Kill sessions", menu_items_by_title)  # tab rows alone: the selection shows how many
         self.assertTrue(menu_items_by_title["/compact 2 sessions"].isEnabled())
-        self.assertEqual(menu_items_by_title["/compact 2 sessions"].toolTip(),
-                         "A session in the middle of a turn will get this command when the turn ends")
+        self.assertEqual(menu_items_by_title["/compact 2 sessions"].toolTip(), COMPACT_IN_THE_MENU_OF_SEVERAL_ROWS_TOOL_TIP
+                         + "\nA session in the middle of a turn will get this command when the turn ends")
         self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # an unselected row keeps its own menu
         self.select_rows(5)
         self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # so does a single selected row
@@ -1309,7 +1319,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(1, agent_tool_name="Aider", slash_commands=()))
         self.select_rows(3, 5)  # codex-review (Codex) and analysis-0 (Aider)
         self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 session"].toolTip(),
-                         "Typed only into the 1 of 2 where this command is supported.")
+                         COMPACT_IN_THE_MENU_OF_SEVERAL_ROWS_TOOL_TIP + "\nTyped only into the 1 of 2 where this command is supported.")
         self.select_rows(5, 6)  # two Aider tabs
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
@@ -1320,7 +1330,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(1, status="paused"))
         self.select_rows(3, 5)  # codex-review (done) and analysis-0 (paused)
         self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 session"].toolTip(),
-                         "Typed only into the 1 of 2 where this command is supported.")
+                         COMPACT_IN_THE_MENU_OF_SEVERAL_ROWS_TOOL_TIP + "\nTyped only into the 1 of 2 where this command is supported.")
         self.select_rows(5, 6)  # both paused
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
@@ -1716,6 +1726,22 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.list_controller.items_by_key[("tab", "1")].entry.tab_title, "renamed")
         # Refilled now that its name isn't being edited: the arrow points down.
         self.assertEqual(self.lay_out_row_view(1).disclosure_button.image().accessibilityDescription(), "Close")
+
+    def test_every_right_click_menu_item_says_what_it_does_on_mouse_over(self):
+        outline_view = self.list_controller.outline_view
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.select_rows(3, 4)  # the menu of several rows
+        self.assertEqual(list_menu_items_without_a_tool_tip(self.build_right_click_menu(4)), [])
+        outline_view.deselectAll_(None)
+        # Monitor rows and Move to monitor, and a process row under the first tab.
+        self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot_with_entries_changed(
+            0, 0, child_processes=(ChildProcessEntry(201, "caffeinate -i -t 300", 900.0, False, None, None),))))
+        self.list_controller.set_tab_rows_open([self.list_controller.items_by_key[("tab", "1")]], True)
+        kinds_of_rows_clicked = set()
+        for row in [-1, *range(outline_view.numberOfRows())]:  # -1: empty space
+            kinds_of_rows_clicked.add(outline_view.itemAtRow_(row).kind if row >= 0 else "empty space")
+            self.assertEqual(list_menu_items_without_a_tool_tip(self.build_right_click_menu(row)), [], row)
+        self.assertLessEqual({"empty space", "monitor", "window", "tab", "process"}, kinds_of_rows_clicked)
 
     def test_expand_or_collapse_from_the_right_click_menu(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -3843,6 +3869,14 @@ class SavedSessionsWindowSmokeTests(unittest.TestCase):
         self.controller.menuRename_(None)
         self.assertEqual((self.outline_view.editedRow(), self.outline_view.editedColumn()), (4, 0))
 
+    def test_the_right_click_menu_items_say_what_they_do_on_mouse_over(self):
+        menu = build_right_click_menu(self.controller, self.outline_view, 1)  # "planning", a saved session
+        self.assertEqual([menu_item.toolTip() for menu_item in menu.itemArray()],
+                         ["Renames this saved session", "Deletes this saved session from the list; its conversation file stays on disk"])
+        menu = build_right_click_menu(self.controller, self.outline_view, 0)  # a saved window
+        self.assertEqual([menu_item.toolTip() for menu_item in menu.itemArray()],
+                         ["Renames this saved window", "Deletes these saved sessions from the list; their conversation files stay on disk"])
+
     def test_restore_and_delete_act_on_the_selected_rows_from_the_buttons_and_the_keys(self):
         self.outline_view.deselectAll_(None)
         self.assertFalse(self.controller.restore_button.isEnabled() or self.controller.delete_button.isEnabled())
@@ -3911,8 +3945,10 @@ class SavedSessionsInTheAppTests(unittest.TestCase):
                 (True, ["Show popup", "Show sidebar", "Show window", "---", "Restore sessions…", "Settings…", "---",
                         "Quit AgentCommandTab"])):
             status_item_controller.owner.has_saved_agent_sessions.return_value = has_saved_sessions
-            self.assertEqual(["---" if menu_item.isSeparatorItem() else menu_item.title()
-                              for menu_item in status_item_controller.build_right_click_menu().itemArray()], expected_titles)
+            menu = status_item_controller.build_right_click_menu()
+            self.assertEqual(["---" if menu_item.isSeparatorItem() else menu_item.title() for menu_item in menu.itemArray()],
+                             expected_titles)
+            self.assertEqual(list_menu_items_without_a_tool_tip(menu), [])
         status_item_controller.restoreSessionsClicked_(None)
         status_item_controller.owner.open_saved_sessions_window.assert_called_once_with()
 

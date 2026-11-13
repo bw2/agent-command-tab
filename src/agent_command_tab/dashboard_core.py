@@ -50,7 +50,7 @@ from agent_command_tab.dashboard_core_api import ActionRegistry, ActionResult
 from agent_command_tab.messages_between_agent_sessions import (SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT,
                                                                AgentSessionForMessages,
                                                                build_message_asking_agent_session_to_talk_to_the_others,
-                                                               build_messaging_instructions,
+                                                               build_contact_info,
                                                                explain_why_sessions_of_agent_tool_cant_take_messages)
 from agent_command_tab.snapshot_builder import (SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING, DisplayedState,
                                                 build_computer_snapshot, resolve_agent_sessions,
@@ -531,7 +531,7 @@ class DashboardCore:
         register("end_agent_processes", self.handle_end_agent_processes)
         register("read_child_process_details", self.handle_read_child_process_details)
         register("read_agent_session_details", self.handle_read_agent_session_details)
-        register("build_messaging_instructions", self.handle_build_messaging_instructions)
+        register("build_contact_info", self.handle_build_contact_info)
         register("end_child_process", self.handle_end_child_process)
         register("pause_agent_sessions", self.handle_pause_agent_sessions)
         register("resume_agent_sessions", self.handle_resume_agent_sessions)
@@ -1022,16 +1022,16 @@ class DashboardCore:
             codex_home_folder=agent_session["adapter"].find_codex_home_folder_of_process(process_id))
         return ActionResult(True, details=details)
 
-    async def handle_build_messaging_instructions(self, action_request):
-        """Returns, in details {"text"}, what a tab row's "Copy messaging instructions" puts on the
+    async def handle_build_contact_info(self, action_request):
+        """Returns, in details {"text"}, what a tab row's "Copy contact info" puts on the
         clipboard for the agent session of target {"session_id"}
-        (messages_between_agent_sessions.build_messaging_instructions), or why it can't take
+        (messages_between_agent_sessions.build_contact_info), or why it can't take
         messages from other sessions."""
         agent_session_for_messages, reason = await self.build_agent_session_for_messages_or_reason_it_cant_take_part(
             action_request.target["session_id"])
         if agent_session_for_messages is None:
             return ActionResult(False, reason)
-        return ActionResult(True, details={"text": build_messaging_instructions(agent_session_for_messages)})
+        return ActionResult(True, details={"text": build_contact_info(agent_session_for_messages)})
 
     async def handle_end_child_process(self, action_request):
         """Ends the process in arguments {"process_id"}, a sub row of target {"session_id"}, and
