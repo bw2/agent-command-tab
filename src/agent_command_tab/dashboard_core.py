@@ -49,7 +49,9 @@ from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.dashboard_core_api import ActionRegistry, ActionResult
 from agent_command_tab.messages_between_agent_sessions import (SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT,
                                                                AgentSessionForMessages,
-                                                               build_message_asking_agent_session_to_talk_to_the_others)
+                                                               build_message_asking_agent_session_to_talk_to_the_others,
+                                                               build_messaging_instructions,
+                                                               explain_why_sessions_of_agent_tool_cant_take_messages)
 from agent_command_tab.snapshot_builder import (SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING, DisplayedState,
                                                 build_computer_snapshot, resolve_agent_sessions,
                                                 turns_of_the_agent_run_outside_its_tab)
@@ -84,7 +86,7 @@ RESOURCE_USAGE_CHECK_INTERVAL_SECONDS = 3  # the Memory and CPU columns
 SECONDS_BETWEEN_THE_FIRST_TWO_CPU_READINGS = 0.5
 CPU_PERCENT_SHOWN_AS_IDLE = 3  # an idle agent's CPU use wavers between 0 and 2 percent
 SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED = 5  # "Kill Session": SIGTERM, then SIGKILL (a sub row's "Kill" too)
-SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER = 0.5  # a sub row's Info
+SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER = 0.5  # a sub row's Info, a tab row's Session info
 CONVERSATION_FILE_RETRY_SECONDS = 15  # a conversation file not found yet (Codex writes it at the first prompt)
 CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up again in case the conversation changed
 # The session reading values read from it that belong to its conversation, so cleared when the
@@ -263,6 +265,21 @@ def round_memory_and_cpu_use(memory_bytes, cpu_percent):
     if cpu_percent is not None:
         cpu_percent = round(cpu_percent) if cpu_percent >= CPU_PERCENT_SHOWN_AS_IDLE else 0
     return round(memory_bytes / 1024 ** 2) * 1024 ** 2, cpu_percent
+
+
+async def read_process_details_with_cpu_use(process_id):
+    """Returns read_process_details's dict for a process (a sub row's Info, a tab row's Session
+    info), with "cpu_percent", its and its descendants' CPU use over
+    SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER, both it and the memory rounded as the rows'
+    are; or None once the process has ended."""
+    first_resource_usage, first_read_at = read_process_tree_resource_usage(process_id), time.time()
+    await asyncio.sleep(SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER)
+    details, read_at = read_process_details(process_id), time.time()
+    if first_resource_usage is None or details is None:
+        return None
+    details["memory_bytes"], details["cpu_percent"] = round_memory_and_cpu_use(
+        details["memory_bytes"], compute_cpu_percent((first_resource_usage[1], first_read_at), (details["cpu_seconds"], read_at)))
+    return details
 
 
 def convert_exception_to_action_result(result_or_exception):
@@ -513,6 +530,8 @@ class DashboardCore:
         register("end_agent_process", self.handle_end_agent_process)
         register("end_agent_processes", self.handle_end_agent_processes)
         register("read_child_process_details", self.handle_read_child_process_details)
+        register("read_agent_session_details", self.handle_read_agent_session_details)
+        register("build_messaging_instructions", self.handle_build_messaging_instructions)
         register("end_child_process", self.handle_end_child_process)
         register("pause_agent_sessions", self.handle_pause_agent_sessions)
         register("resume_agent_sessions", self.handle_resume_agent_sessions)
@@ -970,20 +989,49 @@ class DashboardCore:
 
     async def handle_read_child_process_details(self, action_request):
         """Returns, in its details, what a sub row's Info shows about the process in arguments
-        {"process_id"} of target {"session_id"}: read_process_details's
-        dict, with "cpu_percent", its and its descendants' CPU use over
-        SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER, rounded as the row's is."""
+        {"process_id"} of target {"session_id"}: read_process_details_with_cpu_use's dict."""
         process_id = action_request.arguments["process_id"]
         if not self.child_process_is_listed(action_request.target["session_id"], process_id):
             return ActionResult(False, "that process is no longer listed under its tab")
-        first_resource_usage, first_read_at = read_process_tree_resource_usage(process_id), time.time()
-        await asyncio.sleep(SECONDS_A_PROCESS_INFO_MEASURES_CPU_USE_OVER)
-        details, read_at = read_process_details(process_id), time.time()
-        if first_resource_usage is None or details is None:
+        details = await read_process_details_with_cpu_use(process_id)
+        if details is None:
             return ActionResult(False, "that process has ended")
-        details["memory_bytes"], details["cpu_percent"] = round_memory_and_cpu_use(
-            details["memory_bytes"], compute_cpu_percent((first_resource_usage[1], first_read_at), (details["cpu_seconds"], read_at)))
         return ActionResult(True, details=details)
+
+    async def handle_read_agent_session_details(self, action_request):
+        """Returns, in its details, what a tab row's Session info shows about the agent session of
+        target {"session_id"}: read_process_details_with_cpu_use's dict for its agent process, with
+        "tab_kind_name" ("iTerm2 tab", "tmux window"), "conversation_id" and "conversation_file"
+        (each None when not known), "claude_config_folder" (None for the default folder and for
+        other tools) and "codex_home_folder" (None for other tools)."""
+        session_id = action_request.target["session_id"]
+        agent_session = self.agent_sessions.get(session_id)
+        if agent_session is None or not agent_session["process_id"]:
+            return ActionResult(False, "that tab no longer runs an agent")
+        process_id = agent_session["process_id"]
+        details = await read_process_details_with_cpu_use(process_id)
+        if details is None:
+            return ActionResult(False, "the agent has ended")
+        # Unknown, rather than refused as Save session refuses it, when it can't be told.
+        conversation_id, conversation_file, _ = await self.find_conversation_id_and_file_known_to_be_its_own(session_id, agent_session)
+        terminal_backend = self.find_terminal_backend_of(session_id=session_id)
+        details.update(
+            tab_kind_name=terminal_backend.tab_kind_name if terminal_backend is not None else "tab",
+            conversation_id=conversation_id, conversation_file=conversation_file,
+            claude_config_folder=(self.claude_agents_by_process_id.get(process_id) or {}).get("config_folder"),
+            codex_home_folder=agent_session["adapter"].find_codex_home_folder_of_process(process_id))
+        return ActionResult(True, details=details)
+
+    async def handle_build_messaging_instructions(self, action_request):
+        """Returns, in details {"text"}, what a tab row's "Copy messaging instructions" puts on the
+        clipboard for the agent session of target {"session_id"}
+        (messages_between_agent_sessions.build_messaging_instructions), or why it can't take
+        messages from other sessions."""
+        agent_session_for_messages, reason = await self.build_agent_session_for_messages_or_reason_it_cant_take_part(
+            action_request.target["session_id"])
+        if agent_session_for_messages is None:
+            return ActionResult(False, reason)
+        return ActionResult(True, details={"text": build_messaging_instructions(agent_session_for_messages)})
 
     async def handle_end_child_process(self, action_request):
         """Ends the process in arguments {"process_id"}, a sub row of target {"session_id"}, and
@@ -1127,7 +1175,7 @@ class DashboardCore:
                                       "and after /new more than one fits")
             codex_home_folder = agent_session["adapter"].find_codex_home_folder_of_process(process_id)  # where its conversation is
         else:
-            return None, f"{agent_session['agent_tool_name']} sessions can't take messages from other sessions"
+            return None, explain_why_sessions_of_agent_tool_cant_take_messages(agent_session["agent_tool_name"])
         if not address:
             return None, reason_without_address
         terminal_backend = self.find_terminal_backend_of(session_id=session_id)
@@ -1336,6 +1384,19 @@ class DashboardCore:
 
     # ----- saved sessions: Save session and Restore sessions -----
 
+    async def find_conversation_id_and_file_known_to_be_its_own(self, session_id, agent_session):
+        """Returns (the agent session's conversation ID, its conversation file, ""), each None when
+        not known, or (None, None, why its conversation can't be told) when a lookup by folder and
+        start time could find another session's conversation, for Save session, Duplicate and
+        Session info."""
+        if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
+            return None, None, "it has had no conversation since its /clear"
+        if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
+            return None, None, "its conversation can't be told apart from another Codex session's in the same folder"
+        claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
+        return (await agent_session["adapter"].find_conversation_id(agent_session["process_id"], claude_agent_record),
+                await self.find_current_conversation_file(session_id, agent_session), "")
+
     async def find_conversation_to_save_or_copy(self, session_id, agent_session):
         """Returns (the agent session's conversation ID, the Claude Code config folder it runs
         with or None for the default, the CODEX_HOME a Codex session runs with or None for other
@@ -1343,18 +1404,16 @@ class DashboardCore:
         when it isn't certainly this session's."""
         if not agent_session["adapter"].can_resume_conversations:
             return None, None, None, f"{agent_session['agent_tool_name']} can't resume a saved conversation"
-        if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
-            return None, None, None, "it has had no conversation since its /clear"
-        if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
-            return None, None, None, "its conversation can't be told apart from another Codex session's in the same folder"
-        claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
-        conversation_id = await agent_session["adapter"].find_conversation_id(agent_session["process_id"], claude_agent_record)
-        if await self.find_current_conversation_file(session_id, agent_session) is None:
+        conversation_id, conversation_file, reason_the_conversation_cant_be_told = (
+            await self.find_conversation_id_and_file_known_to_be_its_own(session_id, agent_session))
+        if reason_the_conversation_cant_be_told:
+            return None, None, None, reason_the_conversation_cant_be_told
+        if conversation_file is None:
             return None, None, None, "it has no conversation yet (no message was sent to it)"
         if not conversation_id:  # Codex after /new: more than one conversation file fits its process
             return None, None, None, "it has started more than one conversation, and which one runs now can't be told"
         # The default home too, so a CODEX_HOME the launch command sets doesn't take its place.
-        return (conversation_id, (claude_agent_record or {}).get("config_folder"),
+        return (conversation_id, (self.claude_agents_by_process_id.get(agent_session["process_id"]) or {}).get("config_folder"),
                 agent_session["adapter"].find_codex_home_folder_of_process(agent_session["process_id"]), "")
 
     async def handle_save_agent_sessions(self, action_request):

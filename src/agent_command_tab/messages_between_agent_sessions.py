@@ -41,6 +41,43 @@ def describe_agent_session_for_messages(agent_session):
             f'folder {agent_session.working_folder or "unknown"}, {agent_session.tab_kind_name} "{agent_session.tab_title}")')
 
 
+def explain_how_to_send_a_message_to(recipient):
+    """Returns the sentence telling a session that can message the recipient how to: run
+    `codex queue` for a Codex session, which any agent with a shell can, or use the SendMessage
+    tool for a Claude Code session, which only another Claude Code session has."""
+    if recipient.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
+        # The message attached to its option, so one starting with "-" isn't read as an option. Its
+        # CODEX_HOME, since the sender's may differ.
+        return (f"To message it, run: {build_codex_home_setting(recipient.codex_home_folder)}codex queue --thread "
+                f"{shlex.quote(recipient.address)} "
+                f'--message="<your message>"')
+    return f'To message it, use your SendMessage tool with to: "{recipient.address}".'
+
+
+def explain_why_sessions_of_agent_tool_cant_take_messages(agent_tool_name):
+    """Returns why a session of a tool other than Claude Code and Codex is left out of messages
+    between sessions, such as "Aider sessions can't take messages from other sessions"."""
+    return f"{agent_tool_name} sessions can't take messages from other sessions"
+
+
+def build_messaging_instructions(agent_session):
+    """Returns what a tab row's "Copy messaging instructions" puts on the clipboard, to paste into
+    another agent session so it can message this one: the session as Talk to Each Other names it,
+    then how to send it a message, for example 'The Claude Code session "analysis-1d" (process ID
+    4242, folder /x, iTerm2 tab "analysis"). To message it, use your SendMessage tool with to:
+    "analysis-1d". Only Claude Code sessions have that tool, so a Codex session can't message it.'
+
+    Args:
+        agent_session: The AgentSessionForMessages of the session to message.
+    """
+    description = describe_agent_session_for_messages(agent_session)
+    instructions = f"{description[:1].upper()}{description[1:]}. {explain_how_to_send_a_message_to(agent_session)}"
+    if agent_session.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL:
+        # Pasted into a Codex session, the instructions would otherwise ask it for a tool it lacks.
+        return f"{instructions} Only Claude Code sessions have that tool, so a Codex session can't message it."
+    return instructions
+
+
 def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_too):
     """Returns the sentence telling the sender how to send the recipient a message, or why it can't.
 
@@ -51,14 +88,9 @@ def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_
             too, so it learns how to message the sender (only the one chosen in the Talk to Each
             Other window may get it).
     """
-    if recipient.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
-        # The message attached to its option, so one starting with "-" isn't read as an option. Its
-        # CODEX_HOME, since the sender's may differ.
-        return (f"To message it, run: {build_codex_home_setting(recipient.codex_home_folder)}codex queue --thread "
-                f"{shlex.quote(recipient.address)} "
-                f'--message="<your message>"')
-    if sender.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL:
-        return f'To message it, use your SendMessage tool with to: "{recipient.address}".'
+    if (recipient.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE
+            or sender.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL):
+        return explain_how_to_send_a_message_to(recipient)
     if recipient_gets_the_message_too:
         return ("A Codex session has no way to send a Claude Code session a message, so it can't hear from you directly, "
                 "but it can message you.")

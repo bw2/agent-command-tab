@@ -110,6 +110,8 @@ class RecordingOwner:
         self.recipient_titles_to_choose = None  # the tab chosen under "Send the message to:", or None for each of them
         self.hooks_install_requests = []
         self.process_info_requests = []  # (session ID, process ID)
+        self.session_info_requests = []  # agent session entries
+        self.messaging_instructions_requests = []  # session IDs
         self.lists_closed_after_escape = []
         self.has_saved_sessions = False
         self.saved_sessions_window_opening_count = 0
@@ -178,6 +180,12 @@ class RecordingOwner:
 
     def show_process_info(self, session_id, process_id):
         self.process_info_requests.append((session_id, process_id))
+
+    def show_agent_session_info(self, agent_session_entry):
+        self.session_info_requests.append(agent_session_entry)
+
+    def copy_messaging_instructions(self, session_id):
+        self.messaging_instructions_requests.append(session_id)
 
     def close_the_list_after_escape(self, list_controller):
         self.lists_closed_after_escape.append(list_controller)
@@ -1053,8 +1061,31 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                           "Restore sessions…", "---", "Close window"])
         self.assertEqual(self.build_right_click_menu_titles(1),
                          ["Show tab", "Rename", "Duplicate this tab", "Move to window", "Move to new window", "---",
+                          "Session info", "Copy messaging instructions", "---",
                           "Pause session", "---", "Save session", "Restore sessions…", "---",
                           "/compact", "/clear", "Kill session"])
+
+    def test_session_info_and_copy_messaging_instructions_in_the_tab_menu(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id(
+            {"10": dict(agent_tool_name="Aider"), "11": dict(status="exited")}))
+        menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # "planning", Claude Code
+        copy_item = menu_items_by_title["Copy messaging instructions"]
+        self.assertTrue(menu_items_by_title["Session info"].isEnabled())
+        self.assertEqual((copy_item.isEnabled(), copy_item.toolTip()),
+                         (True, "Copies text to paste into another agent session so that it can message this one"))
+        self.list_controller.menuShowSessionInfo_(menu_items_by_title["Session info"])
+        self.list_controller.menuCopyMessagingInstructions_(copy_item)
+        self.assertEqual([entry.session_id for entry in self.owner.session_info_requests], ["s1"])
+        self.assertEqual(self.owner.messaging_instructions_requests, ["s1"])
+        aider_menu_items_by_title = self.build_right_click_menu_items_by_title(5)
+        self.assertTrue(aider_menu_items_by_title["Session info"].isEnabled())
+        self.assertEqual((aider_menu_items_by_title["Copy messaging instructions"].isEnabled(),
+                          aider_menu_items_by_title["Copy messaging instructions"].toolTip()),
+                         (False, "Aider sessions can't take messages from other sessions"))
+        exited_menu_items_by_title = self.build_right_click_menu_items_by_title(6)
+        for title in ("Session info", "Copy messaging instructions"):
+            self.assertEqual((exited_menu_items_by_title[title].isEnabled(), exited_menu_items_by_title[title].toolTip()),
+                             (False, "The agent has ended"))
 
     def test_save_session_in_the_row_menus(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id(
@@ -1091,7 +1122,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         exited_tab_menu_titles = self.build_right_click_menu_titles(6)
         save_position = exited_tab_menu_titles.index("Save session")
         self.assertEqual(exited_tab_menu_titles[save_position - 2:save_position + 3],
-                         ["Move to new window", "---", "Save session", "Restore sessions…", "---"])
+                         ["Copy messaging instructions", "---", "Save session", "Restore sessions…", "---"])
 
     def test_pause_and_resume_in_the_row_menus_and_the_bottom_bar(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(

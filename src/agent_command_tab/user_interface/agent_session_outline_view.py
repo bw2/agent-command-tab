@@ -45,6 +45,7 @@ from agent_command_tab.agent_adapters import (list_agent_tool_names_whose_conver
 from agent_command_tab.agent_adapters.base import COMMAND_THAT_STARTS_A_NEW_CONVERSATION
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.list_sorting import sort_agent_session_entries, sort_window_entries
+from agent_command_tab.messages_between_agent_sessions import explain_why_sessions_of_agent_tool_cant_take_messages
 from agent_command_tab.session_status_computation import (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT,
                                                           split_agent_sessions_into_pausable_and_resumable)
 from agent_command_tab.settings_store import DEFAULT_SETTINGS
@@ -54,7 +55,7 @@ from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_i
 from agent_command_tab.user_interface.control_helpers import is_a_command_press_of_letter, show_symbol_on_button
 from agent_command_tab.user_interface.named_colors import build_color_from_name, choose_list_background_color
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
-from agent_command_tab.user_interface.process_info_alert import shorten_command_for_alert
+from agent_command_tab.user_interface.process_and_session_info_alerts import shorten_command_for_alert
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
                                                                  LONGEST_TEXT_BY_COLUMN_FIELD_NAME, RowTextParts,
                                                                  build_agent_session_row_text_parts,
@@ -703,6 +704,9 @@ class AgentSessionListController(NSObject):
             left_out_agent_session_entries): shows the Talk to Each Other window; returns (the
             note the user may have edited, the entries chosen to get it), or None for Cancel.
         show_process_info(session_id, process_id): shows a process row's Info window.
+        show_agent_session_info(agent_session_entry): shows a tab row's Session info window.
+        copy_messaging_instructions(session_id): puts on the clipboard what another agent session
+            needs to send this one a message.
         save_agent_sessions(session_ids): saves these agent sessions' conversations to resume
             later (Save session; the owner keeps the saved list).
         has_saved_agent_sessions(): whether any sessions are saved (Restore sessions… is grayed
@@ -2247,6 +2251,20 @@ class AgentSessionListController(NSObject):
                 move_to_new_window_item.setEnabled_(False)
                 move_to_new_window_item.setToolTip_("This tab is its window's only tab")
             menu.addItem_(NSMenuItem.separatorItem())
+            session_info_item = self.add_menu_item(menu, "Session info", "menuShowSessionInfo:")
+            copy_messaging_instructions_item = self.add_menu_item(menu, "Copy messaging instructions",
+                                                                  "menuCopyMessagingInstructions:")
+            copy_messaging_instructions_item.setToolTip_(
+                "Copies text to paste into another agent session so that it can message this one")
+            if item.entry.status == "exited":
+                for menu_item in (session_info_item, copy_messaging_instructions_item):
+                    menu_item.setEnabled_(False)
+                    menu_item.setToolTip_("The agent has ended")
+            elif item.entry.agent_tool_name not in AGENT_TOOL_NAMES_WHOSE_SESSIONS_CAN_TALK_TO_EACH_OTHER:
+                copy_messaging_instructions_item.setEnabled_(False)
+                copy_messaging_instructions_item.setToolTip_(
+                    explain_why_sessions_of_agent_tool_cant_take_messages(item.entry.agent_tool_name or "This agent"))
+            menu.addItem_(NSMenuItem.separatorItem())
             self.add_pause_and_resume_menu_items(menu, [item.entry])
             self.add_save_and_restore_menu_items(menu, [item.entry])
             # Typed into the agent only while it waits at its prompt.
@@ -2549,6 +2567,12 @@ class AgentSessionListController(NSObject):
                 "with whatever it was doing; the tab stays open with its shell.", confirmation_action_name):
             self.owner.submit_action_and_report_failure(
                 ActionRequest("end_agent_process", {"session_id": tab_entry.session_id}), "The session wasn't ended")
+
+    def menuShowSessionInfo_(self, sender):
+        self.owner.show_agent_session_info(self.menu_target_item.entry)
+
+    def menuCopyMessagingInstructions_(self, sender):
+        self.owner.copy_messaging_instructions(self.menu_target_item.entry.session_id)
 
     def menuShowProcessInfo_(self, sender):
         session_id, child_process_entry = self.menu_target_processes[0]  # the row clicked: Info is off for several

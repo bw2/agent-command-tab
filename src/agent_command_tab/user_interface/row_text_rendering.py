@@ -128,17 +128,24 @@ def build_dot_text(dot_glyph):
     return dot_glyph + (" " if dot_glyph else "")
 
 
-def format_elapsed_time(elapsed_seconds):
-    """Returns a short elapsed time such as "45s", "3m", "1h 5m" or "2d"."""
+def split_elapsed_time_into_counts_and_units(elapsed_seconds):
+    """Returns an elapsed time as [(count, unit)], to the precision the list shows it: seconds
+    under a minute, minutes under an hour, hours and minutes (minutes left out at 0) under a day,
+    else days, such as [(1, "hour"), (5, "minute")]."""
     elapsed_seconds = max(int(elapsed_seconds), 0)
     if elapsed_seconds < 60:
-        return f"{elapsed_seconds}s"
+        return [(elapsed_seconds, "second")]
     if elapsed_seconds < 3600:
-        return f"{elapsed_seconds // 60}m"
+        return [(elapsed_seconds // 60, "minute")]
     if elapsed_seconds < 86400:
         hours, minutes = divmod(elapsed_seconds // 60, 60)
-        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
-    return f"{elapsed_seconds // 86400}d"
+        return [(hours, "hour"), (minutes, "minute")] if minutes else [(hours, "hour")]
+    return [(elapsed_seconds // 86400, "day")]
+
+
+def format_elapsed_time(elapsed_seconds):
+    """Returns a short elapsed time such as "45s", "3m", "1h 5m" or "2d"."""
+    return " ".join(f"{count}{unit[0]}" for count, unit in split_elapsed_time_into_counts_and_units(elapsed_seconds))
 
 
 def format_memory_size(memory_bytes):

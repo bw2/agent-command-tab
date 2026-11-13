@@ -279,6 +279,31 @@ class TalkToEachOtherTests(unittest.TestCase):
             False, "\"reviews\": the agent is working; \"codex tests\": it failed: RuntimeError('tab gone')"))
 
 
+class MessagingInstructionsInTheCoreTests(unittest.TestCase):
+    """A tab row's "Copy messaging instructions": the text for one session, or why it can't take messages."""
+
+    def build_messaging_instructions(self, session_id):
+        return asyncio.run(make_core().handle_build_messaging_instructions(
+            ActionRequest("build_messaging_instructions", {"session_id": session_id})))
+
+    def test_a_claude_code_session_and_a_codex_session_get_their_own_instructions(self):
+        self.assertEqual(self.build_messaging_instructions("s1").details["text"],
+                         'The Claude Code session "planning-3a" (process ID 101, folder /p, iTerm2 tab "planning"). '
+                         'To message it, use your SendMessage tool with to: "planning-3a". '
+                         "Only Claude Code sessions have that tool, so a Codex session can't message it.")
+        self.assertEqual(self.build_messaging_instructions("s3").details["text"],
+                         'The Codex session codex-conversation-1 (process ID 301, folder /p/codex, iTerm2 tab "codex tests"). '
+                         "To message it, run: CODEX_HOME=/Users/me/.codex-tests codex queue --thread codex-conversation-1 "
+                         '--message="<your message>"')
+
+    def test_a_session_other_sessions_cant_message_says_why(self):
+        self.assertEqual(self.build_messaging_instructions("s4"),
+                         ActionResult(False, "aider sessions can't take messages from other sessions"))
+        self.assertEqual(self.build_messaging_instructions("s5"),
+                         ActionResult(False, "its Claude Code session name isn't known yet"))
+        self.assertEqual(self.build_messaging_instructions("s6"), ActionResult(False, "that tab no longer runs an agent"))
+
+
 class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
     """/compact and /clear from the menu of several selected rows reach sessions in the middle of a turn too."""
 

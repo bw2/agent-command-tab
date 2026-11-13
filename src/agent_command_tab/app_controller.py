@@ -15,7 +15,8 @@ from AppKit import (NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn
                     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicyAccessory, NSApplicationDidBecomeActiveNotification,
                     NSApplicationDidChangeScreenParametersNotification, NSApplicationDidResignActiveNotification,
                     NSApplicationWillTerminateNotification, NSEvent, NSEventModifierFlagCommand, NSEventModifierFlagShift,
-                    NSMakeRect, NSMenu, NSMenuItem, NSModalPanelWindowLevel, NSMouseInRect, NSPopoverBehaviorApplicationDefined,
+                    NSMakeRect, NSMenu, NSMenuItem, NSModalPanelWindowLevel, NSMouseInRect, NSPasteboard, NSPasteboardTypeString,
+                    NSPopoverBehaviorApplicationDefined,
                     NSPopoverBehaviorTransient, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
                     NSWorkspaceDidActivateApplicationNotification)
 from Foundation import NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
@@ -48,7 +49,7 @@ from agent_command_tab.user_interface.app_icon import build_app_icon
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.menu_bar_status_item import MenuBarStatusItemController
 from agent_command_tab.user_interface.popover_container import ListPanelController, build_dropdown_popover
-from agent_command_tab.user_interface.process_info_alert import build_process_info_alert
+from agent_command_tab.user_interface.process_and_session_info_alerts import build_process_info_alert, build_session_info_alert
 from agent_command_tab.user_interface.saved_sessions_window import SavedSessionsWindowController, shorten_home_folder
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
                                                             convert_rect_to_frame_list, grow_frame_to_smallest_size,
@@ -833,6 +834,28 @@ class AppController(NSObject):
             ActionRequest("read_child_process_details", {"session_id": session_id}, {"process_id": process_id}),
             "The process info couldn't be read",
             lambda action_result: self.run_alert_in_front(build_process_info_alert(action_result.details, time.time())))
+
+    @objc.python_method
+    def show_agent_session_info(self, agent_session_entry):
+        """Shows a tab row's Session info window once the core has read its agent session's
+        details, or an alert saying why it couldn't."""
+        self.submit_action_and_report_failure(
+            ActionRequest("read_agent_session_details", {"session_id": agent_session_entry.session_id}),
+            "The session info couldn't be read",
+            lambda action_result: self.run_alert_in_front(
+                build_session_info_alert(agent_session_entry, action_result.details, time.time())))
+
+    @objc.python_method
+    def copy_messaging_instructions(self, session_id):
+        """Puts on the clipboard what another agent session needs to send this one a message
+        (a tab row's "Copy messaging instructions"), or says why it can't take messages."""
+
+        def put_text_on_the_clipboard(action_result):
+            pasteboard = NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            pasteboard.setString_forType_(action_result.details["text"], NSPasteboardTypeString)
+        self.submit_action_and_report_failure(ActionRequest("build_messaging_instructions", {"session_id": session_id}),
+                                              "The messaging instructions weren't copied", put_text_on_the_clipboard)
 
     @objc.python_method
     def find_launch_command(self, agent_tool_name):
