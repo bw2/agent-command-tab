@@ -188,7 +188,7 @@ class ProcessInfoWindowTests(unittest.TestCase):
             ("Working directory", "/Users/someone/code"),
             ("Subprocesses", "python3 check.py (61170)\nsleep 600 (61171)"),
             ("CPU", "12% (total, including subprocesses)"),
-            ("CPU time", "1 minute (total, including subprocesses)"),
+            ("CPU Time", "1 minute (total, including subprocesses)"),
             ("Memory", "3M (total, including subprocesses)"),
             ("Command", "cat <<EOF\nline two\nEOF"),
             ("Full command line", "/bin/bash -c true && eval 'cat <<EOF\nline two\nEOF'")])
@@ -237,22 +237,22 @@ class ProcessInfoWindowTests(unittest.TestCase):
         self.assertEqual(list_session_info_lines(entry, details, details["started_at"] + 3 * 86400 + 600), [
             ("Session", "agent-command-tab-f7 (process ID 29769)"),
             ("Age", "3 days (started Oct 29, 7:14:47 AM)"),
-            ("Agent tool", "Claude Code"),
+            ("Agent Tool", "Claude Code"),
             ("Tab", 'iTerm2 tab "agent-command-tab"'),
-            ("Working directory", "/Users/someone/code"),
-            ("Conversation ID", "2aa37546-5264-4b90-a553-5c668c422d40"),
-            ("Conversation file", "/Users/someone/.claude/projects/x/2aa37546-5264-4b90-a553-5c668c422d40.jsonl"),
-            ("Context", "134k tokens (13% of the context window)"),
+            ("Working Directory", "/Users/someone/code"),
+            ("Conversation Id", "2aa37546-5264-4b90-a553-5c668c422d40"),
+            ("Conversation Log", "/Users/someone/.claude/projects/x/2aa37546-5264-4b90-a553-5c668c422d40.jsonl"),
             ("CPU", "12% (total, including subprocesses)"),
-            ("CPU time", "1 minute (total, including subprocesses)"),
+            ("CPU Time", "1 minute (total, including subprocesses)"),
             ("Memory", "3M (total, including subprocesses)"),
-            ("Command line", "claude --model opus")])
+            ("Command Line", "claude --model opus"),
+            ("Context", "134k tokens (13% of the context window)")])
         # A Codex session: no name, its CODEX_HOME, no conversation yet, and no context size or subprocesses.
         details = self.make_session_details(conversation_id=None, conversation_file=None,
                                             codex_home_folder="/Users/someone/.codex", subprocesses=[])
         lines = dict(list_session_info_lines(make_agent_session_entry("s3", "codex", agent_tool_name="Codex"), details,
                                              details["started_at"]))
-        self.assertEqual((lines["Session"], lines["Conversation ID"], lines["Conversation file"], lines["CODEX_HOME"], lines["CPU"]),
+        self.assertEqual((lines["Session"], lines["Conversation Id"], lines["Conversation Log"], lines["CODEX_HOME"], lines["CPU"]),
                          ("process ID 29769", "unknown", "unknown", "/Users/someone/.codex", "12%"))
         self.assertNotIn("Context", lines)
         self.assertNotIn("Claude Code config folder", lines)

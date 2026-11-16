@@ -55,7 +55,7 @@ def list_cpu_and_memory_lines(details):
     total_label = " (total, including subprocesses)" if details["subprocesses"] else ""
     return [
         ("CPU", f"{details['cpu_percent']}%{total_label}"),
-        ("CPU time", f"{format_elapsed_time_in_words(details['cpu_seconds'])}{total_label}"),
+        ("CPU Time", f"{format_elapsed_time_in_words(details['cpu_seconds'])}{total_label}"),
         ("Memory", f"{format_memory_size(details['memory_bytes'])}{total_label}"),
     ]
 
@@ -89,8 +89,8 @@ def list_process_info_lines(details, now):
 def list_session_info_lines(agent_session_entry, details, now):
     """Returns [(label, value)] for a tab row's Session info window, in the order shown: first the
     session's name, which other Claude Code sessions message it by, with its agent's process ID,
-    then its age and what else is known about it. CPU and memory are those of the agent and every
-    process below it, as the row's columns count them.
+    then its age and what else is known about it, with its context size last. CPU and memory are
+    those of the agent and every process below it, as the row's columns count them.
 
     Args:
         agent_session_entry: The tab row's AgentSessionEntry.
@@ -103,21 +103,22 @@ def list_session_info_lines(agent_session_entry, details, now):
         ("Session", f"{agent_session_entry.agent_session_name} ({process_id_text})" if agent_session_entry.agent_session_name
          else process_id_text),
         ("Age", f"{format_elapsed_time_in_words(now - details['started_at'])} (started {format_date_and_time(details['started_at'])})"),
-        ("Agent tool", agent_session_entry.agent_tool_name),
+        ("Agent Tool", agent_session_entry.agent_tool_name),
         ("Tab", f'{details["tab_kind_name"]} "{agent_session_entry.tab_title}"'),
-        ("Working directory", agent_session_entry.working_folder or details["working_folder"] or "unknown"),
-        ("Conversation ID", details["conversation_id"] or "unknown"),
-        ("Conversation file", details["conversation_file"] or "unknown"),
+        ("Working Directory", agent_session_entry.working_folder or details["working_folder"] or "unknown"),
+        ("Conversation Id", details["conversation_id"] or "unknown"),
+        ("Conversation Log", details["conversation_file"] or "unknown"),
     ]
     if details["claude_config_folder"]:  # not the default folder
         lines.append(("Claude Code config folder", details["claude_config_folder"]))
     if details["codex_home_folder"]:
         lines.append(("CODEX_HOME", details["codex_home_folder"]))
+    lines += list_cpu_and_memory_lines(details) + [("Command Line", details["command_line"])]
     if agent_session_entry.context_tokens:
         lines.append(("Context", f"{format_token_count(agent_session_entry.context_tokens)} tokens" + (
             f" ({agent_session_entry.context_fill_percent}% of the context window)"
             if agent_session_entry.context_fill_percent is not None else "")))
-    return lines + list_cpu_and_memory_lines(details) + [("Command line", details["command_line"])]
+    return lines
 
 
 def build_info_text(lines, font):

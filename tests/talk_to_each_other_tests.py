@@ -288,12 +288,11 @@ class ContactInfoInTheCoreTests(unittest.TestCase):
 
     def test_a_claude_code_session_and_a_codex_session_get_their_own_contact_info(self):
         self.assertEqual(self.build_contact_info("s1").details["text"],
-                         'The Claude Code session "planning-3a" (process ID 101, folder /p, iTerm2 tab "planning"). '
-                         'To message it, use your SendMessage tool with to: "planning-3a". '
-                         "Only Claude Code sessions have that tool, so a Codex session can't message it.")
+                         'Claude Code session "planning-3a" (process ID 101, folder /p, iTerm2 tab "planning"). '
+                         'You can message it using your SendMessage tool with to: "planning-3a"')
         self.assertEqual(self.build_contact_info("s3").details["text"],
-                         'The Codex session codex-conversation-1 (process ID 301, folder /p/codex, iTerm2 tab "codex tests"). '
-                         "To message it, run: CODEX_HOME=/Users/me/.codex-tests codex queue --thread codex-conversation-1 "
+                         'Codex session codex-conversation-1 (process ID 301, folder /p/codex, iTerm2 tab "codex tests"). '
+                         "You can message it by running: CODEX_HOME=/Users/me/.codex-tests codex queue --thread codex-conversation-1 "
                          '--message="<your message>"')
 
     def test_a_session_other_sessions_cant_message_says_why(self):

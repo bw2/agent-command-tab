@@ -34,11 +34,20 @@ AgentSessionForMessages.__doc__ = (
 
 def describe_agent_session_for_messages(agent_session):
     """Returns how the messages name a session, with its process ID, folder and tab, for example
-    'the Claude Code session "analysis-1d" (process ID 4242, folder /x, iTerm2 tab "analysis")'."""
+    'Claude Code session "analysis-1d" (process ID 4242, folder /x, iTerm2 tab "analysis")'."""
     name = (f'"{agent_session.address}"' if agent_session.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
             else agent_session.address)
-    return (f"the {agent_session.agent_tool_name} session {name} (process ID {agent_session.process_id}, "
+    return (f"{agent_session.agent_tool_name} session {name} (process ID {agent_session.process_id}, "
             f'folder {agent_session.working_folder or "unknown"}, {agent_session.tab_kind_name} "{agent_session.tab_title}")')
+
+
+def build_codex_queue_command(recipient):
+    """Returns the command that sends the recipient, a Codex session, a message, with
+    "<your message>" in place of the message."""
+    # The message attached to its option, so one starting with "-" isn't read as an option. Its
+    # CODEX_HOME, since the sender's may differ.
+    return (f"{build_codex_home_setting(recipient.codex_home_folder)}codex queue --thread {shlex.quote(recipient.address)} "
+            f'--message="<your message>"')
 
 
 def explain_how_to_send_a_message_to(recipient):
@@ -46,11 +55,7 @@ def explain_how_to_send_a_message_to(recipient):
     `codex queue` for a Codex session, which any agent with a shell can, or use the SendMessage
     tool for a Claude Code session, which only another Claude Code session has."""
     if recipient.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
-        # The message attached to its option, so one starting with "-" isn't read as an option. Its
-        # CODEX_HOME, since the sender's may differ.
-        return (f"To message it, run: {build_codex_home_setting(recipient.codex_home_folder)}codex queue --thread "
-                f"{shlex.quote(recipient.address)} "
-                f'--message="<your message>"')
+        return f"To message it, run: {build_codex_queue_command(recipient)}"
     return f'To message it, use your SendMessage tool with to: "{recipient.address}".'
 
 
@@ -63,19 +68,18 @@ def explain_why_sessions_of_agent_tool_cant_take_messages(agent_tool_name):
 def build_contact_info(agent_session):
     """Returns what a tab row's "Copy contact info" puts on the clipboard, to paste into
     another agent session so it can message this one: the session as Talk to Each Other names it,
-    then how to send it a message, for example 'The Claude Code session "analysis-1d" (process ID
-    4242, folder /x, iTerm2 tab "analysis"). To message it, use your SendMessage tool with to:
-    "analysis-1d". Only Claude Code sessions have that tool, so a Codex session can't message it.'
+    then how to send it a message, for example 'Claude Code session "analysis-1d" (process ID
+    4242, folder /x, iTerm2 tab "analysis"). You can message it using your SendMessage tool with
+    to: "analysis-1d"'.
 
     Args:
         agent_session: The AgentSessionForMessages of the session to message.
     """
-    description = describe_agent_session_for_messages(agent_session)
-    contact_info = f"{description[:1].upper()}{description[1:]}. {explain_how_to_send_a_message_to(agent_session)}"
-    if agent_session.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL:
-        # Pasted into a Codex session, the contact info would otherwise ask it for a tool it lacks.
-        return f"{contact_info} Only Claude Code sessions have that tool, so a Codex session can't message it."
-    return contact_info
+    if agent_session.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
+        how_to_message_it = f"by running: {build_codex_queue_command(agent_session)}"
+    else:
+        how_to_message_it = f'using your SendMessage tool with to: "{agent_session.address}"'
+    return f"{describe_agent_session_for_messages(agent_session)}. You can message it {how_to_message_it}"
 
 
 def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_too):
@@ -108,8 +112,8 @@ def build_message_asking_agent_session_to_talk_to_the_others(note, recipient, ot
         agent_sessions_that_get_the_message: The AgentSessionForMessages of every session that
             gets a Talk to Each Other message this time.
     """
-    lines = [note.strip(), "", f"You are {describe_agent_session_for_messages(recipient)}.", "", "The other sessions:"]
-    lines += [f"- {describe_agent_session_for_messages(other)}. "
+    lines = [note.strip(), "", f"You are the {describe_agent_session_for_messages(recipient)}.", "", "The other sessions:"]
+    lines += [f"- the {describe_agent_session_for_messages(other)}. "
               f"{explain_how_to_send_a_message(recipient, other, other in agent_sessions_that_get_the_message)}"
               for other in other_agent_sessions]
     return "\n".join(lines)
