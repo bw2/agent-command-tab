@@ -174,7 +174,6 @@ class Iterm2TerminalBackend(TerminalBackend):
         # already set when the dashboard connected has none (find_status_set_in_iterm2_since_the_job_started).
         self.status_set_in_iterm2_at_by_session_id = {}
         self.key_terminal_window_id = None  # None while no terminal window (for example iTerm2's Settings) has keyboard focus
-        self.iterm2_process_ids = []  # the app's, read when connecting (a connection lasts no longer than its iTerm2)
 
     # ----- connection -----
 
@@ -198,7 +197,6 @@ class Iterm2TerminalBackend(TerminalBackend):
                 # it in the environment and doesn't ask again.
                 await asyncio.to_thread(iterm2.auth.authenticate)
                 self.connection = await iterm2.Connection.async_create()
-                self.iterm2_process_ids = list_iterm2_process_ids()
                 break
             except Exception as error:
                 self.report_problem(self.terminal_name, f"could not connect to iTerm2 ({error}). Retrying soon. Make sure "
@@ -440,7 +438,10 @@ class Iterm2TerminalBackend(TerminalBackend):
         return self.app is not None and self.app.app_active and self.key_terminal_window_id is not None
 
     def list_application_process_ids(self):
-        return self.iterm2_process_ids
+        """Looked up each time: read once, right after connecting, macOS's list of running apps came
+        back without iTerm2 in about half the starts (checked 2026-11-17), and then no tab was in
+        front while the dashboard was active, so the front tab's outline vanished as the list opened."""
+        return list_iterm2_process_ids()
 
     def find_session(self, session_id):
         session = self.app.get_session_by_id(session_id) if self.app is not None else None

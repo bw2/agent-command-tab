@@ -110,18 +110,20 @@ def build_main_menu_with_the_settings_and_edit_shortcuts(settings_target):
     return main_menu
 
 
-def choose_what_the_global_shortcut_does(show_as, sidebar_mode, sidebar_is_shown, list_window_is_in_front, dropdown_is_open):
+def choose_what_the_global_shortcut_does(show_as, sidebar_mode, sidebar_is_shown, sidebar_has_the_keyboard,
+                                         list_window_is_in_front, dropdown_is_open):
     """Returns what a press of the global shortcut does: it shows the list the way the settings
-    ask, or hides it when it shows, except that a sidebar set to stay
-    visible stays, or comes back if the menu bar icon's menu hid it.
+    ask, with the keyboard, or hides it when it shows, except that a sidebar set to stay
+    visible stays: it gets the keyboard, or gives it back while it has it, and comes back if the
+    menu bar icon's menu hid it.
 
     Returns:
-        "show_sidebar", "hide_sidebar", "nothing", "show_window", "hide_window",
-        "open_dropdown" or "close_dropdown".
+        "show_sidebar", "hide_sidebar", "give_back_the_sidebars_keyboard", "show_window",
+        "hide_window", "open_dropdown" or "close_dropdown".
     """
     if show_as == "sidebar":
         if sidebar_mode != "auto_hide":
-            return "nothing" if sidebar_is_shown else "show_sidebar"
+            return "give_back_the_sidebars_keyboard" if sidebar_is_shown and sidebar_has_the_keyboard else "show_sidebar"
         return "hide_sidebar" if sidebar_is_shown else "show_sidebar"
     if show_as == "window":
         return "hide_window" if list_window_is_in_front else "show_window"
@@ -371,30 +373,35 @@ class AppController(NSObject):
         """The global shortcut shows the list as the menu bar icon does and, pressed again, hides
         it, giving the keyboard back to the app that had it
         (choose_what_the_global_shortcut_does). The list it shows has the first agent asking a
-        question selected, or while none asks, the tab in front."""
+        question selected, or while none asks, the previous tab (the one Return then goes back to)."""
         closed_a_dropdown_the_menu_showed = self.close_a_dropdown_the_menu_showed()
         what_to_do = choose_what_the_global_shortcut_does(
             self.settings["show_as"], self.settings["sidebar_mode"], self.sidebar_controller.is_shown,
-            self.list_window_controller.is_in_front(), self.popover.isShown())
+            self.sidebar_controller.has_the_keyboard, self.list_window_controller.is_in_front(), self.popover.isShown())
         if what_to_do in ("show_sidebar", "hide_sidebar") and closed_a_dropdown_the_menu_showed:
-            # The sidebar takes no keyboard, so the app that had it before the dropdown gets it
-            # back, as when the shortcut closes the dropdown itself.
+            # The sidebar never makes the dashboard the active app, so the app that had the
+            # keyboard before the dropdown is made active again, as when the shortcut closes the
+            # dropdown itself, and gets the keyboard back from the sidebar.
             self.give_activation_to(self.application_in_front_before_dropdown)
         if what_to_do == "show_sidebar":
-            self.show_the_sidebar()  # for a few seconds, or for good if it stays visible
-            self.sidebar_controller.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
+            if not self.sidebar_controller.is_shown:  # (one that stays visible may be in already)
+                self.show_the_sidebar()  # for a few seconds, or for good if it stays visible
+            self.sidebar_controller.list_controller.select_the_first_asking_tab_or_else_the_previous_tab()
+            self.sidebar_controller.take_the_keyboard()  # so Return shows the selected row's tab
         elif what_to_do == "hide_sidebar":
             self.sidebar_controller.hide_now()
+        elif what_to_do == "give_back_the_sidebars_keyboard":
+            self.sidebar_controller.give_back_the_keyboard()
         elif what_to_do == "show_window":
             self.show_the_list_window()
-            self.list_window_controller.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
+            self.list_window_controller.list_controller.select_the_first_asking_tab_or_else_the_previous_tab()
         elif what_to_do == "hide_window":
             self.hide_the_list_window()
             if NSApp.isActive():  # otherwise (always on top) the app with the keyboard keeps it
                 self.give_activation_to(self.last_other_active_application)
         elif what_to_do == "open_dropdown":
             self.status_item_controller.show_popover()
-            self.dropdown_list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
+            self.dropdown_list_controller.select_the_first_asking_tab_or_else_the_previous_tab()
         elif what_to_do == "close_dropdown":
             self.close_dropdown()
             self.give_activation_to(self.application_in_front_before_dropdown)
@@ -403,15 +410,15 @@ class AppController(NSObject):
     def close_the_list_after_escape(self, list_controller):
         """Esc in a list closes it and gives the keyboard back to the app that had it, as a second
         press of the global shortcut does; a sidebar set to stay
-        visible stays, and gives the keyboard back."""
+        visible stays, and gives the keyboard back (SidebarController.give_back_the_keyboard)."""
         if list_controller is self.dropdown_list_controller:
             self.close_dropdown()
             self.give_activation_to(self.application_in_front_before_dropdown)
             return
         if list_controller is self.list_window_controller.list_controller:
             self.hide_the_list_window()
-        elif self.sidebar_controller.hides_by_itself():  # also one the menu's Show sidebar slid in
-            self.sidebar_controller.hide_now()
+        else:  # the sidebar, which hides by itself also when the menu's Show sidebar slid it in
+            self.sidebar_controller.give_back_the_keyboard()
         self.give_activation_to(self.last_other_active_application)
 
     def settingsShortcutPressed_(self, sender):
@@ -686,9 +693,13 @@ class AppController(NSObject):
 
     @objc.python_method
     def tab_was_focused(self, list_controller):
-        """The dropdown closes after a tab is focused; the sidebar stays until the pointer leaves."""
+        """The dropdown closes after a tab is focused; the sidebar stays until the pointer leaves,
+        unless the global shortcut gave it the keyboard: then it gives it back, sliding out if it
+        hides by itself, so the shortcut shows it again for the next tab."""
         if list_controller is self.dropdown_list_controller and self.popover.isShown():
             self.popover.performClose_(None)
+        elif list_controller is self.sidebar_controller.list_controller and self.sidebar_controller.has_the_keyboard:
+            self.sidebar_controller.give_back_the_keyboard()
 
     @objc.python_method
     def row_drag_began_or_ended(self):
@@ -1184,7 +1195,15 @@ class AppController(NSObject):
 
     def anotherApplicationBecameActive_(self, notification):
         if self.peek_in_progress is None and self.peek_waiting_for_put_back is None:  # a peek activates iTerm2 only for a moment
-            self.note_application_unless_it_is_the_dashboard(notification.userInfo()[NSWorkspaceApplicationKey])
+            application = notification.userInfo()[NSWorkspaceApplicationKey]
+            # Another app made active (Command-Tab, say) takes the keyboard from the sidebar. The
+            # app it had it from doesn't: the shortcut makes that app active again after closing
+            # a dropdown the menu showed.
+            if (self.sidebar_controller.has_the_keyboard and application is not None and application.processIdentifier() != os.getpid()
+                    and (self.last_other_active_application is None
+                         or application.processIdentifier() != self.last_other_active_application.processIdentifier())):
+                self.sidebar_controller.give_back_the_keyboard()
+            self.note_application_unless_it_is_the_dashboard(application)
 
     @objc.python_method
     def note_application_unless_it_is_the_dashboard(self, application):

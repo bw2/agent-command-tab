@@ -68,6 +68,14 @@ class PeekAndConnectionTests(unittest.TestCase):
         self.assertIn("Python API is off", problems[0])
         self.assertIsNone(problems[-1])
 
+    def test_iterm2s_process_ids_are_looked_up_each_time_rather_than_kept_from_connecting(self):
+        # Read once right after connecting, they came back empty in about half the starts, and the
+        # tab in front then lost its outline as soon as the list opened.
+        backend = make_iterm2_terminal_backend()
+        for iterm2_process_ids in ([], [1472]):
+            with unittest.mock.patch.object(iterm2_terminal_backend, "list_iterm2_process_ids", return_value=iterm2_process_ids):
+                self.assertEqual(backend.list_application_process_ids(), iterm2_process_ids)
+
 
 class Iterm2TerminalSessionTests(unittest.TestCase):
     def test_typing_goes_to_the_session_as_it_is_and_a_paste_is_bracketed(self):

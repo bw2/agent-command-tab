@@ -1934,6 +1934,8 @@ class DashboardCore:
 
         That is the selected tab of the front window of a terminal with windows of its own
         (iTerm2), once that terminal has keyboard focus when the_terminal_must_have_keyboard_focus,
+        else (while the dashboard is active) once that terminal was the last app other than the
+        dashboard to be active, or that app isn't known yet,
         unless a client of a terminal that shows its windows through clients (tmux) is in front:
         when a_client_inside_another_terminal_app_counts, one running inside the last app other
         than the dashboard to be active, when that is another terminal app (such as Terminal);
@@ -1948,8 +1950,10 @@ class DashboardCore:
             if terminal_backend.shows_windows_through_clients or not terminal_backend.is_connected():
                 continue
             terminal_application_process_ids |= set(terminal_backend.list_application_process_ids())
-            if tab_id_in_front is None and (not the_terminal_must_have_keyboard_focus
-                                            or terminal_backend.a_terminal_window_has_keyboard_focus()):
+            terminal_counts_as_in_front = (
+                terminal_backend.a_terminal_window_has_keyboard_focus() if the_terminal_must_have_keyboard_focus
+                else self.last_other_active_application_process_id in (None, *terminal_backend.list_application_process_ids()))
+            if tab_id_in_front is None and terminal_counts_as_in_front:
                 tab_id_in_front = terminal_backend.find_front_tab_id()
         first_session_in_front = next((gathered_tab["first_session"] for gathered_window in self.gathered_windows
                                        for gathered_tab in gathered_window["tabs"] if gathered_tab["tab_id"] == tab_id_in_front), None)
@@ -1986,8 +1990,9 @@ class DashboardCore:
 
     def find_highlighted_session_id(self):
         """Returns the session shown as in front: the one in front while its terminal is active,
-        and also while the dashboard itself is active (so the highlight doesn't vanish while you
-        use the list); None while another app is active."""
+        and also while the dashboard itself is active after that terminal was (so the highlight
+        doesn't vanish while you use the list); None while another app is active, or while the
+        dashboard is active after another app was, since then no tab is the one you came from."""
         return self.find_session_id_in_front(the_terminal_must_have_keyboard_focus=not self.dashboard_is_active,
                                              a_client_inside_another_terminal_app_counts=True)
 

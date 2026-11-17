@@ -61,6 +61,10 @@ PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
 IDLE_TABS_BUTTON_KEY = "i"
 IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle (⌘-i)"),
                           True: ("Show Idle", "Show tabs whose agent is idle (⌘-i)")}
+# Command-S and Command-Shift-S open the top bar's Sort pop-up in the list that has the keyboard,
+# and its tooltip says so.
+SORT_ORDER_POPUP_KEY = "s"
+SORT_ORDER_POPUP_TOOL_TIP = "Sort the list (⌘-s)"
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
 # A message line narrower than this beside the sort control and Hide Idle shows too little to
@@ -130,6 +134,19 @@ class ExpandOrCollapseAllButton(PointingHandButton):
             self.performClick_(None)
             return True
         return objc.super(ExpandOrCollapseAllButton, self).performKeyEquivalent_(event)
+
+
+class SortOrderPopUpButton(NSPopUpButton):
+    """The top bar's Sort pop-up, whose menu Command-S and Command-Shift-S open while it shows. The
+    open menu takes the keys (the arrows, Return and typing choose an order, Esc closes it), and
+    the list's rows have the keyboard again once it closes, as they never lost it."""
+
+    def performKeyEquivalent_(self, event):
+        if not self.isHiddenOrHasHiddenAncestor() and is_a_command_press_of_letter(
+                SORT_ORDER_POPUP_KEY, event.charactersIgnoringModifiers(), event.modifierFlags()):
+            self.performClick_(None)
+            return True
+        return objc.super(SortOrderPopUpButton, self).performKeyEquivalent_(event)
 
 
 class ListPanelView(NSView):
@@ -224,7 +241,8 @@ class ListPanelController(NSViewController):
         self.sort_label.setFrameOrigin_((8, height - TOP_BAR_HEIGHT + 6))
         self.sort_label.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.sort_label)
-        self.list_sort_order_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 90, 20), False)
+        self.list_sort_order_popup = SortOrderPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 90, 20), False)
+        self.list_sort_order_popup.setToolTip_(SORT_ORDER_POPUP_TOOL_TIP)
         # A gray pill like the buttons beside it, and narrower than the standard style (the inline
         # style draws no text in a pop-up).
         self.list_sort_order_popup.setBezelStyle_(NSBezelStyleRecessed)

@@ -53,7 +53,8 @@ from agent_command_tab.snapshot_data_classes import (build_window_title_shown_in
                                                      rename_window_entry, replace_title_in_snapshot)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image, describe_agent_tool_icon
 from agent_command_tab.user_interface.control_helpers import is_a_command_press_of_letter, show_symbol_on_button
-from agent_command_tab.user_interface.named_colors import build_color_from_name, choose_list_background_color
+from agent_command_tab.user_interface.named_colors import (build_color_from_name, choose_list_background_color,
+                                                           make_light_and_dark_mode_color_maker, make_srgb_color_maker)
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 from agent_command_tab.user_interface.process_and_session_info_alerts import shorten_command_for_alert
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
@@ -164,6 +165,9 @@ RESTORE_SESSIONS_TOOL_TIP = "Opens the Saved sessions window, to continue sessio
 SELECTION_OUTLINE_WIDTH = 1.5
 SELECTION_OUTLINE_INSET = 1
 SELECTION_OUTLINE_CORNER_RADIUS = 4
+# The outline of the tab in front's row, the size of the selection outline: dark gray in light
+# mode (white wouldn't show on the light rows), white in dark mode.
+FRONT_TAB_OUTLINE_COLOR_MAKER = make_light_and_dark_mode_color_maker(make_srgb_color_maker(85, 85, 85), NSColor.whiteColor)
 TAB_DRAG_TYPE = "org.agent-command-tab.tab-id"
 WINDOW_DRAG_TYPE = "org.agent-command-tab.window-id"
 COLUMN_IDENTIFIER = "main"
@@ -246,19 +250,29 @@ def compute_selection_outline_rect(row_bounds, is_flipped, joins_the_row_above, 
     return NSMakeRect(x, y, width, height)
 
 
-class RowViewWithSelectionOutline(NSTableRowView):
+class RowViewWithSelectionAndFrontTabOutlines(NSTableRowView):
     """A row that shows it is selected with an outline in the accent color rather than a filled
     background, so its text keeps its colors; adjacent selected rows share one outline, which also takes in
     the process rows of a selected tab row, though
-    they aren't selected."""
+    they aren't selected. The row of the tab in front has an outline of its own around that row
+    alone (FRONT_TAB_OUTLINE_COLOR_MAKER), unless it is inside a selection outline."""
 
     def drawSelectionInRect_(self, dirty_rect):
         self.draw_selection_outline_if_inside_one()
 
     def drawBackgroundInRect_(self, dirty_rect):
-        objc.super(RowViewWithSelectionOutline, self).drawBackgroundInRect_(dirty_rect)
-        if not self.isSelected():  # a process row of a selected tab row draws its part of the tab row's outline
-            self.draw_selection_outline_if_inside_one()
+        objc.super(RowViewWithSelectionAndFrontTabOutlines, self).drawBackgroundInRect_(dirty_rect)
+        # A process row of a selected tab row draws its part of the tab row's outline.
+        if not self.isSelected() and not self.draw_selection_outline_if_inside_one():
+            self.draw_front_tab_outline_if_this_is_its_row()
+
+    @objc.python_method
+    def find_outline_view_and_row(self):
+        """Returns the list's outline view and this row's index in it, or (None, -1)."""
+        outline_view = self.superview()
+        while outline_view is not None and not isinstance(outline_view, NSOutlineView):
+            outline_view = outline_view.superview()  # AppKit puts some rows in a clip view of its own, NSTableRowsClipView
+        return outline_view, outline_view.rowForView_(self) if outline_view is not None else -1
 
     @objc.python_method
     def find_selection_outline_rows(self):
@@ -266,10 +280,7 @@ class RowViewWithSelectionOutline(NSTableRowView):
         outline (AgentSessionListController.row_is_inside_the_selection_outline). A row view that
         isn't one of the list's rows now (drawn while it is reused, say) goes by AppKit's
         selection flags."""
-        outline_view = self.superview()
-        while outline_view is not None and not isinstance(outline_view, NSOutlineView):
-            outline_view = outline_view.superview()  # AppKit puts some rows in a clip view of its own, NSTableRowsClipView
-        row = outline_view.rowForView_(self) if outline_view is not None else -1
+        outline_view, row = self.find_outline_view_and_row()
         if row < 0:
             return self.isSelected(), self.isPreviousRowSelected(), self.isNextRowSelected()
         row_is_inside_the_selection_outline = outline_view.delegate().row_is_inside_the_selection_outline
@@ -278,6 +289,7 @@ class RowViewWithSelectionOutline(NSTableRowView):
 
     @objc.python_method
     def draw_selection_outline_if_inside_one(self):
+        """Draws this row's part of a selection outline if it is inside one; returns whether it is."""
         try:
             is_inside, joins_the_row_above, joins_the_row_below = self.find_selection_outline_rows()
         except Exception:
@@ -285,11 +297,28 @@ class RowViewWithSelectionOutline(NSTableRowView):
             # parent was NSTableRowsClipView), so it is printed instead, and the row goes by AppKit's flags.
             traceback.print_exc()
             is_inside, joins_the_row_above, joins_the_row_below = self.isSelected(), self.isPreviousRowSelected(), self.isNextRowSelected()
-        if not is_inside:
+        if is_inside:
+            self.stroke_outline(NSColor.controlAccentColor(), joins_the_row_above, joins_the_row_below)
+        return is_inside
+
+    @objc.python_method
+    def draw_front_tab_outline_if_this_is_its_row(self):
+        """Outlines this row alone if it is the tab in front's (AgentSessionListController.row_is_the_tab_in_front)."""
+        try:
+            outline_view, row = self.find_outline_view_and_row()
+            is_the_tab_in_front = row >= 0 and outline_view.delegate().row_is_the_tab_in_front(row)
+        except Exception:
+            traceback.print_exc()  # rather than end the app, as for the selection outline
             return
+        if is_the_tab_in_front:
+            self.stroke_outline(FRONT_TAB_OUTLINE_COLOR_MAKER(), False, False)
+
+    @objc.python_method
+    def stroke_outline(self, color, joins_the_row_above, joins_the_row_below):
+        """Strokes the row's outline (compute_selection_outline_rect) in this color."""
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath.clipRect_(self.bounds())
-        NSColor.controlAccentColor().setStroke()
+        color.setStroke()
         outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             compute_selection_outline_rect(self.bounds(), self.isFlipped(), joins_the_row_above, joins_the_row_below),
             SELECTION_OUTLINE_CORNER_RADIUS, SELECTION_OUTLINE_CORNER_RADIUS)
@@ -620,6 +649,7 @@ class AgentListRowView(NSTableCellView):
         self.shows_disclosure_button = False  # a row that can open or close
         self.tree_line_x = None  # set on the "+" row: its button is centered on the tree's vertical line
         self.look = None  # what the row shows, set by the list controller's fill_row_view
+        self.is_filled_as_the_tab_in_front = False  # set by fill_row_view, which redraws the outer row view's outline when it changes
         return self
 
     def layout(self):
@@ -849,7 +879,7 @@ class AgentSessionListController(NSObject):
         outline_view.setIntercellSpacing_((0, 0))
         outline_view.setBackgroundColor_(choose_list_background_color(outline_view.effectiveAppearance()))
         # A click selects a window or tab row, Command-click adds or removes one, Shift-click a
-        # range; RowViewWithSelectionOutline draws the selection.
+        # range; RowViewWithSelectionAndFrontTabOutlines draws the selection.
         outline_view.setAllowsMultipleSelection_(True)
         outline_view.setSelectionHighlightStyle_(NSTableViewSelectionHighlightStyleRegular)
         # The one column follows the outline view's width; its container calls sizeLastColumnToFit once it is embedded.
@@ -1317,7 +1347,7 @@ class AgentSessionListController(NSObject):
         # the kept row view again, about twice per row and reload.
         outer_row_view = self.outer_row_views_by_item_key.get(item.key)
         if outer_row_view is None:
-            outer_row_view = RowViewWithSelectionOutline.alloc().initWithFrame_(NSZeroRect)
+            outer_row_view = RowViewWithSelectionAndFrontTabOutlines.alloc().initWithFrame_(NSZeroRect)
             self.outer_row_views_by_item_key[item.key] = outer_row_view
         return outer_row_view
 
@@ -1352,6 +1382,14 @@ class AgentSessionListController(NSObject):
             return True
         item = self.outline_view.itemAtRow_(row)
         return item.kind == "process" and self.outline_view.isRowSelected_(self.outline_view.rowForItem_(item.parent_item))
+
+    @objc.python_method
+    def row_is_the_tab_in_front(self, row):
+        """Whether a row is the row of the tab in front, which has a bold name and an outline of its own."""
+        if not 0 <= row < self.outline_view.numberOfRows():
+            return False
+        item = self.outline_view.itemAtRow_(row)
+        return item.kind == "tab" and item.entry.is_in_front
 
     # ----- selection -----
 
@@ -1513,14 +1551,21 @@ class AgentSessionListController(NSObject):
         return True
 
     @objc.python_method
-    def select_the_first_asking_tab_or_else_the_tab_in_front(self):
-        """Selects the first tab row, top to bottom, whose agent asks a question, or while no agent asks, the
-        row of the tab in front, drawn in bold, opening the collapsed monitor and window rows above it, and
-        scrolls to it: the global shortcut does this as it shows the list. The selection stays as
-        it is while no agent asks and no listed tab is in front (another app is, or Hide Idle
-        hides that tab's row)."""
+    def select_the_first_asking_tab_or_else_the_previous_tab(self):
+        """Selects the first tab row, top to bottom, whose agent asks a question, or while no agent
+        asks, the row of the previous tab: of the listed tabs other than the one in front, the one
+        last seen in front, so that Return goes back to it and the shortcut and Return again come
+        back, as Command-Tab does between apps. While another app is in front, no tab is, so the
+        previous tab is the one used last. With no previous tab (no other listed tab was seen in
+        front since the app started), it selects the row of the tab in front. It opens the
+        collapsed monitor and window rows above the row and scrolls to it: the global shortcut does
+        this as it shows the list. The selection stays as it is while none of these rows is listed
+        (Hide Idle hides idle tabs' rows)."""
         tab_items = [item for item in self.list_all_items() if item.kind == "tab"]
+        previously_seen_tab_items = [item for item in tab_items
+                                     if not item.entry.is_in_front and item.entry.last_time_tab_was_seen is not None]
         tab_item = (next((item for item in tab_items if item.entry.status == "asking"), None)
+                    or max(previously_seen_tab_items, key=lambda item: item.entry.last_time_tab_was_seen, default=None)
                     or next((item for item in tab_items if item.entry.is_in_front), None))
         if tab_item is not None:
             self.select_row_alone_and_scroll_to_it(tab_item)
@@ -1528,7 +1573,7 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def select_window_once_it_shows(self, window_id):
         """Selects the first tab row of a window the "+" row opened, as
-        select_the_first_asking_tab_or_else_the_tab_in_front selects a row, once the window is in a snapshot: it is listed only after its agent has
+        select_the_first_asking_tab_or_else_the_previous_tab selects a row, once the window is in a snapshot: it is listed only after its agent has
         started (in the folder of another window, it looked like that
         window). It waits SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW at most for the window to show;
         a list that isn't on screen then selects it when it appears, within
@@ -1664,6 +1709,12 @@ class AgentSessionListController(NSObject):
         dot_alpha = DIM_DOT_ALPHA if parts.dot_blinks and self.blink_phase_is_dim else 1.0
         if row_view.dot_text_field.alphaValue() != dot_alpha:
             row_view.dot_text_field.setAlphaValue_(dot_alpha)
+        if is_in_front != row_view.is_filled_as_the_tab_in_front:
+            row_view.is_filled_as_the_tab_in_front = is_in_front
+            # The outer row view draws the tab in front's outline, and AppKit redraws it only when the selection changes.
+            outer_row_view = self.outer_row_views_by_item_key.get(item.key)
+            if outer_row_view is not None:
+                outer_row_view.setNeedsDisplay_(True)
         # Everything else the row's look depends on: an unchanged row is neither refilled nor laid out
         # again, which keeps the 0.6-second refresh cheap with many rows.
         look = (parts, item.kind, is_in_front, shows_disclosure_button, self.row_is_open(item),

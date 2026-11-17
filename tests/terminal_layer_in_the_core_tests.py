@@ -245,6 +245,23 @@ class SessionInFrontTests(unittest.TestCase):
             core.last_other_active_application_process_id = 50  # iTerm2: the client in its front tab
             self.assertEqual(core.find_highlighted_session_id(), "%1")
 
+    def test_while_the_dashboard_is_active_after_another_app_no_tab_is_highlighted(self):
+        core, iterm2, tmux = make_core()
+        iterm2.gathered_windows[0]["tabs"][0]["first_session"]["job_pid"] = 777  # no tmux client in iTerm2's tab
+        core.gathered_windows = asyncio.run(core.gather_every_terminals_windows())
+        iterm2.front_tab_id = "t1"
+        core.dashboard_is_active = True
+        with unittest.mock.patch.object(dashboard_core, "list_the_process_and_its_ancestor_ids",
+                                        lambda process_id: [process_id]):
+            self.assertEqual(core.find_highlighted_session_id(), "s1")  # the app used before isn't known yet
+            core.last_other_active_application_process_id = 50  # iTerm2
+            self.assertEqual(core.find_highlighted_session_id(), "s1")
+            core.last_other_active_application_process_id = 70  # a browser, say: no tab was in front
+            self.assertIsNone(core.find_highlighted_session_id())
+            core.dashboard_is_active = False
+            iterm2.has_keyboard_focus = True  # iTerm2 active again
+            self.assertEqual(core.find_highlighted_session_id(), "s1")
+
 
 class SnapshotOfATmuxSessionTests(unittest.TestCase):
     def test_a_tmux_session_goes_with_the_menu_bar_monitor_and_is_named_with_tmux(self):

@@ -32,7 +32,7 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSImageScaleProportionallyUpOrDown, NSImageView, NSMenu,
                     NSNormalWindowLevel, NSPopover, NSPopoverBehaviorApplicationDefined, NSPopoverBehaviorTransient,
                     NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSView, NSWindow, NSWindowOcclusionStateVisible,
-                    NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable)
+                    NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable, NSWorkspaceApplicationKey)
 from Foundation import NSContainsRect, NSIndexSet
 
 from agent_command_tab.app_controller import AppController, yield_activation_to
@@ -55,7 +55,7 @@ from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_
                                                                          SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW, SMALLEST_TAB_NAME_WIDTH,
                                                                          TEXT_FIELD_INSETS,
                                                                          AgentSessionListController, RowButton,
-                                                                         RowViewWithSelectionOutline, build_index_set,
+                                                                         RowViewWithSelectionAndFrontTabOutlines, build_index_set,
                                                                          choose_room_for_a_columns_texts,
                                                                          compute_selection_outline_rect, list_moves_that_reorder)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons
@@ -1237,8 +1237,50 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual([outline_view.itemAtRow_(row).kind for row in range(outline_view.numberOfRows()) if allowed_rows.containsIndex_(row)],
                          ["window", "tab", "tab", "tab", "window", "tab", "tab"])  # no monitor rows, no "+" row
         row_view = self.list_controller.outlineView_rowViewForItem_(outline_view, outline_view.itemAtRow_(1))
-        self.assertIsInstance(row_view, RowViewWithSelectionOutline)
+        self.assertIsInstance(row_view, RowViewWithSelectionAndFrontTabOutlines)
         self.assertEqual(row_view.interiorBackgroundStyle(), NSBackgroundStyleNormal)  # the text keeps its colors
+
+    def test_the_tab_in_front_has_an_outline_of_its_own_unless_it_is_inside_the_selection_outline(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # planning (row 1) is in front
+        outline_view = self.list_controller.outline_view
+        self.assertEqual([row for row in range(outline_view.numberOfRows()) if self.list_controller.row_is_the_tab_in_front(row)], [1])
+        content_view = self.window.contentView()
+
+        def read_the_middle_of_the_left_edge_of_each_row(rows):
+            """Returns the color (0 to 255) drawn on each row's left outline edge, halfway down."""
+            content_view.layoutSubtreeIfNeeded()
+            bitmap = render_view_into_bitmap(content_view)
+            scale = bitmap.pixelsWide() / content_view.bounds().size.width
+            colors = []
+            for row in rows:
+                outer_row_view = outline_view.rowViewAtRow_makeIfNecessary_(row, True)
+                row_rect = content_view.convertRect_fromView_(outer_row_view.bounds(), outer_row_view)
+                y_from_the_top = content_view.bounds().size.height - row_rect.origin.y - row_rect.size.height / 2
+                colors.append(convert_color_components_to_0_to_255(
+                    read_drawn_color_components(bitmap, scale, row_rect.origin.x + 1, y_from_the_top)))
+            return colors
+
+        for appearance_name, outline_is_darker_than_the_rows in ((NSAppearanceNameAqua, True), (NSAppearanceNameDarkAqua, False)):
+            self.window.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
+            outline_view.deselectAll_(None)
+            front_tab_edge, other_tab_edge = read_the_middle_of_the_left_edge_of_each_row([1, 2])
+            brightness_difference = sum(front_tab_edge[:3]) / 3 - sum(other_tab_edge[:3]) / 3
+            # Dark gray on the light rows, white on the dark ones.
+            self.assertGreater(-brightness_difference if outline_is_darker_than_the_rows else brightness_difference, 60,
+                               (appearance_name, front_tab_edge, other_tab_edge))
+            # Selected, it has the selection outline instead, like another selected tab row.
+            outline_view.selectRowIndexes_byExtendingSelection_(build_index_set([1, 3]), False)
+            front_tab_edge, other_selected_tab_edge = read_the_middle_of_the_left_edge_of_each_row([1, 3])
+            self.assertEqual(front_tab_edge, other_selected_tab_edge, appearance_name)
+        # Once another tab is in front, the outline moves to that tab's row.
+        outline_view.deselectAll_(None)
+        snapshot = make_sample_snapshot()
+        self.list_controller.apply_snapshot(replace_windows_of_the_first_monitor(snapshot, (
+            window_entry._replace(agent_sessions=tuple(entry._replace(is_in_front=entry.tab_id == "3") for entry in window_entry.agent_sessions))
+            for window_entry in snapshot.monitors[0].windows)))
+        self.assertEqual([row for row in range(outline_view.numberOfRows()) if self.list_controller.row_is_the_tab_in_front(row)], [3])
+        planning_edge, codex_review_edge = read_the_middle_of_the_left_edge_of_each_row([1, 3])
+        self.assertGreater(sum(codex_review_edge[:3]) - sum(planning_edge[:3]), 180)  # white on the dark rows, as the loop left them
 
     def test_adjacent_selected_rows_draw_one_outline_around_them_all(self):
         bounds = NSMakeRect(0, 0, 300, 22)
@@ -1922,6 +1964,26 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(press_e("e", NSEventModifierFlagCommand))  # the button is hidden with one window, and so is its key
         self.assertEqual(outline_view.numberOfRows(), 5)
 
+    def test_command_s_and_command_shift_s_open_the_sort_popup_leaving_the_keyboard_on_the_rows(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        popup = self.dropdown_panel_controller.list_sort_order_popup
+        self.assertEqual(popup.toolTip(), "Sort the list (⌘-s)")
+        first_responder = self.window.firstResponder()
+
+        def press_s(characters, modifier_flags):
+            # performClick_ would open the menu and wait in it for a choice; here it only counts.
+            with unittest.mock.patch.object(popup, "performClick_") as open_the_menu:
+                handled = self.window.performKeyEquivalent_(make_key_down_event(self.window, characters, 1, modifier_flags))
+            return handled, open_the_menu.call_count
+        for characters, modifier_flags in (("s", NSEventModifierFlagCommand),
+                                           ("S", NSEventModifierFlagCommand | NSEventModifierFlagShift)):  # Shift makes it "S"
+            self.assertEqual(press_s(characters, modifier_flags), (True, 1), (characters, modifier_flags))
+        self.assertEqual(press_s("s", NSEventModifierFlagCommand | NSEventModifierFlagControl), (False, 0))  # another key
+        self.assertIs(self.window.firstResponder(), first_responder)  # the rows keep the keyboard
+        popup.setHidden_(True)  # a list too narrow for it: the column titles still sort it
+        self.assertEqual(press_s("s", NSEventModifierFlagCommand), (False, 0))
+        popup.setHidden_(False)
+
     def test_a_collapsed_monitor_left_without_windows_doesnt_count_as_collapsed(self):
         two_monitor_snapshot = make_two_monitor_snapshot(make_sample_snapshot())
         self.list_controller.apply_snapshot(two_monitor_snapshot)
@@ -2268,32 +2330,48 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.press_key(characters, key_code)
         self.assertEqual([item.entry.title for item in self.list_controller.list_selected_items()], ["tandem-repeats"])
 
-    def test_the_first_asking_tab_or_else_the_tab_in_front_is_selected_opening_its_collapsed_window(self):
+    def test_the_first_asking_tab_or_else_the_previous_tab_is_selected_opening_its_collapsed_window(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(1, 0, status="asking"))
         outline_view = self.list_controller.outline_view
         self.list_controller.toggle_expansion(outline_view.itemAtRow_(0))  # collapses agent-command-tab
         self.select_rows(2)  # analysis-0, which asks too, but below phase0-tests
-        self.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()  # planning is in front, but agents ask
+        self.list_controller.select_the_first_asking_tab_or_else_the_previous_tab()  # planning is in front, but agents ask
         self.assertTrue(outline_view.isItemExpanded_(outline_view.itemAtRow_(0)))
         self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["phase0-tests"])
 
-        def apply_snapshot_where_no_agent_asks_and_this_tab_is_in_front(tab_id_in_front):
+        def apply_snapshot_where_no_agent_asks(tab_id_in_front, last_time_tab_was_seen_by_tab_id):
             snapshot = make_sample_snapshot()
             self.list_controller.apply_snapshot(replace_windows_of_the_first_monitor(snapshot, (
                 window_entry._replace(agent_sessions=tuple(
-                    entry._replace(status="idle", is_in_front=entry.tab_id == tab_id_in_front) for entry in window_entry.agent_sessions))
+                    entry._replace(status="idle", is_in_front=entry.tab_id == tab_id_in_front,
+                                   last_time_tab_was_seen=last_time_tab_was_seen_by_tab_id.get(entry.tab_id))
+                    for entry in window_entry.agent_sessions))
                 for window_entry in snapshot.monitors[0].windows)))
-        apply_snapshot_where_no_agent_asks_and_this_tab_is_in_front("11")  # analysis-1
+
+        def select_and_list_the_selected_tab_titles():
+            self.list_controller.select_the_first_asking_tab_or_else_the_previous_tab()
+            return [item.entry.tab_title for item in self.list_controller.list_selected_items()]
+        planning_row = outline_view.rowForItem_(self.list_controller.items_by_key[("tab", "1")])
+        # No other tab was seen in front since the app started: the tab in front.
+        apply_snapshot_where_no_agent_asks("11", {"11": 300.0})  # analysis-1
         tandem_repeats_window_item = self.list_controller.items_by_key[("window", "w2")]
         self.list_controller.toggle_expansion(tandem_repeats_window_item)  # collapses tandem-repeats
-        self.select_rows(outline_view.rowForItem_(self.list_controller.items_by_key[("tab", "1")]))  # planning
-        self.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
+        self.select_rows(planning_row)
+        self.assertEqual(select_and_list_the_selected_tab_titles(), ["analysis-1"])
         self.assertTrue(outline_view.isItemExpanded_(tandem_repeats_window_item))
-        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["analysis-1"])
-        apply_snapshot_where_no_agent_asks_and_this_tab_is_in_front(None)  # another app is in front
-        self.select_rows(outline_view.rowForItem_(self.list_controller.items_by_key[("tab", "1")]))
-        self.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front()
-        self.assertEqual([item.entry.tab_title for item in self.list_controller.list_selected_items()], ["planning"])
+        # Else the tab seen in front last before the one in front, so Return goes back to it.
+        apply_snapshot_where_no_agent_asks("11", {"1": 100.0, "3": 200.0, "11": 300.0})
+        self.assertEqual(select_and_list_the_selected_tab_titles(), ["codex-review"])
+        # Shown, codex-review is in front, and the shortcut then selects analysis-1, to come back.
+        apply_snapshot_where_no_agent_asks("3", {"1": 100.0, "3": 400.0, "11": 300.0})
+        self.assertEqual(select_and_list_the_selected_tab_titles(), ["analysis-1"])
+        # While another app is in front, no tab is, so it is the tab used last.
+        apply_snapshot_where_no_agent_asks(None, {"1": 100.0, "3": 400.0, "11": 300.0})
+        self.assertEqual(select_and_list_the_selected_tab_titles(), ["codex-review"])
+        # The selection stays as it is while no tab is in front and none was seen in front.
+        apply_snapshot_where_no_agent_asks(None, {})
+        self.select_rows(planning_row)
+        self.assertEqual(select_and_list_the_selected_tab_titles(), ["planning"])
 
     def test_a_window_the_plus_row_opened_is_selected_and_scrolled_to_once_it_shows(self):
         # In the folder of another window, it looked like that window, and nothing pointed to it.
@@ -2627,18 +2705,30 @@ class MenuBarIconClickAndDropdownTests(unittest.TestCase):
         calls.clear()
         AppController.menu_bar_icon_clicked(stand_in_app_controller)
         self.assertEqual(calls, ["close settings", "close dropdown", "show window"])
-        # The global shortcut does so too, and gives the keyboard back to
-        # the app that had it before the dropdown, since the sidebar takes none.
+        # The global shortcut does so too, and makes the app that had the keyboard before the
+        # dropdown active again, since the sidebar never makes the dashboard active; the sidebar
+        # then takes the keyboard, for Return, until it gives it back.
         stand_in_app_controller.settings = {"show_as": "sidebar", "sidebar_mode": "auto_hide"}
         stand_in_app_controller.sidebar_controller.is_shown = False
+        stand_in_app_controller.sidebar_controller.has_the_keyboard = False
+        stand_in_app_controller.sidebar_controller.take_the_keyboard = lambda: calls.append("take the keyboard")
         stand_in_app_controller.list_window_controller = unittest.mock.Mock(is_in_front=lambda: False)
         stand_in_app_controller.dropdown_is_shown = True
         calls.clear()
         AppController.global_shortcut_pressed(stand_in_app_controller)
-        self.assertEqual(calls, ["close dropdown", "give the keyboard to iTerm2", "show"])
+        self.assertEqual(calls, ["close dropdown", "give the keyboard to iTerm2", "show", "take the keyboard"])
         # The sidebar it shows has the first agent asking a question selected,
-        # or while none asks, the tab in front.
-        stand_in_app_controller.sidebar_controller.list_controller.select_the_first_asking_tab_or_else_the_tab_in_front.assert_called_once_with()
+        # or while none asks, the previous tab.
+        stand_in_app_controller.sidebar_controller.list_controller.select_the_first_asking_tab_or_else_the_previous_tab.assert_called_once_with()
+        # A sidebar that stays visible gets the keyboard, and pressed again, gives it back.
+        stand_in_app_controller.settings = {"show_as": "sidebar", "sidebar_mode": "floating"}
+        stand_in_app_controller.sidebar_controller.is_shown = True
+        stand_in_app_controller.sidebar_controller.give_back_the_keyboard = lambda: calls.append("give back the keyboard")
+        for sidebar_has_the_keyboard, expected_calls in ((False, ["take the keyboard"]), (True, ["give back the keyboard"])):
+            stand_in_app_controller.sidebar_controller.has_the_keyboard = sidebar_has_the_keyboard
+            calls.clear()
+            AppController.global_shortcut_pressed(stand_in_app_controller)
+            self.assertEqual(calls, expected_calls, sidebar_has_the_keyboard)
 
     def test_a_row_dragged_in_the_dropdown_keeps_it_open_when_the_dashboard_stops_being_the_active_app(self):
         # A drag usually starts as a hold, so it ends a peek right away, and macOS told the
@@ -2658,13 +2748,35 @@ class MenuBarIconClickAndDropdownTests(unittest.TestCase):
             AppController.dashboardResignedActive_.callable(stand_in_app_controller, None)
             self.assertEqual(stand_in_app_controller.close_dropdown.called, closes_the_dropdown)
 
-    def test_esc_hides_a_sidebar_that_hides_by_itself_and_gives_the_keyboard_back(self):
-        for sidebar_hides_by_itself in (True, False):  # True also for one the menu's Show sidebar slid in
+    def test_esc_in_the_sidebar_gives_the_keyboard_back(self):
+        # (SidebarController.give_back_the_keyboard also slides out one that hides by itself.)
+        stand_in_app_controller = unittest.mock.Mock()
+        AppController.close_the_list_after_escape(stand_in_app_controller, stand_in_app_controller.sidebar_controller.list_controller)
+        stand_in_app_controller.sidebar_controller.give_back_the_keyboard.assert_called_once_with()
+        stand_in_app_controller.give_activation_to.assert_called_once_with(stand_in_app_controller.last_other_active_application)
+
+    def test_a_tab_shown_from_the_sidebar_with_the_keyboard_gives_the_keyboard_back(self):
+        # So the shortcut, pressed again, shows it with the keyboard rather than hiding it.
+        for sidebar_has_the_keyboard in (True, False):
             stand_in_app_controller = unittest.mock.Mock()
-            stand_in_app_controller.sidebar_controller.hides_by_itself.return_value = sidebar_hides_by_itself
-            AppController.close_the_list_after_escape(stand_in_app_controller, stand_in_app_controller.sidebar_controller.list_controller)
-            self.assertEqual(stand_in_app_controller.sidebar_controller.hide_now.called, sidebar_hides_by_itself)
-            stand_in_app_controller.give_activation_to.assert_called_once_with(stand_in_app_controller.last_other_active_application)
+            stand_in_app_controller.sidebar_controller.has_the_keyboard = sidebar_has_the_keyboard
+            AppController.tab_was_focused(stand_in_app_controller, stand_in_app_controller.sidebar_controller.list_controller)
+            self.assertEqual(stand_in_app_controller.sidebar_controller.give_back_the_keyboard.called, sidebar_has_the_keyboard)
+
+    def test_another_app_made_active_takes_the_keyboard_from_the_sidebar_but_the_one_it_came_from_doesnt(self):
+        def make_application(process_id):
+            application = unittest.mock.Mock()
+            application.processIdentifier.return_value = process_id
+            return application
+        for activated_process_id, gives_back in ((70, True), (50, False), (os.getpid(), False)):  # 50: the app it had the keyboard from
+            stand_in_app_controller = make_stand_in_app_controller_with_real_methods(
+                ["note_application_unless_it_is_the_dashboard"], peek_in_progress=None, peek_waiting_for_put_back=None)
+            stand_in_app_controller.last_other_active_application = make_application(50)
+            stand_in_app_controller.sidebar_controller.has_the_keyboard = True
+            notification = unittest.mock.Mock()
+            notification.userInfo.return_value = {NSWorkspaceApplicationKey: make_application(activated_process_id)}
+            AppController.anotherApplicationBecameActive_.callable(stand_in_app_controller, notification)
+            self.assertEqual(stand_in_app_controller.sidebar_controller.give_back_the_keyboard.called, gives_back, activated_process_id)
 
     def test_a_dropdown_opened_over_the_dashboards_own_window_gives_the_keyboard_to_the_last_other_app(self):
         # With the list window that Show popup hid in front, or the settings window that a click on
@@ -2845,6 +2957,43 @@ class SidebarControllerTests(unittest.TestCase):
             self.controller.hide_now(animate=False)
             self.assertIsNone(self.controller.click_monitor)
             self.assertFalse(self.controller.window.isVisible())  # gone at once, without sliding
+
+    def test_the_keyboard_the_shortcut_gives_it_goes_to_its_list_and_keeps_it_in_until_given_back(self):
+        self.controller.screens = [FAR_AWAY_SCREEN]
+        for sidebar_mode, hides_by_itself in (("auto_hide", True), ("floating", False), ("docked", False)):
+            self.controller.settings = dict(self.controller.settings, sidebar_mode=sidebar_mode)
+            self.controller.set_shown(True, animate=False)
+            self.controller.take_the_keyboard()
+            self.assertTrue(self.controller.has_the_keyboard, sidebar_mode)
+            self.assertIs(self.controller.window.firstResponder(), self.controller.list_controller.outline_view)  # Return, the arrows, Esc
+            self.assertTrue(self.controller.something_belonging_to_the_sidebar_is_open())  # an auto-hiding one stays in
+            self.assertIsNotNone(self.controller.click_monitor)  # a click in another app takes the keyboard
+            with unittest.mock.patch.object(self.controller, "hide_now") as hide_now:
+                self.controller.give_back_the_keyboard()
+            self.assertFalse(self.controller.has_the_keyboard)
+            self.assertEqual(hide_now.called, hides_by_itself, sidebar_mode)
+            if not hides_by_itself:  # it stays, having left the screen for an instant, which gives the keyboard back
+                self.assertTrue(self.controller.window.isVisible())
+                self.assertFalse(self.controller.window.isKeyWindow())
+                self.assertIsNone(self.controller.click_monitor)
+            self.controller.hide_now(animate=False)
+
+    def test_a_click_in_another_app_takes_the_keyboard_from_a_sidebar_that_stays_visible(self):
+        self.controller.screens = [FAR_AWAY_SCREEN]
+        self.controller.set_shown(True, animate=False)
+        self.controller.take_the_keyboard()
+        self.controller.another_app_was_clicked()
+        self.assertFalse(self.controller.has_the_keyboard)
+        self.assertTrue(self.controller.is_shown)
+        self.assertIsNone(self.controller.click_monitor)
+
+    def test_once_slid_out_it_no_longer_has_the_keyboard(self):
+        self.controller.screens = [FAR_AWAY_SCREEN]
+        self.controller.settings = dict(self.controller.settings, sidebar_mode="auto_hide")
+        self.controller.set_shown(True, animate=False)
+        self.controller.take_the_keyboard()
+        self.controller.hide_now(animate=False)
+        self.assertFalse(self.controller.has_the_keyboard)
 
     def test_its_top_bar_dragged_turns_it_into_the_list_window_at_the_windows_last_size(self):
         # With Show as: Sidebar, settings_changed shows the window. With Show as: Window already

@@ -1,7 +1,9 @@
 """The sidebar at the screen edge.
 
 A non-activating panel that floats above windows on every desktop, including full-screen
-ones, and takes keyboard focus only for typing (a rename). Three modes (settings_store.SIDEBAR_MODES):
+ones, and takes keyboard focus only for typing (a rename) and from the global shortcut, so that
+Return shows the selected row's tab (take_the_keyboard), all without making the dashboard the
+active app. Three modes (settings_store.SIDEBAR_MODES):
 - auto_hide: slides in when the pointer touches the chosen edge and slides out half a second
   after the pointer leaves, unless a rename, drag or menu is open, or at once on a click in
   another app;
@@ -71,7 +73,8 @@ def allow_pointer_changes_while_another_app_is_in_front():
 
 
 class SidebarWindow(NSPanel):
-    """A borderless, non-activating panel that may become key, so a rename field can take typing."""
+    """A borderless, non-activating panel that may become key, so a rename field can take typing,
+    and the list the keys pressed after the global shortcut."""
 
     def canBecomeKeyWindow(self):
         return True
@@ -149,7 +152,10 @@ class SidebarController(NSObject):
         self.shown_from_the_menu = False  # out because of show_for_a_few_seconds (until it next hides)
         self.is_kept_hidden = False  # hidden by the menu's Show popup or Show window (hide_until_shown_again)
         self.mouse_monitors = []
-        self.click_monitor = None  # while a sidebar that hides by itself is in (watch_for_clicks_in_other_apps)
+        self.click_monitor = None  # while a sidebar that hides by itself or has the keyboard is in (watch_for_clicks_in_other_apps)
+        # Given by the global shortcut (take_the_keyboard) until given back. Kept here, since the
+        # window still said it was the key window after another app became active (checked 2026-11-17).
+        self.has_the_keyboard = False
         self.width_drag_start = None  # (pointer x, width) while the inner edge is dragged
         self.list_controller = AgentSessionListController.alloc().initWithOwner_(owner)
         self.list_controller.width_is_set_by_the_user = True
@@ -194,6 +200,7 @@ class SidebarController(NSObject):
         # A click in another window (iTerm2, say) ends an open rename without renaming, as closing
         # the dropdown does; AppKit itself leaves the field open, and the list would stop updating.
         self.list_controller.cancel_rename()
+        self.has_the_keyboard = False
 
     @objc.python_method
     def move_width_drag_strip_to_inner_edge(self, edge):
@@ -308,7 +315,8 @@ class SidebarController(NSObject):
         self.is_shown = is_shown
         if not is_shown:
             self.shown_from_the_menu = False
-        self.watch_for_clicks_in_other_apps(is_shown and self.hides_by_itself())
+            self.has_the_keyboard = False  # ordered out, it gives the keyboard back
+        self.watch_for_clicks_in_other_apps(is_shown and (self.hides_by_itself() or self.has_the_keyboard))
         if is_shown:
             self.window.orderFrontRegardless()
             if not was_on_screen:
@@ -360,22 +368,58 @@ class SidebarController(NSObject):
     @objc.python_method
     def watch_for_clicks_in_other_apps(self, is_watching):
         """Adds or removes a global monitor (it only watches, needing no Accessibility permission)
-        of mouse button presses in other apps' windows, which slide out a sidebar that hides by
-        itself at once, rather than after SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT or
-        once the pointer leaves. Clicks on the sidebar and the menu bar icon go to the dashboard,
-        so the monitor never sees them."""
+        of mouse button presses in other apps' windows (another_app_was_clicked). Clicks on the
+        sidebar and the menu bar icon go to the dashboard, so the monitor never sees them."""
         if is_watching and self.click_monitor is None:
             self.click_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown, lambda event: self.hide_now())
+                NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown,
+                lambda event: self.another_app_was_clicked())
         elif not is_watching and self.click_monitor is not None:
             NSEvent.removeMonitor_(self.click_monitor)
             self.click_monitor = None
 
     @objc.python_method
+    def another_app_was_clicked(self):
+        """A click in another app's window slides out a sidebar that hides by itself at once,
+        rather than after SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT or once the pointer leaves, and
+        gives that app the keyboard."""
+        if self.hides_by_itself():
+            self.hide_now()
+        else:
+            self.has_the_keyboard = False
+            self.watch_for_clicks_in_other_apps(False)
+
+    @objc.python_method
+    def take_the_keyboard(self):
+        """Gives the shown sidebar's list the keyboard, as the global shortcut shows it, without
+        making the dashboard the active app: Return shows the selected row's tab, the arrows move
+        the selection, and Esc gives the keyboard back. It stays in while it has the keyboard
+        (something_belonging_to_the_sidebar_is_open)."""
+        self.has_the_keyboard = True
+        self.window.makeKeyWindow()
+        self.window.makeFirstResponder_(self.list_controller.outline_view)
+        self.watch_for_clicks_in_other_apps(True)
+
+    @objc.python_method
+    def give_back_the_keyboard(self):
+        """Gives the keyboard back to the active app (Return showed a tab, Esc, or the global
+        shortcut again): a sidebar that hides by itself slides out, and one that stays visible
+        leaves the screen for an instant. macOS gives the keyboard back only then: activating
+        the app that is already active left the sidebar the key window (checked 2026-11-17)."""
+        self.has_the_keyboard = False
+        if self.hides_by_itself():
+            self.hide_now()
+        elif self.window.isVisible():
+            self.watch_for_clicks_in_other_apps(False)
+            self.window.orderOut_(None)
+            self.window.orderFrontRegardless()
+
+    @objc.python_method
     def something_belonging_to_the_sidebar_is_open(self):
-        """A rename, drag or right-click menu keeps the sidebar in place."""
+        """A rename, drag or right-click menu keeps the sidebar in place, as does the keyboard
+        the global shortcut gave it."""
         return (self.list_controller.rename_in_progress or self.list_controller.drag_in_progress
-                or self.list_controller.menu_is_open or self.width_drag_is_in_progress())
+                or self.list_controller.menu_is_open or self.width_drag_is_in_progress() or self.has_the_keyboard)
 
     # ----- pointer tracking -----
 
