@@ -3236,6 +3236,16 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.settings = dict(self.owner.settings)
         self.controller.window = self.controller.build_window()  # built without showing it
 
+    def test_the_window_opens_with_the_keyboard_on_show_as(self):
+        # Left to AppKit, it went to the first text field: with Keyboard navigation off, AppKit
+        # passes over pop-ups for the window's initial first responder.
+        with unittest.mock.patch("agent_command_tab.user_interface.settings_window.NSApp"), \
+                unittest.mock.patch("agent_command_tab.user_interface.settings_window.place_window_at_saved_frame_or_center",
+                                    lambda window, frame: window.setFrameOrigin_((-20000, -20000))):
+            self.controller.show(dict(self.owner.settings))
+        self.addCleanup(self.controller.window.orderOut_, None)
+        self.assertIs(self.controller.window.firstResponder(), self.controller.show_as_popup)
+
     def test_showing_an_open_window_brings_it_forward_as_it_is(self):
         # It was closed and built again, losing its scroll position and an edit under way.
         open_window = self.controller.window

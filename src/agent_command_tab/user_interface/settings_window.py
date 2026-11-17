@@ -228,6 +228,10 @@ class SettingsWindowController(WindowFrameSavingController):
         self.fit_window_height_to_rows()
         NSApp.activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
+        # The window opens with the keyboard on "Show as", its top control. Left to itself, AppKit
+        # passes over a pop-up for the window's initial first responder unless System Settings >
+        # Keyboard > Keyboard navigation is on, and gave the keyboard to the first text field.
+        self.window.makeFirstResponder_(self.show_as_popup)
 
     def windowDidResize_(self, notification):
         # A scroll view doesn't widen what it holds, so the rows follow the window's width here
