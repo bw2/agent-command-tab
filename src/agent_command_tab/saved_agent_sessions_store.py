@@ -11,7 +11,7 @@ A saved window is the terminal window its sessions were saved from:
      "saved_sessions": [saved session, ...] in the order they were saved, which a restore keeps:
          tab order, except that a session saved again keeps its place and one saved later goes last}
 A saved session:
-    {"conversation_id": str, "agent_tool_name": "Claude Code" or "Codex", "name": str,
+    {"conversation_id": str, "agent_tool_name": "Claude Code", "Codex" or "agy", "name": str,
      "name_was_set_by_user": bool, "folder": where the agent ran, which a resume needs,
      "claude_config_folder": the Claude Code config folder it ran with, or None for the default,
      "codex_home_folder": the CODEX_HOME a Codex session ran with, or None when not known (files

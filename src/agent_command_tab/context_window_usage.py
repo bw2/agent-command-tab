@@ -6,6 +6,10 @@ conversation file (the Tokens column, for example "425k").
   same number its status line shows as total_input_tokens.
 - Codex writes ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<ID>.jsonl with "token_count"
   events whose last_token_usage.total_tokens is the context in use (find_codex_conversation_files).
+- agy writes ~/.gemini/antigravity-cli/brain/<ID>/.system_generated/logs/transcript.jsonl, one
+  record per step; each model reply has its input_tokens and cache_read_tokens, which together
+  are the context in use. agy doesn't say how large its models' context windows are, so its
+  share isn't shown.
 - The context window's size, for the share in use ("134k (13%)" in the
   Tokens column): Codex reports it with its usage; for Claude Code it follows from the model of the
   latest reply (read_model_from_claude_code_transcript) and from the model the session was started
@@ -105,6 +109,19 @@ def read_context_tokens_from_codex_conversation_file(file_path):
             last_token_usage = (payload.get("info") or {}).get("last_token_usage") or {}
             if "total_tokens" in last_token_usage:
                 return last_token_usage["total_tokens"]
+    return None
+
+
+def read_context_tokens_from_agy_transcript(file_path):
+    """Returns the tokens in context at the latest model reply in an agy transcript (its
+    input_tokens, which leave out the cached part, plus its cache_read_tokens), or None.
+    Checked with agy 1.5.9: a reply's record is {"type": "PLANNER_RESPONSE", "model":
+    "gemini-4-carbon-medium", "input_tokens": 2402, "cache_read_tokens": 7773, "output_tokens": 357, ...}."""
+    for record in read_last_records(file_path):
+        input_tokens = record.get("input_tokens")
+        if isinstance(input_tokens, int):
+            cache_read_tokens = record.get("cache_read_tokens")
+            return input_tokens + (cache_read_tokens if isinstance(cache_read_tokens, int) else 0)
     return None
 
 

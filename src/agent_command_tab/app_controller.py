@@ -37,8 +37,10 @@ from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
 from agent_command_tab.saved_agent_sessions_store import (SAVED_AGENT_SESSIONS_FILE_PATH, choose_saved_windows_to_restore,
                                                           delete_saved_items, load_saved_windows, merge_saved_windows,
                                                           rename_saved_session, rename_saved_window, save_saved_windows)
-from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings, find_launch_command,
-                                              list_included_agent_tool_names, load_settings, save_settings)
+from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings,
+                                              build_launch_command_by_agent_tool_name, find_installed_agent_tool_names,
+                                              find_launch_command, list_included_agent_tool_names, load_settings,
+                                              save_settings)
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list, choose_folder_for_new_agent_window
 from agent_command_tab.terminal_backends.iterm2_terminal_backend import ITERM2_BUNDLE_IDENTIFIER, list_running_iterm2_applications
 from agent_command_tab.start_with_iterm2 import (START_WITH_ITERM2_SETTING_TITLE, build_command_that_starts_this_copy_of_the_app,
@@ -142,6 +144,9 @@ class AppController(NSObject):
         if self is None:
             return None
         self.settings = load_settings()
+        # The agent tools installed (find_installed_agent_tool_names), which the menus that start
+        # new agent sessions offer; None until the check that start begins has answered.
+        self.installed_agent_tool_names = None
         self.reserved_screen_area = None
         self.application_in_front_before_dropdown = None
         # The last app other than the dashboard to be active: hiding the list window with the
@@ -203,6 +208,7 @@ class AppController(NSObject):
             self.connection_thread.send_last_other_active_application_process_id(
                 self.last_other_active_application.processIdentifier())
         self.apply_settings_to_the_core_and_every_list(self.settings)
+        self.find_installed_agent_tools(self.settings["agent_tools"])
         self.apply_appearance(self.settings["appearance"])
         self.apply_start_with_iterm2_setting(self.settings["app_starts_with_iterm2"])
         self.global_shortcut_key_filter.use_global_shortcut(self.settings["global_shortcut"])
@@ -695,8 +701,27 @@ class AppController(NSObject):
 
     @objc.python_method
     def list_agent_tool_names(self):
-        """The agent tools the menus offer for new agent sessions: those the settings include."""
-        return list_included_agent_tool_names(self.settings)
+        """The agent tools the menus offer for new agent sessions: those the settings include that
+        are installed, so someone without agy isn't offered it (every included one until the check
+        has answered)."""
+        return [agent_tool_name for agent_tool_name in list_included_agent_tool_names(self.settings)
+                if self.installed_agent_tool_names is None or agent_tool_name in self.installed_agent_tool_names]
+
+    @objc.python_method
+    def find_installed_agent_tools(self, agent_tools):
+        """Finds out, off the main thread (asking the login shell about a command takes a moment),
+        which of the agent tools (the agent_tools setting) are installed, for list_agent_tool_names."""
+        def find():
+            installed_agent_tool_names = find_installed_agent_tool_names(agent_tools)
+            AppHelper.callAfter(self.note_installed_agent_tools, agent_tools, installed_agent_tool_names)
+        threading.Thread(target=find, name="installed-agent-tools-check", daemon=True).start()
+
+    @objc.python_method
+    def note_installed_agent_tools(self, checked_agent_tools, installed_agent_tool_names):
+        """Keeps find_installed_agent_tools's answer while the settings still have the launch commands it checked."""
+        if build_launch_command_by_agent_tool_name(checked_agent_tools) == build_launch_command_by_agent_tool_name(
+                self.settings["agent_tools"]):
+            self.installed_agent_tool_names = installed_agent_tool_names
 
     @objc.python_method
     def confirm_closing_window(self, window_entry):
@@ -1034,7 +1059,11 @@ class AppController(NSObject):
             self.apply_appearance(new_settings["appearance"])
         if new_settings["app_starts_with_iterm2"] != self.settings["app_starts_with_iterm2"]:
             self.apply_start_with_iterm2_setting(new_settings["app_starts_with_iterm2"])
+        launch_commands_changed = (build_launch_command_by_agent_tool_name(new_settings["agent_tools"])
+                                   != build_launch_command_by_agent_tool_name(self.settings["agent_tools"]))
         self.settings = new_settings
+        if launch_commands_changed:
+            self.find_installed_agent_tools(new_settings["agent_tools"])
         save_settings(new_settings)
         self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
         list_window_is_shown_now = new_settings["show_as"] == "window" and show_as_before != "window"

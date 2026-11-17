@@ -1,7 +1,7 @@
 """Small icons that tell agent tools apart in the list's icon column.
 
-They are drawn in code, Claude Code's from a pixel grid and Codex's from the OpenAI logo's
-outline, so no logo files ship with the project. A tool without an icon here gets its name
+They are drawn in code, Claude Code's and agy's from pixel grids and Codex's from the OpenAI
+logo's outline, so no logo files ship with the project. A tool without an icon here gets its name
 drawn as a small image instead.
 """
 
@@ -22,6 +22,24 @@ CLAUDE_CODE_MASCOT_PIXEL_ROWS = [
     "   # #    # #   ",
     "   # #    # #   ",
 ]
+# agy's arch, the figure in its start-up banner (five rows of half blocks, so two pixels each).
+# The banner shades it with some 25 colors; here one color stands for each group of them: "Y"
+# orange and "R" red at the top, "G" green on the left, "B" blue below, "P" purple on the right.
+AGY_ARCH_PIXEL_ROWS = [
+    "     YR     ",
+    "    YYRR    ",
+    "   GGYRRR   ",
+    "   GGYRRR   ",
+    "  GGGBPPPP  ",
+    "  GGB  BPP  ",
+    "  GG    BB  ",
+    " GBB    BBB ",
+    " GB      BB ",
+    "BB        BB",
+]
+# The xterm colors agy draws the arch in: 208, 203, 107, 69 and 98.
+AGY_ARCH_COLORS_BY_CHARACTER = {"Y": (255, 135, 0), "R": (255, 95, 95), "G": (135, 175, 95), "B": (95, 135, 255),
+                                "P": (135, 95, 215)}
 # The OpenAI logo for Codex, in place of the ">_" from Codex's start-up banner. The outline is Simple Icons'
 # (simpleicons.org), which they release under CC0.
 OPENAI_LOGO_SVG = (
@@ -117,7 +135,10 @@ def build_agent_tool_icons():
     """Returns {agent tool name: NSImage} for the tools that have a drawn icon."""
     clay_orange = NSColor.colorWithSRGBRed_green_blue_alpha_(215 / 255, 119 / 255, 87 / 255, 1.0)
     icons_by_name = {
-        "Claude Code": build_pixel_grid_image(CLAUDE_CODE_MASCOT_PIXEL_ROWS, {"#": clay_orange, "E": NSColor.blackColor()})}
+        "Claude Code": build_pixel_grid_image(CLAUDE_CODE_MASCOT_PIXEL_ROWS, {"#": clay_orange, "E": NSColor.blackColor()}),
+        "agy": build_pixel_grid_image(AGY_ARCH_PIXEL_ROWS, {
+            character: NSColor.colorWithSRGBRed_green_blue_alpha_(red / 255, green / 255, blue / 255, 1.0)
+            for character, (red, green, blue) in AGY_ARCH_COLORS_BY_CHARACTER.items()})}
     openai_logo = build_svg_image(OPENAI_LOGO_SVG, OPENAI_LOGO_SIZE, NSColor.labelColor())
     if openai_logo is not None:  # before macOS 14, Codex gets its name drawn instead
         icons_by_name["Codex"] = openai_logo

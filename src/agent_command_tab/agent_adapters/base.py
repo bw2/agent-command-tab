@@ -150,6 +150,13 @@ class AgentToolAdapter:
         """
         return None
 
+    async def find_whether_no_message_was_sent_in_its_conversation(self, agent_process_id):
+        """Returns True when the tool's own files show that the agent process has had no message
+        in the conversation it is in (it has none yet, or one with no message), which makes its
+        row "new"; False when they show one; None when the tool's files can't tell, as for Claude
+        Code, whose hooks tell instead. Asked only while find_conversation_file finds no file."""
+        return None
+
     def read_context_tokens(self, conversation_file_path):
         """Returns how many tokens the conversation's context holds, from its file, or None.
         The core calls this, and read_turn_started_at, in a worker thread."""
@@ -201,7 +208,7 @@ class AgentToolAdapter:
 
     def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None, codex_home_folder=None):
         """Returns the command that resumes a saved conversation (can_resume_conversations only).
-        Each tool uses its own folder argument.
+        Each tool uses its own folder argument, if any.
 
         Args:
             launch_command: The tool's launch command from the settings.

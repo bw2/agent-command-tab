@@ -1,5 +1,6 @@
 """Agent tool adapters and the rule that picks one for a tab."""
 
+from agent_command_tab.agent_adapters.agy import AgyAdapter
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.agent_adapters.generic import GenericAdapter
@@ -8,7 +9,7 @@ from agent_command_tab.session_status_computation import map_iterm2_status_value
 
 def build_built_in_agent_tool_adapters():
     """Returns the adapters with their own rules, in matching order, and the generic adapter."""
-    return [ClaudeCodeAdapter(), CodexAdapter()], GenericAdapter()
+    return [ClaudeCodeAdapter(), CodexAdapter(), AgyAdapter()], GenericAdapter()
 
 
 def list_slash_commands_of_the_built_in_agent_tools():
@@ -40,7 +41,7 @@ def find_agent_tool_adapter_for_tab(command_line, iterm2_status_value, specific_
         command_line: iTerm2's `commandLine` for the tab's first session.
         iterm2_status_value: The value iTerm2 set in that session's `status` variable after its
             foreground job started, or None (find_status_set_in_iterm2_since_the_job_started).
-        specific_adapters: Adapters tried in order (Claude Code, then Codex).
+        specific_adapters: Adapters tried in order (Claude Code, Codex, then agy).
         generic_adapter: Used when no specific adapter matches, the job is not a shell, and the
             status variable holds a recognized value.
 

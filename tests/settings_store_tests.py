@@ -9,7 +9,8 @@ import unittest.mock
 from agent_command_tab import settings_store
 from agent_command_tab.settings_store import (DEFAULT_SETTINGS, ask_the_login_shell_whether_it_knows_command,
                                               build_core_settings, build_environment_with_the_programs_folder_first_on_path,
-                                              find_codex_command_path, find_launch_command_problem,
+                                              build_launch_command_by_agent_tool_name, find_codex_command_path,
+                                              find_installed_agent_tool_names, find_launch_command_problem,
                                               list_included_agent_tool_names, list_left_out_agent_tool_names,
                                               load_settings, merge_settings_with_defaults,
                                               move_the_settings_folder_of_the_old_name, run_script_in_the_login_shell,
@@ -71,10 +72,27 @@ class MergeSettingsTests(unittest.TestCase):
     def test_agent_tools_from_before_the_harnesses_section_are_included(self):
         settings = merge_settings_with_defaults({"agent_tools": [{"agent_tool_name": "Claude Code", "launch_command": "yc"},
                                                                  {"agent_tool_name": "Codex", "launch_command": "codex",
-                                                                  "is_included": False}]})
-        self.assertEqual([agent_tool["is_included"] for agent_tool in settings["agent_tools"]], [True, False])
-        self.assertEqual(list_included_agent_tool_names(settings), ["Claude Code"])
+                                                                  "is_included": False},
+                                                                 {"agent_tool_name": "agy", "launch_command": "agy"}]})
+        self.assertEqual([agent_tool["is_included"] for agent_tool in settings["agent_tools"]], [True, False, True])
+        self.assertEqual(list_included_agent_tool_names(settings), ["Claude Code", "agy"])
         self.assertEqual(list_left_out_agent_tool_names(settings), ["Codex"])
+
+    def test_the_installed_tools_are_those_whose_launch_command_can_run(self):
+        agent_tools = merge_settings_with_defaults({})["agent_tools"]
+        problems_by_launch_command = {"claude": "", "codex": "", "agy": "agy: command not found"}
+        self.assertEqual(find_installed_agent_tool_names(agent_tools, problems_by_launch_command.get), {"Claude Code", "Codex"})
+        self.assertEqual(build_launch_command_by_agent_tool_name(agent_tools), {"Claude Code": "claude", "Codex": "codex",
+                                                                                "agy": "agy"})
+
+    def test_a_tool_added_to_the_app_since_the_file_was_saved_joins_its_tools(self):  # agy, for files from 0.4.1 and before
+        settings = merge_settings_with_defaults({"agent_tools": [
+            {"agent_tool_name": "Codex", "launch_command": "codex -s read-only", "is_included": False},
+            {"agent_tool_name": "Claude Code", "launch_command": "yc", "is_included": True}]})
+        self.assertEqual(settings["agent_tools"], [
+            {"agent_tool_name": "Codex", "launch_command": "codex -s read-only", "is_included": False},
+            {"agent_tool_name": "Claude Code", "launch_command": "yc", "is_included": True},
+            {"agent_tool_name": "agy", "launch_command": "agy", "is_included": True}])
 
     def test_core_settings_read_memory_and_cpu_only_while_their_columns_are_shown_or_sort_the_list(self):
         settings = merge_settings_with_defaults({"stuck_minutes": 4})  # a setting that was dropped

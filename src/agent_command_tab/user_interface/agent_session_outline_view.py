@@ -2356,7 +2356,8 @@ class AgentSessionListController(NSObject):
                                        if len(sessions_to_save) == 1 else
                                        "Saves the conversations so that Restore sessions… can continue them later")
         save_item.setRepresentedObject_([entry.session_id for entry in sessions_to_save])
-        tools_that_can_be_saved = " and ".join(sorted(AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED))
+        tool_names = sorted(AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED)
+        tools_that_can_be_saved = f"{', '.join(tool_names[:-1])} and {tool_names[-1]}"  # "Claude Code, Codex and agy"
         if not sessions_to_save:
             save_item.setEnabled_(False)
             if all(entry.status == "exited" for entry in agent_session_entries):

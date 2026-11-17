@@ -4,9 +4,10 @@ import tempfile
 import unittest
 import unittest.mock
 
-from agent_command_tab.agent_adapters import codex
+from agent_command_tab.agent_adapters import agy, codex
 from agent_command_tab.agent_adapters import (build_built_in_agent_tool_adapters, find_agent_tool_adapter_for_tab,
                                               list_agent_tool_names_whose_conversations_can_be_resumed)
+from agent_command_tab.agent_adapters.agy import AgyAdapter, build_agy_transcript_path, find_agy_conversation_and_transcript
 from agent_command_tab.agent_adapters.base import (command_line_is_a_shell_with_no_script_or_command, command_line_runs_a_shell,
                                                    split_command_line_into_program_names)
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
@@ -40,8 +41,12 @@ class ResumeCommandTests(unittest.TestCase):  # Save session and Restore session
         self.assertEqual(CodexAdapter().build_launch_command_to_resume("CODEX_HOME=~/.codex-work codex", "0199-ab"),
                          "CODEX_HOME=~/.codex-work codex resume 0199-ab")  # not known (saved before it was kept)
 
-    def test_only_claude_code_and_codex_can_resume(self):
-        self.assertEqual(list_agent_tool_names_whose_conversations_can_be_resumed(), {"Claude Code", "Codex"})
+    def test_agy_resumes_with_its_conversation_option(self):
+        self.assertEqual(AgyAdapter().build_launch_command_to_resume("agy --model gemini-4-carbon-high", "5bb9d1c8-3df7"),
+                         "agy --model gemini-4-carbon-high --conversation 5bb9d1c8-3df7")
+
+    def test_only_claude_code_codex_and_agy_can_resume(self):
+        self.assertEqual(list_agent_tool_names_whose_conversations_can_be_resumed(), {"Claude Code", "Codex", "agy"})
 
 
 class DuplicateLaunchCommandTests(unittest.TestCase):
@@ -73,6 +78,61 @@ class DuplicateLaunchCommandTests(unittest.TestCase):
     def test_without_a_conversation_id_or_for_other_tools_the_copy_starts_fresh(self):
         self.assertEqual(ClaudeCodeAdapter().build_launch_command_for_a_copy("claude", None), "claude")
         self.assertEqual(GenericAdapter().build_launch_command_for_a_copy("aider", "abc"), "aider")
+        self.assertEqual(AgyAdapter().build_launch_command_for_a_copy("agy", "5bb9d1c8-3df7"), "agy")  # agy can't fork one
+
+
+class AgyConversationLookupTests(unittest.TestCase):
+    CONVERSATION_ID = "5bb9d1c8-3df7-4e4d-b96d-0155db6b8a5a"
+    OTHER_CONVERSATION_ID = "1b5f3f86-1b68-4a7d-aa5c-81e46434075e"
+
+    def setUp(self):
+        self.agy_folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.agy_folder.cleanup)
+
+    def build_open_file_paths(self, *conversation_ids):
+        """Files an agy process has open (agy 1.5.10): after a /new, the earlier conversation's
+        folders and database stay open, but only the current one's presence lock does."""
+        paths = [os.path.join(self.agy_folder.name, "log", "cli-20261117_103516.log")]
+        for conversation_id in (self.OTHER_CONVERSATION_ID, *conversation_ids):
+            paths += [os.path.join(self.agy_folder.name, "brain", conversation_id),
+                      os.path.join(self.agy_folder.name, "conversations", conversation_id + ".db")]
+        return paths + [os.path.join(self.agy_folder.name, "presence", conversation_id + ".lock")
+                        for conversation_id in conversation_ids]
+
+    def write_transcript(self, conversation_id):
+        transcript_path = build_agy_transcript_path(self.agy_folder.name, conversation_id)
+        os.makedirs(os.path.dirname(transcript_path))
+        open(transcript_path, "w").close()
+        return transcript_path
+
+    def test_the_presence_lock_names_the_conversation_whose_transcript_comes_with_its_first_message(self):
+        open_file_paths = self.build_open_file_paths(self.CONVERSATION_ID)
+        self.assertEqual(find_agy_conversation_and_transcript(open_file_paths), (self.CONVERSATION_ID, None))
+        transcript_path = self.write_transcript(self.CONVERSATION_ID)
+        self.assertEqual(find_agy_conversation_and_transcript(open_file_paths), (self.CONVERSATION_ID, transcript_path))
+
+    def test_no_lock_is_no_conversation_yet_and_files_that_cant_be_read_or_two_locks_tell_nothing(self):
+        self.assertEqual(find_agy_conversation_and_transcript(self.build_open_file_paths()), (None, None))
+        self.assertIsNone(find_agy_conversation_and_transcript(None))
+        self.assertIsNone(find_agy_conversation_and_transcript(
+            self.build_open_file_paths(self.CONVERSATION_ID, "0054ada5-9370-4f9d-9b01-3cd280ddea3b")))
+
+    def test_the_adapter_asks_the_agy_process_for_its_open_files(self):
+        adapter = AgyAdapter()
+
+        def ask_the_adapter(open_file_paths):
+            with unittest.mock.patch.object(agy, "list_the_files_a_process_has_open", return_value=(
+                    None if open_file_paths is None else dict(enumerate(open_file_paths)))):
+                return (asyncio.run(adapter.find_conversation_id(4242, None)),
+                        asyncio.run(adapter.find_conversation_file(4242, None, [])),
+                        asyncio.run(adapter.find_whether_no_message_was_sent_in_its_conversation(4242)))
+        self.assertEqual(ask_the_adapter(self.build_open_file_paths()), (None, None, True))  # a fresh agy
+        open_file_paths = self.build_open_file_paths(self.CONVERSATION_ID)
+        self.assertEqual(ask_the_adapter(open_file_paths), (self.CONVERSATION_ID, None, True))  # after /new
+        transcript_path = self.write_transcript(self.CONVERSATION_ID)
+        self.assertEqual(ask_the_adapter(open_file_paths), (self.CONVERSATION_ID, transcript_path, False))
+        self.assertEqual(ask_the_adapter(None), (None, None, None))
+        self.assertIsNone(asyncio.run(adapter.find_whether_no_message_was_sent_in_its_conversation(None)))
 
 
 class CodexConversationLookupTests(unittest.TestCase):
@@ -157,6 +217,11 @@ class FindAgentToolAdapterTests(unittest.TestCase):
     def test_codex_both_forms(self):
         self.assertEqual(self.find_tool_name("codex --dangerously-bypass-hook-trust -a on-request"), "Codex")
         self.assertEqual(self.find_tool_name("node /opt/homebrew/bin/codex -c 'model=\"o3\"'"), "Codex")
+
+    def test_agy_also_before_it_reports_a_status(self):
+        self.assertEqual(self.find_tool_name("agy"), "agy")
+        self.assertEqual(self.find_tool_name("/Users/someone/.local/bin/agy --conversation 5bb9d1c8-3df7"), "agy")
+        self.assertIsNone(self.find_tool_name("agyle --help"))
 
     def test_node_running_something_else_is_not_codex(self):
         self.assertIsNone(self.find_tool_name("node server.js"))

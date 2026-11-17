@@ -27,6 +27,9 @@ class StandInAdapter:
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         return self.path
 
+    async def find_whether_no_message_was_sent_in_its_conversation(self, agent_process_id):
+        return None  # as CodexAdapter: its files can't tell
+
     def read_context_tokens(self, conversation_file_path):
         self.read_paths.append(conversation_file_path)
         if self.while_reading is not None:

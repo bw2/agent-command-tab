@@ -127,6 +127,14 @@ def can_be_reached_with_tab(control):
     return bool(control.isEnabled()) and not control.isHiddenOrHasHiddenAncestor()
 
 
+def make_section_note_field():
+    """Returns an empty note in small gray text for under a section's box (SettingsSection's note_field)."""
+    note_field = NSTextField.wrappingLabelWithString_("")
+    note_field.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+    note_field.setTextColor_(NSColor.secondaryLabelColor())
+    return note_field
+
+
 class KeyboardSwitch(NSSwitch):
     """A switch that Tab and Shift-Tab reach, and that Space or Return turns on or off."""
 
@@ -272,9 +280,9 @@ class SettingsWindowController(WindowFrameSavingController):
         # Switches, as System Settings has, for the on/off settings.
         self.column_switches = {column_name: self.make_switch(column_name in self.settings["shown_columns"])
                                 for column_name in LIST_COLUMN_NAMES_IN_SETTINGS_ORDER}
-        self.edge_note = NSTextField.wrappingLabelWithString_("")
-        self.edge_note.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
-        self.edge_note.setTextColor_(NSColor.secondaryLabelColor())
+        self.edge_note = make_section_note_field()
+        # Under the Harnesses box while none of the tools is installed (show_whether_no_harness_is_installed).
+        self.harness_note = make_section_note_field()
         # A General section first: "Show as", the keyboard shortcut with its accessibility button
         # under it, then Appearance, then whether iTerm2 starts the app.
         general_section = SettingsSection("General", [
@@ -308,7 +316,7 @@ class SettingsWindowController(WindowFrameSavingController):
         # bar icon's menu's "Show sidebar" still uses the Sidebar section's edge and width. Each
         # section: (the "Show as" choice it shows for, or None for every choice, the section).
         self.sections = [(None, general_section), ("window", window_section), ("sidebar", sidebar_section),
-                         (None, columns_section), (None, SettingsSection("Harnesses", harness_rows))]
+                         (None, columns_section), (None, SettingsSection("Harnesses", harness_rows, self.harness_note))]
         self.update_edge_choices()
         self.show_placement_fallback_note(self.settings)
 
@@ -342,8 +350,10 @@ class SettingsWindowController(WindowFrameSavingController):
     @objc.python_method
     def find_what_the_layout_depends_on(self, show_as):
         """The things that change which rows are laid out: the "Show as" choice (which sections show),
-        whether the accessibility button shows, and whether the sidebar's note says something."""
-        return show_as, bool(self.accessibility_settings_button.isHidden()), not self.edge_note.stringValue()
+        whether the accessibility button shows, and whether the sidebar's note and the Harnesses
+        note say something."""
+        return (show_as, bool(self.accessibility_settings_button.isHidden()), not self.edge_note.stringValue(),
+                not self.harness_note.stringValue())
 
     @objc.python_method
     def lay_out_sections(self, show_as):
@@ -362,7 +372,7 @@ class SettingsWindowController(WindowFrameSavingController):
     @objc.python_method
     def lay_out_sections_again_if_needed(self, show_as):
         """Lays the sections out again, and fits the window's height to them, once a section shows
-        or hides, or the accessibility button or the sidebar's note does."""
+        or hides, or the accessibility button or a note does."""
         if self.find_what_the_layout_depends_on(show_as) == self.layout_depended_on:
             return
         # A width being typed is saved first, as when the window closes: its field would end
@@ -593,6 +603,18 @@ class SettingsWindowController(WindowFrameSavingController):
         launch_command_field.shows_a_problem = bool(problem)
         launch_command_field.setNeedsDisplay_(True)
         launch_command_field.setToolTip_(problem or None)
+        self.show_whether_no_harness_is_installed()
+
+    @objc.python_method
+    def show_whether_no_harness_is_installed(self):
+        """Says under the Harnesses box, while every tool's launch command shows a problem (none is
+        installed, as the menus that start agent sessions find too), "None of these are installed:
+        Claude Code, Codex, agy". A single tool that isn't installed shows only in its field."""
+        no_harness_is_installed = all(launch_command_field.shows_a_problem for launch_command_field in self.launch_command_fields)
+        self.harness_note.setStringValue_(
+            "None of these are installed: " + ", ".join(agent_tool["agent_tool_name"] for agent_tool in self.settings["agent_tools"])
+            if no_harness_is_installed else "")
+        self.lay_out_sections_again_if_needed(self.layout_depended_on[0])  # the note can appear or go
 
     @objc.python_method
     def read_number_field_into_settings(self, text_field, setting_name, new_settings):

@@ -9,7 +9,7 @@ from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens,
                                                     claude_model_has_a_200k_context_window, find_claude_code_transcript,
                                                     find_codex_conversation_files, format_token_count,
-                                                    read_claude_code_model_setting,
+                                                    read_claude_code_model_setting, read_context_tokens_from_agy_transcript,
                                                     read_context_tokens_from_claude_code_transcript,
                                                     read_context_tokens_from_codex_conversation_file,
                                                     read_context_window_tokens_from_codex_conversation_file, read_last_lines,
@@ -83,6 +83,21 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "response_item", "payload": {"type": "message"}},
         ])
         self.assertEqual(read_context_tokens_from_codex_conversation_file(path), 40546)
+
+    def test_agy_context_is_the_latest_replys_input_and_cache_read_tokens(self):  # records as agy 1.5.9 writes them
+        path = self.write_lines("transcript.jsonl", [
+            {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "content": "hi"},
+            {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+             "model": "gemini-4-carbon-medium", "input_tokens": 9827, "cache_read_tokens": 0, "output_tokens": 265},
+            {"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE", "content": "Created At: ..."},
+            {"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+             "model": "gemini-4-carbon-medium", "input_tokens": 2402, "cache_read_tokens": 7773, "output_tokens": 357},
+            {"step_index": 4, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "content": "next"},
+        ])
+        self.assertEqual(read_context_tokens_from_agy_transcript(path), 2402 + 7773)
+        no_reply_yet = self.write_lines("transcript_before_a_reply.jsonl", [
+            {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "content": "hi"}])
+        self.assertIsNone(read_context_tokens_from_agy_transcript(no_reply_yet))
 
     def test_codex_reports_its_context_window_with_its_usage(self):
         path = self.write_lines("rollout_with_window.jsonl", [

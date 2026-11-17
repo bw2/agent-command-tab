@@ -7,6 +7,7 @@ Set AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE=/path/to/file.png to also save what the l
 """
 
 import concurrent.futures
+import copy
 import io
 import json
 import math
@@ -1106,12 +1107,13 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.menuSaveSessions_(window_menu_items_by_title["Save 3 sessions"])
         self.assertEqual(saved_session_ids, [["s1"], ["s1", "s2", "s3"]])
         aider_item = self.build_right_click_menu_items_by_title(5)["Save session"]
-        self.assertEqual((aider_item.isEnabled(), aider_item.toolTip()), (False, "Only Claude Code and Codex sessions can be saved"))
+        self.assertEqual((aider_item.isEnabled(), aider_item.toolTip()),
+                         (False, "Only Claude Code, Codex and agy sessions can be saved"))
         exited_item = self.build_right_click_menu_items_by_title(6)["Save session"]
         self.assertEqual((exited_item.isEnabled(), exited_item.toolTip()), (False, "The agent has ended"))
         self.select_rows(3, 5)  # codex-review and the Aider tab
         several_rows_item = self.build_right_click_menu_items_by_title(5)["Save 1 session"]  # counts only those it saves
-        self.assertEqual(several_rows_item.toolTip(), "Saves 1 of the 2 sessions: only Claude Code and Codex sessions "
+        self.assertEqual(several_rows_item.toolTip(), "Saves 1 of the 2 sessions: only Claude Code, Codex and agy sessions "
                                                       "whose agent runs can be saved")
         self.list_controller.menuSaveSessions_(several_rows_item)
         self.assertEqual(saved_session_ids[-1], ["s3"])
@@ -3462,6 +3464,20 @@ class SettingsWindowSmokeTests(unittest.TestCase):
                 self.assertEqual((command_field.shows_a_problem, command_field.toolTip()), (bool(problem), problem))
                 render_view_into_bitmap(command_field)  # draws the outline
 
+    def test_the_harnesses_note_says_none_is_installed_only_while_every_command_cant_run(self):
+        command_fields = self.controller.launch_command_fields
+        for command_field in command_fields[:-1]:  # agy alone still runs: its field and the others' red outlines say enough
+            self.controller.show_launch_command_problem(command_field, command_field.stringValue(), "command not found")
+        self.assertIsNone(self.controller.harness_note.superview())
+        height_without_the_note = self.controller.rows_view.frame().size.height
+        self.controller.show_launch_command_problem(command_fields[-1], command_fields[-1].stringValue(), "agy: command not found")
+        self.assertEqual(self.controller.harness_note.stringValue(), "None of these are installed: Claude Code, Codex, agy")
+        self.assertIs(self.controller.harness_note.superview(), self.controller.rows_view)
+        self.assertGreater(self.controller.rows_view.frame().size.height, height_without_the_note)
+        self.controller.show_launch_command_problem(command_fields[0], command_fields[0].stringValue(), "")  # one runs again
+        self.assertEqual(self.controller.harness_note.stringValue(), "")
+        self.assertIsNone(self.controller.harness_note.superview())
+
     def test_the_command_fields_start_together_keep_their_width_and_scroll_a_longer_command(self):
         command_fields = self.controller.launch_command_fields
         self.controller.window.setContentSize_((self.controller.window.contentView().frame().size.width + 160, 300))
@@ -3560,11 +3576,11 @@ class SettingsWindowSmokeTests(unittest.TestCase):
 
     def test_harnesses_can_be_left_out_and_keep_their_commands(self):
         self.assertEqual([self.find_label_of_control(include_switch) for include_switch in self.controller.include_switches],
-                         ["Claude Code", "Codex"])
+                         ["Claude Code", "Codex", "agy"])
         self.assertEqual(self.find_label_of_control(self.controller.launch_command_fields[1]), "Command")  # under "Codex"
         self.controller.include_switches[1].setState_(0)
         self.controller.controlChanged_(self.controller.include_switches[1])
-        self.assertEqual([agent_tool["is_included"] for agent_tool in self.owner.settings["agent_tools"]], [True, False])
+        self.assertEqual([agent_tool["is_included"] for agent_tool in self.owner.settings["agent_tools"]], [True, False, True])
         self.assertEqual(self.owner.settings["agent_tools"][1]["launch_command"], "codex")
 
     def test_the_shortcut_popup_offers_both_combinations_and_off_and_saves_the_choice(self):
@@ -3936,6 +3952,47 @@ def make_stand_in_app_controller_for_saved_sessions(**attributes):
     return make_stand_in_app_controller_with_real_methods(["change_saved_windows", "submit_action_and_report_failure"], **attributes)
 
 
+class ThreadThatRunsAtOnce:
+    """Stands in for threading.Thread: start runs the target right away."""
+
+    def __init__(self, target, **keyword_arguments):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+class InstalledAgentToolsInTheMenusTests(unittest.TestCase):
+    def test_the_menus_offer_only_the_included_tools_that_are_installed(self):
+        stand_in_app_controller = make_stand_in_app_controller_with_real_methods(
+            ["list_agent_tool_names", "find_installed_agent_tools", "note_installed_agent_tools"],
+            settings=copy.deepcopy(DEFAULT_SETTINGS), installed_agent_tool_names=None)
+        self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Claude Code", "Codex", "agy"])  # not checked yet
+        with unittest.mock.patch("agent_command_tab.app_controller.threading.Thread", ThreadThatRunsAtOnce), \
+                unittest.mock.patch("agent_command_tab.app_controller.find_installed_agent_tool_names",
+                                    return_value=frozenset({"Claude Code", "Codex"})), run_main_thread_calls_at_once():
+            stand_in_app_controller.find_installed_agent_tools(stand_in_app_controller.settings["agent_tools"])
+        self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Claude Code", "Codex"])  # no agy installed
+        stand_in_app_controller.settings["agent_tools"][0]["is_included"] = False  # left out in Settings
+        self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Codex"])
+        # An answer about launch commands changed since is dropped: the change's own check decides.
+        checked_agent_tools = copy.deepcopy(stand_in_app_controller.settings["agent_tools"])
+        stand_in_app_controller.settings["agent_tools"][2]["launch_command"] = "~/.local/bin/agy"
+        stand_in_app_controller.note_installed_agent_tools(checked_agent_tools, frozenset({"Codex", "agy"}))
+        self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Codex"])
+
+    def test_a_changed_launch_command_is_checked_again(self):
+        for changed_agent_tool_field, value, is_checked_again in (("launch_command", "~/.local/bin/agy", True),
+                                                                   ("is_included", False, False)):
+            stand_in_app_controller = unittest.mock.Mock(settings=copy.deepcopy(DEFAULT_SETTINGS))
+            new_settings = copy.deepcopy(DEFAULT_SETTINGS)
+            new_settings["agent_tools"][2][changed_agent_tool_field] = value
+            with unittest.mock.patch("agent_command_tab.app_controller.save_settings"):
+                AppController.settings_changed(stand_in_app_controller, new_settings)
+            self.assertEqual([call.args for call in stand_in_app_controller.find_installed_agent_tools.call_args_list],
+                             [(new_settings["agent_tools"],)] if is_checked_again else [], changed_agent_tool_field)
+
+
 class SavedSessionsInTheAppTests(unittest.TestCase):
     def test_restore_sessions_is_in_the_menu_bar_icons_menu_only_while_sessions_are_saved(self):
         status_item_controller = MenuBarStatusItemController.alloc().init()  # no status item of its own
@@ -3982,7 +4039,8 @@ class SavedSessionsInTheAppTests(unittest.TestCase):
             self.assertEqual(action_request.action, "restore_saved_agent_sessions")
             self.assertEqual([[saved_session["conversation_id"] for saved_session in saved_window["saved_sessions"]]
                               for saved_window in action_request.arguments["saved_windows"]], [["a"], ["c"]])
-            self.assertEqual(action_request.arguments["launch_command_by_agent_tool_name"], {"Claude Code": "claude", "Codex": "codex"})
+            self.assertEqual(action_request.arguments["launch_command_by_agent_tool_name"],
+                             {"Claude Code": "claude", "Codex": "codex", "agy": "agy"})
             # The restored session leaves the list; the one that failed stays.
             self.assertEqual([[saved_session["conversation_id"] for saved_session in saved_window["saved_sessions"]]
                               for saved_window in stand_in_app_controller.saved_windows], [["b"], ["c"]])

@@ -2487,6 +2487,14 @@ class DashboardCore:
                     conversation_key, path, now, conversation_file["cleared_path"] if is_same_conversation else None)
                 self.conversation_files_by_session_id[session_id] = conversation_file
                 self.forget_conversation_file_readings(session_id)
+            # For a tool whose files tell (agy), whether its row is "new"
+            # (snapshot_builder.agent_waits_for_its_first_prompt); a conversation with a file has had a message.
+            no_message_was_sent = (False if conversation_file["path"] is not None
+                                   else await agent_session["adapter"].find_whether_no_message_was_sent_in_its_conversation(
+                                       agent_session["process_id"]))
+            if session_id not in self.agent_sessions:
+                return  # the tab closed meanwhile
+            self.note_reading_value(session_id, "no_message_was_sent_in_its_conversation", no_message_was_sent)
         path = conversation_file["path"]
         if path is None:
             return

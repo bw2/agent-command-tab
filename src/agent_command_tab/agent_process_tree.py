@@ -170,13 +170,13 @@ def read_process_current_folder(process_id):
     return buffer.raw[VNODE_INFO_SIZE:VNODE_INFO_SIZE + MAXIMUM_PATH_LENGTH].split(b"\0", 1)[0].decode(errors="replace")
 
 
-def list_the_files_a_process_writes_to(process_id):
-    """Returns {file descriptor: path} for the files and devices a process has open for writing
-    (a terminal or /dev/null gives its device's path; pipes and sockets aren't listed), or {} for
-    a process that can't be read."""
+def list_the_files_a_process_has_open(process_id, only_those_open_for_writing=False):
+    """Returns {file descriptor: path} for the files, folders and devices a process has open, or
+    only those open for writing (a terminal or /dev/null gives its device's path; pipes and
+    sockets aren't listed), or None for a process that can't be read."""
     needed_size = LIBPROC.proc_pidinfo(process_id, PROC_PIDLISTFDS, ctypes.c_uint64(0), None, 0)
     if needed_size <= 0:
-        return {}
+        return None
     file_descriptor_infos = (ctypes.c_int32 * (2 * (needed_size // PROC_FD_INFO_SIZE)))()  # (descriptor, type) pairs
     listed_size = LIBPROC.proc_pidinfo(process_id, PROC_PIDLISTFDS, ctypes.c_uint64(0), file_descriptor_infos,
                                        ctypes.sizeof(file_descriptor_infos))
@@ -187,7 +187,7 @@ def list_the_files_a_process_writes_to(process_id):
         if (file_descriptor_type == PROX_FDTYPE_VNODE
                 and LIBPROC.proc_pidfdinfo(process_id, file_descriptor, PROC_PIDFDVNODEPATHINFO, path_info,
                                            len(path_info)) == len(path_info)
-                and ctypes.c_uint32.from_buffer_copy(path_info.raw[:4]).value & FWRITE):
+                and (not only_those_open_for_writing or ctypes.c_uint32.from_buffer_copy(path_info.raw[:4]).value & FWRITE)):
             paths_by_file_descriptor[file_descriptor] = (
                 path_info.raw[PROC_FILE_INFO_SIZE + VNODE_INFO_SIZE:].split(b"\0", 1)[0].decode(errors="replace"))
     return paths_by_file_descriptor
@@ -584,7 +584,7 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
         command_started_at = child.started_at if claude_code_shell_command else shown_process.started_at
         # Any file it writes to, not only its standard output: a shell that runs a loop or a { }
         # block with its output sent elsewhere (`done > /dev/null`) keeps its own on another descriptor meanwhile.
-        paths_written_to_by_file_descriptor = list_the_files_a_process_writes_to(child.process_id)
+        paths_written_to_by_file_descriptor = list_the_files_a_process_has_open(child.process_id, only_those_open_for_writing=True) or {}
         claude_code_task_id = next(filter(None, (find_the_claude_code_task_of_an_output_file(path)
                                                  for _, path in sorted(paths_written_to_by_file_descriptor.items()))), None)
         output_file_path = paths_written_to_by_file_descriptor.get(STANDARD_OUTPUT_FILE_DESCRIPTOR, "")

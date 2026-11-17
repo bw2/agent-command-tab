@@ -181,6 +181,21 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         # A reply in its conversation file: a prompt was sent while the app wasn't running to hear it.
         self.assertEqual(build_entry("idle", dict(no_prompt, context_tokens=58_000)).status, "idle")
 
+    def test_an_agy_session_whose_conversation_had_no_message_is_new_also_before_it_reports_a_status(self):
+        def build_agy_entry(status, session_reading):
+            return build_snapshot([make_window("w", [make_tab("1", "agy", status=status)])],
+                                  session_readings={"session-1": session_reading}).monitors[0].windows[0].agent_sessions[0]
+        no_message = {"no_message_was_sent_in_its_conversation": True}
+        entry = build_agy_entry(None, no_message)  # it may report no status to iTerm2 before its first message
+        self.assertEqual((entry.agent_tool_name, entry.status, entry.status_reason),
+                         ("agy", "new", "started, with no message sent to it yet"))
+        self.assertEqual(build_agy_entry("idle", no_message).status, "new")
+        self.assertEqual(build_agy_entry(None, {"no_message_was_sent_in_its_conversation": False}).status, "unknown")
+        self.assertEqual(build_agy_entry("working", no_message).status, "working")
+        self.assertEqual(build_agy_entry("idle", dict(no_message, context_tokens=10_175)).status, "idle")
+        # Background work makes only an idle session "background", not one without a status.
+        self.assertEqual(build_agy_entry(None, {"background_task_count": 1}).status, "unknown")
+
     def test_a_tool_call_open_for_5_seconds_or_more_shows_as_running(self):  # build_snapshot's time is 1000
         subagent_call = {"open_tool_name": "Agent", "open_tool_started_at": 995.0}
         entry = build_the_one_claude_entry("working", {"open_tool_call": subagent_call})

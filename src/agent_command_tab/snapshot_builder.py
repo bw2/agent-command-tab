@@ -59,11 +59,14 @@ def session_has_background_work(session_reading):
 
 
 def agent_waits_for_its_first_prompt(session_reading):
-    """Returns whether an agent has had no message since it started, which makes its idle session
-    "new": its hooks report no prompt since its start, and its
-    conversation file shows no reply, which a prompt sent while the app wasn't running to hear it
-    would have brought."""
-    return bool(session_reading.get("hooks_report_no_prompt_since_the_agent_started")) and session_reading.get("context_tokens") is None
+    """Returns whether an agent has had no message since it started, which makes its idle session,
+    or one without a status yet, "new": its hooks report no prompt since its start, or its tool's
+    files show no message in its conversation (agy, whose conversation has no transcript before
+    its first message), and its conversation file shows no reply, which a prompt sent while the
+    app wasn't running to hear it would have brought."""
+    return ((bool(session_reading.get("hooks_report_no_prompt_since_the_agent_started"))
+             or bool(session_reading.get("no_message_was_sent_in_its_conversation")))
+            and session_reading.get("context_tokens") is None)
 
 
 def choose_tool_the_agent_is_waiting_on(state, session_reading, now):
@@ -277,11 +280,13 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         )
         status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
                                                      previous_displayed_state, now)
-    for session_reading_shows_it, state_shown_instead_of_idle, reason_shown_instead_of_idle in (
-            (agent_waits_for_its_first_prompt, "new", "started, with no message sent to it yet"),
-            (session_has_background_work, "background", "at its prompt, with background processes running")):
-        if state == "idle" and session_reading_shows_it(session_reading):
-            state, reason = state_shown_instead_of_idle, reason_shown_instead_of_idle
+    # An agent with no message yet can't be in a turn, so "new" also stands in for no status at
+    # all, as a tool that reports its own state may have none before its first message.
+    for session_reading_shows_it, states_it_replaces, state_shown_instead, reason_shown_instead in (
+            (agent_waits_for_its_first_prompt, ("idle", "unknown"), "new", "started, with no message sent to it yet"),
+            (session_has_background_work, ("idle",), "background", "at its prompt, with background processes running")):
+        if state in states_it_replaces and session_reading_shows_it(session_reading):
+            state, reason = state_shown_instead, reason_shown_instead
             status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
                                                          previous_displayed_state, now)
     running_tool = choose_tool_the_agent_is_waiting_on(state, session_reading, now)

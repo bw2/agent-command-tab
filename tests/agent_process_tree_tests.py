@@ -19,7 +19,7 @@ from agent_command_tab.agent_process_tree import (ProcessInfo, an_agent_program_
                                                   list_detached_processes, read_child_processes,
                                                   read_name_the_process_was_started_as,
                                                   read_process_info, read_process_resource_usage,
-                                                  read_process_tree_resource_usage, list_the_files_a_process_writes_to)
+                                                  read_process_tree_resource_usage, list_the_files_a_process_has_open)
 from condition_waiting import wait_for_the_process_named_below, wait_until
 
 TURN_STARTED_AT = 1000.0
@@ -251,8 +251,9 @@ class ChildProcessTests(unittest.TestCase):
             shells["monitor"] = start_shell(subprocess.PIPE, "true && eval 'sleep 30; true' < /dev/null && pwd -P >| /dev/null")
             shells["device"] = start_shell(subprocess.DEVNULL)
             try:
-                self.assertEqual(list_the_files_a_process_writes_to(shells["device"].pid), {1: "/dev/null", 2: "/dev/null"})
-                self.assertEqual(list_the_files_a_process_writes_to(shells["pipe"].pid), {})
+                self.assertEqual(list_the_files_a_process_has_open(shells["device"].pid, only_those_open_for_writing=True),
+                                 {1: "/dev/null", 2: "/dev/null"})
+                self.assertEqual(list_the_files_a_process_has_open(shells["pipe"].pid, only_those_open_for_writing=True), {})
                 entries_by_process_id = {}
 
                 def every_shell_runs_its_sleep():  # which then names it (a shell counts once it has run 2 s)
@@ -337,6 +338,22 @@ class ProcessTreeReadingTests(unittest.TestCase):
     def test_a_process_that_is_gone(self):
         self.assertIsNone(read_process_info(999999))
         self.assertEqual(read_name_the_process_was_started_as(999999), "")
+        self.assertIsNone(list_the_files_a_process_has_open(999999))
+
+    def test_the_folders_and_files_a_process_has_open_only_for_reading_are_listed_too(self):  # as agy's presence lock
+        with tempfile.TemporaryDirectory() as folder:
+            folder = os.path.realpath(folder)  # /private/var/..., as the kernel names it
+            lock_path = os.path.join(folder, "conversation.lock")
+            open(lock_path, "w").close()
+            folder_descriptor, lock_descriptor = os.open(folder, os.O_RDONLY), os.open(lock_path, os.O_RDONLY)
+            try:
+                self.assertLessEqual({folder_descriptor: folder, lock_descriptor: lock_path}.items(),
+                                     list_the_files_a_process_has_open(os.getpid()).items())
+                self.assertFalse({folder, lock_path} & set(
+                    list_the_files_a_process_has_open(os.getpid(), only_those_open_for_writing=True).values()))
+            finally:
+                os.close(folder_descriptor)
+                os.close(lock_descriptor)
 
     def test_a_program_started_through_a_symbolic_link_is_named_as_typed(self):
         # As ~/.local/bin/claude links to an executable named after its version.

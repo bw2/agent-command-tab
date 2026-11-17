@@ -1,7 +1,8 @@
-"""Screens recorded from Claude Code 2.1.302 and Codex 0.163.0, as iTerm2 returns them (NULs for empty cells)."""
+"""Screens recorded from Claude Code 2.1.302, Codex 0.163.0 and agy 1.5.9, as iTerm2 returns them (NULs for empty cells)."""
 
 import unittest
 
+from agent_command_tab.agent_adapters.agy import AgyAdapter
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.screen_readings import (count_lines_matching, input_area_is_empty, read_typed_input_area_text,
@@ -27,6 +28,23 @@ CODEX_LONG_TURN_AT_6_SECONDS = [
     "\x00\x00>_ OpenAI Codex (v0.163.0)", "› Run exactly this shell command inside the sandbox (it needs no escalation):",
     "  sleep 45", "•\x00Working\x00(5s • esc to interrupt) · 1 background terminal running · /ps to view…",
     "› Ask Codex to do anything", "\x00\x00GPT-6-Astra low fast · /private/tmp/claude-502/-Users-someone-project-base6-…",
+]
+AGY_STATUS_LINE_END = " " * 60 + "Gemini 4 Carbon · medium"
+AGY_BETWEEN_TURNS = [
+    "> What model are you rnning?", "", "▸ Thought for 10s, 166 tokens", "",
+    "  I am running on Gemini 4 Carbon (configured with Medium reasoning effort).", "",
+    "─" * 90, "> ", "─" * 90, "? for shortcuts" + AGY_STATUS_LINE_END,
+]
+AGY_TURN_UNDER_WAY = [
+    "> Run sleep 15; ls in this folder and tell me how many files there are.", "", "⣟  Working...",
+    "─" * 90, ">", "─" * 90, "esc to cancel" + AGY_STATUS_LINE_END,
+]
+AGY_PERMISSION_PROMPT = [
+    "● Ran (sleep 15; ls) (ctrl+o to expand)", "", "Command", "─" * 90, "", "Requesting permission for:", "   sleep 15; ls",
+    "", "Run this command?", "> 1. Yes, run command",
+    "  2. Yes, and always allow in this conversation for commands that start with 'sleep'",
+    "  3. Yes, and always allow for commands that start with 'sleep' (Persist to settings.json)", "  4. No, cancel", "",
+    "  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command", "esc to cancel" + AGY_STATUS_LINE_END,
 ]
 
 
@@ -55,6 +73,14 @@ class PermissionDialogTests(unittest.TestCase):
 
     def test_no_patterns_means_nothing_to_check(self):
         self.assertTrue(screen_shows_permission_dialog(CODEX_LONG_TURN_AT_6_SECONDS, ()))
+
+
+class TurnShownOnScreenTests(unittest.TestCase):  # how a tmux row of a tool that reports no status tells a turn
+    def test_agy_shows_esc_to_cancel_below_its_input_box_only_during_a_turn(self):
+        pattern = AgyAdapter.working_screen_pattern
+        self.assertEqual([count_lines_matching(screen, pattern) for screen in (
+            AGY_TURN_UNDER_WAY, AGY_PERMISSION_PROMPT, AGY_BETWEEN_TURNS)], [1, 1, 0])
+        self.assertEqual(count_lines_matching(["  Press esc to cancel a turn."], pattern), 0)  # the words in a reply
 
 
 def mark_faint(text, faint_flags_as_letters=""):
@@ -111,6 +137,14 @@ class ReadTypedInputAreaTextTests(unittest.TestCase):
     def test_an_earlier_prompt_in_the_transcript_doesnt_count(self):
         screen = [mark_faint("❯ an earlier prompt"), mark_faint("⏺ the reply")] + CLAUDE_INPUT_BOX_PLACEHOLDER
         self.assertEqual(self.read(ClaudeCodeAdapter(), screen), "")
+
+    def test_agys_box_is_read_below_the_earlier_prompts_and_not_from_its_permission_prompt(self):
+        between_turns = [mark_faint(line) for line in AGY_BETWEEN_TURNS]
+        self.assertEqual(self.read(AgyAdapter(), between_turns), "")
+        between_turns[7] = mark_faint("> /compact")
+        self.assertEqual(self.read(AgyAdapter(), between_turns), "/compact")
+        # Its options start with ">" too, but no rule follows them: a box that can't be read.
+        self.assertIsNone(self.read(AgyAdapter(), [mark_faint(line) for line in AGY_PERMISSION_PROMPT]))
 
     def test_a_box_that_is_not_on_screen_reads_as_none(self):
         self.assertIsNone(self.read(ClaudeCodeAdapter(), [mark_faint("✻ Compacting conversation…")]))

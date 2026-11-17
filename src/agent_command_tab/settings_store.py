@@ -88,6 +88,7 @@ DEFAULT_SETTINGS = {
     "agent_tools": [
         {"agent_tool_name": "Claude Code", "launch_command": "claude", "is_included": True},
         {"agent_tool_name": "Codex", "launch_command": "codex", "is_included": True},
+        {"agent_tool_name": "agy", "launch_command": "agy", "is_included": True},
     ],
     "list_sort_order": "manual",
     "list_sort_order_is_reversed": False,  # a second click on a sorted column's title
@@ -148,6 +149,10 @@ def merge_settings_with_defaults(stored_settings):
                 settings[name] = value
     # Files from before the Harnesses section have no "is_included": those tools are included.
     settings["agent_tools"] = [dict({"is_included": True}, **agent_tool) for agent_tool in settings["agent_tools"]]
+    # A tool added to the app since the file was saved (agy) joins its tools, at the end.
+    stored_agent_tool_names = {agent_tool["agent_tool_name"] for agent_tool in settings["agent_tools"]}
+    settings["agent_tools"] += [dict(agent_tool) for agent_tool in DEFAULT_SETTINGS["agent_tools"]
+                                if agent_tool["agent_tool_name"] not in stored_agent_tool_names]
     return settings
 
 
@@ -347,6 +352,19 @@ def find_launch_command_problem(launch_command, find_command_path=find_program_o
     if find_command_path(first_word) or ask_the_login_shell(first_word) is not False:
         return ""
     return f"{first_word}: command not found (not on PATH, and not an alias or function in your shell)"
+
+
+def build_launch_command_by_agent_tool_name(agent_tools):
+    """Returns {agent tool name: its launch command} for the agent_tools setting."""
+    return {agent_tool["agent_tool_name"]: agent_tool["launch_command"] for agent_tool in agent_tools}
+
+
+def find_installed_agent_tool_names(agent_tools, find_problem=find_launch_command_problem):
+    """Returns the names of the agent tools (the agent_tools setting) that are installed, as far
+    as the app can tell: those whose launch command can be run (find_launch_command_problem finds
+    no problem). Asking the login shell about a command takes a moment, so the app calls this off
+    the main thread."""
+    return frozenset(agent_tool["agent_tool_name"] for agent_tool in agent_tools if not find_problem(agent_tool["launch_command"]))
 
 
 def move_the_settings_folder_of_the_old_name(old_folder=SETTINGS_FOLDER_OF_THE_OLD_NAME, new_folder=SETTINGS_FOLDER):

@@ -10,7 +10,7 @@ kernel (the foreground process group of its terminal, or a text editor its job o
 group), as iTerm2's jobPid does.
 
 tmux reports no agent status, so the core takes each agent's own report instead (Claude Code's
-session file; for Codex the turn timer on its screen). A tmux window shows only through a client
+session file; for Codex the turn timer on its screen, for agy the "esc to cancel" below its input box). A tmux window shows only through a client
 (`tmux attach`) running inside a terminal app, so bringing a tab to the front selects it in tmux,
 switches a client to its session, and leaves bringing that client's terminal to the front to the
 core (an iTerm2 tab) or the app (any other terminal app).
