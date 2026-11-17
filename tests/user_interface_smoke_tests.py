@@ -191,6 +191,9 @@ class RecordingOwner:
     def close_the_list_after_escape(self, list_controller):
         self.lists_closed_after_escape.append(list_controller)
 
+    def tell_the_core_whether_the_dashboard_has_the_keyboard(self):
+        pass  # the sidebar took the keyboard or gave it back; SidebarControllerTests records these
+
     def window_frame_changed(self, setting_name, frame):
         pass  # the list window's frame is saved by the app controller, not looked at here
 
@@ -2960,17 +2963,23 @@ class SidebarControllerTests(unittest.TestCase):
 
     def test_the_keyboard_the_shortcut_gives_it_goes_to_its_list_and_keeps_it_in_until_given_back(self):
         self.controller.screens = [FAR_AWAY_SCREEN]
+        # The core is told, so it goes on marking the tab you came from as the one in front.
+        keyboard_reports = []
+        self.owner.tell_the_core_whether_the_dashboard_has_the_keyboard = lambda: keyboard_reports.append(self.controller.has_the_keyboard)
         for sidebar_mode, hides_by_itself in (("auto_hide", True), ("floating", False), ("docked", False)):
             self.controller.settings = dict(self.controller.settings, sidebar_mode=sidebar_mode)
             self.controller.set_shown(True, animate=False)
+            keyboard_reports.clear()
             self.controller.take_the_keyboard()
             self.assertTrue(self.controller.has_the_keyboard, sidebar_mode)
+            self.assertEqual(keyboard_reports, [True], sidebar_mode)
             self.assertIs(self.controller.window.firstResponder(), self.controller.list_controller.outline_view)  # Return, the arrows, Esc
             self.assertTrue(self.controller.something_belonging_to_the_sidebar_is_open())  # an auto-hiding one stays in
             self.assertIsNotNone(self.controller.click_monitor)  # a click in another app takes the keyboard
             with unittest.mock.patch.object(self.controller, "hide_now") as hide_now:
                 self.controller.give_back_the_keyboard()
             self.assertFalse(self.controller.has_the_keyboard)
+            self.assertEqual(keyboard_reports, [True, False], sidebar_mode)
             self.assertEqual(hide_now.called, hides_by_itself, sidebar_mode)
             if not hides_by_itself:  # it stays, having left the screen for an instant, which gives the keyboard back
                 self.assertTrue(self.controller.window.isVisible())

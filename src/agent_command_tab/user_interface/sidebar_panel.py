@@ -133,9 +133,11 @@ class SidebarController(NSObject):
     """Owns the sidebar window, its own list controller, and the edge tracking.
 
     The owner is the app controller (see AgentSessionListController for the methods it has);
-    the sidebar also calls its sidebar_width_changed(width) after the user drags the width, and
+    the sidebar also calls its sidebar_width_changed(width) after the user drags the width,
     reserve_screen_area(reserved_area or None) whenever the docked area starts, moves or ends:
-    {"frame", "edge", "monitor_visible_frame"} (update_placement).
+    {"frame", "edge", "monitor_visible_frame"} (update_placement), and
+    tell_the_core_whether_the_dashboard_has_the_keyboard() when the sidebar takes the keyboard
+    or gives it back (note_whether_it_has_the_keyboard).
     """
 
     def initWithOwner_(self, owner):
@@ -200,7 +202,7 @@ class SidebarController(NSObject):
         # A click in another window (iTerm2, say) ends an open rename without renaming, as closing
         # the dropdown does; AppKit itself leaves the field open, and the list would stop updating.
         self.list_controller.cancel_rename()
-        self.has_the_keyboard = False
+        self.note_whether_it_has_the_keyboard(False)
 
     @objc.python_method
     def move_width_drag_strip_to_inner_edge(self, edge):
@@ -315,7 +317,7 @@ class SidebarController(NSObject):
         self.is_shown = is_shown
         if not is_shown:
             self.shown_from_the_menu = False
-            self.has_the_keyboard = False  # ordered out, it gives the keyboard back
+            self.note_whether_it_has_the_keyboard(False)  # ordered out, it gives the keyboard back
         self.watch_for_clicks_in_other_apps(is_shown and (self.hides_by_itself() or self.has_the_keyboard))
         if is_shown:
             self.window.orderFrontRegardless()
@@ -386,8 +388,17 @@ class SidebarController(NSObject):
         if self.hides_by_itself():
             self.hide_now()
         else:
-            self.has_the_keyboard = False
+            self.note_whether_it_has_the_keyboard(False)
             self.watch_for_clicks_in_other_apps(False)
+
+    @objc.python_method
+    def note_whether_it_has_the_keyboard(self, has_the_keyboard):
+        """Records whether the sidebar has the keyboard and, when that changes, has the owner tell
+        the core, which goes on marking the tab you came from as the one in front while the
+        sidebar has the keyboard (iTerm2 then says none of its windows has it)."""
+        if has_the_keyboard != self.has_the_keyboard:
+            self.has_the_keyboard = has_the_keyboard
+            self.owner.tell_the_core_whether_the_dashboard_has_the_keyboard()
 
     @objc.python_method
     def take_the_keyboard(self):
@@ -395,7 +406,7 @@ class SidebarController(NSObject):
         making the dashboard the active app: Return shows the selected row's tab, the arrows move
         the selection, and Esc gives the keyboard back. It stays in while it has the keyboard
         (something_belonging_to_the_sidebar_is_open)."""
-        self.has_the_keyboard = True
+        self.note_whether_it_has_the_keyboard(True)
         self.window.makeKeyWindow()
         self.window.makeFirstResponder_(self.list_controller.outline_view)
         self.watch_for_clicks_in_other_apps(True)
@@ -406,7 +417,7 @@ class SidebarController(NSObject):
         shortcut again): a sidebar that hides by itself slides out, and one that stays visible
         leaves the screen for an instant. macOS gives the keyboard back only then: activating
         the app that is already active left the sidebar the key window (checked 2026-11-17)."""
-        self.has_the_keyboard = False
+        self.note_whether_it_has_the_keyboard(False)
         if self.hides_by_itself():
             self.hide_now()
         elif self.window.isVisible():

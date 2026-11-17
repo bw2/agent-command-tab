@@ -1216,11 +1216,19 @@ class AppController(NSObject):
                 self.connection_thread.send_last_other_active_application_process_id(application.processIdentifier())
 
     def dashboardBecameActive_(self, notification):
-        self.connection_thread.send_dashboard_is_active(True)
+        self.tell_the_core_whether_the_dashboard_has_the_keyboard()
         self.retry_the_global_shortcut_if_it_lacks_permission()
 
+    @objc.python_method
+    def tell_the_core_whether_the_dashboard_has_the_keyboard(self):
+        """Tells the core whether the dashboard has the keyboard: it is the active app, or the
+        sidebar took the keyboard from the global shortcut without making it active
+        (SidebarController.take_the_keyboard). iTerm2 then says none of its windows has the
+        keyboard, and the core still marks the tab you came from as the one in front."""
+        self.connection_thread.send_dashboard_has_the_keyboard(bool(NSApp.isActive()) or self.sidebar_controller.has_the_keyboard)
+
     def dashboardResignedActive_(self, notification):
-        self.connection_thread.send_dashboard_is_active(False)
+        self.tell_the_core_whether_the_dashboard_has_the_keyboard()
         # An open settings window keeps the dropdown open while you click elsewhere in the dashboard
         # (update_dropdown_closing_behavior); a click in another app still closes it, unless a peek
         # brought iTerm2 forward on purpose or a row is dragged in the dropdown. A drag usually

@@ -454,7 +454,9 @@ class DashboardCore:
         self.resource_usage_reading_needed = asyncio.Event()  # set when resource_usage_is_read turns on
         self.claude_agents_by_process_id = {}
         self.last_seen_session_id = None
-        self.dashboard_is_active = False
+        # The dashboard is the active app, or its sidebar took the keyboard without making it active
+        # (the global shortcut), when iTerm2 says none of its windows has the keyboard.
+        self.dashboard_has_the_keyboard = False
         # The last app other than the dashboard to be active (the main thread's), whose windows may
         # show a tmux client (find_session_id_in_front).
         self.last_other_active_application_process_id = None
@@ -1736,9 +1738,10 @@ class DashboardCore:
         self.codex_command_path = core_settings["codex_command_path"]
         self.snapshot_needed.set()
 
-    def set_dashboard_is_active(self, dashboard_is_active):
-        """Receives whether the dashboard itself is the active app (then nothing counts as seen)."""
-        self.dashboard_is_active = dashboard_is_active
+    def set_dashboard_has_the_keyboard(self, dashboard_has_the_keyboard):
+        """Receives whether the dashboard has the keyboard: it is the active app, or its sidebar took
+        the keyboard without making it active (then nothing counts as seen)."""
+        self.dashboard_has_the_keyboard = dashboard_has_the_keyboard
         self.record_seen_time_for_the_seen_session()
         self.snapshot_needed.set()
 
@@ -1934,7 +1937,7 @@ class DashboardCore:
 
         That is the selected tab of the front window of a terminal with windows of its own
         (iTerm2), once that terminal has keyboard focus when the_terminal_must_have_keyboard_focus,
-        else (while the dashboard is active) once that terminal was the last app other than the
+        else (while the dashboard has the keyboard) once that terminal was the last app other than the
         dashboard to be active, or that app isn't known yet,
         unless a client of a terminal that shows its windows through clients (tmux) is in front:
         when a_client_inside_another_terminal_app_counts, one running inside the last app other
@@ -1962,7 +1965,7 @@ class DashboardCore:
                             if terminal_backend.shows_windows_through_clients and terminal_backend.is_connected()
                             for terminal_client in terminal_backend.list_clients()]
         # First a client inside the last other app, when that is another terminal app: while the
-        # dashboard is active, iTerm2's front tab may be one the user didn't come from. iTerm2's
+        # dashboard has the keyboard, iTerm2's front tab may be one the user didn't come from. iTerm2's
         # own clients are matched through its tab in front instead.
         other_application_process_id = self.last_other_active_application_process_id
         terminal_client_in_front = None
@@ -1979,21 +1982,22 @@ class DashboardCore:
 
     def find_seen_session_id(self):
         """Returns the session being seen: the one in front (find_session_id_in_front) while its
-        terminal, not the dashboard, is active, and for iTerm2, while a terminal window (not, for
+        terminal, not the dashboard, has the keyboard, and for iTerm2, while a terminal window (not, for
         example, iTerm2's Settings) has keyboard focus. A tmux client inside another terminal app
         doesn't count (that app's tab in front may be another); showing its tab from the list does
         (handle_focus_agent_session)."""
-        if self.dashboard_is_active:
+        if self.dashboard_has_the_keyboard:
             return None
         return self.find_session_id_in_front(the_terminal_must_have_keyboard_focus=True,
                                              a_client_inside_another_terminal_app_counts=False)
 
     def find_highlighted_session_id(self):
         """Returns the session shown as in front: the one in front while its terminal is active,
-        and also while the dashboard itself is active after that terminal was (so the highlight
-        doesn't vanish while you use the list); None while another app is active, or while the
-        dashboard is active after another app was, since then no tab is the one you came from."""
-        return self.find_session_id_in_front(the_terminal_must_have_keyboard_focus=not self.dashboard_is_active,
+        and also while the dashboard has the keyboard (dashboard_has_the_keyboard) after that
+        terminal was active (so the highlight doesn't vanish while you use the list); None while
+        another app is active, or while the dashboard has the keyboard after another app was
+        active, since then no tab is the one you came from."""
+        return self.find_session_id_in_front(the_terminal_must_have_keyboard_focus=not self.dashboard_has_the_keyboard,
                                              a_client_inside_another_terminal_app_counts=True)
 
     def record_seen_time_for_the_seen_session(self):
@@ -2949,10 +2953,10 @@ class DashboardCoreThread(threading.Thread):
         self.core_ready.wait()
         self.event_loop.call_soon_threadsafe(self.core.set_core_settings, core_settings)
 
-    def send_dashboard_is_active(self, dashboard_is_active):
-        """Thread-safe: tells the core whether the dashboard is the active app."""
+    def send_dashboard_has_the_keyboard(self, dashboard_has_the_keyboard):
+        """Thread-safe: tells the core whether the dashboard has the keyboard (set_dashboard_has_the_keyboard)."""
         self.core_ready.wait()
-        self.event_loop.call_soon_threadsafe(self.core.set_dashboard_is_active, dashboard_is_active)
+        self.event_loop.call_soon_threadsafe(self.core.set_dashboard_has_the_keyboard, dashboard_has_the_keyboard)
 
     def send_last_other_active_application_process_id(self, process_id):
         """Thread-safe: tells the core the process ID of the last app other than the dashboard to be active."""
