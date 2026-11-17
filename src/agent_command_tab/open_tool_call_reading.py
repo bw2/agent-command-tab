@@ -60,6 +60,19 @@ def join_codex_item_texts(item):
                      and str(part.get("type")).lower() == "text") if isinstance(content, list) else ""
 
 
+def read_codex_message_text(record):
+    """Returns the text of a Codex conversation file record that holds the user's prompt or the
+    agent's reply: an "item_completed" event with a UserMessage or AgentMessage item (Codex 0.163
+    on), or a "user_message" or "agent_message" event (earlier versions); "" for any other record."""
+    payload = record.get("payload")
+    if record.get("type") != "event_msg" or not isinstance(payload, dict):
+        return ""
+    if payload.get("type") in ("user_message", "agent_message"):
+        return str(payload.get("message") or "")
+    item = payload.get("item") if payload.get("type") == "item_completed" else None
+    return join_codex_item_texts(item) if isinstance(item, dict) and item.get("type") in ("UserMessage", "AgentMessage") else ""
+
+
 def read_open_tool_call_from_codex_conversation_file(file_path):
     """Returns the open tool call at the end of a Codex conversation file (rollout-*.jsonl).
 
@@ -79,12 +92,7 @@ def read_open_tool_call_from_codex_conversation_file(file_path):
             continue
         payload_type = payload.get("type")
         if record.get("type") == "event_msg":
-            item = payload.get("item") if payload_type == "item_completed" and isinstance(payload.get("item"), dict) else {}
-            prompt_text = (str(payload.get("message") or "") if payload_type == "user_message"
-                           else join_codex_item_texts(item) if item.get("type") == "UserMessage" else "")
-            agent_text = (str(payload.get("message") or "") if payload_type == "agent_message"
-                          else join_codex_item_texts(item) if item.get("type") == "AgentMessage" else "")
-            if prompt_text.strip() or agent_text.strip():
+            if read_codex_message_text(record).strip():
                 break
         elif record.get("type") == "response_item":
             if payload_type in ("function_call_output", "custom_tool_call_output"):

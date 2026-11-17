@@ -24,6 +24,7 @@ import shlex
 from agent_command_tab.agent_adapters.base import AgentToolAdapter, split_command_line_into_program_names
 from agent_command_tab.agent_process_tree import list_the_files_a_process_has_open
 from agent_command_tab.context_window_usage import read_context_tokens_from_agy_transcript
+from agent_command_tab.conversation_search_texts import extract_search_texts_from_agy_record
 
 # <agy's folder>/presence/<conversation ID>.lock
 PRESENCE_LOCK_FILE_PATTERN = re.compile(
@@ -104,6 +105,9 @@ class AgyAdapter(AgentToolAdapter):
 
     def read_context_tokens(self, conversation_file_path):
         return read_context_tokens_from_agy_transcript(conversation_file_path)
+
+    def extract_search_texts_from_conversation_record(self, record):
+        return extract_search_texts_from_agy_record(record)
 
     def build_launch_command_to_resume(self, launch_command, conversation_id, claude_config_folder=None, codex_home_folder=None):
         """`<launch command> --conversation <id>`."""

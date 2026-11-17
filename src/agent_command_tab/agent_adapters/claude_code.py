@@ -15,6 +15,7 @@ from agent_command_tab.context_window_usage import (choose_claude_code_context_w
                                                     read_context_tokens_from_claude_code_transcript,
                                                     read_model_from_claude_code_transcript,
                                                     read_turn_started_at_from_claude_code_transcript)
+from agent_command_tab.conversation_search_texts import extract_search_texts_from_claude_code_record
 from agent_command_tab.open_tool_call_reading import read_open_tool_call_from_claude_code_transcript
 
 DEFAULT_CLAUDE_CONFIG_FOLDER = os.path.expanduser("~/.claude")  # the one a Claude Code without CLAUDE_CONFIG_DIR uses
@@ -93,6 +94,9 @@ class ClaudeCodeAdapter(AgentToolAdapter):
 
     def read_open_tool_call(self, conversation_file_path):
         return read_open_tool_call_from_claude_code_transcript(conversation_file_path)
+
+    def extract_search_texts_from_conversation_record(self, record):
+        return extract_search_texts_from_claude_code_record(record)
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None, codex_home_folder=None):
         """Continues a copy of the conversation under a new session ID (`--resume <id> --fork-session`),

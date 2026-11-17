@@ -155,13 +155,15 @@ class SidebarController(NSObject):
         self.is_kept_hidden = False  # hidden by the menu's Show popup or Show window (hide_until_shown_again)
         self.mouse_monitors = []
         self.click_monitor = None  # while a sidebar that hides by itself or has the keyboard is in (watch_for_clicks_in_other_apps)
-        # Given by the global shortcut (take_the_keyboard) until given back. Kept here, since the
+        # Given by the global shortcut (take_the_keyboard) or taken by the search box
+        # (search_box_took_the_keyboard) until given back. Kept here, since the
         # window still said it was the key window after another app became active (checked 2026-11-17).
         self.has_the_keyboard = False
         self.width_drag_start = None  # (pointer x, width) while the inner edge is dragged
         self.list_controller = AgentSessionListController.alloc().initWithOwner_(owner)
         self.list_controller.width_is_set_by_the_user = True
         self.list_panel_controller = ListPanelController.alloc().initWithListController_(self.list_controller)
+        self.list_panel_controller.on_search_box_took_the_keyboard = self.search_box_took_the_keyboard
         self.window = self.build_window()
         allow_pointer_changes_while_another_app_is_in_front()  # for the width strip's left-right arrows
         return self
@@ -398,7 +400,24 @@ class SidebarController(NSObject):
         sidebar has the keyboard (iTerm2 then says none of its windows has it)."""
         if has_the_keyboard != self.has_the_keyboard:
             self.has_the_keyboard = has_the_keyboard
+            if not has_the_keyboard:
+                # An open rename ends without renaming, as when the sidebar stops being the key window.
+                self.list_controller.cancel_rename()
+                # The search box lets go of the keyboard too: AppKit tells a box only when it takes the
+                # keyboard, so a later click in it then gives the sidebar the keyboard again.
+                self.give_the_list_the_keyboard_focus()
             self.owner.tell_the_core_whether_the_dashboard_has_the_keyboard()
+
+    @objc.python_method
+    def give_the_list_the_keyboard_focus(self):
+        """Makes the list the sidebar's first responder. The panel becomes key only when a view
+        that needs it is clicked (becomesKeyOnlyIfNeeded, so a click on a row doesn't take the
+        keyboard), and with that on the list refuses to be the first responder, so it is off meanwhile."""
+        self.window.setBecomesKeyOnlyIfNeeded_(False)
+        try:
+            self.window.makeFirstResponder_(self.list_controller.outline_view)
+        finally:
+            self.window.setBecomesKeyOnlyIfNeeded_(True)
 
     @objc.python_method
     def take_the_keyboard(self):
@@ -408,7 +427,15 @@ class SidebarController(NSObject):
         (something_belonging_to_the_sidebar_is_open)."""
         self.note_whether_it_has_the_keyboard(True)
         self.window.makeKeyWindow()
-        self.window.makeFirstResponder_(self.list_controller.outline_view)
+        self.give_the_list_the_keyboard_focus()
+        self.watch_for_clicks_in_other_apps(True)
+
+    @objc.python_method
+    def search_box_took_the_keyboard(self):
+        """A click in the search box, or Command-F or "/" in the list, made the sidebar the key
+        window, without making the dashboard the active app: as with take_the_keyboard, the
+        sidebar stays in while you type, and a click in another app gives the keyboard back."""
+        self.note_whether_it_has_the_keyboard(True)
         self.watch_for_clicks_in_other_apps(True)
 
     @objc.python_method

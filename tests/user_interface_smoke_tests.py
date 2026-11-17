@@ -22,7 +22,8 @@ import warnings
 from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, NSAppearance, NSAppearanceNameAqua,
                     NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
-                    NSBitmapImageFileTypePNG, NSBox, NSBoxCustom, NSButton, NSColor, NSColorSpace, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
+                    NSBitmapImageFileTypePNG, NSBox, NSBoxCustom, NSButton, NSColor, NSColorSpace, NSControlStateValueOff,
+                    NSControlStateValueOn, NSControlTextDidChangeNotification, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSDownArrowFunctionKey, NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagShift,
                     NSEventTypeKeyDown, NSSwitch, NSUpArrowFunctionKey,
                     NSEventTypeLeftMouseDown,
@@ -33,23 +34,26 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSNormalWindowLevel, NSPopover, NSPopoverBehaviorApplicationDefined, NSPopoverBehaviorTransient,
                     NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSView, NSWindow, NSWindowOcclusionStateVisible,
                     NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable, NSWorkspaceApplicationKey)
-from Foundation import NSContainsRect, NSIndexSet
+from Foundation import NSContainsRect, NSIndexSet, NSNotification
 
-from agent_command_tab.app_controller import AppController, yield_activation_to
+from agent_command_tab.app_controller import SECONDS_BEFORE_THE_INSTALLED_AGENT_TOOLS_ARE_CHECKED_AGAIN, AppController, yield_activation_to
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
 from agent_command_tab.snapshot_data_classes import (AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry,
                                                      build_window_title_shown_in_the_list)
-from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, GAP_BETWEEN_TOP_BAR_BUTTONS,
-                                                                HOOKS_SEND_NO_EVENTS_TOOL_TIP, PANEL_SIDE_MARGIN, POPOVER_WIDTH,
+from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, CASE_SENSITIVE_CHECKBOX_TOOL_TIP,
+                                                                GAP_AFTER_THE_SORT_CONTROL, GAP_BETWEEN_TOP_BAR_BUTTONS,
+                                                                HOOKS_SEND_NO_EVENTS_TOOL_TIP, LARGEST_SEARCH_FIELD_WIDTH,
+                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH,
                                                                 SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS,
-                                                                SMALLEST_POPOVER_WIDTH, SMALLEST_SORT_POPUP_WIDTH,
+                                                                SMALLEST_POPOVER_WIDTH, SMALLEST_SEARCH_FIELD_WIDTH,
+                                                                SMALLEST_SORT_POPUP_WIDTH,
                                                                 TOP_BAR_HEIGHT, ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.saved_agent_sessions_store import rename_saved_session
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
-                                                                         DIM_DOT_ALPHA,
+                                                                         CONVERSATION_ONLY_MATCH_ROW_ALPHA, DIM_DOT_ALPHA,
                                                                          GAP_BEFORE_DETAILS, ROW_HEIGHT, ROW_RIGHT_MARGIN,
                                                                          SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW,
                                                                          SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW, SMALLEST_TAB_NAME_WIDTH,
@@ -116,6 +120,21 @@ class RecordingOwner:
         self.lists_closed_after_escape = []
         self.has_saved_sessions = False
         self.saved_sessions_window_opening_count = 0
+        self.search_is_case_sensitive_choices = []
+        # The list's questions to the core about conversations: [(text, is case sensitive, on_answer)];
+        # a test answers one with answer_conversation_search.
+        self.conversation_searches = []
+
+    def search_is_case_sensitive_chosen(self, search_is_case_sensitive):
+        self.search_is_case_sensitive_choices.append(search_is_case_sensitive)
+
+    def find_agent_sessions_whose_conversations_contain(self, text, is_case_sensitive, on_answer):
+        self.conversation_searches.append((text, is_case_sensitive, on_answer))
+
+    def answer_conversation_search(self, session_ids):
+        """Answers the oldest question the list asked about conversations, as the core would."""
+        _, _, on_answer = self.conversation_searches.pop(0)
+        on_answer(session_ids)
 
     def has_saved_agent_sessions(self):
         return self.has_saved_sessions
@@ -719,10 +738,14 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         width_from_the_buttons_to_the_right_edge = (
             GAP_BETWEEN_TOP_BAR_BUTTONS + panel.idle_tabs_button.frame().size.width
             + GAP_BETWEEN_TOP_BAR_BUTTONS + panel.expand_or_collapse_all_button.frame().size.width + PANEL_SIDE_MARGIN)
+        # The search box at its smallest and its "aA" checkbox keep their room before the sort control's.
+        width_from_the_search_box_to_the_right_edge = (
+            GAP_AFTER_THE_SORT_CONTROL + SMALLEST_SEARCH_FIELD_WIDTH + GAP_BETWEEN_TOP_BAR_BUTTONS
+            + panel.case_sensitive_checkbox.frame().size.width + width_from_the_buttons_to_the_right_edge)
         narrowest_width_with_the_label = (label_frame.origin.x + label_frame.size.width + 2 + full_popup_width
-                                          + width_from_the_buttons_to_the_right_edge)
-        narrowest_width_with_the_full_popup = label_frame.origin.x + full_popup_width + width_from_the_buttons_to_the_right_edge
-        narrowest_width_with_the_popup = label_frame.origin.x + SMALLEST_SORT_POPUP_WIDTH + width_from_the_buttons_to_the_right_edge
+                                          + width_from_the_search_box_to_the_right_edge)
+        narrowest_width_with_the_full_popup = label_frame.origin.x + full_popup_width + width_from_the_search_box_to_the_right_edge
+        narrowest_width_with_the_popup = label_frame.origin.x + SMALLEST_SORT_POPUP_WIDTH + width_from_the_search_box_to_the_right_edge
         # The label drops first, then the pop-up narrows, then it hides, which never happens in the
         # dropdown (only in a sidebar or a list window, where the column titles still sort the list).
         self.assertGreater(narrowest_width_with_the_label, narrowest_width_with_the_full_popup)
@@ -735,19 +758,34 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             widths += [math.ceil(step_width), math.ceil(step_width) - 1]
         for width in widths + [200, POPOVER_WIDTH]:
             self.window.setContentSize_((width, 260))
-            self.assertEqual((not panel.sort_label.isHidden(), not panel.list_sort_order_popup.isHidden(),
-                              panel.list_sort_order_popup.frame().size.width),
+            popup_shows = not panel.list_sort_order_popup.isHidden()
+            self.assertEqual((not panel.sort_label.isHidden(), popup_shows,
+                              panel.list_sort_order_popup.frame().size.width if popup_shows else None),
                              (width >= narrowest_width_with_the_label, width >= narrowest_width_with_the_popup,
-                              max(full_popup_width - max(narrowest_width_with_the_full_popup - width, 0), 0)), width)
+                              full_popup_width - max(narrowest_width_with_the_full_popup - width, 0)
+                              if width >= narrowest_width_with_the_popup else None), width)
             # Hide Idle right before the expand button, and the pop-up before Hide Idle.
             idle_tabs_button_frame = panel.idle_tabs_button.frame()
             self.assertFalse(panel.idle_tabs_button.isHidden())
             self.assertEqual(idle_tabs_button_frame.origin.x + idle_tabs_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
                              panel.expand_or_collapse_all_button.frame().origin.x)
+            # The search box after the pop-up (at the left edge without it), at least its smallest
+            # width, the checkbox after it, both before Hide Idle; the checkbox hides only in a
+            # sidebar too narrow for both (200 points).
+            search_frame = panel.search_field.frame()
+            checkbox_frame = panel.case_sensitive_checkbox.frame()
+            self.assertFalse(panel.search_field.isHidden(), width)
+            self.assertEqual(panel.case_sensitive_checkbox.isHidden(), width == 200, width)
+            self.assertTrue(SMALLEST_SEARCH_FIELD_WIDTH <= search_frame.size.width <= LARGEST_SEARCH_FIELD_WIDTH, width)
             if not panel.list_sort_order_popup.isHidden():
                 popup_frame = panel.list_sort_order_popup.frame()
-                self.assertLessEqual(popup_frame.origin.x + popup_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
-                                     idle_tabs_button_frame.origin.x)
+                self.assertEqual(popup_frame.origin.x + popup_frame.size.width + GAP_AFTER_THE_SORT_CONTROL, search_frame.origin.x)
+            else:
+                self.assertEqual(search_frame.origin.x, label_frame.origin.x)
+            self.assertLessEqual(
+                (checkbox_frame.origin.x + checkbox_frame.size.width if not panel.case_sensitive_checkbox.isHidden()
+                 else search_frame.origin.x + search_frame.size.width) + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                idle_tabs_button_frame.origin.x, width)
             message_frame = panel.message_text_field.frame()
             self.assertTrue(message_frame.size.width == 0
                             or message_frame.origin.x + message_frame.size.width <= idle_tabs_button_frame.origin.x,
@@ -761,8 +799,10 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual(pause_button_frame.origin.x + pause_button_frame.size.width, width - PANEL_SIDE_MARGIN)
             self.assertLessEqual(pause_button_frame.origin.y + pause_button_frame.size.height, BOTTOM_BAR_HEIGHT)
         self.window.setContentSize_((320, 260))
-        panel.show_message("iTerm2 can't be reached; retrying")  # the sort control and Hide Idle step aside for it
+        panel.show_message("iTerm2 can't be reached; retrying")  # the sort control, the search box and Hide Idle step aside for it
         self.assertTrue(panel.list_sort_order_popup.isHidden())
+        self.assertTrue(panel.search_field.isHidden())
+        self.assertTrue(panel.case_sensitive_checkbox.isHidden())
         self.assertTrue(panel.idle_tabs_button.isHidden())
         message_frame = panel.message_text_field.frame()  # up to the expand button
         self.assertEqual(message_frame.origin.x + message_frame.size.width + 8, panel.expand_or_collapse_all_button.frame().origin.x)
@@ -777,8 +817,10 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(panel.idle_tabs_button.isHidden())
         message_frame = panel.message_text_field.frame()
         self.assertLessEqual(message_frame.origin.x + message_frame.size.width + 8, panel.idle_tabs_button.frame().origin.x)
-        self.assertGreaterEqual(message_frame.origin.x, panel.list_sort_order_popup.frame().origin.x
-                                + panel.list_sort_order_popup.frame().size.width)
+        # The search box keeps its smallest width, and the message comes after its checkbox.
+        self.assertEqual(panel.search_field.frame().size.width, SMALLEST_SEARCH_FIELD_WIDTH)
+        checkbox_frame = panel.case_sensitive_checkbox.frame()
+        self.assertGreaterEqual(message_frame.origin.x, checkbox_frame.origin.x + checkbox_frame.size.width)
         self.assertGreaterEqual(message_frame.size.width, SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS)
         # and in a narrow one, where the message would get too little room beside them, they step aside.
         self.window.setContentSize_((200, 260))
@@ -786,6 +828,107 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertTrue(panel.list_sort_order_popup.isHidden())
         self.assertTrue(panel.idle_tabs_button.isHidden())
         self.assertGreaterEqual(panel.message_text_field.frame().size.width, SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS)
+
+    def type_in_the_search_box(self, text):
+        """Puts text in the dropdown's search box, as typing does."""
+        panel = self.dropdown_panel_controller
+        panel.search_field.setStringValue_(text)
+        panel.controlTextDidChange_(NSNotification.notificationWithName_object_(NSControlTextDidChangeNotification, panel.search_field))
+
+    def row_alpha_of_tab(self, tab_id):
+        row = self.list_row_item_ids().index(tab_id)
+        return self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, row, True).alphaValue()
+
+    def test_the_search_shows_title_matches_and_dimmed_conversation_matches_then_every_row_again(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("PLAN")  # case doesn't count unless "aA" is checked
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])  # a window without matches goes too
+        self.assertEqual(self.list_controller.list_selected_items(), [self.list_controller.outline_view.itemAtRow_(1)])
+        self.assertEqual([(text, is_case_sensitive) for text, is_case_sensitive, _ in self.owner.conversation_searches],
+                         [("PLAN", False)])
+        self.owner.answer_conversation_search(["s1", "s11"])  # their conversations hold "plan"
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
+        self.assertEqual((self.row_alpha_of_tab("1"), self.row_alpha_of_tab("11")), (1.0, CONVERSATION_ONLY_MATCH_ROW_ALPHA))
+        # Hide Idle doesn't hide an idle tab that matches, and comes back once the search is empty.
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
+        self.type_in_the_search_box("")
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "2", "3", "new_window"])
+        self.assertEqual(self.row_alpha_of_tab("1"), 1.0)
+        self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
+        # A window's own title never matches; a text only a conversation holds selects its row
+        # once the core answers, so Return opens it.
+        self.type_in_the_search_box("tandem")
+        self.assertEqual(self.list_row_item_ids(), ["new_window"])
+        self.owner.answer_conversation_search(["s10"])
+        self.assertEqual(self.list_row_item_ids(), ["w2", "10", "new_window"])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["10"])
+        self.type_in_the_search_box("")
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "2", "3", "w2", "10", "11", "new_window"])
+        self.assertEqual(self.owner.conversation_searches, [])  # an empty search asks nothing
+
+    def test_the_aa_checkbox_makes_case_count_and_an_answer_to_an_older_search_is_dropped(self):
+        panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.assertEqual(panel.case_sensitive_checkbox.toolTip(), CASE_SENSITIVE_CHECKBOX_TOOL_TIP)
+        panel.case_sensitive_checkbox.setState_(NSControlStateValueOn)
+        panel.caseSensitiveCheckboxClicked_(panel.case_sensitive_checkbox)
+        self.assertEqual(self.owner.search_is_case_sensitive_choices, [True])  # the owner saves it and shows it in every list
+        panel.show_search_is_case_sensitive(True)
+        self.type_in_the_search_box("Plan")
+        self.assertEqual(self.list_row_item_ids(), ["new_window"])  # "planning" has no capital P
+        self.type_in_the_search_box("plan")  # while the core still answers for "Plan"
+        self.assertEqual([(text, is_case_sensitive) for text, is_case_sensitive, _ in self.owner.conversation_searches],
+                         [("Plan", True)])
+        self.owner.answer_conversation_search(["s10"])  # for "Plan": dropped, and "plan" asked
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
+        self.assertEqual([(text, is_case_sensitive) for text, is_case_sensitive, _ in self.owner.conversation_searches],
+                         [("plan", True)])
+        self.owner.answer_conversation_search(["s11"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
+        # Each new snapshot asks again: conversations grow between snapshots.
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(0, 0, status="idle"))
+        self.assertEqual([text for text, _, _ in self.owner.conversation_searches], ["plan"])
+        self.owner.answer_conversation_search(["s11"])
+        # A closed dropdown keeps its search but asks only once it opens again.
+        self.list_controller.defers_rebuilding_while_hidden = True
+        self.window.orderOut_(None)
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.assertEqual(self.owner.conversation_searches, [])
+        self.window.orderFrontRegardless()
+        self.list_controller.prepare_to_appear()
+        self.assertEqual([text for text, _, _ in self.owner.conversation_searches], ["plan"])
+        panel.show_search_is_case_sensitive(False)
+        self.assertEqual(panel.case_sensitive_checkbox.state(), NSControlStateValueOff)
+
+    def test_command_f_and_slash_reach_the_search_box_whose_keys_move_show_and_empty(self):
+        panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        self.assertFalse(panel.search_field.canBecomeKeyView())  # a window opening leaves the keyboard on the rows
+        for characters, key_code, modifier_flags in (("f", 3, NSEventModifierFlagCommand), ("/", 44, 0)):
+            self.window.makeFirstResponder_(outline_view)
+            self.press_key(characters, key_code, modifier_flags)
+            self.assertIsNotNone(panel.search_field.currentEditor(), characters)
+        self.type_in_the_search_box("a")  # in every tab's title but "codex-review", whose conversation holds it
+        self.owner.answer_conversation_search(["s3"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "2", "3", "w2", "10", "11", "new_window"])
+        self.select_rows(1)
+        for command, expected_tab_id in (("moveDown:", "2"), ("moveDown:", "3"), ("moveDown:", "10"), ("moveUp:", "3")):
+            self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, command))
+            self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], [expected_tab_id], command)
+        self.assertFalse(panel.control_textView_doCommandBySelector_(panel.search_field, None, "deleteBackward:"))  # typing edits
+        # Return shows the selected row's tab and empties the search, which found what it was for.
+        self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "insertNewline:"))
+        self.assertEqual(self.submitted_actions[-1], ActionRequest("focus_agent_session", {"session_id": "s3"}))
+        self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_text), ("", ""))
+        # Esc empties the box, then closes the list.
+        self.type_in_the_search_box("codex")
+        self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "cancelOperation:"))
+        self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_text, self.owner.lists_closed_after_escape),
+                         ("", "", []))
+        self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "cancelOperation:"))
+        self.assertEqual(self.owner.lists_closed_after_escape, [self.list_controller])
 
     def test_hide_idle_hides_idle_tabs_and_windows_left_without_tabs_until_show_idle(self):
         panel = self.dropdown_panel_controller
@@ -1277,10 +1420,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual(front_tab_edge, other_selected_tab_edge, appearance_name)
         # Once another tab is in front, the outline moves to that tab's row.
         outline_view.deselectAll_(None)
-        snapshot = make_sample_snapshot()
-        self.list_controller.apply_snapshot(replace_windows_of_the_first_monitor(snapshot, (
-            window_entry._replace(agent_sessions=tuple(entry._replace(is_in_front=entry.tab_id == "3") for entry in window_entry.agent_sessions))
-            for window_entry in snapshot.monitors[0].windows)))
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id(
+            {"1": dict(is_in_front=False), "3": dict(is_in_front=True)}))
         self.assertEqual([row for row in range(outline_view.numberOfRows()) if self.list_controller.row_is_the_tab_in_front(row)], [3])
         planning_edge, codex_review_edge = read_the_middle_of_the_left_edge_of_each_row([1, 3])
         self.assertGreater(sum(codex_review_edge[:3]) - sum(planning_edge[:3]), 180)  # white on the dark rows, as the loop left them
@@ -1863,13 +2004,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def apply_snapshot_with_processes_on_three_tabs(self):
         """Applies the sample snapshot with a process on both tabs of the second window and on the first tab of the first."""
-        snapshot = make_sample_snapshot()
-        snapshot = replace_windows_of_the_first_monitor(snapshot, (
-            window._replace(agent_sessions=tuple(
-                entry._replace(child_processes=(ChildProcessEntry(300 + int(entry.tab_id), "sleep 600", 900.0, False, None, None),))
-                if entry.tab_id in ("1", "10", "11") else entry for entry in window.agent_sessions))
-            for window in snapshot.monitors[0].windows))
-        self.list_controller.apply_snapshot(snapshot)
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id({
+            tab_id: dict(child_processes=(ChildProcessEntry(300 + int(tab_id), "sleep 600", 900.0, False, None, None),))
+            for tab_id in ("1", "10", "11")}))
         return self.list_controller.outline_view
 
     def test_the_columns_and_their_titles_end_at_the_right_margin(self):
@@ -2556,7 +2693,6 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         for hooks_status_per_agent_tool, expected_note, shows_button in (
                 ((("Claude Code", "missing"), ("Codex", "missing")), "Claude Code and Codex hooks not installed yet", True),
                 ((("Claude Code", "missing"), ("Codex", "installed")), "Claude Code hooks not installed yet", True),
-                ((("Claude Code", "installed"), ("Codex", "needs approval")), "Approve the Codex hooks: /hooks in Codex", False),
                 ((("Claude Code", "installed"), ("Codex", "installed")), "", False),
                 # Hooks that don't work, which installing them again wouldn't fix.
                 ((("Claude Code", "can't run"), ("Codex", "can't run")),
@@ -2987,6 +3123,39 @@ class SidebarControllerTests(unittest.TestCase):
                 self.assertIsNone(self.controller.click_monitor)
             self.controller.hide_now(animate=False)
 
+    def test_the_search_box_taking_the_keyboard_keeps_the_sidebar_in_until_another_app_is_clicked(self):
+        self.controller.screens = [FAR_AWAY_SCREEN]
+        self.controller.set_shown(True, animate=False)  # a floating sidebar, which stays visible
+        keyboard_reports = []
+        self.owner.tell_the_core_whether_the_dashboard_has_the_keyboard = lambda: keyboard_reports.append(self.controller.has_the_keyboard)
+        self.assertTrue(self.controller.window.makeFirstResponder_(self.controller.list_panel_controller.search_field))  # as a click does
+        self.assertTrue(self.controller.has_the_keyboard)
+        self.assertEqual(keyboard_reports, [True])
+        self.assertTrue(self.controller.something_belonging_to_the_sidebar_is_open())  # an auto-hiding one would stay in
+        self.assertIsNotNone(self.controller.click_monitor)
+        self.controller.another_app_was_clicked()
+        self.assertFalse(self.controller.has_the_keyboard)
+        self.assertEqual(keyboard_reports, [True, False])
+        # The box let go of the keyboard too, so a second click in it gives the sidebar the keyboard again.
+        self.assertIs(self.controller.window.firstResponder(), self.controller.list_controller.outline_view)
+        self.assertTrue(self.controller.window.makeFirstResponder_(self.controller.list_panel_controller.search_field))
+        self.assertTrue(self.controller.has_the_keyboard)
+        self.controller.hide_now(animate=False)
+
+    def test_giving_the_keyboard_back_ends_an_open_rename_without_renaming(self):
+        self.controller.screens = [FAR_AWAY_SCREEN]
+        self.controller.set_shown(True, animate=False)
+        list_controller = self.controller.list_controller
+        list_controller.apply_snapshot(make_sample_snapshot())
+        self.controller.window.contentView().layoutSubtreeIfNeeded()
+        self.controller.take_the_keyboard()
+        list_controller.begin_rename(list_controller.outline_view.itemAtRow_(1))  # R pressed after the shortcut
+        list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, 1, False).name_text_field.setStringValue_("half-typ")
+        self.controller.give_back_the_keyboard()  # another app became active
+        self.assertFalse(list_controller.rename_in_progress)
+        self.assertEqual([action_request.action for action_request in self.owner.submitted_actions if "rename" in action_request.action], [])
+        self.controller.hide_now(animate=False)
+
     def test_a_click_in_another_app_takes_the_keyboard_from_a_sidebar_that_stays_visible(self):
         self.controller.screens = [FAR_AWAY_SCREEN]
         self.controller.set_shown(True, animate=False)
@@ -3241,7 +3410,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         # passes over pop-ups for the window's initial first responder.
         with unittest.mock.patch("agent_command_tab.user_interface.settings_window.NSApp"), \
                 unittest.mock.patch("agent_command_tab.user_interface.settings_window.place_window_at_saved_frame_or_center",
-                                    lambda window, frame: window.setFrameOrigin_((-20000, -20000))):
+                                    lambda window, frame: window.setAlphaValue_(0.0)):  # shown on a real screen, but transparent
             self.controller.show(dict(self.owner.settings))
         self.addCleanup(self.controller.window.orderOut_, None)
         self.assertIs(self.controller.window.firstResponder(), self.controller.show_as_popup)
@@ -4134,7 +4303,7 @@ class InstalledAgentToolsInTheMenusTests(unittest.TestCase):
     def test_the_menus_offer_only_the_included_tools_that_are_installed(self):
         stand_in_app_controller = make_stand_in_app_controller_with_real_methods(
             ["list_agent_tool_names", "find_installed_agent_tools", "note_installed_agent_tools"],
-            settings=copy.deepcopy(DEFAULT_SETTINGS), installed_agent_tool_names=None)
+            settings=copy.deepcopy(DEFAULT_SETTINGS), installed_agent_tool_names=None, installed_agent_tools_checked_at=time.time())
         self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Claude Code", "Codex", "agy"])  # not checked yet
         with unittest.mock.patch("agent_command_tab.app_controller.threading.Thread", ThreadThatRunsAtOnce), \
                 unittest.mock.patch("agent_command_tab.app_controller.find_installed_agent_tool_names",
@@ -4148,6 +4317,12 @@ class InstalledAgentToolsInTheMenusTests(unittest.TestCase):
         stand_in_app_controller.settings["agent_tools"][2]["launch_command"] = "~/.local/bin/agy"
         stand_in_app_controller.note_installed_agent_tools(checked_agent_tools, frozenset({"Codex", "agy"}))
         self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Codex"])
+        # A menu that opens a while after the last check has the tools checked again: agy was installed since.
+        stand_in_app_controller.installed_agent_tools_checked_at -= SECONDS_BEFORE_THE_INSTALLED_AGENT_TOOLS_ARE_CHECKED_AGAIN
+        with unittest.mock.patch("agent_command_tab.app_controller.threading.Thread", ThreadThatRunsAtOnce), \
+                unittest.mock.patch("agent_command_tab.app_controller.find_installed_agent_tool_names",
+                                    return_value=frozenset({"Codex", "agy"})), run_main_thread_calls_at_once():
+            self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Codex", "agy"])
 
     def test_a_changed_launch_command_is_checked_again(self):
         for changed_agent_tool_field, value, is_checked_again in (("launch_command", "~/.local/bin/agy", True),

@@ -40,9 +40,10 @@ def build_snapshot(gathered_windows, window_order=(), claude_agents_by_process_i
                                    hooks_status_per_agent_tool)
 
 
-def build_the_one_claude_entry(status, session_reading):
-    """Returns the entry of a one-tab snapshot whose Claude Code agent has this status and session reading."""
-    return build_snapshot([make_window("w", [make_tab("1", "claude", status=status)])],
+def build_the_one_entry(status, session_reading, command_line="claude"):
+    """Returns the entry of a one-tab snapshot whose agent (Claude Code, unless command_line runs
+    another) has this status and session reading."""
+    return build_snapshot([make_window("w", [make_tab("1", command_line, status=status)])],
                           session_readings={"session-1": session_reading}).monitors[0].windows[0].agent_sessions[0]
 
 
@@ -162,29 +163,26 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual((entry.status, entry.status_reason), ("working", "running pytest"))
 
     def test_an_idle_session_with_background_processes_is_background(self):
-        build_entry = build_the_one_claude_entry
         helper = ChildProcessEntry(65, "clangd --background-index", 900.0, False, None, None)
         detached_job = ChildProcessEntry(77, "bash scratchpad/run.sh", 950.0, True, None, None)
-        self.assertEqual(build_entry("idle", {"background_task_count": 1}).status, "background")
-        entry = build_entry("idle", {"child_processes": (helper, detached_job)})
+        self.assertEqual(build_the_one_entry("idle", {"background_task_count": 1}).status, "background")
+        entry = build_the_one_entry("idle", {"child_processes": (helper, detached_job)})
         self.assertEqual((entry.status, entry.status_reason), ("background", "at its prompt, with background processes running"))
-        self.assertEqual(build_entry("idle", {"child_processes": (helper,)}).status, "idle")  # a helper isn't background work
-        self.assertEqual(build_entry("working", {"background_task_count": 1}).status, "working")  # the turn goes first
+        self.assertEqual(build_the_one_entry("idle", {"child_processes": (helper,)}).status, "idle")  # a helper isn't background work
+        self.assertEqual(build_the_one_entry("working", {"background_task_count": 1}).status, "working")  # the turn goes first
 
     def test_an_idle_session_with_no_prompt_since_it_started_is_new(self):
-        build_entry = build_the_one_claude_entry
         no_prompt = {"hooks_report_no_prompt_since_the_agent_started": True}
-        entry = build_entry("idle", no_prompt)
+        entry = build_the_one_entry("idle", no_prompt)
         self.assertEqual((entry.status, entry.status_reason), ("new", "started, with no message sent to it yet"))
-        self.assertEqual(build_entry("idle", {}).status, "idle")
-        self.assertEqual(build_entry("working", no_prompt).status, "working")
+        self.assertEqual(build_the_one_entry("idle", {}).status, "idle")
+        self.assertEqual(build_the_one_entry("working", no_prompt).status, "working")
         # A reply in its conversation file: a prompt was sent while the app wasn't running to hear it.
-        self.assertEqual(build_entry("idle", dict(no_prompt, context_tokens=58_000)).status, "idle")
+        self.assertEqual(build_the_one_entry("idle", dict(no_prompt, context_tokens=58_000)).status, "idle")
 
     def test_an_agy_session_whose_conversation_had_no_message_is_new_also_before_it_reports_a_status(self):
         def build_agy_entry(status, session_reading):
-            return build_snapshot([make_window("w", [make_tab("1", "agy", status=status)])],
-                                  session_readings={"session-1": session_reading}).monitors[0].windows[0].agent_sessions[0]
+            return build_the_one_entry(status, session_reading, command_line="agy")
         no_message = {"no_message_was_sent_in_its_conversation": True}
         entry = build_agy_entry(None, no_message)  # it may report no status to iTerm2 before its first message
         self.assertEqual((entry.agent_tool_name, entry.status, entry.status_reason),
@@ -198,16 +196,16 @@ class BuildComputerSnapshotTests(unittest.TestCase):
 
     def test_a_tool_call_open_for_5_seconds_or_more_shows_as_running(self):  # build_snapshot's time is 1000
         subagent_call = {"open_tool_name": "Agent", "open_tool_started_at": 995.0}
-        entry = build_the_one_claude_entry("working", {"open_tool_call": subagent_call})
+        entry = build_the_one_entry("working", {"open_tool_call": subagent_call})
         self.assertEqual((entry.running_tool_name, entry.running_tool_started_at, entry.status_reason), ("Agent", 995.0, "running Agent"))
         quick_call = dict(subagent_call, open_tool_started_at=996.0)  # open 4 seconds: likely a file read, still thinking
-        entry = build_the_one_claude_entry("working", {"open_tool_call": quick_call})
+        entry = build_the_one_entry("working", {"open_tool_call": quick_call})
         self.assertEqual((entry.running_tool_name, entry.status_reason), ("", ""))  # the reason says no more than the row
         # A command found from the agent's processes counts at once, and from its own start.
-        entry = build_the_one_claude_entry("working", {"open_tool_call": quick_call, "running_command": ("pytest", 990.0)})
+        entry = build_the_one_entry("working", {"open_tool_call": quick_call, "running_command": ("pytest", 990.0)})
         self.assertEqual((entry.running_tool_name, entry.running_tool_started_at, entry.status_reason),
                          ("pytest", 990.0, "running pytest"))
-        self.assertEqual(build_the_one_claude_entry("idle", {"open_tool_call": subagent_call}).running_tool_name, "")
+        self.assertEqual(build_the_one_entry("idle", {"open_tool_call": subagent_call}).running_tool_name, "")
 
     def test_snapshot_converts_to_json(self):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="waiting")])])

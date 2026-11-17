@@ -159,8 +159,8 @@ class SaveAgentSessionsTests(unittest.TestCase):
         self.assertEqual(save_frame_of_w1(), [30, 40, 800, 600])
 
     def test_a_cleared_conversation_with_no_new_file_isnt_saved(self):
-        self.core.conversation_files_by_session_id["s1"] = {"key": None, "path": None, "modified_at": None,
-                                                            "cleared_path": "/transcripts/conv-1.jsonl"}
+        self.core.conversation_files_by_session_id["s1"] = dashboard_core.build_conversation_file_record(
+            None, None, 0, "/transcripts/conv-1.jsonl")
         action_result = asyncio.run(self.core.handle_save_agent_sessions(
             ActionRequest("save_agent_sessions", {"session_ids": ["s1"]})))
         self.assertEqual((action_result.message, action_result.details),
@@ -181,15 +181,14 @@ class SaveAgentSessionsTests(unittest.TestCase):
         # The default too, so a CODEX_HOME the launch command sets doesn't take its place on restore.
         codex_adapter = CodexAdapter()
         self.core.agent_sessions["s1"].update(adapter=codex_adapter, agent_tool_name="Codex")
-        for codex_home_folder, expected_codex_home_folder in (("/Users/me/.codex-work", "/Users/me/.codex-work"),
-                                                              (os.path.expanduser("~/.codex"), os.path.expanduser("~/.codex"))):
+        for codex_home_folder in ("/Users/me/.codex-work", os.path.expanduser("~/.codex")):
             with unittest.mock.patch.object(codex_adapter, "find_conversation_files", return_value=[
                     "/sessions/rollout-2026-11-06T09-00-00-0199a1b2-0000-7000-8000-00000000000a.jsonl"]), \
                     unittest.mock.patch.object(codex_adapter, "find_codex_home_folder_of_process", return_value=codex_home_folder):
                 action_result = asyncio.run(self.core.handle_save_agent_sessions(
                     ActionRequest("save_agent_sessions", {"session_ids": ["s1"]})))
             (saved_session,) = action_result.details["saved_windows"][0]["saved_sessions"]
-            self.assertEqual(saved_session["codex_home_folder"], expected_codex_home_folder)
+            self.assertEqual(saved_session["codex_home_folder"], codex_home_folder)
 
 
 class RestoreSavedAgentSessionsTests(unittest.TestCase):

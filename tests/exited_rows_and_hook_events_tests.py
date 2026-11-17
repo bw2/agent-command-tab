@@ -120,6 +120,13 @@ class HookEventTests(unittest.IsolatedAsyncioTestCase):
             [700, "sh"], [650, "2.1.311"], [640, "bash"], [101, "2.1.311"]]))
         self.assertEqual(set(self.core.hook_state_by_agent_process_id), {650})
 
+    def test_an_event_of_a_codex_hook_an_earlier_version_added_is_left_out(self):
+        # Until the app takes the hook out; Codex 0.165 and later send it from their shared
+        # background server, which belongs to no tab.
+        self.core.note_hook_event(dict(make_event("Stop", 101), agent_tool_name="Codex",
+                                       ancestor_processes=[[1101, "sh"], [101, "codex"]]))
+        self.assertEqual(self.core.hook_state_by_agent_process_id, {})
+
     def test_a_clear_typed_in_the_terminal_asks_for_the_next_conversations_id_at_once(self):
         self.core.process_ids_asked_about_in_claude_agents = {101, 102}
         self.core.note_hook_event(make_event("SessionStart", 101, source="compact"))  # the same conversation goes on

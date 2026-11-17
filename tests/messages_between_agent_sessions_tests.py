@@ -67,12 +67,12 @@ class ContactInfoTests(unittest.TestCase):
     def test_a_claude_code_session_is_named_as_talk_to_each_other_names_it_with_its_send_message_address(self):
         self.assertEqual(build_contact_info(PLANNING),
                          'Claude Code session "planning-3a" (process ID 101, folder /Users/me/project, iTerm2 tab '
-                         '"planning"). You can message it using your SendMessage tool with to: "planning-3a"')
+                         '"planning"). To message it, use your SendMessage tool with to: "planning-3a".')
 
     def test_a_codex_session_comes_with_its_codex_queue_command_and_its_own_codex_home(self):
         self.assertEqual(build_contact_info(CODEX_DOCS._replace(codex_home_folder="/Users/me/Codex Work")),
                          "Codex session 01a15e4e-facd-7073-85e7-90d8392b1d54 (process ID 104, folder /Users/me/project/docs, "
-                         "iTerm2 tab \"codex docs\"). You can message it by running: CODEX_HOME='/Users/me/Codex Work' codex queue "
+                         "iTerm2 tab \"codex docs\"). To message it, run: CODEX_HOME='/Users/me/Codex Work' codex queue "
                          '--thread 01a15e4e-facd-7073-85e7-90d8392b1d54 --message="<your message>"')
 
 

@@ -76,12 +76,15 @@ MonitorEntry = collections.namedtuple("MonitorEntry", ["monitor_id", "name", "fr
 MonitorEntry.__doc__ = "One monitor and the windows assigned to it, in the core's window list order."
 
 ComputerSnapshot = collections.namedtuple(
-    "ComputerSnapshot", ["computer_id", "computer_name", "taken_at", "monitors", "hooks_status_per_agent_tool"],
-    defaults=[()],
+    "ComputerSnapshot", ["computer_id", "computer_name", "taken_at", "monitors", "hooks_status_per_agent_tool",
+                         "conversation_search_text_revision"],
+    defaults=[(), 0],
 )
 ComputerSnapshot.__doc__ = ("Everything one computer's core knows, at one moment. hooks_status_per_agent_tool holds "
                             "(agent tool name, hooks_installer.check_hooks's status) pairs, one for each tool the "
-                            "app has hooks for.")
+                            "app has hooks for. conversation_search_text_revision counts the changes of the "
+                            "conversation text the list's search looks through, which the snapshot doesn't hold "
+                            "itself: a new count tells a list with a search to ask the core again.")
 
 
 def convert_snapshot_to_json_ready_dict(snapshot):

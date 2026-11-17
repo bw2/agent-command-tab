@@ -438,9 +438,9 @@ class Iterm2TerminalBackend(TerminalBackend):
         return self.app is not None and self.app.app_active and self.key_terminal_window_id is not None
 
     def list_application_process_ids(self):
-        """Looked up each time: read once, right after connecting, macOS's list of running apps came
-        back without iTerm2 in about half the starts (checked 2026-11-17), and then no tab was in
-        front while the dashboard was active, so the front tab's outline vanished as the list opened."""
+        """Looked up each time rather than once after connecting: right after the app starts,
+        macOS's list of running apps can come back without iTerm2, and no tab would then count
+        as in front while the dashboard is active."""
         return list_iterm2_process_ids()
 
     def find_session(self, session_id):
@@ -566,7 +566,8 @@ class Iterm2TerminalBackend(TerminalBackend):
 
         Returns:
             An ActionResult with details {"tab_id": the new tab's ID}, plus {"window_id": its ID}
-            for a new window; None when iTerm2 gives no tab or window (its session ended right away).
+            for a new window; a successful one with details None when iTerm2 gives no tab or
+            window (its session ended right away).
         """
         profile = build_new_agent_session_profile(folder, launch_command)
         if window_id is None:

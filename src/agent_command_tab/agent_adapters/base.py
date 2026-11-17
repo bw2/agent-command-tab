@@ -4,6 +4,8 @@ import os
 import re
 import shlex
 
+from agent_command_tab.settings_store import split_off_the_environment_settings_of_launch_command
+
 SHELL_PROGRAM_NAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "elvish"}
 # The slash command that ends the conversation and starts a new one: the menu asks first, and
 # the core then forgets the old conversation's readings.
@@ -15,22 +17,12 @@ COMPACT_AND_CLEAR_SLASH_COMMANDS = ("/compact", COMMAND_THAT_STARTS_A_NEW_CONVER
 # Code sessions have; or `codex queue --thread <conversation ID>`, which any agent with a shell can run.
 MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL = "send_message_tool"
 MESSAGES_THROUGH_CODEX_QUEUE = "codex_queue"
-# One "NAME=value " word in front of a launch command's program, the value maybe quoted
-# ("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude").
-LEADING_ENVIRONMENT_SETTING_PATTERN = re.compile(r"""([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])*\s+""")
-
-
 def remove_environment_settings_from_launch_command(launch_command, variable_name):
     """Returns the launch command without the <variable_name>=... words in front of its program
     (CLAUDE_CONFIG_DIR, CODEX_HOME), keeping its other environment settings, so a setting put in
     front of it isn't overridden by the launch command's own."""
-    kept_settings = []
-    rest = launch_command.lstrip()
-    while (match := LEADING_ENVIRONMENT_SETTING_PATTERN.match(rest)):
-        if match.group(1) != variable_name:
-            kept_settings.append(match.group(0))
-        rest = rest[match.end():]
-    return "".join(kept_settings) + rest
+    environment_settings, rest = split_off_the_environment_settings_of_launch_command(launch_command)
+    return "".join(match.group(0) for match in environment_settings if match.group(1) != variable_name) + rest
 
 
 def split_command_line_into_words(command_line):
@@ -189,10 +181,22 @@ class AgentToolAdapter:
         Called in a worker thread."""
         return False
 
+    def read_whether_a_conversation_it_may_be_in_runs_outside_the_tab(self, agent_process_id):
+        """Returns whether any conversation file that may be the agent process's, when its own
+        can't be told apart from another session's, says its turns run outside the tab
+        (read_turns_run_outside_the_tab). Called in a worker thread."""
+        return False
+
     def read_open_tool_call(self, conversation_file_path):
         """Returns the tool call the agent waits on, from the end of the conversation file
         (open_tool_call_reading), or None. Called in a worker thread."""
         return None
+
+    def extract_search_texts_from_conversation_record(self, record):
+        """Returns the texts of one decoded line of the conversation file that the list's search
+        box looks through: prompts, replies and the commands the agent ran
+        (conversation_search_texts). Called in a worker thread."""
+        return []
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None, codex_home_folder=None):
         """Returns the command that starts a copy of a session (Duplicate): one that continues a

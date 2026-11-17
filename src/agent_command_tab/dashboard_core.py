@@ -46,6 +46,9 @@ from agent_command_tab.agent_adapters.base import (COMMAND_THAT_STARTS_A_NEW_CON
 from agent_command_tab.agent_adapters.claude_code import (DEFAULT_CLAUDE_CONFIG_FOLDER, ClaudeCodeAdapter, list_claude_config_folder_paths,
                                                           list_claude_config_folders)
 from agent_command_tab.agent_adapters.codex import CodexAdapter
+from agent_command_tab.conversation_search_texts import (add_texts_to_conversation_search_text,
+                                                         build_empty_conversation_search_text,
+                                                         find_session_ids_whose_conversations_contain, read_new_search_texts)
 from agent_command_tab.dashboard_core_api import ActionRegistry, ActionResult
 from agent_command_tab.messages_between_agent_sessions import (SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT,
                                                                AgentSessionForMessages,
@@ -94,6 +97,10 @@ CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up a
 # which belongs to the agent process (snapshot_builder.turns_of_the_agent_run_outside_its_tab): an
 # ambiguous lookup must not let Pause stop a client of Codex's shared server.
 CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "open_tool_call", "conversation_shows_a_turn_under_way")
+# Actions that only read what the core already knows: they don't ask for a fresh gather of the
+# terminals, which every other action does (perform_action). The list's search asks again after
+# every snapshot, so a gather would bring a snapshot, and that snapshot another search.
+ACTIONS_THAT_CHANGE_NOTHING = frozenset({"find_agent_sessions_whose_conversations_contain"})
 # How long iTerm2 must have said working before Claude Code's own "idle" counts over it without a
 # turn end from the hooks: at a turn's start Claude Code's own report may lag iTerm2's for a moment
 # (DashboardCore.claude_code_reports_the_turn_over).
@@ -311,9 +318,12 @@ def explain_why_an_agent_session_cant_start(folder, launch_command):
 def keep_the_hook_states_of_the_processes_still_running(started_at_and_hook_state_by_process_id):
     """Returns {agent process ID: hook state} from saved hook states ({process ID: (start time,
     hook state)}, hook_states_store.load_hook_states), for the processes that still run with the
-    start time stored with their state."""
+    start time stored with their state, from an agent tool the app installs hooks for (an earlier
+    version saved Codex's too)."""
     hook_state_by_agent_process_id = {}
     for process_id, (started_at, hook_state) in started_at_and_hook_state_by_process_id.items():
+        if hook_state.get("agent_tool_name") not in HOOK_EVENTS_BY_AGENT_TOOL_NAME:
+            continue
         process = read_process_info(process_id)
         if process is not None and process.started_at == started_at:
             hook_state_by_agent_process_id[process_id] = hook_state
@@ -465,6 +475,11 @@ class DashboardCore:
         self.regather_needed = asyncio.Event()
         self.screen_check_needed = asyncio.Event()
         self.conversation_files_by_session_id = {}  # build_conversation_file_record's records
+        # Each session's conversation text that the list's search looks through (a
+        # conversation_search_texts.ConversationSearchText), read from its conversation file, and
+        # how many times any of it changed (note_that_conversation_search_texts_changed).
+        self.conversation_search_texts_by_session_id = {}
+        self.conversation_search_text_revision = 0
         self.peek_lock = asyncio.Lock()  # a quick release must not undo a peek that hasn't happened yet
         self.what_was_in_front_before_peek_by_terminal_name = None  # each terminal's remember_what_is_in_front
         self.action_registry = ActionRegistry()
@@ -540,9 +555,11 @@ class DashboardCore:
         register("ask_agent_sessions_to_talk_to_each_other", self.handle_ask_agent_sessions_to_talk_to_each_other)
         register("save_agent_sessions", self.handle_save_agent_sessions)
         register("restore_saved_agent_sessions", self.handle_restore_saved_agent_sessions)
+        register("find_agent_sessions_whose_conversations_contain", self.handle_find_agent_sessions_whose_conversations_contain)
 
     async def perform_action(self, action_request):
-        """Runs an action request, then asks for a fresh gather and snapshot.
+        """Runs an action request, then asks for a fresh gather and snapshot, unless it is one of
+        ACTIONS_THAT_CHANGE_NOTHING.
 
         The gather itself runs in publish_when_needed, so gathers never overlap and their
         errors are handled in one place.
@@ -550,8 +567,21 @@ class DashboardCore:
         action_result = await self.action_registry.perform_action(action_request)
         if self.verbose or not action_result.succeeded:
             print(f"action {action_request.action}: {action_result}")
-        self.regather_needed.set()
+        if action_request.action not in ACTIONS_THAT_CHANGE_NOTHING:
+            self.regather_needed.set()
         return action_result
+
+    async def handle_find_agent_sessions_whose_conversations_contain(self, action_request):
+        """Returns, in its details {"session_ids": [...]}, the agent sessions whose conversation
+        holds arguments {"text"} (as one phrase), ignoring case unless arguments
+        {"is_case_sensitive"}: their prompts, replies and the commands the agent ran, read from
+        their conversation files (conversation_search_texts). A session without a known file
+        (another agent tool, or a Codex session sharing its folder with another) never matches."""
+        arguments = action_request.arguments or {}
+        session_ids = await asyncio.to_thread(
+            find_session_ids_whose_conversations_contain, list(self.conversation_search_texts_by_session_id.items()),
+            str(arguments.get("text") or ""), bool(arguments.get("is_case_sensitive")))
+        return ActionResult(True, details={"session_ids": session_ids})
 
     async def bring_forward_the_terminal_tab_running_the_client(self, action_result):
         """After a terminal that shows its windows through clients (tmux) brought a tab to the
@@ -1168,11 +1198,9 @@ class DashboardCore:
             address = (self.claude_agents_by_process_id.get(process_id) or {}).get("name")
             reason_without_address = "its Claude Code session name isn't known yet"
         elif how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
-            if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
-                return None, "its conversation was just cleared, and its next one starts at its next prompt"
-            if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
-                return None, "another Codex session runs or ran in the same folder, so its conversation can't be told apart"
-            address = await agent_session["adapter"].find_conversation_id(process_id, None)
+            address, reason_the_conversation_cant_be_told = await self.find_conversation_id_known_to_be_its_own(session_id, agent_session)
+            if reason_the_conversation_cant_be_told:
+                return None, reason_the_conversation_cant_be_told
             reason_without_address = ("its Codex conversation can't be identified: Codex starts it at the first prompt, "
                                       "and after /new more than one fits")
             codex_home_folder = agent_session["adapter"].find_codex_home_folder_of_process(process_id)  # where its conversation is
@@ -1386,18 +1414,28 @@ class DashboardCore:
 
     # ----- saved sessions: Save session and Restore sessions -----
 
+    async def find_conversation_id_known_to_be_its_own(self, session_id, agent_session):
+        """Returns (the agent session's conversation ID, or None when not known, ""), or (None, why
+        its conversation can't be told) when a lookup by folder and start time could find another
+        session's conversation: after /clear, until the next conversation has a file, and for a
+        Codex session that shares or shared its folder with another. For Talk to Each Other and
+        Copy contact info (find_conversation_id_and_file_known_to_be_its_own has the others)."""
+        if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
+            return None, "it has had no conversation since its /clear"
+        if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
+            return None, "another Codex session runs or ran in the same folder, so its conversation can't be told apart"
+        return (await agent_session["adapter"].find_conversation_id(
+            agent_session["process_id"], self.claude_agents_by_process_id.get(agent_session["process_id"])), "")
+
     async def find_conversation_id_and_file_known_to_be_its_own(self, session_id, agent_session):
         """Returns (the agent session's conversation ID, its conversation file, ""), each None when
-        not known, or (None, None, why its conversation can't be told) when a lookup by folder and
-        start time could find another session's conversation, for Save session, Duplicate and
-        Session info."""
-        if self.conversation_was_cleared_and_the_next_has_no_file_yet(session_id):
-            return None, None, "it has had no conversation since its /clear"
-        if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
-            return None, None, "its conversation can't be told apart from another Codex session's in the same folder"
-        claude_agent_record = self.claude_agents_by_process_id.get(agent_session["process_id"])
-        return (await agent_session["adapter"].find_conversation_id(agent_session["process_id"], claude_agent_record),
-                await self.find_current_conversation_file(session_id, agent_session), "")
+        not known, or (None, None, why its conversation can't be told), as
+        find_conversation_id_known_to_be_its_own tells, for Save session, Duplicate and Session info."""
+        conversation_id, reason_the_conversation_cant_be_told = await self.find_conversation_id_known_to_be_its_own(
+            session_id, agent_session)
+        if reason_the_conversation_cant_be_told:
+            return None, None, reason_the_conversation_cant_be_told
+        return conversation_id, await self.find_current_conversation_file(session_id, agent_session), ""
 
     async def find_conversation_to_save_or_copy(self, session_id, agent_session):
         """Returns (the agent session's conversation ID, the Claude Code config folder it runs
@@ -2258,7 +2296,8 @@ class DashboardCore:
             session_id: entry_and_end_time for session_id, entry_and_end_time
             in entries_and_end_times_of_exited_agent_sessions_by_session_id.items()
             if entry_and_end_time[0].agent_tool_name not in self.left_out_agent_tool_names}
-        snapshot = build_snapshot_of(listed_agent_sessions, listed_exited_agent_sessions_by_session_id)
+        snapshot = build_snapshot_of(listed_agent_sessions, listed_exited_agent_sessions_by_session_id)._replace(
+            conversation_search_text_revision=self.conversation_search_text_revision)
         # Sessions left out of the list (Harnesses) keep their shown state current too, so a
         # suspended agent's state and every state's start are right when they are listed again.
         snapshot_of_every_session = (
@@ -2322,7 +2361,11 @@ class DashboardCore:
     def note_hook_event(self, event):
         """Applies a hook event to the hook state of the agent process that sent it (an agent
         inside a tab's agent has its own), and takes away the "exited" row of an agent whose
-        normal session end arrives after its process was gone."""
+        normal session end arrives after its process was gone. An event from an agent tool the app
+        installs no hooks for (a Codex hook an earlier version added, in a file the app hasn't taken
+        it out of) is left out."""
+        if event.get("agent_tool_name") not in HOOK_EVENTS_BY_AGENT_TOOL_NAME:
+            return
         ancestor_processes = [ancestor for ancestor in event.get("ancestor_processes") or []
                               if isinstance(ancestor, list) and len(ancestor) == 2 and isinstance(ancestor[0], int)]
         process_id = find_agent_process_id_of_hook_event(ancestor_processes)
@@ -2348,8 +2391,8 @@ class DashboardCore:
 
     async def check_hooks_periodically(self):
         """Keeps hooks_status_per_agent_tool current (hooks_installer.check_hooks), checked every
-        HOOKS_CHECK_INTERVAL_SECONDS (the user can change the files, or approve Codex's hooks, at
-        any time) and at once after the app installed hooks (hooks_check_needed)."""
+        HOOKS_CHECK_INTERVAL_SECONDS (the user can change the files at any time) and at once after
+        the app installed hooks (hooks_check_needed)."""
         while True:
             try:
                 hooks_status_per_agent_tool = await asyncio.to_thread(
@@ -2373,8 +2416,7 @@ class DashboardCore:
         HOOKS_SEND_NO_EVENTS when a Claude Code session that started after this run first found
         the hooks installed has sent no hook event SECONDS_A_NEW_CLAUDE_CODE_SESSION_HAS_TO_SEND_A_HOOK_EVENT
         after it started (hooks turned off in Claude Code, or failing for a reason the files don't
-        show). Only while this copy receives the hook events. Codex is
-        left out: its hooks report too little to tell.
+        show). Only while this copy receives the hook events.
 
         Args:
             hooks_status_per_agent_tool: ((agent tool name, check_hooks's status), ...).
@@ -2458,13 +2500,16 @@ class DashboardCore:
     async def read_context_window_usage_periodically(self):
         """Keeps each agent session's context size and open tool call ("context_tokens" and
         "open_tool_call" in its session reading) current from the end of its conversation
-        file (context_window_usage, open_tool_call_reading). The file is looked up
+        file (context_window_usage, open_tool_call_reading), and the text the list's search looks
+        through (conversation_search_texts_by_session_id). The file is looked up
         (Claude Code: from `claude agents --json`; Codex: by its folder and start time) for each new process or Claude
         Code conversation and again every minute, and read again only when it changed."""
         while True:
             await asyncio.sleep(CONTEXT_USAGE_CHECK_INTERVAL_SECONDS)
             for session_id in set(self.conversation_files_by_session_id) - set(self.agent_sessions):
                 del self.conversation_files_by_session_id[session_id]
+            for session_id in set(self.conversation_search_texts_by_session_id) - set(self.agent_sessions):
+                del self.conversation_search_texts_by_session_id[session_id]
             for session_id, agent_session in list(self.agent_sessions.items()):
                 await self.update_conversation_file_readings(session_id, agent_session)
 
@@ -2485,6 +2530,8 @@ class DashboardCore:
             path = await self.look_up_conversation_file(session_id, agent_session)
             if session_id not in self.agent_sessions:
                 return  # the tab closed during the lookup
+            if self.codex_conversation_may_be_another_sessions(session_id, agent_session):
+                await self.note_whether_the_turns_of_an_unidentified_codex_conversation_run_outside_the_tab(session_id, agent_session)
             conversation_file = self.conversation_files_by_session_id.get(session_id)
             is_same_conversation = conversation_file is not None and conversation_file["key"] == conversation_key
             if is_same_conversation and path == conversation_file["cleared_path"]:
@@ -2525,9 +2572,22 @@ class DashboardCore:
         open_tool_call = await asyncio.to_thread(agent_session["adapter"].read_open_tool_call, path)
         turn_is_under_way = await asyncio.to_thread(agent_session["adapter"].read_turn_is_under_way, path)
         turns_run_outside_the_tab = await asyncio.to_thread(agent_session["adapter"].read_turns_run_outside_the_tab, path)
+        # The lines added since the last read (all of them for a file not read before), for the list's search.
+        conversation_search_text = self.conversation_search_texts_by_session_id.get(session_id)
+        if conversation_search_text is None or conversation_search_text.path != path:
+            conversation_search_text = build_empty_conversation_search_text(path)
+        new_search_texts = await asyncio.to_thread(
+            read_new_search_texts, path, conversation_search_text.read_up_to_byte,
+            agent_session["adapter"].extract_search_texts_from_conversation_record)
         if (session_id not in self.agent_sessions or self.conversation_files_by_session_id.get(session_id) is not conversation_file
                 or conversation_file["path"] != path):
             return  # the tab closed, or /clear or a new conversation took this file's place, during the reads
+        if new_search_texts is not None:
+            texts, read_up_to_byte, started_over = new_search_texts
+            self.conversation_search_texts_by_session_id[session_id] = add_texts_to_conversation_search_text(
+                build_empty_conversation_search_text(path) if started_over else conversation_search_text, texts, read_up_to_byte)
+            if texts or started_over:
+                self.note_that_conversation_search_texts_changed()
         conversation_file["modified_at"] = modified_at
         if context_tokens is not None:
             self.note_reading_value(session_id, "context_tokens", context_tokens)
@@ -2545,6 +2605,17 @@ class DashboardCore:
             seconds_until_it_shows_as_running = SECONDS_BEFORE_AN_OPEN_TOOL_CALL_SHOWS_AS_RUNNING - (time.time() - open_tool_started_at)
             if seconds_until_it_shows_as_running > 0:
                 asyncio.get_running_loop().call_later(seconds_until_it_shows_as_running + 0.1, self.snapshot_needed.set)
+
+    async def note_whether_the_turns_of_an_unidentified_codex_conversation_run_outside_the_tab(self, session_id, agent_session):
+        """For a Codex session whose conversation file can't be told apart from another's (a
+        Duplicate in the same folder, say), which never gets its own file's reading: notes that its
+        turns run outside the tab when any file that may be its conversation says they run in
+        Codex's shared background server, so a pause doesn't stop only its client and leave its
+        work running. A file not yet written leaves the earlier reading as it is."""
+        process_id = agent_session["process_id"]
+        if await asyncio.to_thread(agent_session["adapter"].read_whether_a_conversation_it_may_be_in_runs_outside_the_tab, process_id):
+            if self.agent_sessions.get(session_id) is agent_session:
+                self.note_reading_value(session_id, "process_id_whose_turns_run_outside_the_tab", process_id)
 
     def find_conversation_key(self, agent_session):
         """Returns (agent process ID, Claude Code session ID or None): another process, or another
@@ -2568,9 +2639,18 @@ class DashboardCore:
 
     def forget_conversation_file_readings(self, session_id):
         """Clears the values read from a session's conversation file, when it is no longer its
-        conversation (a new one, a vanished file, /clear)."""
+        conversation (a new one, a vanished file, /clear), and the text the list's search looks through."""
         for reading_name in CONVERSATION_FILE_READING_NAMES:
             self.note_reading_value(session_id, reading_name, None)
+        if self.conversation_search_texts_by_session_id.pop(session_id, None) is not None:
+            self.note_that_conversation_search_texts_changed()
+
+    def note_that_conversation_search_texts_changed(self):
+        """Counts a change of the conversation text the list's search looks through, which the next
+        snapshot carries (ComputerSnapshot.conversation_search_text_revision), so a list with a
+        search asks again: new text often comes with no other change a snapshot would show."""
+        self.conversation_search_text_revision += 1
+        self.snapshot_needed.set()
 
     def note_reading_value(self, session_id, reading_name, value):
         """Stores a value read for a session, from its conversation file ("context_tokens",

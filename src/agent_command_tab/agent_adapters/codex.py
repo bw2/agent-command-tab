@@ -17,6 +17,7 @@ from agent_command_tab.context_window_usage import (codex_session_header_says_it
                                                     read_context_window_tokens_from_codex_conversation_file,
                                                     read_turn_is_under_way_from_codex_conversation_file,
                                                     read_turn_started_at_from_codex_conversation_file)
+from agent_command_tab.conversation_search_texts import extract_search_texts_from_codex_record
 from agent_command_tab.open_tool_call_reading import read_open_tool_call_from_codex_conversation_file
 
 
@@ -138,8 +139,16 @@ class CodexAdapter(AgentToolAdapter):
     def read_turns_run_outside_the_tab(self, conversation_file_path):
         return codex_session_header_says_it_runs_in_the_shared_server(read_codex_session_header(conversation_file_path))
 
+    def read_whether_a_conversation_it_may_be_in_runs_outside_the_tab(self, agent_process_id):
+        """Whether any file find_conversation_files fits to the process says so: one is enough, as
+        a pause that stops only the tab's client of the server would leave the session's work running."""
+        return any(self.read_turns_run_outside_the_tab(path) for path in self.find_conversation_files(agent_process_id))
+
     def read_open_tool_call(self, conversation_file_path):
         return read_open_tool_call_from_codex_conversation_file(conversation_file_path)
+
+    def extract_search_texts_from_conversation_record(self, record):
+        return extract_search_texts_from_codex_record(record)
 
     def build_launch_command_for_a_copy(self, launch_command, conversation_id, claude_agent_record=None, codex_home_folder=None):
         """Continues a copy of the conversation (`codex fork <id>`), with the original's CODEX_HOME

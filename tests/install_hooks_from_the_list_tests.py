@@ -63,16 +63,11 @@ class InstallHooksFromTheListTests(unittest.TestCase):
     def test_a_file_that_cant_be_changed_is_reported(self):
         with open(self.settings_path, "w") as settings_file:
             settings_file.write('{"model": ')  # not JSON: left alone
-        install_hooks_tried_for = []
-        install_hooks = hooks_installer.install_hooks
-        with unittest.mock.patch.object(app_controller_module, "install_hooks",
-                                        lambda agent_tool_name: install_hooks_tried_for.append(agent_tool_name) or install_hooks(agent_tool_name)):
-            AppController.install_hooks(self.stand_in_app_controller, ["Claude Code", "Codex"])
+        AppController.install_hooks(self.stand_in_app_controller, ["Claude Code"])
         self.assertEqual([alert.messageText() for alert in self.alerts],
-                         ["Install the hooks for Claude Code and Codex?", "The hooks couldn't be installed"])
-        # The failure names the tool and the file, and the other tool's hooks are still tried.
+                         ["Install the hooks for Claude Code?", "The hooks couldn't be installed"])
+        # The failure names the tool and the file.
         self.assertTrue(self.alerts[1].informativeText().startswith(f"Claude Code: {self.settings_path} isn't valid JSON"))
-        self.assertEqual(install_hooks_tried_for, ["Claude Code", "Codex"])
         with open(self.settings_path) as settings_file:
             self.assertEqual(settings_file.read(), '{"model": ')
 

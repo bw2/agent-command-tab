@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import signal
 import subprocess
@@ -13,8 +14,7 @@ from agent_command_tab import __version__, command_line, hooks_installer, start_
 from agent_command_tab.command_line import (SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CTRL_C, choose_signal_that_stops_the_copy, main,
                                             stop_the_running_copy, take_the_running_lock, the_running_lock_is_held,
                                             wait_for_app_process)
-from agent_command_tab.hooks_installer import (HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL, check_hooks,
-                                               install_hooks)
+from agent_command_tab.hooks_installer import HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, check_hooks, install_hooks
 
 
 class VersionOptionTests(unittest.TestCase):
@@ -209,19 +209,24 @@ class CleanUpBeforeUninstallingTests(unittest.TestCase):
             os.mkdir(autolaunch_folder)
             autolaunch_script_path = os.path.join(autolaunch_folder, start_with_iterm2.AUTOLAUNCH_SCRIPT_FILE_NAME)
             open(autolaunch_script_path, "w").close()
+            codex_hooks_path = os.path.join(codex_home_folder, "hooks.json")
+            with open(codex_hooks_path, "w") as codex_hooks_file:  # a hook an earlier version added to Codex
+                json.dump({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/venv/bin/python -I -S /f/hook_event_forwarder.py Codex",
+                                                          "statusMessage": "Report to AgentCommandTab"}]}]}}, codex_hooks_file)
             printed = io.StringIO()
             with unittest.mock.patch.object(hooks_installer, "list_settings_file_paths", lambda agent_tool_name: {
-                        "Claude Code": [claude_settings_path], "Codex": [os.path.join(codex_home_folder, "hooks.json")]}[agent_tool_name]), \
+                        "Claude Code": [claude_settings_path], "Codex": [codex_hooks_path]}[agent_tool_name]), \
                     unittest.mock.patch.object(start_with_iterm2, "find_iterm2_autolaunch_folder", lambda: autolaunch_folder), \
                     unittest.mock.patch.object(command_line, "stop_the_running_copy",
                                                lambda: (True, "AgentCommandTab isn't running")), \
                     contextlib.redirect_stdout(printed):
                 install_hooks("Claude Code")
-                install_hooks("Codex")
-                # Codex's wait for the user's approval in Codex, which config.toml (read in codex_home_folder) doesn't hold.
-                self.assertEqual((check_hooks("Claude Code"), check_hooks("Codex")), (HOOKS_ARE_INSTALLED, HOOKS_AWAIT_APPROVAL))
+                self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
                 self.assertEqual(main(["clean-up-before-uninstalling"]), 0)
-                self.assertEqual((check_hooks("Claude Code"), check_hooks("Codex")), (HOOKS_ARE_MISSING, HOOKS_ARE_MISSING))
+                self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_MISSING)
+            with open(codex_hooks_path) as codex_hooks_file:
+                self.assertEqual(json.load(codex_hooks_file), {})
+            self.assertIn(f"Codex: removed from {codex_hooks_path}", printed.getvalue())
             self.assertFalse(os.path.exists(autolaunch_script_path))
             self.assertIn(f"removed the script that started AgentCommandTab with iTerm2: {autolaunch_script_path}", printed.getvalue())
             self.assertIn("pipx uninstall agent-command-tab", printed.getvalue())

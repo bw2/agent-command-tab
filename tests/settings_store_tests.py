@@ -13,8 +13,9 @@ from agent_command_tab.settings_store import (DEFAULT_SETTINGS, ask_the_login_sh
                                               find_installed_agent_tool_names, find_launch_command_problem,
                                               list_included_agent_tool_names, list_left_out_agent_tool_names,
                                               load_settings, merge_settings_with_defaults,
-                                              move_the_settings_folder_of_the_old_name, run_script_in_the_login_shell,
-                                              save_settings)
+                                              move_the_settings_folder_of_the_old_name, read_environment_settings_of_launch_command,
+                                              run_script_in_the_login_shell, save_settings,
+                                              split_launch_command_into_words_after_environment_settings)
 from executable_script_writing import write_executable_script
 
 
@@ -139,6 +140,18 @@ class MergeSettingsTests(unittest.TestCase):
         # A list the merge doesn't build anew, so only a copy of the defaults keeps them as they were.
         merge_settings_with_defaults({})["shown_columns"].append("cpu_usage")
         self.assertEqual(DEFAULT_SETTINGS, defaults_before)
+
+
+class LaunchCommandEnvironmentSettingsTests(unittest.TestCase):
+    def test_the_settings_in_front_of_the_program_are_read_as_the_shell_reads_them(self):
+        for launch_command, expected_settings, expected_words in (
+                ("CODEX_HOME=~/.codex-work codex", {"CODEX_HOME": "~/.codex-work"}, ["codex"]),
+                ("CODEX_HOME='~/Codex Work' codex --yolo", {"CODEX_HOME": "~/Codex Work"}, ["codex", "--yolo"]),
+                ('  RUST_LOG=info A="x y" claude -c', {"RUST_LOG": "info", "A": "x y"}, ["claude", "-c"]),
+                ("claude --model=opus", {}, ["claude", "--model=opus"]),  # a setting after the program is its argument
+                ("A=b", {"A": "b"}, [])):  # no program
+            self.assertEqual(read_environment_settings_of_launch_command(launch_command), expected_settings, launch_command)
+            self.assertEqual(split_launch_command_into_words_after_environment_settings(launch_command), expected_words, launch_command)
 
 
 class LoadAndSaveTests(unittest.TestCase):

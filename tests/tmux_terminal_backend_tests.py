@@ -201,6 +201,12 @@ class TmuxServerTests(unittest.TestCase):
         self.assertEqual(sorted([gathered_tab["tab_id"] for gathered_tab in gathered_window["tabs"]] for gathered_window in gathered_windows),
                          sorted([[first_tab_id], [second_tab_id]]))
         self.assertFalse(asyncio.run(self.backend.move_tab_to_new_window(first_tab_id)).succeeded)  # its window's only tab
+        # A new tab goes last, also where the tab moved away left a free index before the others.
+        appended = asyncio.run(self.backend.start_agent_session(session_id, self.folder, "echo appended"))
+        self.assertTrue(appended.succeeded, appended)
+        self.assertEqual(next([gathered_tab["tab_id"] for gathered_tab in gathered_window["tabs"]]
+                              for gathered_window in self.gather() if gathered_window["window_id"] == session_id),
+                         [first_tab_id, appended.details["tab_id"]])
         self.assertTrue(asyncio.run(self.backend.close_window(moved.details["window_id"])).succeeded)
         self.assertEqual([gathered_window["window_id"] for gathered_window in self.gather()], [session_id])
 

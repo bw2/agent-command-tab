@@ -1,4 +1,4 @@
-"""The panel around the list: the sort order, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a note while the app's hooks are missing, and pause or resume the selected rows at the bottom right.
+"""The panel around the list: the sort order, the search box with its "aA" checkbox, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a note while the app's hooks are missing, and pause or resume the selected rows at the bottom right.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
 sidebar and in the list window, each with its own list controller.
@@ -7,14 +7,15 @@ sidebar and in the list window, each with its own list controller.
 import math
 
 import objc
-from AppKit import (NSBezelStyleRecessed, NSColor, NSControlSizeSmall, NSEdgeInsetsMake, NSEvent, NSEventModifierFlagCommand, NSFont,
+from AppKit import (NSBezelStyleRecessed, NSButton, NSColor, NSControlSizeSmall, NSControlStateValueOff, NSControlStateValueOn,
+                    NSEdgeInsetsMake, NSEvent, NSEventModifierFlagCommand, NSFont,
                     NSFontWeightRegular,
                     NSImage, NSImageLeading, NSImageSymbolConfiguration,
                     NSLineBreakByTruncatingTail, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSRectFill, NSScreen,
-                    NSScrollView, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
-                    NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
+                    NSScrollView, NSSearchField, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin,
+                    NSViewMaxYMargin, NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
 
-from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_AWAIT_APPROVAL, HOOKS_CANT_RUN, HOOKS_SEND_NO_EVENTS
+from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_CANT_RUN, HOOKS_SEND_NO_EVENTS
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
 from agent_command_tab.user_interface.control_helpers import (add_popup_choices, is_a_command_press_of_letter,
                                                               read_popup_choice, select_popup_choice, show_symbol_on_button)
@@ -67,6 +68,18 @@ SORT_ORDER_POPUP_KEY = "s"
 SORT_ORDER_POPUP_TOOL_TIP = "Sort the list (⌘-s)"
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
+GAP_AFTER_THE_SORT_CONTROL = 8  # before the search box, or the message line where no search box shows
+# The search box after the Sort pop-up, with the "aA" checkbox (whether case counts) after it: as
+# wide as LARGEST_SEARCH_FIELD_WIDTH where there is room, narrower in a narrow sidebar, the
+# checkbox hidden where even the narrowest box wouldn't leave it room, and the box hidden below
+# SMALLEST_SEARCH_FIELD_WIDTH (fit_top_bar_to_width).
+LARGEST_SEARCH_FIELD_WIDTH = 220
+SMALLEST_SEARCH_FIELD_WIDTH = 80  # the magnifying glass, a few letters, and the button that empties it
+SEARCH_FIELD_PLACEHOLDER = "Search"
+SEARCH_FIELD_TOOL_TIP = ("Show only the tabs whose title holds this text, and, dimmed, those whose conversation does "
+                         "(prompts, replies and the commands the agent ran) (⌘-f or /)")
+CASE_SENSITIVE_CHECKBOX_TITLE = "aA"
+CASE_SENSITIVE_CHECKBOX_TOOL_TIP = "Toggle whether the search is case sensitive"
 # A message line narrower than this beside the sort control and Hide Idle shows too little to
 # read, so they step aside for it (fit_top_bar_to_width).
 SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS = 120
@@ -85,7 +98,7 @@ HOOKS_SEND_NO_EVENTS_TOOL_TIP = ("Claude Code sessions started after the hooks w
 def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
     """Returns (the bottom bar's note about the app's hooks, or "" for none, its tooltip, the
     agent tools its Install Hooks button installs them for). Only tools with a session in the list count, so
-    someone who never runs Codex isn't
+    someone who never runs Claude Code isn't
     asked to install its hooks. Hooks that can't run come first: nothing else works until the app
     is reinstalled.
 
@@ -103,8 +116,6 @@ def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
     missing_agent_tool_names = list_listed_agent_tools_whose_hooks_are(HOOKS_ARE_MISSING)
     if missing_agent_tool_names:
         return f"{' and '.join(missing_agent_tool_names)} hooks not installed yet", HOOKS_NOTE_TOOL_TIP, missing_agent_tool_names
-    if list_listed_agent_tools_whose_hooks_are(HOOKS_AWAIT_APPROVAL):
-        return "Approve the Codex hooks: /hooks in Codex", HOOKS_NOTE_TOOL_TIP, []
     if list_listed_agent_tools_whose_hooks_are(HOOKS_SEND_NO_EVENTS):
         return "No events from the Claude Code hooks", HOOKS_SEND_NO_EVENTS_TOOL_TIP, []
     return "", HOOKS_NOTE_TOOL_TIP, []
@@ -124,16 +135,23 @@ def make_gray_pill_button(title, target, action_name):
     return button
 
 
+def click_control_on_a_command_press_of_letter(control, letter, event):
+    """Clicks the control, when it shows, for Command and the letter, with or without Shift (a
+    control's own key equivalent matches only one of them). Returns whether it did."""
+    if control.isHiddenOrHasHiddenAncestor() or not is_a_command_press_of_letter(
+            letter, event.charactersIgnoringModifiers(), event.modifierFlags()):
+        return False
+    control.performClick_(None)
+    return True
+
+
 class ExpandOrCollapseAllButton(PointingHandButton):
     """The top bar's expand or collapse button, which Command-E and Command-Shift-E press too
-    while it shows (a button's own key equivalent matches only one of them)."""
+    while it shows."""
 
     def performKeyEquivalent_(self, event):
-        if not self.isHiddenOrHasHiddenAncestor() and is_a_command_press_of_letter(
-                EXPAND_OR_COLLAPSE_ALL_KEY, event.charactersIgnoringModifiers(), event.modifierFlags()):
-            self.performClick_(None)
-            return True
-        return objc.super(ExpandOrCollapseAllButton, self).performKeyEquivalent_(event)
+        return (click_control_on_a_command_press_of_letter(self, EXPAND_OR_COLLAPSE_ALL_KEY, event)
+                or objc.super(ExpandOrCollapseAllButton, self).performKeyEquivalent_(event))
 
 
 class SortOrderPopUpButton(NSPopUpButton):
@@ -142,11 +160,24 @@ class SortOrderPopUpButton(NSPopUpButton):
     the list's rows have the keyboard again once it closes, as they never lost it."""
 
     def performKeyEquivalent_(self, event):
-        if not self.isHiddenOrHasHiddenAncestor() and is_a_command_press_of_letter(
-                SORT_ORDER_POPUP_KEY, event.charactersIgnoringModifiers(), event.modifierFlags()):
-            self.performClick_(None)
-            return True
-        return objc.super(SortOrderPopUpButton, self).performKeyEquivalent_(event)
+        return (click_control_on_a_command_press_of_letter(self, SORT_ORDER_POPUP_KEY, event)
+                or objc.super(SortOrderPopUpButton, self).performKeyEquivalent_(event))
+
+
+class ListSearchField(NSSearchField):
+    """The top bar's search box. It tells its panel when it takes the keyboard (a click, or
+    Command-F or "/" in the list), so a sidebar keeps the keyboard while you type in it."""
+
+    def canBecomeKeyView(self):
+        # Never the view a window gives the keyboard to by itself (as it opens, or with Tab): the
+        # list keeps it, and the box takes it only from a click, Command-F or "/".
+        return False
+
+    def becomeFirstResponder(self):
+        became_first_responder = objc.super(ListSearchField, self).becomeFirstResponder()
+        if became_first_responder:
+            self.panel_controller.search_box_took_the_keyboard()
+        return became_first_responder
 
 
 class ListPanelView(NSView):
@@ -200,6 +231,7 @@ class ListPanelController(NSViewController):
     calls its open_settings(), list_sort_order_chosen(list_sort_order, list_sort_order_is_reversed)
     (as the list controller does when a column's title is clicked),
     idle_tabs_are_hidden_chosen(idle_tabs_are_hidden),
+    search_is_case_sensitive_chosen(search_is_case_sensitive) (the "aA" checkbox),
     top_bar_dragged(list_panel_controller, start_point_on_screen) and
     install_hooks(agent_tool_names) (the bottom bar's Install Hooks button).
     """
@@ -209,6 +241,9 @@ class ListPanelController(NSViewController):
         if self is None:
             return None
         self.list_controller = list_controller
+        # Called when the search box takes the keyboard; the sidebar sets it, to keep the keyboard
+        # while you type there without making the dashboard the active app.
+        self.on_search_box_took_the_keyboard = lambda: None
         return self
 
     def loadView(self):
@@ -285,6 +320,32 @@ class ListPanelController(NSViewController):
         self.message_text_field.setAutoresizingMask_(NSViewMinYMargin)
         root_view.addSubview_(self.message_text_field)
         self.sort_control_and_hide_idle_step_aside_for_the_message = True  # show_message's
+        # After the sort order: the search box and its "aA" checkbox (fit_top_bar_to_width places them).
+        self.search_field = ListSearchField.alloc().initWithFrame_(NSMakeRect(0, height - TOP_BAR_HEIGHT + 4, LARGEST_SEARCH_FIELD_WIDTH, 20))
+        self.search_field.panel_controller = self
+        self.search_field.setControlSize_(NSControlSizeSmall)
+        self.search_field.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.search_field.setPlaceholderString_(SEARCH_FIELD_PLACEHOLDER)
+        self.search_field.setToolTip_(SEARCH_FIELD_TOOL_TIP)
+        self.search_field.setFrameSize_((LARGEST_SEARCH_FIELD_WIDTH, self.search_field.fittingSize().height))
+        self.search_field.setDelegate_(self)  # controlTextDidChange_ and the keys (control_textView_doCommandBySelector_)
+        self.search_field.setTarget_(self)  # its button that empties it
+        self.search_field.setAction_("searchFieldChanged:")
+        self.search_field.setAutoresizingMask_(NSViewMinYMargin)
+        root_view.addSubview_(self.search_field)
+        self.case_sensitive_checkbox = NSButton.checkboxWithTitle_target_action_(
+            CASE_SENSITIVE_CHECKBOX_TITLE, self, "caseSensitiveCheckboxClicked:")
+        self.case_sensitive_checkbox.setControlSize_(NSControlSizeSmall)
+        self.case_sensitive_checkbox.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+        self.case_sensitive_checkbox.setToolTip_(CASE_SENSITIVE_CHECKBOX_TOOL_TIP)
+        self.case_sensitive_checkbox.sizeToFit()
+        self.case_sensitive_checkbox.setAutoresizingMask_(NSViewMinYMargin)
+        sort_popup_middle_y = self.list_sort_order_popup.frame().origin.y + self.list_sort_order_popup.frame().size.height / 2
+        for control in (self.search_field, self.case_sensitive_checkbox):  # level with the Sort pop-up
+            control.setFrameOrigin_((0, round(sort_popup_middle_y - control.frame().size.height / 2)))
+        root_view.addSubview_(self.case_sensitive_checkbox)
+        self.list_controller.on_search_keys_pressed = self.put_the_keyboard_in_the_search_box
+        self.list_controller.on_search_text_cleared = lambda: self.search_field.setStringValue_("")
 
         # Bottom bar: a Settings button with its name, easier to see than an icon, at the left, a
         # gray pill like the top bar's controls, and one button that pauses or resumes the
@@ -344,17 +405,19 @@ class ListPanelController(NSViewController):
     @objc.python_method
     def fit_top_bar_to_width(self):
         """Puts the expand or collapse all button at the right end and the Hide Idle button just
-        left of it. The sort control
-        fits between the panel's left edge and those buttons: with its "Sort:" label when there is
+        left of it. The sort control and then the search box with its "aA" checkbox
+        fit between the panel's left edge and those buttons. The search box keeps at least
+        SMALLEST_SEARCH_FIELD_WIDTH, with its checkbox where there is room for both: the sort
+        control shows with its "Sort:" label when there is
         room, without it in a narrower one, and then with the pop-up narrowed, cutting its title
         short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar or a list window,
-        where the column titles still sort the list). Where each step happens depends on how wide
-        macOS draws the controls: on macOS 27 the label goes below 241 points and the pop-up
-        narrows below 209; it would hide below 171, narrower than the sidebar's smallest width
-        (200). The message line takes the room left before the buttons, so it never covers them;
+        where the column titles still sort the list). The search box takes the room left, up to
+        LARGEST_SEARCH_FIELD_WIDTH. Where each step happens depends on how wide
+        macOS draws the controls. The message line takes the room left before the buttons, so it never covers them,
+        while the search box keeps its smallest width;
         while it shows a message that asks for it (the app restarts, so there are no rows to sort
         or hide; show_message), or one that would get less than SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS
-        beside them (a narrow sidebar), the sort control and the Hide Idle button step aside for it."""
+        beside them (a narrow sidebar), the sort control, the search box and the Hide Idle button step aside for it."""
         has_a_message = bool(self.message_text_field.stringValue())
         message_width = self.lay_out_top_bar(has_a_message and self.sort_control_and_hide_idle_step_aside_for_the_message)
         if has_a_message and message_width < SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS:
@@ -362,8 +425,8 @@ class ListPanelController(NSViewController):
 
     @objc.python_method
     def lay_out_top_bar(self, controls_step_aside_for_a_message):
-        """Lays out the top bar as fit_top_bar_to_width describes, with the sort control and the
-        Hide Idle button stepping aside for the message when controls_step_aside_for_a_message;
+        """Lays out the top bar as fit_top_bar_to_width describes, with the sort control, the
+        search box and the Hide Idle button stepping aside for the message when controls_step_aside_for_a_message;
         returns the message line's width."""
         label_x, label_width = self.sort_label.frame().origin.x, self.sort_label.frame().size.width
         popup_frame = self.list_sort_order_popup.frame()
@@ -376,15 +439,38 @@ class ListPanelController(NSViewController):
                 button.setFrameOrigin_((right_end_x, button.frame().origin.y))
                 gap_before_the_buttons_placed = GAP_BETWEEN_TOP_BAR_BUTTONS
         room_right_edge = right_end_x - gap_before_the_buttons_placed
+        # The search box at its smallest, with its checkbox where both fit, keeps its room before the sort control's.
+        checkbox_width = self.case_sensitive_checkbox.frame().size.width
+        checkbox_room = GAP_BETWEEN_TOP_BAR_BUTTONS + checkbox_width
+        search_field_shows = (not controls_step_aside_for_a_message
+                              and room_right_edge - label_x >= SMALLEST_SEARCH_FIELD_WIDTH)
+        checkbox_shows = search_field_shows and room_right_edge - label_x >= SMALLEST_SEARCH_FIELD_WIDTH + checkbox_room
+        smallest_search_room = (SMALLEST_SEARCH_FIELD_WIDTH + (checkbox_room if checkbox_shows else 0) + GAP_AFTER_THE_SORT_CONTROL
+                                if search_field_shows else 0)
+        sort_room_right_edge = room_right_edge - smallest_search_room
         popup_x_after_label = label_x + label_width + 2
-        label_fits = not controls_step_aside_for_a_message and popup_x_after_label + self.sort_popup_width_for_its_widest_title <= room_right_edge
+        label_fits = (not controls_step_aside_for_a_message
+                      and popup_x_after_label + self.sort_popup_width_for_its_widest_title <= sort_room_right_edge)
         popup_x = popup_x_after_label if label_fits else label_x
-        popup_width = max(min(self.sort_popup_width_for_its_widest_title, room_right_edge - popup_x), 0)
+        popup_width = max(min(self.sort_popup_width_for_its_widest_title, sort_room_right_edge - popup_x), 0)
         popup_fits = not controls_step_aside_for_a_message and popup_width >= SMALLEST_SORT_POPUP_WIDTH
         self.sort_label.setHidden_(not label_fits)
         self.list_sort_order_popup.setHidden_(not popup_fits)
         self.list_sort_order_popup.setFrame_(NSMakeRect(popup_x, popup_frame.origin.y, popup_width, popup_frame.size.height))
-        message_x = popup_x + popup_width + 8 if popup_fits else label_x
+        search_x = popup_x + popup_width + GAP_AFTER_THE_SORT_CONTROL if popup_fits else label_x
+        has_a_message = bool(self.message_text_field.stringValue())
+        search_field_width = (SMALLEST_SEARCH_FIELD_WIDTH if has_a_message  # the message takes the rest
+                              else max(min(LARGEST_SEARCH_FIELD_WIDTH,
+                                           room_right_edge - search_x - (checkbox_room if checkbox_shows else 0)),
+                                       SMALLEST_SEARCH_FIELD_WIDTH))
+        self.search_field.setHidden_(not search_field_shows)
+        self.case_sensitive_checkbox.setHidden_(not checkbox_shows)
+        search_frame = self.search_field.frame()
+        self.search_field.setFrame_(NSMakeRect(search_x, search_frame.origin.y, search_field_width, search_frame.size.height))
+        checkbox_x = search_x + search_field_width + GAP_BETWEEN_TOP_BAR_BUTTONS
+        self.case_sensitive_checkbox.setFrameOrigin_((checkbox_x, self.case_sensitive_checkbox.frame().origin.y))
+        message_x = (checkbox_x + checkbox_width + 8 if checkbox_shows else search_x + search_field_width + 8 if search_field_shows
+                     else search_x)
         message_frame = self.message_text_field.frame()
         message_width = max(right_end_x - message_x - 8, 0)
         self.message_text_field.setFrame_(NSMakeRect(message_x, message_frame.origin.y, message_width, message_frame.size.height))
@@ -502,6 +588,61 @@ class ListPanelController(NSViewController):
         title, tool_tip = IDLE_TABS_BUTTON_LOOKS[self.list_controller.idle_tabs_are_hidden]
         self.idle_tabs_button.setTitle_(title)
         self.idle_tabs_button.setToolTip_(tool_tip)
+
+    @objc.python_method
+    def put_the_keyboard_in_the_search_box(self):
+        """Command-F or "/" in the list: puts the keyboard in the search box, its text selected.
+        Returns whether it did (not while the box is hidden, in a sidebar too narrow for it)."""
+        window = self.view().window()
+        if window is None or self.search_field.isHiddenOrHasHiddenAncestor():
+            return False
+        window.makeFirstResponder_(self.search_field)
+        return True
+
+    @objc.python_method
+    def search_box_took_the_keyboard(self):
+        self.on_search_box_took_the_keyboard()
+
+    def controlTextDidChange_(self, notification):
+        """Filters the list as each letter is typed in the search box."""
+        if notification.object() is self.search_field:
+            self.list_controller.set_search_text(self.search_field.stringValue())
+
+    def searchFieldChanged_(self, sender):
+        """The search box's own action: also sent when its button empties it, which typing doesn't do."""
+        self.list_controller.set_search_text(self.search_field.stringValue())
+
+    def control_textView_doCommandBySelector_(self, control, text_view, command_selector):
+        """The search box's keys: Return shows the selected row's tab, as in the list; Up and Down
+        move the selection among the tab rows; Esc empties the box, and in an empty box closes
+        the list as Esc in the list does. Other keys edit the text."""
+        if control is not self.search_field:
+            return False
+        if command_selector == "insertNewline:":
+            self.list_controller.show_the_selected_row()
+            return True
+        if command_selector in ("moveUp:", "moveDown:"):
+            self.list_controller.move_the_selection_among_tab_rows(-1 if command_selector == "moveUp:" else 1)
+            return True
+        if command_selector == "cancelOperation:":
+            if self.search_field.stringValue():
+                self.search_field.setStringValue_("")
+                self.list_controller.set_search_text("")
+            else:
+                self.list_controller.owner.close_the_list_after_escape(self.list_controller)
+            return True
+        return False
+
+    def caseSensitiveCheckboxClicked_(self, sender):
+        self.list_controller.owner.search_is_case_sensitive_chosen(sender.state() == NSControlStateValueOn)
+
+    @objc.python_method
+    def show_search_is_case_sensitive(self, search_is_case_sensitive):
+        """Checks or unchecks the "aA" checkbox and has the search count case, or not (the
+        dropdown, the sidebar and the list window share one choice)."""
+        self.view()
+        self.case_sensitive_checkbox.setState_(NSControlStateValueOn if search_is_case_sensitive else NSControlStateValueOff)
+        self.list_controller.set_search_is_case_sensitive(search_is_case_sensitive)
 
     def settingsClicked_(self, sender):
         self.list_controller.owner.open_settings()

@@ -30,7 +30,8 @@ from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FI
 from agent_command_tab.global_shortcut_key_filter import GlobalShortcutKeyFilter
 from agent_command_tab.hook_event_forwarder import HOOK_EVENTS_SOCKET_PATH
 from agent_command_tab.hook_states_store import HOOK_STATES_FILE_PATH
-from agent_command_tab.hooks_installer import BACKUP_FILE_SUFFIX, install_hooks, list_settings_file_paths
+from agent_command_tab.hooks_installer import (BACKUP_FILE_SUFFIX, install_hooks, list_settings_file_paths,
+                                               take_out_the_hooks_only_earlier_versions_added)
 from agent_command_tab.dashboard_core import DashboardCoreThread
 from agent_command_tab.monitor_assignment import compute_frame_clear_of_area
 from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH
@@ -62,6 +63,8 @@ from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk
 
 SECONDS_TO_SHOW_CONNECTION_PROBLEM_BEFORE_EXITING = 10
 SECONDS_BEFORE_SAVING_A_MOVED_WINDOWS_FRAME = 0.5
+# A menu that starts agent sessions has the installed agent tools checked again when the last check is this old (list_agent_tool_names).
+SECONDS_BEFORE_THE_INSTALLED_AGENT_TOOLS_ARE_CHECKED_AGAIN = 30
 # The settings' Appearance (settings_store.APPEARANCE_CHOICES): the
 # NSAppearance name the app is drawn in, or None to follow macOS's Light or Dark setting.
 APPEARANCE_NAMES_BY_CHOICE = {"auto": None, "dark": NSAppearanceNameDarkAqua, "light": NSAppearanceNameAqua}
@@ -70,15 +73,18 @@ APPEARANCE_NAMES_BY_CHOICE = {"auto": None, "dark": NSAppearanceNameDarkAqua, "l
 SETTINGS_THAT_PLACE_THE_SIDEBAR = ("show_as", "sidebar_mode", "sidebar_edge", "sidebar_width")
 
 
-def build_main_menu_with_the_settings_and_edit_shortcuts(settings_target):
+def build_main_menu_with_the_settings_close_and_edit_shortcuts(settings_target):
     """Returns a main menu holding an app menu whose Settings items open the settings with
-    Command-comma, as in nearly every Mac app, and Command-period,
-    and an Edit menu: Undo, Redo, Cut, Copy, Paste and Select All.
+    Command-comma, as in nearly every Mac app, and Command-period, a File menu whose Close item
+    closes the window in front with Command-W, and an Edit menu: Undo, Redo, Cut, Copy, Paste and
+    Select All.
 
     The dashboard, an accessory app, never shows a menu bar, but AppKit finds the Command-key
-    shortcuts in the main menu's items; without them, Command-C, V, X, A and Z do
-    nothing in its text fields (the Talk to Each Other note, renames, the settings). The Edit
-    items have no target, so each goes to the field being edited.
+    shortcuts in the main menu's items; without them, Command-W does nothing in its windows, and
+    Command-C, V, X, A and Z do nothing in its text fields (the Talk to Each Other note, renames,
+    the settings). The Close and Edit items have no target, so Close goes to the window in front
+    (a window without a close button, as the dropdown's and the sidebar's, turns it down, as it
+    turns down a click on a close button it doesn't have), and each Edit item to the field being edited.
 
     Args:
         settings_target: The object whose settingsShortcutPressed_ opens the settings (the AppController).
@@ -91,6 +97,12 @@ def build_main_menu_with_the_settings_and_edit_shortcuts(settings_target):
         app_menu.addItem_(settings_item)
     app_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("AgentCommandTab", None, "")
     app_menu_item.setSubmenu_(app_menu)
+    file_menu = NSMenu.alloc().initWithTitle_("File")
+    close_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Close", "performClose:", "w")
+    close_item.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
+    file_menu.addItem_(close_item)
+    file_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("File", None, "")
+    file_menu_item.setSubmenu_(file_menu)
     edit_menu = NSMenu.alloc().initWithTitle_("Edit")
     for title, action_name, key, modifier_flags in (
             ("Undo", "undo:", "z", NSEventModifierFlagCommand),
@@ -106,6 +118,7 @@ def build_main_menu_with_the_settings_and_edit_shortcuts(settings_target):
     edit_menu_item.setSubmenu_(edit_menu)
     main_menu = NSMenu.alloc().initWithTitle_("")
     main_menu.addItem_(app_menu_item)
+    main_menu.addItem_(file_menu_item)
     main_menu.addItem_(edit_menu_item)
     return main_menu
 
@@ -149,6 +162,7 @@ class AppController(NSObject):
         # The agent tools installed (find_installed_agent_tool_names), which the menus that start
         # new agent sessions offer; None until the check that start begins has answered.
         self.installed_agent_tool_names = None
+        self.installed_agent_tools_checked_at = 0  # when find_installed_agent_tools last began a check
         self.reserved_screen_area = None
         self.application_in_front_before_dropdown = None
         # The last app other than the dashboard to be active: hiding the list window with the
@@ -714,7 +728,11 @@ class AppController(NSObject):
     def list_agent_tool_names(self):
         """The agent tools the menus offer for new agent sessions: those the settings include that
         are installed, so someone without agy isn't offered it (every included one until the check
-        has answered)."""
+        has answered). A menu asking for them SECONDS_BEFORE_THE_INSTALLED_AGENT_TOOLS_ARE_CHECKED_AGAIN
+        or more after the last check gets that check's answer and starts another, so a tool
+        installed while the app runs shows in the menus from then on."""
+        if time.time() - self.installed_agent_tools_checked_at >= SECONDS_BEFORE_THE_INSTALLED_AGENT_TOOLS_ARE_CHECKED_AGAIN:
+            self.find_installed_agent_tools(self.settings["agent_tools"])
         return [agent_tool_name for agent_tool_name in list_included_agent_tool_names(self.settings)
                 if self.installed_agent_tool_names is None or agent_tool_name in self.installed_agent_tool_names]
 
@@ -722,6 +740,8 @@ class AppController(NSObject):
     def find_installed_agent_tools(self, agent_tools):
         """Finds out, off the main thread (asking the login shell about a command takes a moment),
         which of the agent tools (the agent_tools setting) are installed, for list_agent_tool_names."""
+        self.installed_agent_tools_checked_at = time.time()
+
         def find():
             installed_agent_tool_names = find_installed_agent_tool_names(agent_tools)
             AppHelper.callAfter(self.note_installed_agent_tools, agent_tools, installed_agent_tool_names)
@@ -783,8 +803,7 @@ class AppController(NSObject):
             "They are added to:\n\n" + "\n".join(file_paths)
             # The installer copies a file only the first time.
             + f"\n\nThe first time, each file is copied to its name plus {BACKUP_FILE_SUFFIX}, which keeps it as it was "
-              "before the app changed it. Sessions started after this will use the hooks."
-            + (" Codex then asks you to approve them: type /hooks in Codex." if "Codex" in agent_tool_names else ""))
+              "before the app changed it. Sessions started after this will use the hooks.")
         alert.addButtonWithTitle_("Install")
         alert.addButtonWithTitle_("Cancel")
         if self.run_alert_in_front(alert) != NSAlertFirstButtonReturn:
@@ -857,6 +876,20 @@ class AppController(NSObject):
                 after_success(action_result)
         self.submit_action(action_request).add_done_callback(
             lambda done_future: AppHelper.callAfter(handle_action_result, done_future.result()))
+
+    @objc.python_method
+    def find_agent_sessions_whose_conversations_contain(self, text, is_case_sensitive, on_answer):
+        """Asks the core which agent sessions' conversations hold the text (a list's search box);
+        on_answer(their session IDs, or None when the core couldn't answer) runs on the main thread."""
+        def hand_over_the_answer(done_future):
+            try:
+                action_result = done_future.result()
+            except Exception:  # the core stopped (the app restarts); the list asks again after it is back
+                action_result = None
+            AppHelper.callAfter(on_answer, (action_result.details or {}).get("session_ids")
+                                if action_result is not None and action_result.succeeded else None)
+        self.submit_action(ActionRequest("find_agent_sessions_whose_conversations_contain", None,
+                                         {"text": text, "is_case_sensitive": is_case_sensitive})).add_done_callback(hand_over_the_answer)
 
     @objc.python_method
     def report_action_failure(self, action_result, failure_title):
@@ -1005,8 +1038,7 @@ class AppController(NSObject):
         self.submit_action_and_report_failure(
             ActionRequest("restore_saved_agent_sessions", {}, {
                 "saved_windows": saved_windows_to_restore,
-                "launch_command_by_agent_tool_name": {agent_tool["agent_tool_name"]: agent_tool["launch_command"]
-                                                      for agent_tool in self.settings["agent_tools"]}}),
+                "launch_command_by_agent_tool_name": build_launch_command_by_agent_tool_name(self.settings["agent_tools"])}),
             "The session wasn't restored" if saved_session_count == 1 else "Not every session was restored",
             after_any_result=take_the_restored_sessions_out_of_the_list)
 
@@ -1161,11 +1193,19 @@ class AppController(NSObject):
             self.settings_changed(dict(self.settings, idle_tabs_are_hidden=idle_tabs_are_hidden))
 
     @objc.python_method
+    def search_is_case_sensitive_chosen(self, search_is_case_sensitive):
+        """The "aA" checkbox beside the search box of the dropdown, the sidebar or the list window: one choice for all, saved with the settings."""
+        if search_is_case_sensitive != self.settings["search_is_case_sensitive"]:
+            self.settings_changed(dict(self.settings, search_is_case_sensitive=search_is_case_sensitive))
+
+    @objc.python_method
     def apply_list_settings(self, settings):
-        """Gives the dropdown's, the sidebar's and the list window's lists the same sort order, idle tabs shown or hidden, and shown columns."""
+        """Gives the dropdown's, the sidebar's and the list window's lists the same sort order, idle tabs shown or hidden,
+        shown columns, and whether their search counts case."""
         for list_panel_controller in self.list_all_list_panel_controllers():
             list_panel_controller.show_list_sort_order(settings["list_sort_order"], settings["list_sort_order_is_reversed"])
             list_panel_controller.show_idle_tabs_are_hidden(settings["idle_tabs_are_hidden"])
+            list_panel_controller.show_search_is_case_sensitive(settings["search_is_case_sensitive"])
             list_panel_controller.list_controller.set_shown_columns(settings["shown_columns"])
 
     @objc.python_method
@@ -1277,7 +1317,8 @@ def run_menu_bar_app(verbose):
     # For anything else that shows NSApp's icon; the dialogs get it from run_alert_in_front.
     application.setApplicationIconImage_(build_app_icon())
     app_controller = AppController.alloc().initWithVerbose_(verbose)
-    application.setMainMenu_(build_main_menu_with_the_settings_and_edit_shortcuts(app_controller))
+    application.setMainMenu_(build_main_menu_with_the_settings_close_and_edit_shortcuts(app_controller))
+    threading.Thread(target=take_out_the_hooks_only_earlier_versions_added, name="old-hooks-removal", daemon=True).start()
     app_controller.start()
     # runEventLoop(installInterrupt=True) installs its Ctrl+C handler only when no NSApplication
     # exists yet, and one was made above, so it is installed here. Ctrl+C then terminates the app,

@@ -1,5 +1,4 @@
-"""The app's own hooks in Claude Code's and Codex's settings:
-installing, removing and checking them.
+"""The app's own hooks in Claude Code's settings: installing, removing and checking them.
 
 Each hook runs hook_event_forwarder.py, which sends the event to the app. The events tell the
 app when an agent's session ended normally (so a crash leaves an "exited" row), and
@@ -9,20 +8,19 @@ replaces them and removing takes out only them. Each file the installer changes 
 to <file>.agent-command-tab-backup, the first time only, so that keeps the file as it was before
 the app changed it ({} for a file the app created).
 
-- Claude Code: settings.json in each config folder in use (claude_code.list_claude_config_folders,
-  so a Claude Code started with CLAUDE_CONFIG_DIR=~/.claude_work gets them too). A session
-  reads its hooks when it starts, so only sessions started afterwards report.
-- Codex: hooks.json in each Codex home folder in use (list_codex_home_folders: the app's own, and
-  the one the Codex launch command in the settings sets). Codex runs a new hook only once the
-  user approves it in its /hooks screen, which records the approval in that home's config.toml under
-  [hooks.state."<hooks.json path>:<event>:<group>:<hook>"], with a hash of
-  the hook as it was then, so a changed hook needs approving again (compute_codex_approval_hash).
+The hooks go in settings.json in each Claude Code config folder in use
+(claude_code.list_claude_config_folders, so a Claude Code started with
+CLAUDE_CONFIG_DIR=~/.claude_work gets them too). A session reads its hooks when it starts, so
+only sessions started afterwards report.
+
+Earlier versions also added hooks to Codex's hooks.json. Codex 0.165 and later run hooks in their
+shared background server (`codex app-server`), whose process belongs to no tab, so those events
+reached no row (checked with Codex 0.169); the app takes them out
+(take_out_the_hooks_only_earlier_versions_added).
 """
 
-import hashlib
 import json
 import os
-import re
 import shlex
 import shutil
 
@@ -47,16 +45,12 @@ BACKUP_FILE_SUFFIX = ".agent-command-tab-backup"
 HOOK_EVENTS_BY_AGENT_TOOL_NAME = {
     "Claude Code": [("SessionStart", None), ("UserPromptSubmit", None), ("Stop", None), ("SubagentStop", None),
                     ("SessionEnd", None), ("PreToolUse", "Bash|Agent|Task"), ("PostToolUse", "Bash|Agent|Task")],
-    "Codex": [("SessionStart", None), ("Stop", None), ("SessionEnd", None)],
 }
-# Codex's /hooks screen shows a hook's statusMessage as its name, "Unnamed hook" without one, and
-# its status line shows it while the hook runs. Claude Code's hooks have
-# no names (its statusMessage is only spinner text), so its entries go without.
-HOOK_NAMES_BY_AGENT_TOOL_NAME = {"Codex": "Report to AgentCommandTab"}
-CODEX_SESSION_END_LONGEST_TIMEOUT = 3  # seconds: Codex lowers a longer SessionEnd hook timeout to this
+# The agent tools whose hooks only earlier versions added, which the app takes out
+# (take_out_the_hooks_only_earlier_versions_added) and never installs.
+AGENT_TOOL_NAMES_WHOSE_HOOKS_ONLY_EARLIER_VERSIONS_ADDED = ("Codex",)
 HOOKS_ARE_INSTALLED = "installed"
 HOOKS_ARE_MISSING = "missing"
-HOOKS_AWAIT_APPROVAL = "needs approval"  # Codex: in hooks.json, not yet approved in its /hooks screen
 # The Python or the forwarder this copy's hooks run is gone, though the app still runs on it: a
 # Homebrew upgrade removed the Python a pipx environment was made with, say (this_copys_hooks_can_run).
 HOOKS_CANT_RUN = "can't run"
@@ -114,26 +108,24 @@ def remove_the_apps_hooks(settings):
     return dict(settings, hooks=kept_hooks)
 
 
-def build_the_apps_hook_group(command, matcher, hook_name=None):
-    hook = {"type": "command", "command": command, "async": True, "timeout": SECONDS_A_HOOK_MAY_RUN}
+def build_the_apps_hook_group(command, matcher):
     return dict({"matcher": matcher} if matcher else {},
-                hooks=[dict(hook, statusMessage=hook_name) if hook_name else hook])
+                hooks=[{"type": "command", "command": command, "async": True, "timeout": SECONDS_A_HOOK_MAY_RUN}])
 
 
-def add_the_apps_hooks(settings, command, events, hook_name=None):
+def add_the_apps_hooks(settings, command, events):
     """Returns the settings with one entry of the app's per event, after the user's own, in place
-    of any the app added before (with another command, other events or another name).
+    of any the app added before (with another command or other events).
 
     Args:
         settings: The settings file's contents.
         command: build_forwarder_command's command.
         events: [(event name, matcher or None)], from HOOK_EVENTS_BY_AGENT_TOOL_NAME.
-        hook_name: From HOOK_NAMES_BY_AGENT_TOOL_NAME, or None for unnamed entries.
     """
     settings = remove_the_apps_hooks(settings)
     hooks = dict(settings.get("hooks") or {})
     for event_name, matcher in events:
-        hooks[event_name] = list(hooks.get(event_name) or []) + [build_the_apps_hook_group(command, matcher, hook_name)]
+        hooks[event_name] = list(hooks.get(event_name) or []) + [build_the_apps_hook_group(command, matcher)]
     return dict(settings, hooks=hooks)
 
 
@@ -162,58 +154,19 @@ def hook_group_is_the_same_as(hook_group, expected_hook_group):
             and normalize_forwarder_command(str(hook.get("command", ""))) == normalize_forwarder_command(expected_hook["command"]))
 
 
-def list_positions_of_the_apps_hooks(settings, command, events, hook_name=None):
-    """Returns [(event name, entry index, hook index)] of the app's hook for each event, or None
-    unless every event has the entry add_the_apps_hooks adds (hook_group_is_the_same_as)."""
+def settings_have_the_apps_hooks(settings, command, events):
+    """Whether every event has the entry add_the_apps_hooks adds (hook_group_is_the_same_as)."""
     hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
-    positions = []
-    for event_name, matcher in events:
-        hook_groups = hooks.get(event_name) if isinstance(hooks.get(event_name), list) else []
-        group_indexes = [index for index, hook_group in enumerate(hook_groups)
-                         if hook_group_is_the_same_as(hook_group, build_the_apps_hook_group(command, matcher, hook_name))]
-        if not group_indexes:
-            return None
-        positions.append((event_name, group_indexes[0], 0))
-    return positions
-
-
-def convert_event_name_to_codex_hook_state_name(event_name):
-    """Returns the name Codex's config.toml gives an event in its hook approvals ("SessionEnd" -> "session_end")."""
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", event_name).lower()
-
-
-def compute_codex_approval_hash(event_name, hook_group):
-    """Returns the trusted_hash Codex records in config.toml when the user approves the hook in an
-    entry of the app's (hook_hash in Codex's codex-rs/hooks/src/engine/discovery.rs): SHA-256 of
-    the event's name and the entry, as JSON with sorted keys and no spaces. Of the changes Codex
-    makes to an entry before hashing it, only one touches the app's: a SessionEnd hook's timeout
-    is lowered to CODEX_SESSION_END_LONGEST_TIMEOUT."""
-    hook = dict(hook_group["hooks"][0])
-    if event_name == "SessionEnd":
-        hook["timeout"] = min(hook["timeout"], CODEX_SESSION_END_LONGEST_TIMEOUT)
-    identity = dict(hook_group, event_name=convert_event_name_to_codex_hook_state_name(event_name), hooks=[hook])
-    return "sha256:" + hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-
-
-def codex_has_approved_the_hooks(config_text, hooks_file_path, settings, positions):
-    """Whether Codex's config.toml records an approval of the hook at each position
-    (list_positions_of_the_apps_hooks) as it is in the settings now. An approval of an earlier
-    version, such as one without its name, doesn't count: Codex skips the changed hook until the
-    user approves it again."""
-    for event_name, group_index, hook_index in positions:
-        state_name = f"{hooks_file_path}:{convert_event_name_to_codex_hook_state_name(event_name)}:{group_index}:{hook_index}"
-        state_section = re.search(rf'^\[hooks\.state\."{re.escape(state_name)}"\]$(.*?)(?=^\[|\Z)', config_text,
-                                  re.MULTILINE | re.DOTALL)
-        trusted_hash_line = f'trusted_hash = "{compute_codex_approval_hash(event_name, settings["hooks"][event_name][group_index])}"'
-        if state_section is None or trusted_hash_line not in state_section.group(1):
-            return False
-    return True
+    return all(isinstance(hooks.get(event_name), list)
+               and any(hook_group_is_the_same_as(hook_group, build_the_apps_hook_group(command, matcher))
+                       for hook_group in hooks[event_name])
+               for event_name, matcher in events)
 
 
 def list_settings_file_paths(agent_tool_name):
     """Returns the files that hold the agent tool's hooks, in folders that exist (a tool that
-    isn't installed has none)."""
+    isn't installed has none): Claude Code's settings.json files, or, for Codex, whose hooks only
+    earlier versions added, the hooks.json files of list_codex_home_folders."""
     if agent_tool_name == "Claude Code":
         folders = list_claude_config_folder_paths()
         return [os.path.join(folder, "settings.json") for folder in folders if os.path.isdir(folder)]
@@ -221,9 +174,9 @@ def list_settings_file_paths(agent_tool_name):
 
 
 def list_codex_home_folders(settings_file_path=SETTINGS_FILE_PATH):
-    """Returns the Codex home folders the app's hooks go in: its own (find_codex_home_folder), and
-    the one the Codex launch command in the settings sets (CODEX_HOME=... in front of its
-    program), since a session reads its hooks only from its own home."""
+    """Returns the Codex home folders that earlier versions put the app's hooks in: its own
+    (find_codex_home_folder), and the one the Codex launch command in the settings sets
+    (CODEX_HOME=... in front of its program), since a session reads its hooks only from its own home."""
     codex_home_setting = read_environment_settings_of_launch_command(
         find_launch_command(load_settings(settings_file_path), "Codex")).get("CODEX_HOME")
     return list(dict.fromkeys([find_codex_home_folder()] + ([os.path.expanduser(codex_home_setting)] if codex_home_setting else [])))
@@ -270,21 +223,19 @@ def write_settings_file(settings, file_path):
 
 def install_hooks(agent_tool_name):
     """Adds the app's hooks to the agent tool's settings files; returns the files changed. A file
-    that has them already (perhaps naming the same Python by another link) is left as it is, so
-    Codex's approval of them stays.
+    that has them already (perhaps naming the same Python by another link) is left as it is.
 
     Raises:
         OSError, ValueError: A file couldn't be read or written; files changed before it stay changed.
     """
     command = build_forwarder_command(agent_tool_name)
     events = HOOK_EVENTS_BY_AGENT_TOOL_NAME[agent_tool_name]
-    hook_name = HOOK_NAMES_BY_AGENT_TOOL_NAME.get(agent_tool_name)
     changed_file_paths = []
     for file_path in list_settings_file_paths(agent_tool_name):
         settings = read_settings_file(file_path)
-        if list_positions_of_the_apps_hooks(settings, command, events, hook_name) is not None:
+        if settings_have_the_apps_hooks(settings, command, events):
             continue
-        new_settings = add_the_apps_hooks(settings, command, events, hook_name)
+        new_settings = add_the_apps_hooks(settings, command, events)
         if new_settings != settings:
             write_settings_file(new_settings, file_path)
             changed_file_paths.append(file_path)
@@ -303,6 +254,23 @@ def remove_hooks(agent_tool_name):
     return changed_file_paths
 
 
+def take_out_the_hooks_only_earlier_versions_added():
+    """Takes the hooks that only earlier versions added (AGENT_TOOL_NAMES_WHOSE_HOOKS_ONLY_EARLIER_VERSIONS_ADDED)
+    out of the agent tools' files, as the app starts, and prints each file changed, or why one
+    couldn't be. Codex's still started a forwarder for each event, which reached no tab (see the
+    module's docstring), and would fail on every event once the app is uninstalled. A hook the user
+    added to an event after the app's moves up a place in that event's list, so Codex, which
+    records its approval of a hook by its place, asks for that approval again in its /hooks screen."""
+    for agent_tool_name in AGENT_TOOL_NAMES_WHOSE_HOOKS_ONLY_EARLIER_VERSIONS_ADDED:
+        try:
+            changed_file_paths = remove_hooks(agent_tool_name)
+        except (OSError, ValueError) as error:
+            print(f"agent-command-tab: the hooks earlier versions added for {agent_tool_name} couldn't be taken out: {error}", flush=True)
+            continue
+        for file_path in changed_file_paths:
+            print(f"agent-command-tab: took the hooks earlier versions added for {agent_tool_name} out of {file_path}", flush=True)
+
+
 def this_copys_hooks_can_run(python_path=None, forwarder_path=FORWARDER_FILE_PATH):
     """Returns whether the Python and the forwarder this copy's hooks run exist. The app can go on
     running after its Python is gone, so its hooks then fail, silently, since they run in the
@@ -315,41 +283,21 @@ def this_copys_hooks_can_run(python_path=None, forwarder_path=FORWARDER_FILE_PAT
     return os.access(python_path or find_python_of_this_copy(), os.X_OK) and os.path.isfile(forwarder_path)
 
 
-def read_codex_config_of_the_home_of(hooks_file_path):
-    """Returns the text of the config.toml next to a Codex hooks.json (where Codex records the
-    approvals of that home's hooks), or "" when there is none."""
-    try:
-        with open(os.path.join(os.path.dirname(hooks_file_path), "config.toml")) as config_file:
-            return config_file.read()
-    except OSError:
-        return ""
-
-
 def check_hooks(agent_tool_name):
     """Returns HOOKS_CANT_RUN when the Python or the forwarder this copy's hooks run is gone
     (this_copys_hooks_can_run), else HOOKS_ARE_INSTALLED when every settings file of the agent
-    tool has the app's hooks with this app's command (and, for Codex, they are approved),
-    HOOKS_AWAIT_APPROVAL for Codex hooks not yet approved, and HOOKS_ARE_MISSING otherwise (also
+    tool has the app's hooks with this app's command, and HOOKS_ARE_MISSING otherwise (also
     when no file can be read)."""
     if not this_copys_hooks_can_run():
         return HOOKS_CANT_RUN  # installing them again wouldn't help: the app itself needs reinstalling
     command = build_forwarder_command(agent_tool_name)
     events = HOOK_EVENTS_BY_AGENT_TOOL_NAME[agent_tool_name]
     file_paths = list_settings_file_paths(agent_tool_name)
-    settings_and_positions_by_file_path = {}
     for file_path in file_paths:
         try:
             settings = read_settings_file(file_path)
         except (OSError, ValueError):
             return HOOKS_ARE_MISSING
-        positions = list_positions_of_the_apps_hooks(settings, command, events, HOOK_NAMES_BY_AGENT_TOOL_NAME.get(agent_tool_name))
-        if positions is None:
+        if not settings_have_the_apps_hooks(settings, command, events):
             return HOOKS_ARE_MISSING
-        settings_and_positions_by_file_path[file_path] = (settings, positions)
-    if not file_paths:
-        return HOOKS_ARE_MISSING
-    if agent_tool_name == "Codex" and not all(
-            codex_has_approved_the_hooks(read_codex_config_of_the_home_of(file_path), file_path, settings, positions)
-            for file_path, (settings, positions) in settings_and_positions_by_file_path.items()):
-        return HOOKS_AWAIT_APPROVAL
-    return HOOKS_ARE_INSTALLED
+    return HOOKS_ARE_INSTALLED if file_paths else HOOKS_ARE_MISSING

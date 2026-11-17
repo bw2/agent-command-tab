@@ -17,12 +17,14 @@ import unittest
 import unittest.mock
 
 from agent_command_tab import agent_session_pausing, dashboard_core
+from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.agent_process_tree import ProcessInfo, list_descendant_processes, read_process_info
 from agent_command_tab.agent_session_pausing import PauseRecord
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.dashboard_core import DashboardCore
 from agent_command_tab.pause_records_store import load_pause_records, save_pause_records
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
+from agent_command_tab.snapshot_builder import turns_of_the_agent_run_outside_its_tab
 from agent_command_tab.terminal_backends import iterm2_terminal_backend
 from condition_waiting import SECONDS_TO_WAIT_FOR_A_REAL_PROCESS, wait_for_the_process_named_below, wait_until
 from private_tmux_server import TMUX_PROGRAM_PATH, start_a_private_tmux_server
@@ -471,6 +473,21 @@ class PausingInTheCoreTests(unittest.TestCase):
                                         return_value=(ActionResult(True), make_pause_record())) as pause:
             asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
         self.assertFalse(pause.call_args.kwargs["turns_run_outside_the_tab"])
+
+    def test_a_codex_sharing_its_folder_is_unpausable_once_a_file_that_may_be_its_conversation_runs_in_the_shared_server(self):
+        # A Duplicate starts a second Codex in the same folder, so neither one's conversation file can be told apart.
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.agent_sessions = {session_id: {"process_id": process_id, "adapter": CodexAdapter(), "agent_tool_name": "Codex",
+                                            "working_folder": "/repo", "is_in_background": False}
+                               for session_id, process_id in (("s1", AGENT_PROCESS_ID), ("s2", AGENT_PROCESS_ID + 1))}
+        for runs_in_the_shared_server in (False, True):
+            with unittest.mock.patch.object(CodexAdapter, "find_conversation_files", return_value=["rollout-a.jsonl", "rollout-b.jsonl"]), \
+                    unittest.mock.patch.object(CodexAdapter, "read_turns_run_outside_the_tab",
+                                               side_effect=lambda path: runs_in_the_shared_server and path == "rollout-b.jsonl"):
+                core.conversation_files_by_session_id.pop("s1", None)  # a lookup is due
+                asyncio.run(core.update_conversation_file_readings("s1", core.agent_sessions["s1"]))
+            self.assertEqual(turns_of_the_agent_run_outside_its_tab(core.session_readings_by_session_id.get("s1"), AGENT_PROCESS_ID),
+                             runs_in_the_shared_server)
 
     def test_a_pause_waits_for_a_message_being_typed_into_the_tab(self):  # its paste and Enter stay together
         core = self.make_core_with_one_agent_tab()

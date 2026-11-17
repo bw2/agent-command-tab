@@ -564,7 +564,9 @@ class TmuxTerminalBackend(TerminalBackend):
         else:
             if self.find_gathered_window(window_id) is None and window_id not in self.window_and_tab_ids_opened_since_the_last_gather:
                 return ActionResult(False, "that window no longer exists")
-            target_arguments = ["-a", "-t", after_tab_id] if after_tab_id is not None else ["-t", f"{window_id}:"]
+            # After the session's last window ("{end}") rather than at its first free index, which a
+            # window moved or closed earlier leaves before the others.
+            target_arguments = ["-a", "-t", after_tab_id if after_tab_id is not None else f"{window_id}:{{end}}"]
             tab_id, pane_id = (await self.run_tmux(["new-window", "-c", start_folder, "-P", "-F",
                                                     FIELD_SEPARATOR.join(["#{window_id}", "#{pane_id}"])] + target_arguments)
                                ).strip().split(FIELD_SEPARATOR)

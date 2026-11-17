@@ -49,6 +49,9 @@ class StandInAdapter:
     def read_turns_run_outside_the_tab(self, conversation_file_path):
         return False
 
+    def extract_search_texts_from_conversation_record(self, record):
+        return []
+
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         # As CodexAdapter: only when exactly one file fits, so a copy never forks another conversation.
         return os.path.basename(self.paths_that_fit[0]) if len(self.paths_that_fit) == 1 else None

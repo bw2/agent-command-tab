@@ -23,7 +23,7 @@ class HookStatesFileTests(unittest.TestCase):
     def test_saved_states_load_back(self):
         turn_ended = apply_hook_event(None, make_event("Stop", 101, background_tasks=[{"id": "b2", "status": "running"},
                                                                                       {"id": "b1", "status": "running"}]))
-        unknown_tasks = apply_hook_event(None, dict(make_event("UserPromptSubmit", 102), agent_tool_name="Codex"))
+        unknown_tasks = apply_hook_event(None, make_event("UserPromptSubmit", 102))  # no start or list seen
         states = {101: (1000.25, turn_ended), 102: (2000.5, unknown_tasks)}
         save_hook_states(self.file_path, states)
         self.assertEqual(load_hook_states(self.file_path), states)
@@ -106,6 +106,12 @@ class HookStatesAcrossRestartsTests(unittest.TestCase):
         with unittest.mock.patch.object(dashboard_core, "save_hook_states") as save:  # to any file
             core_of_dump_snapshot.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=8.0))
         save.assert_not_called()
+
+    def test_the_states_an_earlier_version_saved_for_codex_are_dropped(self):
+        # Codex 0.165 and later sent them from their shared background server, which belongs to no tab.
+        save_hook_states(self.file_path, {101: (1000.25, apply_hook_event(None, make_event("Stop", 101))),
+                                          102: (2000.5, apply_hook_event(None, dict(make_event("Stop", 102), agent_tool_name="Codex")))})
+        self.assertEqual(set(self.make_core().hook_state_by_agent_process_id), {101})
 
     def test_a_process_gone_or_started_again_with_the_same_id_gets_no_state(self):
         core = self.make_core()

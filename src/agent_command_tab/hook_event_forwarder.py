@@ -1,4 +1,4 @@
-"""The command that Claude Code's and Codex's hooks run: it reads the event from standard input,
+"""The command that the app's Claude Code hooks run: it reads the event from standard input,
 keeps the few fields the app uses, adds the processes above it (whose nearest agent sent the
 event), and sends one line to the app's socket.
 
@@ -85,7 +85,8 @@ def reduce_hook_payload(payload, agent_tool_name, ancestors, now):
 
     Args:
         payload: The hook's input, as the agent tool sent it.
-        agent_tool_name: The name the installer passed ("Claude Code", "Codex").
+        agent_tool_name: The name the installer passed ("Claude Code"; "Codex" in the hooks that
+            earlier versions added to Codex, until the app takes them out).
         ancestors: list_ancestor_processes's list, from the hook's own parent up.
         now: When the hook started.
     """

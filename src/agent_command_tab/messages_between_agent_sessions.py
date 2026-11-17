@@ -68,18 +68,14 @@ def explain_why_sessions_of_agent_tool_cant_take_messages(agent_tool_name):
 def build_contact_info(agent_session):
     """Returns what a tab row's "Copy contact info" puts on the clipboard, to paste into
     another agent session so it can message this one: the session as Talk to Each Other names it,
-    then how to send it a message, for example 'Claude Code session "analysis-1d" (process ID
-    4242, folder /x, iTerm2 tab "analysis"). You can message it using your SendMessage tool with
-    to: "analysis-1d"'.
+    then how to send it a message, as Talk to Each Other says it (explain_how_to_send_a_message_to),
+    for example 'Claude Code session "analysis-1d" (process ID 4242, folder /x, iTerm2 tab
+    "analysis"). To message it, use your SendMessage tool with to: "analysis-1d".'
 
     Args:
         agent_session: The AgentSessionForMessages of the session to message.
     """
-    if agent_session.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
-        how_to_message_it = f"by running: {build_codex_queue_command(agent_session)}"
-    else:
-        how_to_message_it = f'using your SendMessage tool with to: "{agent_session.address}"'
-    return f"{describe_agent_session_for_messages(agent_session)}. You can message it {how_to_message_it}"
+    return f"{describe_agent_session_for_messages(agent_session)}. {explain_how_to_send_a_message_to(agent_session)}"
 
 
 def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_too):

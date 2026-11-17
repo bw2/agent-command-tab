@@ -226,10 +226,10 @@ class TalkToEachOtherTests(unittest.TestCase):
     def test_a_codex_session_takes_part_only_while_its_conversation_can_be_identified(self):
         core = make_core()
         # Right after /clear, the lookup would still find the ended conversation's file.
-        core.conversation_files_by_session_id["s3"] = {"key": (301, None), "path": None, "looked_up_at": 0,
-                                                       "modified_at": None, "cleared_path": "/codex/ended.jsonl"}
+        core.conversation_files_by_session_id["s3"] = dashboard_core.build_conversation_file_record(
+            (301, None), None, 0, "/codex/ended.jsonl")
         action_result = asyncio.run(ask_to_talk(core, ["s1", "s3"]))
-        self.assertIn("\"codex tests\": its conversation was just cleared", action_result.message)
+        self.assertIn("\"codex tests\": it has had no conversation since its /clear", action_result.message)
         self.assertEqual((self.pasted, self.queued), ([], []))  # nobody left to talk to
         core = make_core()
         core.agent_sessions["s3"]["process_id"] = 302  # no single conversation file fits
@@ -289,10 +289,10 @@ class ContactInfoInTheCoreTests(unittest.TestCase):
     def test_a_claude_code_session_and_a_codex_session_get_their_own_contact_info(self):
         self.assertEqual(self.build_contact_info("s1").details["text"],
                          'Claude Code session "planning-3a" (process ID 101, folder /p, iTerm2 tab "planning"). '
-                         'You can message it using your SendMessage tool with to: "planning-3a"')
+                         'To message it, use your SendMessage tool with to: "planning-3a".')
         self.assertEqual(self.build_contact_info("s3").details["text"],
                          'Codex session codex-conversation-1 (process ID 301, folder /p/codex, iTerm2 tab "codex tests"). '
-                         "You can message it by running: CODEX_HOME=/Users/me/.codex-tests codex queue --thread codex-conversation-1 "
+                         "To message it, run: CODEX_HOME=/Users/me/.codex-tests codex queue --thread codex-conversation-1 "
                          '--message="<your message>"')
 
     def test_a_session_other_sessions_cant_message_says_why(self):

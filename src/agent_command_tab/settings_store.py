@@ -12,6 +12,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -31,7 +32,9 @@ LOGIN_SHELLS_THAT_CAN_BE_ASKED = frozenset({"bash", "zsh", "sh", "dash", "ksh"})
 # Intel, Claude Code's installer), which an app started at login has no PATH to: it
 # gets launchd's /usr/bin:/bin:/usr/sbin:/sbin.
 USUAL_PROGRAM_FOLDERS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin")
-ENVIRONMENT_SETTING_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # "ANTHROPIC_MODEL=x claude"
+# One "NAME=value" word in front of a launch command's program, the value maybe quoted, and the
+# space after it ("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude", "CODEX_HOME='~/Codex Work' codex").
+LEADING_ENVIRONMENT_SETTING_PATTERN = re.compile(r"""([A-Za-z_][A-Za-z0-9_]*)=((?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])*)(?:\s+|$)""")
 
 # How the list is shown: popup, the dropdown under the menu bar icon;
 # sidebar, at the edge of the screen (then the icon slides it in); window, a regular window (then
@@ -94,6 +97,7 @@ DEFAULT_SETTINGS = {
     "list_sort_order_is_reversed": False,  # a second click on a sorted column's title
     "shown_columns": ["context_tokens", "state"],
     "idle_tabs_are_hidden": False,  # the Hide Idle / Show Idle button at the top of the list
+    "search_is_case_sensitive": False,  # the "aA" checkbox beside the search box at the top of the list
 }
 
 
@@ -188,21 +192,29 @@ def build_environment_with_the_programs_folder_first_on_path(program_path, envir
                                                   if folder))
 
 
+def split_off_the_environment_settings_of_launch_command(launch_command):
+    """Returns (the NAME=value words in front of the launch command's program, each as its match
+    of LEADING_ENVIRONMENT_SETTING_PATTERN: group 1 the name, group 2 the value as written, group 0
+    the whole word with the space after it; the launch command from its program on)."""
+    environment_settings = []
+    rest = launch_command.lstrip()
+    while (match := LEADING_ENVIRONMENT_SETTING_PATTERN.match(rest)):
+        environment_settings.append(match)
+        rest = rest[match.end():]
+    return environment_settings, rest
+
+
 def read_environment_settings_of_launch_command(launch_command):
-    """Returns {name: value} of the NAME=value words in front of the launch command's program
-    ("CODEX_HOME=~/.codex-work codex" gives {"CODEX_HOME": "~/.codex-work"})."""
-    words = launch_command.split()
-    environment_words = words[:len(words) - len(split_launch_command_into_words_after_environment_settings(launch_command))]
-    return dict(word.split("=", 1) for word in environment_words)
+    """Returns {name: value} of the NAME=value words in front of the launch command's program,
+    each value as the shell reads it ("CODEX_HOME='~/Codex Work' codex" gives {"CODEX_HOME": "~/Codex Work"})."""
+    return {match.group(1): "".join(shlex.split(match.group(2)))
+            for match in split_off_the_environment_settings_of_launch_command(launch_command)[0]}
 
 
 def split_launch_command_into_words_after_environment_settings(launch_command):
     """Returns the launch command's words from its program on: without the leading NAME=value
     words (environment settings, as in "CODEX_HOME=~/.codex-work codex")."""
-    words = launch_command.split()
-    while words and ENVIRONMENT_SETTING_PATTERN.match(words[0]):
-        words = words[1:]
-    return words
+    return split_off_the_environment_settings_of_launch_command(launch_command)[1].split()
 
 
 def find_launch_command(settings, agent_tool_name):

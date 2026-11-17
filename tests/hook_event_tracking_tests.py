@@ -33,7 +33,8 @@ class FindAgentProcessIdOfHookEventTests(unittest.TestCase):
         self.assertEqual(find_agent_process_id_of_hook_event(
             [[700, "sh"], [650, "2.1.311"], [640, "bash"], [600, "2.1.311"], [3358, "bash"]]), 650)
 
-    def test_codexs_program_below_its_node_launcher_counts_as_the_launcher(self):
+    def test_an_agent_program_below_its_node_launcher_counts_as_the_launcher(self):
+        # As Codex's npm package starts its program.
         self.assertEqual(find_agent_process_id_of_hook_event([[801, "sh"], [800, "codex"], [799, "node"], [700, "zsh"]]), 799)
         # A `codex exec` the tab's Codex started through a shell is its own.
         self.assertEqual(find_agent_process_id_of_hook_event([[901, "codex"], [900, "zsh"], [800, "codex"]]), 901)
@@ -53,12 +54,9 @@ class ApplyHookEventTests(unittest.TestCase):
         prompted = apply_hook_event(cleared, make_event_of_process_101_sent_at("UserPromptSubmit", 3.0))
         self.assertFalse(hooks_report_no_prompt_since_the_agent_started(prompted))
         self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_hook_event(prompted, make_event_of_process_101_sent_at("SessionStart", 4.0, source="clear"))))
-        # Not without the start (a resumed conversation, or a state from before starts were
-        # recorded), nor for Codex, whose hooks report no prompts.
+        # Not without the start (a resumed conversation, or a state from before starts were recorded).
         self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="resume"))))
         self.assertFalse(hooks_report_no_prompt_since_the_agent_started(apply_events(make_event_of_process_101_sent_at("Stop", 1.0))))
-        self.assertFalse(hooks_report_no_prompt_since_the_agent_started(
-            apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup", agent_tool_name="Codex"))))
         self.assertFalse(hooks_report_no_prompt_since_the_agent_started(None))
 
     def test_a_normal_session_end_is_kept_but_clear_goes_on(self):
@@ -66,7 +64,7 @@ class ApplyHookEventTests(unittest.TestCase):
         self.assertIsNone(hook_state["session_ended_at"])
         self.assertIsNone(apply_hook_event(hook_state, make_event_of_process_101_sent_at("SessionEnd", 2.0, reason="clear"))["session_ended_at"])
         self.assertEqual(apply_hook_event(hook_state, make_event_of_process_101_sent_at("SessionEnd", 3.0, reason="prompt_input_exit"))["session_ended_at"], 3.0)
-        self.assertEqual(apply_hook_event(hook_state, make_event_of_process_101_sent_at("SessionEnd", 3.0))["session_ended_at"], 3.0)  # Codex sends none
+        self.assertEqual(apply_hook_event(hook_state, make_event_of_process_101_sent_at("SessionEnd", 3.0))["session_ended_at"], 3.0)  # without a reason
 
     def test_background_tasks_follow_launches_ends_and_turn_end_lists(self):
         # As Claude Code 2.1.311 sent them: a background shell and a background agent start, the
@@ -136,11 +134,6 @@ class ApplyHookEventTests(unittest.TestCase):
         self.assertIsNone(hook_state["background_task_ids"])
         hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("Stop", 2.0, background_tasks=[{"id": "a1", "status": "running"}]))
         self.assertEqual(hook_state["background_task_ids"], {"a1"})
-        # Codex's events list none, so its sessions stay unknown (the process tree counts its shells),
-        # also after its SessionStart, which has source "startup" too.
-        self.assertIsNone(apply_events(make_event_of_process_101_sent_at("Stop", 1.0, agent_tool_name="Codex"))["background_task_ids"])
-        self.assertIsNone(apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, agent_tool_name="Codex", source="startup"),
-                                       make_event_of_process_101_sent_at("Stop", 2.0, agent_tool_name="Codex"))["background_task_ids"])
 
     def test_resume_or_a_new_session_in_the_same_process_isnt_its_end(self):
         hook_state = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"), make_event_of_process_101_sent_at("SessionEnd", 2.0, reason="resume"))
@@ -168,11 +161,6 @@ class TurnEndTests(unittest.TestCase):
         hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("PreToolUse", 25.0))
         self.assertIsNone(find_when_the_hooks_ended_the_turn(hook_state, 10.5))
         self.assertEqual(find_when_the_hooks_ended_the_turn(apply_hook_event(hook_state, make_event_of_process_101_sent_at("Stop", 30.0)), 10.5), 30.0)
-
-    def test_codex_goes_by_its_own_status(self):
-        # Its hooks report no prompts, so a turn right after the Stop (a message `codex queue` held) couldn't undo it.
-        hook_state = apply_events(make_event_of_process_101_sent_at("Stop", 20.0, agent_tool_name="Codex"))
-        self.assertIsNone(find_when_the_hooks_ended_the_turn(hook_state, 10.5))
 
 
 if __name__ == "__main__":

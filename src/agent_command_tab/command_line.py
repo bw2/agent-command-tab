@@ -85,11 +85,12 @@ def dump_snapshot(verbose):
 
 
 def install_or_remove_hooks(install):
-    """Adds the app's hooks to Claude Code's and Codex's settings, or takes them out, and prints
-    which files changed (hooks_installer); returns the exit status."""
-    from agent_command_tab.hooks_installer import HOOK_EVENTS_BY_AGENT_TOOL_NAME, install_hooks, remove_hooks
+    """Adds the app's hooks to Claude Code's settings, or takes them out, also those that earlier
+    versions added to Codex's, and prints which files changed (hooks_installer); returns the exit status."""
+    from agent_command_tab.hooks_installer import (AGENT_TOOL_NAMES_WHOSE_HOOKS_ONLY_EARLIER_VERSIONS_ADDED,
+                                                   HOOK_EVENTS_BY_AGENT_TOOL_NAME, install_hooks, remove_hooks)
     exit_status = 0
-    for agent_tool_name in HOOK_EVENTS_BY_AGENT_TOOL_NAME:
+    for agent_tool_name in [*HOOK_EVENTS_BY_AGENT_TOOL_NAME, *(() if install else AGENT_TOOL_NAMES_WHOSE_HOOKS_ONLY_EARLIER_VERSIONS_ADDED)]:
         try:
             changed_file_paths = (install_hooks if install else remove_hooks)(agent_tool_name)
         except (OSError, ValueError) as error:
@@ -101,8 +102,7 @@ def install_or_remove_hooks(install):
         if not changed_file_paths:
             print(f"{agent_tool_name}: nothing to change")
         elif install:
-            print(f"{agent_tool_name}: sessions started from now on use them"
-                  + ("; Codex asks you to approve them first (type /hooks in Codex)" if agent_tool_name == "Codex" else ""))
+            print(f"{agent_tool_name}: sessions started from now on use them")
     return exit_status
 
 
@@ -161,9 +161,9 @@ def stop_the_running_copy(lock_file_path=RUNNING_LOCK_FILE_PATH, seconds_to_wait
 def clean_up_before_uninstalling():
     """Takes out what the app added outside its own files, which pip and pipx leave behind when they
     uninstall it: stops the running copy, whose files the uninstall
-    deletes, then removes its hooks from Claude Code's and Codex's settings (whose commands would
-    otherwise fail on every event) and its script in iTerm2's AutoLaunch folder. Leaves its settings
-    folder and its log. Returns the exit status."""
+    deletes, then removes its hooks from Claude Code's settings and those earlier versions added to
+    Codex's (whose commands would otherwise fail on every event) and its script in iTerm2's
+    AutoLaunch folder. Leaves its settings folder and its log. Returns the exit status."""
     from agent_command_tab.start_with_iterm2 import LOG_FILE_PATH, find_autolaunch_script_path, update_autolaunch_script_to_match_setting
     no_copy_runs, message = stop_the_running_copy()
     print(message)
@@ -291,8 +291,8 @@ def main(arguments=None):
                         default="run",
                         help="run: the menu bar app, restarted when iTerm2's connection drops (default); "
                              "app: the menu bar app without restarts; dump-snapshot: print the current list as JSON; "
-                             "install-hooks, remove-hooks: add the app's hooks to Claude Code's and Codex's settings, "
-                             "or take them out; clean-up-before-uninstalling: stop the app, take out its hooks and "
+                             "install-hooks, remove-hooks: add the app's hooks to Claude Code's settings, "
+                             "or take them out (also those earlier versions added to Codex's); clean-up-before-uninstalling: stop the app, take out its hooks and "
                              "the script that starts it with iTerm2, which pip and pipx leave behind")
     parser.add_argument("--verbose", action="store_true", help="print diagnostics")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
