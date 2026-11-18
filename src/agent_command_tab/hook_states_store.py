@@ -11,13 +11,9 @@ functions apart from the file reading and writing.
 import os
 
 from agent_command_tab.hook_event_tracking import apply_hook_event
-from agent_command_tab.settings_store import SETTINGS_FOLDER, read_json_file, write_json_file_atomically
+from agent_command_tab.settings_store import SETTINGS_FOLDER, is_number, read_json_file, write_json_file_atomically
 
 HOOK_STATES_FILE_PATH = os.path.join(SETTINGS_FOLDER, "agent_hook_states.json")
-
-
-def is_number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def is_stored_hook_state(value):

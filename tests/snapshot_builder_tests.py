@@ -162,6 +162,11 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         entry = snapshot.monitors[0].windows[0].agent_sessions[0]
         self.assertEqual((entry.status, entry.status_reason), ("working", "running pytest"))
 
+    def test_a_turn_that_failed_on_an_api_error_names_the_kind_of_error(self):
+        entry = build_the_one_entry("failed", {"kind_of_api_error_the_last_turn_failed_on": "server_error"})
+        self.assertEqual((entry.status, entry.status_reason), ("error", "the turn ended on an API error (server_error)"))
+        self.assertEqual(build_the_one_entry("failed", {"kind_of_api_error_the_last_turn_failed_on": None}).status_reason, "")
+
     def test_an_idle_session_with_background_processes_is_background(self):
         helper = ChildProcessEntry(65, "clangd --background-index", 900.0, False, None, None)
         detached_job = ChildProcessEntry(77, "bash scratchpad/run.sh", 950.0, True, None, None)

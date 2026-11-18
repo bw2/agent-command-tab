@@ -1,13 +1,12 @@
 import unittest
 
 from agent_command_tab.list_sorting import sort_agent_session_entries, sort_window_entries
-from agent_command_tab.snapshot_data_classes import AgentSessionEntry, WindowEntry
+from agent_command_tab.snapshot_data_classes import WindowEntry
+from gathered_window_builders import make_agent_session_entry
 
 
 def make_entry(tab_id, tab_title, status, status_since):
-    return AgentSessionEntry(tab_id=tab_id, session_id=f"s{tab_id}", tab_title=tab_title, tab_title_set_by_user=False,
-                             agent_session_name="", agent_tool_name="Claude Code", working_folder="/x",
-                             status=status, status_since=status_since)
+    return make_agent_session_entry(f"s{tab_id}", tab_title, tab_id=tab_id, status=status, status_since=status_since)
 
 
 def make_window(window_id, title, agent_sessions):

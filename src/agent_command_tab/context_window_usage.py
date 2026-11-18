@@ -38,8 +38,7 @@ CLAUDE_CODE_CONTEXT_WINDOW_TOKENS = 200_000
 CLAUDE_CODE_1M_CONTEXT_WINDOW_TOKENS = 1_000_000
 # The newest version in each Claude model family whose context window is 200k unless chosen with
 # the "[1m]" suffix, from Claude Code 2.1.314's built-in model list. Newer models, and models not
-# listed, have a 1M window (claude-opus-5-5 showed "175k (87%)" while
-# its status line said 1000k).
+# listed, have a 1M window.
 NEWEST_CLAUDE_MODEL_VERSIONS_WITH_A_200K_CONTEXT_WINDOW = {"opus": (4, 6), "sonnet": (4, 6), "haiku": (4, 5)}
 # "claude-opus-4-6", "claude-haiku-4-5-20251001", "claude-opus-4-20250514" (4.0): a minor version
 # has one or two digits, so a date isn't taken for one.

@@ -26,9 +26,8 @@ by its conversation ID.
 
 import os
 
-from agent_command_tab.docked_window_frames_store import frame_is_valid
-from agent_command_tab.hook_states_store import is_number
-from agent_command_tab.settings_store import SETTINGS_FOLDER, read_json_file, write_json_file_atomically
+from agent_command_tab.settings_store import (SETTINGS_FOLDER, frame_is_valid, is_number, read_json_file,
+                                              write_json_file_atomically)
 
 SAVED_AGENT_SESSIONS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "saved_agent_sessions.json")
 

@@ -7,7 +7,8 @@ from agent_command_tab.session_status_computation import (compute_session_status
                                                           status_change_ends_a_turn,
                                                           summarize_state_counts_in_urgency_order,
                                                           track_status_value,
-                                                          update_permission_dialog_reading)
+                                                          update_permission_dialog_reading,
+                                                          update_permission_dialog_reading_from_claude_codes_own_status)
 
 
 class MapIterm2StatusValueTests(unittest.TestCase):
@@ -174,6 +175,74 @@ class PermissionDialogReadingTests(unittest.TestCase):
         self.assertFalse(self.answered(reading))
         self.assertNotIn("permission_dialog_gone_since", reading)
         self.assertIn("permission_dialog_gone_since", earlier_period)  # the input is not changed
+
+
+class PermissionDialogReadingFromClaudeCodesOwnStatusTests(unittest.TestCase):
+    """One asking period: iTerm2's status turned "waiting" at time 100, and stays so; each check
+    reads the status Claude Code keeps in its session file."""
+
+    def check(self, reading, claude_code_session_status, now):
+        return update_permission_dialog_reading_from_claude_codes_own_status(reading, claude_code_session_status, 100, now)
+
+    def compute_state(self, reading):
+        return compute_session_status_from_sources("waiting", 100, None, None, False, reading)
+
+    def test_asking_while_claude_code_says_it_waits(self):
+        reading = self.check({}, "waiting", 101)
+        self.assertFalse(permission_dialog_was_answered("asking", 100, reading))
+        self.assertEqual(self.compute_state(reading), ("asking", ""))
+
+    def test_approved_once_claude_code_says_busy_or_shell(self):
+        for status_after_the_answer in ("busy", "shell"):
+            reading = self.check(self.check({}, "waiting", 101), status_after_the_answer, 103)
+            self.assertEqual((reading["permission_dialog_gone_since"], reading["turn_was_interrupted"]), (103, False))
+            self.assertEqual(self.compute_state(reading), ("working", ""))
+            self.assertEqual(self.check(reading, status_after_the_answer, 105)["permission_dialog_gone_since"], 103)
+
+    def test_denied_once_claude_code_says_idle(self):
+        reading = self.check(self.check({}, "waiting", 101), "idle", 103)
+        self.assertEqual(self.compute_state(reading), ("idle", "turn interrupted"))
+
+    def test_denied_before_the_first_check_counts_too(self):
+        self.assertEqual(self.compute_state(self.check({}, "idle", 100.5)), ("idle", "turn interrupted"))
+
+    def test_busy_or_shell_tells_nothing_until_waiting_was_read_for_this_prompt(self):
+        # A Claude Code that went on saying "busy" at its prompts, or named waiting otherwise.
+        for status in ("busy", "shell"):
+            self.assertIsNone(self.check({}, status, 100.5))
+        waiting_for_an_earlier_prompt = update_permission_dialog_reading_from_claude_codes_own_status({}, "waiting", 90, 91)
+        self.assertIsNone(self.check(waiting_for_an_earlier_prompt, "busy", 101))
+
+    def test_a_word_claude_code_2_1_326_doesnt_write_tells_nothing(self):
+        for status in ("blocked", "needs_input", "", 7):
+            self.assertIsNone(self.check({}, status, 101), status)
+            self.assertIsNone(self.check(self.check({}, "waiting", 101), status, 103), status)
+
+    def test_the_screen_check_takes_over_where_claude_codes_own_status_stops_telling(self):
+        reading = self.check({}, "waiting", 101)  # then a word that tells nothing, so the screen is read
+        still_showing = update_permission_dialog_reading(reading, True, 2, 100, 103)
+        self.assertEqual(self.compute_state(still_showing), ("asking", ""))
+        self.assertEqual(self.compute_state(update_permission_dialog_reading(still_showing, False, 2, 100, 105)), ("working", ""))
+        self.assertEqual(self.compute_state(update_permission_dialog_reading(reading, False, 2, 100, 103)), ("working", ""))
+
+    def test_the_next_prompt_of_the_same_turn_is_asking_again(self):
+        reading = self.check(self.check(self.check({}, "waiting", 101), "busy", 103), "waiting", 105)
+        self.assertEqual(self.compute_state(reading), ("asking", ""))
+        self.assertNotIn("permission_dialog_gone_since", reading)
+
+    def test_a_new_prompt_forgets_when_the_last_one_was_answered(self):
+        earlier_period = update_permission_dialog_reading_from_claude_codes_own_status(
+            update_permission_dialog_reading_from_claude_codes_own_status({}, "waiting", 90, 91), "idle", 90, 93)
+        reading = self.check(self.check(earlier_period, "waiting", 101), "busy", 103)
+        self.assertEqual((reading["permission_dialog_gone_since"], reading["turn_was_interrupted"]), (103, False))
+        self.assertEqual(earlier_period["permission_dialog_gone_since"], 93)  # the input is not changed
+
+    def test_a_denied_prompt_ends_the_turn_so_the_next_working_is_a_new_one(self):
+        tracking = track_status_value(track_status_value(track_status_value(None, "idle", 80), "working", 90), "waiting", 100)
+        denied = self.check(self.check({}, "waiting", 101), "idle", 103)
+        self.assertEqual(track_status_value(tracking, "working", 110, denied)["turn_started_at"], 110)
+        approved = self.check(self.check({}, "waiting", 101), "busy", 103)
+        self.assertEqual(track_status_value(tracking, "working", 110, approved)["turn_started_at"], 90)
 
 
 class UrgencyTests(unittest.TestCase):

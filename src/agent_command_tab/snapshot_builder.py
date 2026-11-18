@@ -280,6 +280,8 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         )
         status_since = compute_displayed_state_since(state, session_tracking.get("status_change_time", now),
                                                      previous_displayed_state, now)
+        if state == "error" and session_reading.get("kind_of_api_error_the_last_turn_failed_on"):
+            reason = f"the turn ended on an API error ({session_reading['kind_of_api_error_the_last_turn_failed_on']})"
     # An agent with no message yet can't be in a turn, so "new" also stands in for no status at
     # all, as a tool that reports its own state may have none before its first message.
     for session_reading_shows_it, states_it_replaces, state_shown_instead, reason_shown_instead in (

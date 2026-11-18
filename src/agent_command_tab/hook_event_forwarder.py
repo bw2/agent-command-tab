@@ -97,6 +97,7 @@ def reduce_hook_payload(payload, agent_tool_name, ancestors, now):
         "hook_event_name": shorten(payload.get("hook_event_name")),
         "reason": shorten(payload.get("reason")),
         "source": shorten(payload.get("source")),
+        "error": shorten(payload.get("error")),  # StopFailure's kind of API error, such as "server_error"
         "agent_id": shorten(payload.get("agent_id")),
         "background_task_launched_id": background_task_launched_id,
         "background_task_launched_type": background_task_launched_type,

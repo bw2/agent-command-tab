@@ -43,7 +43,9 @@ def list_claude_config_folder_paths():
 class ClaudeCodeAdapter(AgentToolAdapter):
     """Claude Code runs as `claude ...` (iTerm2's jobName is its version number, so the command line is used).
 
-    Screen patterns are from Claude Code 2.1.302.
+    Screen patterns are from Claude Code 2.1.302. The permission dialog's and the interrupted
+    turn's are read only for a session whose own report of its status can't be read: that report
+    tells whether the dialog was answered (DashboardCore.read_agent_screens_periodically).
     """
 
     agent_tool_name = "Claude Code"

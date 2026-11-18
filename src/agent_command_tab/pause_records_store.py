@@ -8,8 +8,7 @@ quit, an upgrade). Pure functions apart from the file reading and writing.
 import os
 
 from agent_command_tab.agent_session_pausing import PauseRecord
-from agent_command_tab.hook_states_store import is_number
-from agent_command_tab.settings_store import SETTINGS_FOLDER, read_json_file, write_json_file_atomically
+from agent_command_tab.settings_store import SETTINGS_FOLDER, is_number, read_json_file, write_json_file_atomically
 
 PAUSE_RECORDS_FILE_PATH = os.path.join(SETTINGS_FOLDER, "paused_agent_sessions.json")
 

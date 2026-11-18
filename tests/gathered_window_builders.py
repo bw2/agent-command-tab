@@ -1,6 +1,6 @@
 """Builders of what the core gathers from the terminals and the screens and what it makes of
 them: a monitor, a tab in the format of a terminal backend's gather_windows, the agent session the
-core finds in a tab, and a tab's row in the snapshot, for the tests of the core."""
+core finds in a tab, and a tab's row in the snapshot, for the tests of the core and of the list."""
 
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.snapshot_data_classes import AgentSessionEntry

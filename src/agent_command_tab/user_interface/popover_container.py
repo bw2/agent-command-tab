@@ -76,8 +76,9 @@ GAP_AFTER_THE_SORT_CONTROL = 8  # before the search box, or the message line whe
 LARGEST_SEARCH_FIELD_WIDTH = 220
 SMALLEST_SEARCH_FIELD_WIDTH = 80  # the magnifying glass, a few letters, and the button that empties it
 SEARCH_FIELD_PLACEHOLDER = "Search"
-SEARCH_FIELD_TOOL_TIP = ("Show only the tabs whose title holds this text, and, dimmed, those whose conversation does "
-                         "(prompts, replies and the commands the agent ran) (⌘-f or /)")
+SEARCH_FIELD_TOOL_TIP = ("Show only the windows whose title holds this text, with all their tabs, the tabs whose title "
+                         "holds it, and, dimmed, those whose conversation does (prompts, replies and the commands the "
+                         "agent ran) (⌘-f or /)")
 CASE_SENSITIVE_CHECKBOX_TITLE = "aA"
 CASE_SENSITIVE_CHECKBOX_TOOL_TIP = "Toggle whether the search is case sensitive"
 # A message line narrower than this beside the sort control and Hide Idle shows too little to
@@ -417,7 +418,8 @@ class ListPanelController(NSViewController):
         while the search box keeps its smallest width;
         while it shows a message that asks for it (the app restarts, so there are no rows to sort
         or hide; show_message), or one that would get less than SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS
-        beside them (a narrow sidebar), the sort control, the search box and the Hide Idle button step aside for it."""
+        beside them (a narrow sidebar), the sort control, the search box and the Hide Idle button step aside for it,
+        the search box only while it is empty."""
         has_a_message = bool(self.message_text_field.stringValue())
         message_width = self.lay_out_top_bar(has_a_message and self.sort_control_and_hide_idle_step_aside_for_the_message)
         if has_a_message and message_width < SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS:
@@ -440,11 +442,14 @@ class ListPanelController(NSViewController):
                 gap_before_the_buttons_placed = GAP_BETWEEN_TOP_BAR_BUTTONS
         room_right_edge = right_end_x - gap_before_the_buttons_placed
         # The search box at its smallest, with its checkbox where both fit, keeps its room before the sort control's.
+        # A search box that holds a search stays for a message too (without its checkbox), so the list is never
+        # filtered with no box to show the search or clear it.
         checkbox_width = self.case_sensitive_checkbox.frame().size.width
         checkbox_room = GAP_BETWEEN_TOP_BAR_BUTTONS + checkbox_width
-        search_field_shows = (not controls_step_aside_for_a_message
+        search_field_shows = ((not controls_step_aside_for_a_message or bool(self.search_field.stringValue()))
                               and room_right_edge - label_x >= SMALLEST_SEARCH_FIELD_WIDTH)
-        checkbox_shows = search_field_shows and room_right_edge - label_x >= SMALLEST_SEARCH_FIELD_WIDTH + checkbox_room
+        checkbox_shows = (search_field_shows and not controls_step_aside_for_a_message
+                          and room_right_edge - label_x >= SMALLEST_SEARCH_FIELD_WIDTH + checkbox_room)
         smallest_search_room = (SMALLEST_SEARCH_FIELD_WIDTH + (checkbox_room if checkbox_shows else 0) + GAP_AFTER_THE_SORT_CONTROL
                                 if search_field_shows else 0)
         sort_room_right_edge = room_right_edge - smallest_search_room

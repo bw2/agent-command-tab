@@ -115,6 +115,14 @@ class ClearedConversationTests(unittest.TestCase):
         self.assertEqual(self.adapter.read_paths, [self.old_path, self.old_path])
         self.assertIsNone(self.find_the_noted_open_tool_call())
 
+    def test_a_conversation_file_that_doesnt_name_the_conversation_is_looked_up_again(self):
+        # agy's /new: another conversation in the same process, which the file found before doesn't follow.
+        self.update_readings_with_a_lookup_due()  # old.jsonl
+        self.adapter.path = self.write_file("new.jsonl")
+        self.adapter.paths_that_fit = [self.adapter.path]
+        self.assertEqual(asyncio.run(self.core.find_conversation_id_and_file_known_to_be_its_own("s1", self.agent_session)),
+                         ("new.jsonl", self.adapter.path, ""))
+
     def duplicate(self):
         """Returns the launch command a Duplicate of the tab would run."""
         self.core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2",

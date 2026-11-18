@@ -205,6 +205,14 @@ class TalkToEachOtherTests(unittest.TestCase):
         self.assertTrue(first_result.succeeded)
         self.assertIn("\"planning\": it didn't wait at its prompt", second_result.message)
 
+    def test_a_row_shown_failed_takes_the_message_at_its_prompt(self):
+        # A turn that failed on an API error leaves Claude Code at its prompt; its row shows "error" until the next prompt.
+        core = make_core()
+        core.displayed_state_by_session_id["s1"] = DisplayedState("error", 0, 0)
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.2):
+            self.assertEqual(asyncio.run(ask_to_talk(core, ["s1", "s3"])), ActionResult(True))
+        self.assertEqual([session_id for session_id, _ in self.pasted], ["s1"])
+
     def test_a_row_whose_state_is_unknown_is_never_typed_into(self):
         core = make_core()
         core.displayed_state_by_session_id["s2"] = DisplayedState("unknown", 0, 0)
@@ -423,6 +431,16 @@ class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
         self.assertEqual(action_result, ActionResult(False, "the agent is suspended or another program is in front of it"))
         self.assertEqual(self.typed, [])
 
+    def test_a_session_whose_turn_failed_gets_it_at_its_prompt(self):
+        # A turn that failed on an API error leaves the agent at its prompt; its row shows "error" until the next prompt.
+        core = make_core()
+        core.displayed_state_by_session_id["s1"] = DisplayedState("error", 0, 0)
+        self.assertEqual(asyncio.run(core.handle_send_slash_command(
+            ActionRequest("send_slash_command", {"session_id": "s1"}, {"command": "/compact"}))), ActionResult(True))
+        self.assertEqual(asyncio.run(self.send(core, ["s1"], "/clear")), ActionResult(True))
+        self.assertEqual(self.typed, [("s1", "/compact"), ("s1", "/clear")])
+        self.assertFalse(self.typed_in_the_middle_of_a_turn_by_session_id["s1"])
+
 
 class ReadClaudeCodeSessionStatusTests(unittest.TestCase):
     def test_the_status_comes_from_the_session_file_of_its_config_folder(self):
@@ -457,6 +475,8 @@ class QueueMessageForCodexSessionTests(unittest.TestCase):
             codex_path = self.write_stand_in_codex(folder, "echo 'no thread with that ID' >&2\nexit 1\n")
             action_result = asyncio.run(queue_message_for_codex_session(codex_path, "conversation-1", "hi"))
         self.assertEqual(action_result, ActionResult(False, "codex queue failed: no thread with that ID"))
+        self.assertEqual(asyncio.run(queue_message_for_codex_session(None, "conversation-1", "hi")),
+                         ActionResult(False, "the codex command wasn't found"))
 
     def test_it_runs_with_the_codex_home_of_the_session_given(self):
         # Where that session keeps its conversation (a launch command may set another than the app's).
@@ -470,8 +490,6 @@ class QueueMessageForCodexSessionTests(unittest.TestCase):
                                                                 codex_home_folder=codex_home_folder))
                 with open(codex_home_path) as codex_home_file:
                     self.assertEqual(codex_home_file.read(), expected_codex_home)
-        self.assertEqual(asyncio.run(queue_message_for_codex_session(None, "conversation-1", "hi")),
-                         ActionResult(False, "the codex command wasn't found"))
 
 
 class PasteMessageIntoEmptyInputBoxTests(unittest.TestCase):

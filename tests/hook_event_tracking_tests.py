@@ -6,6 +6,7 @@ import unittest
 from agent_command_tab.hook_event_tracking import (apply_hook_event, find_agent_process_id_of_hook_event,
                                                    find_when_the_hooks_ended_the_turn,
                                                    hooks_report_no_prompt_since_the_agent_started,
+                                                   hooks_report_the_last_turn_failed,
                                                    list_reported_background_task_ids_still_running)
 import hook_event_builders
 
@@ -161,6 +162,39 @@ class TurnEndTests(unittest.TestCase):
         hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("PreToolUse", 25.0))
         self.assertIsNone(find_when_the_hooks_ended_the_turn(hook_state, 10.5))
         self.assertEqual(find_when_the_hooks_ended_the_turn(apply_hook_event(hook_state, make_event_of_process_101_sent_at("Stop", 30.0)), 10.5), 30.0)
+
+
+class FailedTurnTests(unittest.TestCase):
+    """A turn that ended on an API error (Claude Code's StopFailure, with the kind of error)."""
+
+    def setUp(self):
+        self.failed = apply_events(make_event_of_process_101_sent_at("UserPromptSubmit", 10.0),
+                                   make_event_of_process_101_sent_at("StopFailure", 20.0, error="server_error"))
+
+    def test_a_failed_turn_is_kept_with_its_kind_of_error(self):
+        self.assertTrue(hooks_report_the_last_turn_failed(self.failed))
+        self.assertEqual((self.failed["last_turn_failed_at"], self.failed["last_turn_failure"]), (20.0, "server_error"))
+        self.assertFalse(hooks_report_the_last_turn_failed(None))
+        self.assertFalse(hooks_report_the_last_turn_failed(apply_events(make_event_of_process_101_sent_at("UserPromptSubmit", 10.0))))
+
+    def test_it_counts_until_the_session_goes_on(self):
+        for event_name, fields in (("UserPromptSubmit", {}), ("SessionStart", {"source": "clear"}), ("Stop", {}), ("PreToolUse", {})):
+            hook_state = apply_hook_event(self.failed, make_event_of_process_101_sent_at(event_name, 30.0, **fields))
+            self.assertFalse(hooks_report_the_last_turn_failed(hook_state), event_name)
+            self.assertNotIn("last_turn_failure", hook_state, event_name)
+        # A background agent's events, and the session's normal end, change nothing.
+        for event_name, fields in (("PostToolUse", {"agent_id": "a34"}), ("SubagentStop", {"agent_id": "a34"}),
+                                   ("SessionEnd", {"reason": "prompt_input_exit"})):
+            self.assertTrue(hooks_report_the_last_turn_failed(
+                apply_hook_event(self.failed, make_event_of_process_101_sent_at(event_name, 30.0, **fields))), event_name)
+
+    def test_a_background_agents_failure_isnt_the_sessions(self):
+        self.assertFalse(hooks_report_the_last_turn_failed(apply_events(
+            make_event_of_process_101_sent_at("StopFailure", 20.0, error="server_error", agent_id="a34"))))
+
+    def test_a_state_without_a_failed_turn_has_no_keys_for_one(self):
+        # hook_states_store loads only states with every key a first event gives, so those saved before stay loadable.
+        self.assertNotIn("last_turn_failed_at", apply_events(make_event_of_process_101_sent_at("UserPromptSubmit", 10.0)))
 
 
 if __name__ == "__main__":

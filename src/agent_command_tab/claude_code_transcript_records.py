@@ -1,6 +1,6 @@
-"""Which records of a Claude Code transcript start a turn, the one rule for both readers of a
-transcript's end: when the current turn began (context_window_usage) and which tool call is
-open in it (open_tool_call_reading). Pure functions."""
+"""What each record of a Claude Code transcript is, the one rule for its readers: when the current
+turn began (context_window_usage), which tool call is open in it (open_tool_call_reading), and
+which user texts the search box looks through (conversation_search_texts). Pure functions."""
 
 import re
 
@@ -35,7 +35,7 @@ def join_text_blocks(blocks):
 
 
 def classify_user_record(record, blocks):
-    """Returns what a transcript record is, when looking for where the current turn began.
+    """Returns what a transcript record is.
 
     Args:
         record: One decoded transcript record.

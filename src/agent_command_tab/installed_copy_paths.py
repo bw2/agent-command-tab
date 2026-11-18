@@ -1,5 +1,5 @@
 """Paths to this installed copy of the app that other programs keep and run later (the hooks in Claude
-Code's and Codex's settings, the script in iTerm2's AutoLaunch folder that starts the app), chosen to
+Code's settings, the script in iTerm2's AutoLaunch folder that starts the app), chosen to
 survive upgrades."""
 
 import os

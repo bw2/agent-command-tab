@@ -49,7 +49,7 @@ from agent_command_tab.conversation_search_texts import text_contains
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.list_sorting import sort_agent_session_entries, sort_window_entries
 from agent_command_tab.messages_between_agent_sessions import explain_why_sessions_of_agent_tool_cant_take_messages
-from agent_command_tab.session_status_computation import (STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT,
+from agent_command_tab.session_status_computation import (STATES_OF_AN_AGENT_THAT_TAKES_TEXT_AT_ITS_PROMPT,
                                                           split_agent_sessions_into_pausable_and_resumable)
 from agent_command_tab.settings_store import DEFAULT_SETTINGS
 from agent_command_tab.snapshot_data_classes import (build_window_title_shown_in_the_list, iterate_agent_session_entries,
@@ -89,8 +89,12 @@ TEXT_FIELD_INSETS = 5  # a label's text sits a few points inside its field
 # A collapsed window's state counts can grow ("9 idle" becomes "10 idle") without widening the dropdown.
 ROOM_FOR_GROWING_DETAILS = "0000"
 DIM_DOT_ALPHA = 0.25  # a working dot's opacity in the dim half of its blink
-# The opacity of a tab row the search shows only because its conversation holds the text, not its title.
+# The opacity of a tab row the search shows only because its conversation holds the text, not its title or its window's.
 CONVERSATION_ONLY_MATCH_ROW_ALPHA = 0.5
+# A new search text is shown once the core has answered which conversations hold it, which takes
+# milliseconds; when it takes longer than this, the text is shown with its title matches alone,
+# so the rows keep up with the typing (show_the_search_without_waiting_any_longer).
+SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES = 0.5
 # How many measured text widths a list keeps (measure_text_width) before it starts over.
 LARGEST_NUMBER_OF_KEPT_TEXT_WIDTHS = 5000
 SECONDS_TO_HOLD_BEFORE_PEEKING = 0.15
@@ -351,9 +355,9 @@ def list_agent_sessions_that_take_slash_command(agent_session_entries, command):
 
 
 ListSearch = collections.namedtuple("ListSearch", ["text", "is_case_sensitive", "session_ids_whose_conversations_match"])
-ListSearch.__doc__ = ("What the search box at the top of the list holds: its text (matched as one phrase), whether "
+ListSearch.__doc__ = ("A search the list's rows show: the search box's text (matched as one phrase), whether "
                       "case counts (the \"aA\" checkbox), and the agent sessions whose conversations hold it, as the core "
-                      "last found them (DashboardCore.handle_find_agent_sessions_whose_conversations_contain).")
+                      "found them (DashboardCore.handle_find_agent_sessions_whose_conversations_contain).")
 
 
 def tab_title_matches_the_search(agent_session_entry, list_search):
@@ -362,24 +366,32 @@ def tab_title_matches_the_search(agent_session_entry, list_search):
     return text_contains(title, title.casefold(), list_search.text, list_search.is_case_sensitive)
 
 
-def tab_row_matches_only_by_its_conversation(agent_session_entry, list_search):
+def window_title_matches_the_search(window_entry, list_search):
+    """Whether the window row's title, as the list shows it (build_window_title_shown_in_the_list:
+    "tmux: research", "planning (2)"), holds the search box's text."""
+    title = build_window_title_shown_in_the_list(window_entry)
+    return text_contains(title, title.casefold(), list_search.text, list_search.is_case_sensitive)
+
+
+def tab_row_matches_only_by_its_conversation(agent_session_entry, window_entry, list_search):
     """Whether a search shows the tab's row only because its conversation holds the text, not its
-    title: the row is dimmed."""
+    title or its window's: the row is dimmed."""
     return (bool(list_search.text) and not tab_title_matches_the_search(agent_session_entry, list_search)
+            and not window_title_matches_the_search(window_entry, list_search)
             and agent_session_entry.session_id in list_search.session_ids_whose_conversations_match)
 
 
 def tab_row_is_hidden(agent_session_entry, idle_tabs_are_hidden, list_search=None):
-    """Whether the list hides the agent session's tab row: while the search box holds text, a row
-    whose title holds it and a row whose conversation does show, whether or not Hide Idle is on;
-    otherwise "Hide Idle" hides idle tabs' rows. It only
+    """Whether the list hides the agent session's tab row, whatever its window's title: while the
+    search box holds text, a row whose title holds it and a row whose conversation does show,
+    whether or not Hide Idle is on; otherwise "Hide Idle" hides idle tabs' rows. It only
     hides rows: a window row still stands for its whole iTerm2 window, so the window's menu and
     the top bar's buttons act on its hidden agent sessions too.
 
     Args:
         agent_session_entry: The tab's AgentSessionEntry.
         idle_tabs_are_hidden: Whether Hide Idle is on.
-        list_search: The search box's ListSearch, or None.
+        list_search: The ListSearch the rows show, or None.
     """
     if list_search is not None and list_search.text:
         return not (tab_title_matches_the_search(agent_session_entry, list_search)
@@ -387,11 +399,20 @@ def tab_row_is_hidden(agent_session_entry, idle_tabs_are_hidden, list_search=Non
     return idle_tabs_are_hidden and agent_session_entry.status == "idle"
 
 
+def list_agent_sessions_whose_tab_rows_show(window_entry, idle_tabs_are_hidden, list_search=None):
+    """Returns the window's agent sessions whose tab rows the list shows: during a search, all of
+    them when the window's title holds the text (window_title_matches_the_search), as a found
+    folder shows what it holds; otherwise those tab_row_is_hidden doesn't hide."""
+    if list_search is not None and list_search.text and window_title_matches_the_search(window_entry, list_search):
+        return list(window_entry.agent_sessions)
+    return [entry for entry in window_entry.agent_sessions if not tab_row_is_hidden(entry, idle_tabs_are_hidden, list_search)]
+
+
 def window_row_is_hidden(window_entry, idle_tabs_are_hidden, list_search=None):
-    """Whether the list hides a window row: every one of its agent sessions' rows is hidden
-    (tab_row_is_hidden). A window's own title never matches a search."""
-    return bool(window_entry.agent_sessions) and all(tab_row_is_hidden(entry, idle_tabs_are_hidden, list_search)
-                                                     for entry in window_entry.agent_sessions)
+    """Whether the list hides a window row: it has agent sessions, and none of their tab rows shows
+    (list_agent_sessions_whose_tab_rows_show)."""
+    return bool(window_entry.agent_sessions) and not list_agent_sessions_whose_tab_rows_show(
+        window_entry, idle_tabs_are_hidden, list_search)
 
 
 def list_window_and_tab_item_keys(snapshot):
@@ -890,12 +911,15 @@ class AgentSessionListController(NSObject):
         self.list_sort_order_is_reversed = False
         self.idle_tabs_are_hidden = False  # set by the Hide Idle / Show Idle button
         # The search box at the top of the list (set_search_text, set_search_is_case_sensitive), and
-        # the agent sessions whose conversations hold its text, as the core last answered for
-        # (search text, is case sensitive) conversation_matches_are_for.
+        # the search the rows show (a ListSearch), which follows them once the core has answered which
+        # conversations hold the text (conversation_matches_arrived), so the rows and the dropdown's
+        # size change once, from one search's results to the next.
         self.search_text = ""
         self.search_is_case_sensitive = False
-        self.session_ids_whose_conversations_match = frozenset()
-        self.conversation_matches_are_for = ("", False)
+        self.shown_list_search = ListSearch("", False, frozenset())
+        # Shows the search box's search without the conversation matches, if the core hasn't answered
+        # by then (show_the_search_without_waiting_any_longer).
+        self.search_answer_wait_timer = None
         self.conversation_search_is_under_way = False  # one request to the core at a time
         self.conversation_search_is_due_again = False  # the search or a snapshot changed while one was under way
         # Command-F or "/" in the list; the panel sets it to put the keyboard in its search box,
@@ -1016,7 +1040,7 @@ class AgentSessionListController(NSObject):
         or the search hides, then updates the rows in place when only some came or went (update_rows_in_place),
         reloads them when their structure changed otherwise, and else redraws them."""
         snapshot = self.snapshot
-        list_search = self.build_list_search()
+        list_search = self.shown_list_search
         children_before_by_parent = self.list_children_by_parent()
         self.measure_right_columns()
         show_monitor_rows = snapshot_shows_monitor_rows(snapshot)
@@ -1026,9 +1050,8 @@ class AgentSessionListController(NSObject):
             window_items = [self.update_window_item(window_entry, live_keys, list_search)
                             for window_entry in sort_window_entries(
                                 monitor_entry.windows, self.list_sort_order,
-                                list_ranked_agent_sessions=lambda window_entry: [
-                                    entry for entry in window_entry.agent_sessions
-                                    if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden, list_search)],
+                                list_ranked_agent_sessions=lambda window_entry: list_agent_sessions_whose_tab_rows_show(
+                                    window_entry, self.idle_tabs_are_hidden, list_search),
                                 is_reversed=self.list_sort_order_is_reversed)
                             if not window_row_is_hidden(window_entry, self.idle_tabs_are_hidden, list_search)]
             if show_monitor_rows:
@@ -1074,8 +1097,8 @@ class AgentSessionListController(NSObject):
         window_item = self.find_or_make_item("window", window_entry.window_id, window_entry, live_keys)
         tab_items = [self.find_or_make_item("tab", agent_session_entry.tab_id, agent_session_entry, live_keys)
                      for agent_session_entry in sort_agent_session_entries(
-                         window_entry.agent_sessions, self.list_sort_order, self.list_sort_order_is_reversed)
-                     if not tab_row_is_hidden(agent_session_entry, self.idle_tabs_are_hidden, list_search)]
+                         list_agent_sessions_whose_tab_rows_show(window_entry, self.idle_tabs_are_hidden, list_search),
+                         self.list_sort_order, self.list_sort_order_is_reversed)]
         self.set_child_items(window_item, tab_items)
         for tab_item in tab_items:
             # The process rows exist only while the tab row is open, so a closed tab's commands
@@ -1126,35 +1149,72 @@ class AgentSessionListController(NSObject):
 
     @objc.python_method
     def set_search_text(self, search_text):
-        """Shows only the tab rows whose title holds search_text, and, dimmed, those whose
-        conversation holds it (once the core answers which do), from now on; an empty text shows
-        the rows as Hide Idle leaves them. Then selects the first tab row, unless a selected row
-        still shows (select_the_first_tab_row_found_unless_a_row_is_selected, again once the core answers)."""
+        """Shows only the window rows whose title holds search_text, with all their tabs, the tab
+        rows whose title holds it, and, dimmed, those whose conversation holds it, from now on; an
+        empty text shows the rows as Hide Idle leaves them. A text is shown once the core has
+        answered which conversations hold it (conversation_matches_arrived), so the rows and the
+        dropdown's size change once, from the last text's results to this one's, rather than
+        dropping the conversation matches in between. Then selects the first tab row, unless a
+        selected row still shows (select_the_first_tab_row_found_unless_a_row_is_selected)."""
         if search_text == self.search_text:
             return
         self.search_text = search_text
+        self.show_the_search_box_search_once_the_core_answers()
+
+    @objc.python_method
+    def show_the_search_box_search_once_the_core_answers(self):
+        """Asks the core which conversations hold the search box's text, and shows the search once it
+        answers, or after SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES without its matches;
+        an empty search box's at once, since it needs no answer."""
+        if self.search_answer_wait_timer is not None:
+            self.search_answer_wait_timer.invalidate()
+            self.search_answer_wait_timer = None
+        if not self.search_text:
+            self.show_list_search(ListSearch("", self.search_is_case_sensitive, frozenset()))
+            return
+        self.search_answer_wait_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES, self, "searchAnswerWaitTimerFired:", None, False)
         self.ask_the_core_which_conversations_match()
+
+    def searchAnswerWaitTimerFired_(self, timer):
+        self.search_answer_wait_timer = None
+        self.show_the_search_without_waiting_any_longer()
+
+    @objc.python_method
+    def show_the_search_without_waiting_any_longer(self):
+        """Shows the search box's search with the title matches alone when the core still hasn't
+        answered for it (a busy core), so the search keeps up with the typing; its answer adds the
+        conversation matches when it comes."""
+        if (self.shown_list_search.text, self.shown_list_search.is_case_sensitive) != (self.search_text, self.search_is_case_sensitive):
+            self.show_list_search(ListSearch(self.search_text, self.search_is_case_sensitive, frozenset()))
+
+    @objc.python_method
+    def show_list_search(self, list_search):
+        """Has the rows show this ListSearch, rebuilding them when it differs from the one they show."""
+        if list_search == self.shown_list_search:
+            return
+        self.shown_list_search = list_search
         self.show_the_rows_again_after_a_filter_changed()
         self.select_the_first_tab_row_found_unless_a_row_is_selected()
 
     @objc.python_method
     def select_the_first_tab_row_found_unless_a_row_is_selected(self):
-        """While the search holds text, selects the first tab row it shows when no selected row
+        """While the rows show a search, selects the first tab row it shows when no selected row
         shows, so Return in the search box opens it."""
-        if self.search_text and not self.list_selected_items():
+        if self.shown_list_search.text and not self.list_selected_items():
             first_tab_item = next((item for item in self.list_all_items() if item.kind == "tab"), None)
             if first_tab_item is not None:
                 self.select_row_alone_and_scroll_to_it(first_tab_item)
 
     @objc.python_method
     def set_search_is_case_sensitive(self, search_is_case_sensitive):
-        """Has the search count case from now on, or not (the "aA" checkbox)."""
+        """Has the search count case from now on, or not (the "aA" checkbox), shown as a new text is
+        (set_search_text)."""
         if search_is_case_sensitive == self.search_is_case_sensitive:
             return
         self.search_is_case_sensitive = search_is_case_sensitive
         if self.search_text:
-            self.ask_the_core_which_conversations_match()
-            self.show_the_rows_again_after_a_filter_changed()
+            self.show_the_search_box_search_once_the_core_answers()
 
     @objc.python_method
     def clear_the_search(self):
@@ -1163,21 +1223,11 @@ class AgentSessionListController(NSObject):
         self.on_search_text_cleared()
 
     @objc.python_method
-    def build_list_search(self):
-        """Returns the search box's ListSearch, with the conversation matches only while the
-        core's answer is for the current text and case choice (none until it answers)."""
-        is_current = self.conversation_matches_are_for == (self.search_text, self.search_is_case_sensitive)
-        return ListSearch(self.search_text, self.search_is_case_sensitive,
-                          self.session_ids_whose_conversations_match if is_current else frozenset())
-
-    @objc.python_method
     def ask_the_core_which_conversations_match(self):
         """Asks the core which agent sessions' conversations hold the search box's text, while it
         holds any; one request at a time, and one more after it when the text, the case choice
         or the snapshot changed meanwhile. The answer comes in conversation_matches_arrived."""
         if not self.search_text:
-            self.session_ids_whose_conversations_match = frozenset()
-            self.conversation_matches_are_for = ("", self.search_is_case_sensitive)
             return
         if self.conversation_search_is_under_way:
             self.conversation_search_is_due_again = True
@@ -1192,15 +1242,16 @@ class AgentSessionListController(NSObject):
     def conversation_matches_arrived(self, asked_for, session_ids):
         """Takes the core's answer to ask_the_core_which_conversations_match (on the main thread):
         the IDs of the sessions whose conversations hold asked_for's text, or None when the core
-        couldn't answer. Rebuilds the rows when the answer changes them."""
+        couldn't answer, which shows the search with the title matches alone. An answer for the
+        search box's current search is shown (show_list_search); one for an earlier text is left
+        out, and the current one asked."""
         self.conversation_search_is_under_way = False
-        if session_ids is not None and asked_for == (self.search_text, self.search_is_case_sensitive):
-            new_matches = frozenset(session_ids)
-            if (new_matches, asked_for) != (self.session_ids_whose_conversations_match, self.conversation_matches_are_for):
-                self.session_ids_whose_conversations_match = new_matches
-                self.conversation_matches_are_for = asked_for
-                self.show_the_rows_again_after_a_filter_changed()
-                self.select_the_first_tab_row_found_unless_a_row_is_selected()  # rows only a conversation holds the text of
+        if asked_for == (self.search_text, self.search_is_case_sensitive):
+            if self.search_answer_wait_timer is not None:
+                self.search_answer_wait_timer.invalidate()
+                self.search_answer_wait_timer = None
+            asked_for_text, asked_for_is_case_sensitive = asked_for
+            self.show_list_search(ListSearch(asked_for_text, asked_for_is_case_sensitive, frozenset(session_ids or ())))
         if self.conversation_search_is_due_again or asked_for != (self.search_text, self.search_is_case_sensitive):
             self.conversation_search_is_due_again = False
             self.ask_the_core_which_conversations_match()
@@ -1879,7 +1930,8 @@ class AgentSessionListController(NSObject):
             row_view.dot_text_field.setAlphaValue_(dot_alpha)
         # A tab row the search shows only because its conversation holds the text is dimmed, by its opacity alone.
         row_alpha = (CONVERSATION_ONLY_MATCH_ROW_ALPHA
-                     if item.kind == "tab" and tab_row_matches_only_by_its_conversation(item.entry, self.build_list_search())
+                     if item.kind == "tab" and tab_row_matches_only_by_its_conversation(
+                         item.entry, item.parent_item.entry, self.shown_list_search)
                      else 1.0)
         if row_view.alphaValue() != row_alpha:
             row_view.setAlphaValue_(row_alpha)
@@ -2009,7 +2061,7 @@ class AgentSessionListController(NSObject):
         # The rows Hide Idle doesn't hide; during a search, every tab's, since any may match, so the
         # columns don't change width as the search's text does.
         agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)
-                                 if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden and not self.search_text)
+                                 if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden and not self.shown_list_search.text)
                                  ] if self.snapshot else []
         now = time.time()
         # Process rows too, also those of closed tab rows, so opening one doesn't widen a column.
@@ -2527,7 +2579,7 @@ class AgentSessionListController(NSObject):
                     command_item.setEnabled_(False)
                     # As the menu of several rows says it.
                     command_item.setToolTip_(f"AgentCommandTab can't type commands into {item.entry.agent_tool_name or 'this agent'}")
-                elif item.entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
+                elif item.entry.status not in STATES_OF_AN_AGENT_THAT_TAKES_TEXT_AT_ITS_PROMPT:
                     command_item.setEnabled_(False)
                     # With the state as the row names it ("thinking", not "working").
                     shown_state = build_agent_session_row_text_parts(item.entry, [], time.time()).state_text
@@ -2650,7 +2702,7 @@ class AgentSessionListController(NSObject):
                 # Paused sessions, left out too, are counted as not supported.
                 tool_tip_lines.append(f"Typed only into the {len(agent_sessions_that_take_it)} of "
                                       f"{len(agent_session_entries)} where this command is supported.")
-            if any(entry.status not in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT for entry in agent_sessions_that_take_it):
+            if any(entry.status not in STATES_OF_AN_AGENT_THAT_TAKES_TEXT_AT_ITS_PROMPT for entry in agent_sessions_that_take_it):
                 tool_tip_lines.append("A session in the middle of a turn will get this command when the turn ends")
             command_item.setToolTip_("\n".join(tool_tip_lines))
         kill_item = self.add_menu_item(menu, f"Kill {describe_session_count(len(agent_session_entries))}" if a_window_row_is_selected

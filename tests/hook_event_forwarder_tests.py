@@ -50,13 +50,16 @@ class ReduceHookPayloadTests(unittest.TestCase):
 
     def test_only_the_fields_the_app_uses_are_kept_with_where_the_event_came_from(self):
         event = reduce(TURN_ENDED)
-        self.assertEqual(set(event), {"agent_tool_name", "hook_event_name", "reason", "source", "agent_id",
+        self.assertEqual(set(event), {"agent_tool_name", "hook_event_name", "reason", "source", "error", "agent_id",
                                       "background_task_launched_id", "background_task_launched_type", "background_tasks",
                                       "ancestor_processes", "sent_at"})
         self.assertEqual(event["background_tasks"], [{"id": "bs6f2whbf", "type": "shell", "status": "running"}])
         self.assertEqual((event["hook_event_name"], event["agent_tool_name"], event["ancestor_processes"], event["sent_at"]),
                          ("Stop", "Claude Code", [[27904, "sh"]], 100.0))
         self.assertIsNone(reduce({"hook_event_name": "SessionEnd", "reason": "other"})["background_tasks"])  # not a list: not known
+        # The kind of API error a turn failed on (recorded with Claude Code 2.1.326).
+        self.assertEqual(reduce({"hook_event_name": "StopFailure", "error": "server_error"})["error"], "server_error")
+        self.assertIsNone(event["error"])
 
     def test_long_texts_are_cut(self):
         event = reduce({"hook_event_name": "SessionEnd", "reason": "x" * 5000})

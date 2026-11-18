@@ -101,6 +101,15 @@ DEFAULT_SETTINGS = {
 }
 
 
+def is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def frame_is_valid(frame):
+    """Whether a stored value is a frame: (x, y, width, height), four numbers."""
+    return isinstance(frame, (list, tuple)) and len(frame) == 4 and all(map(is_number, frame))
+
+
 def is_valid_setting_value(name, value):
     """Returns whether a stored value has the right shape for the setting (else the default is used)."""
     default_value = DEFAULT_SETTINGS[name]
@@ -114,9 +123,7 @@ def is_valid_setting_value(name, value):
         return isinstance(value, list) and all(action_name in ACTIONS_THAT_ASK_FOR_CONFIRMATION for action_name in value)
     if name in SMALLEST_WINDOW_SIZES:
         smallest_width, smallest_height = SMALLEST_WINDOW_SIZES[name]
-        return value is None or (isinstance(value, list) and len(value) == 4
-                                 and all(isinstance(number, (int, float)) and not isinstance(number, bool) for number in value)
-                                 and value[2] >= smallest_width and value[3] >= smallest_height)
+        return value is None or (frame_is_valid(value) and value[2] >= smallest_width and value[3] >= smallest_height)
     if name == "sidebar_edge":
         return value in SIDEBAR_EDGES
     if name == "sidebar_mode":
@@ -126,8 +133,7 @@ def is_valid_setting_value(name, value):
     if name == "shown_columns":
         return isinstance(value, list) and all(column_name in LIST_COLUMNS for column_name in value)
     if name == "sidebar_width":
-        return (isinstance(value, (int, float)) and not isinstance(value, bool)
-                and SMALLEST_SIDEBAR_WIDTH <= value <= LARGEST_SIDEBAR_WIDTH)
+        return is_number(value) and SMALLEST_SIDEBAR_WIDTH <= value <= LARGEST_SIDEBAR_WIDTH
     if name == "agent_tools":
         return (isinstance(value, list) and value
                 and all(isinstance(tool, dict) and isinstance(tool.get("agent_tool_name"), str) and tool["agent_tool_name"]

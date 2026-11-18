@@ -274,6 +274,17 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
                                                make_saved_session("conv-8", self.folder)])])
         self.assertEqual(self.iterm2.actions, [("start", "w1", self.folder, "yc --resume conv-8")])
 
+    def test_the_saved_window_name_goes_to_the_window_its_sessions_went_to_not_to_the_one_a_tab_moved_out_of(self):
+        # s2, the tab a session was saved from, has moved from w1, which is still open, into w2.
+        moved_tab = self.core.gathered_windows[0]["tabs"].pop(1)
+        self.core.gathered_windows.append(make_gathered_window("w2", [moved_tab], frame=(0, 0, 800, 600), title="w2"))
+        restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2"),
+                                               make_saved_session("conv-8", self.folder)],
+                                              terminal_window_id="w1", name="saved-project", name_was_set_by_user=True)])
+        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])
+        self.assertEqual(self.iterm2.actions, [("start", "w2", self.folder, "yc --resume conv-8"),
+                                               ("rename_window", "w2", "saved-project")])
+
     def test_of_two_sessions_saved_from_one_tab_only_the_first_is_typed_into_it(self):
         # Saved before and after a /clear in s2, which waits at its shell prompt now.
         action_result = restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2"),

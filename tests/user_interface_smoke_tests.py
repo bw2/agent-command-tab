@@ -40,7 +40,7 @@ from agent_command_tab.app_controller import SECONDS_BEFORE_THE_INSTALLED_AGENT_
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
-from agent_command_tab.snapshot_data_classes import (AgentSessionEntry, ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry,
+from agent_command_tab.snapshot_data_classes import (ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry,
                                                      build_window_title_shown_in_the_list)
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, CASE_SENSITIVE_CHECKBOX_TOOL_TIP,
                                                                 GAP_AFTER_THE_SORT_CONTROL, GAP_BETWEEN_TOP_BAR_BUTTONS,
@@ -84,6 +84,7 @@ from agent_command_tab.user_interface.sidebar_panel import (SECONDS_SHOWN_AFTER_
                                                             allow_pointer_changes_while_another_app_is_in_front)
 from agent_command_tab.user_interface.sidebar_placement import SidebarPlacement
 from codex_sandbox_detection import REASON_FOR_SKIPPING_WINDOW_TESTS_IN_CODEX_SANDBOX, RUNNING_IN_CODEX_SANDBOX
+from gathered_window_builders import make_agent_session_entry
 from monitor_builders import BUILT_IN_SCREEN, DELL_SCREEN_TO_THE_LEFT, STUDIO_SCREEN_TO_THE_RIGHT
 from saved_session_builders import build_saved_session_record, build_saved_window_record
 from stand_in_app_controller_builders import make_stand_in_app_controller_with_real_methods
@@ -249,9 +250,9 @@ def read_drawn_color_components(bitmap, scale, x, y_from_the_top):
 
 
 def make_entry(tab_id, title, status, tool="Claude Code", is_in_front=False):
-    return AgentSessionEntry(tab_id=tab_id, session_id=f"s{tab_id}", tab_title=title, tab_title_set_by_user=False,
-                             agent_session_name=title, agent_tool_name=tool, working_folder="/x", status=status,
-                             status_since=0.0, is_in_front=is_in_front, slash_commands=("/compact", "/clear"))
+    return make_agent_session_entry(f"s{tab_id}", title, tab_id=tab_id, agent_session_name=title, agent_tool_name=tool,
+                                    status=status, status_since=0.0, is_in_front=is_in_front,
+                                    slash_commands=("/compact", "/clear"))
 
 
 class MenuThatRecordsWhereItWouldOpen(NSMenu):
@@ -729,8 +730,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(1)  # "planning", which runs
         # The widths where each step happens follow from the controls' measured widths, which differ
-        # between macOS versions and Python builds: on macOS 27 the label drops below 241 points and
-        # the pop-up would hide below 171, while GitHub's macOS 26 runners measure the controls a few
+        # between macOS versions and Python builds: on macOS 27 the label drops below 368 points and
+        # the pop-up would hide below 298, while GitHub's macOS 26 runners measure the controls a few
         # points wider or narrower.
         label_frame = panel.sort_label.frame()
         full_popup_width = panel.sort_popup_width_for_its_widest_title
@@ -828,6 +829,17 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertTrue(panel.list_sort_order_popup.isHidden())
         self.assertTrue(panel.idle_tabs_button.isHidden())
         self.assertGreaterEqual(panel.message_text_field.frame().size.width, SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS)
+        self.assertTrue(panel.search_field.isHidden())
+        # A search box that holds a search stays, without its checkbox, so the list is never filtered unseen.
+        panel.show_message("")
+        self.window.setContentSize_((400, 260))
+        self.type_in_the_search_box("planning")
+        panel.show_message("iTerm2: could not connect; the other terminals' tabs are listed")
+        self.assertFalse(panel.search_field.isHidden())
+        self.assertTrue(panel.case_sensitive_checkbox.isHidden())
+        search_field_frame = panel.search_field.frame()
+        self.assertEqual(search_field_frame.size.width, SMALLEST_SEARCH_FIELD_WIDTH)
+        self.assertGreaterEqual(panel.message_text_field.frame().origin.x, search_field_frame.origin.x + search_field_frame.size.width)
 
     def type_in_the_search_box(self, text):
         """Puts text in the dropdown's search box, as typing does."""
@@ -839,33 +851,64 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         row = self.list_row_item_ids().index(tab_id)
         return self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, row, True).alphaValue()
 
-    def test_the_search_shows_title_matches_and_dimmed_conversation_matches_then_every_row_again(self):
+    def test_the_search_shows_window_and_tab_title_matches_and_dimmed_conversation_matches_then_every_row_again(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
+        size_changes = []
+        self.list_controller.on_rows_size_changed = lambda: size_changes.append(self.list_row_item_ids())
+        every_row = ["w1", "1", "2", "3", "w2", "10", "11", "new_window"]
         self.type_in_the_search_box("PLAN")  # case doesn't count unless "aA" is checked
-        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])  # a window without matches goes too
-        self.assertEqual(self.list_controller.list_selected_items(), [self.list_controller.outline_view.itemAtRow_(1)])
+        # The rows, and the dropdown's size, stay until the core has answered which conversations
+        # hold the text, then change once.
+        self.assertEqual((self.list_row_item_ids(), size_changes), (every_row, []))
         self.assertEqual([(text, is_case_sensitive) for text, is_case_sensitive, _ in self.owner.conversation_searches],
                          [("PLAN", False)])
         self.owner.answer_conversation_search(["s1", "s11"])  # their conversations hold "plan"
-        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])  # (a window without matches goes)
+        self.assertEqual(size_changes, [self.list_row_item_ids()])
+        self.assertEqual(self.list_controller.list_selected_items(), [self.list_controller.outline_view.itemAtRow_(1)])
         self.assertEqual((self.row_alpha_of_tab("1"), self.row_alpha_of_tab("11")), (1.0, CONVERSATION_ONLY_MATCH_ROW_ALPHA))
-        # Hide Idle doesn't hide an idle tab that matches, and comes back once the search is empty.
+        # Hide Idle doesn't hide an idle tab that matches, and comes back once the search is empty,
+        # at once, since an empty search needs no answer.
         self.dropdown_panel_controller.show_idle_tabs_are_hidden(True)
         self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
         self.type_in_the_search_box("")
         self.assertEqual(self.list_row_item_ids(), ["w1", "1", "2", "3", "new_window"])
         self.assertEqual(self.row_alpha_of_tab("1"), 1.0)
         self.dropdown_panel_controller.show_idle_tabs_are_hidden(False)
-        # A window's own title never matches; a text only a conversation holds selects its row
-        # once the core answers, so Return opens it.
+        # A window whose title holds the text shows with all its tabs, none dimmed, also one whose
+        # conversation holds it.
         self.type_in_the_search_box("tandem")
-        self.assertEqual(self.list_row_item_ids(), ["new_window"])
         self.owner.answer_conversation_search(["s10"])
-        self.assertEqual(self.list_row_item_ids(), ["w2", "10", "new_window"])
-        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["10"])
+        self.assertEqual(self.list_row_item_ids(), ["w2", "10", "11", "new_window"])
+        self.assertEqual((self.row_alpha_of_tab("10"), self.row_alpha_of_tab("11")), (1.0, 1.0))
+        # A text only a conversation holds selects its row once the core answers, so Return opens
+        # it; until then the last text's rows stay.
+        self.type_in_the_search_box("zebra")
+        self.assertEqual(self.list_row_item_ids(), ["w2", "10", "11", "new_window"])
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "2", "new_window"])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["2"])
         self.type_in_the_search_box("")
-        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "2", "3", "w2", "10", "11", "new_window"])
+        self.assertEqual(self.list_row_item_ids(), every_row)
         self.assertEqual(self.owner.conversation_searches, [])  # an empty search asks nothing
+
+    def test_a_search_the_core_is_slow_to_answer_shows_its_title_matches_meanwhile(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("plan")
+        wait_timer = self.list_controller.search_answer_wait_timer
+        self.assertTrue(wait_timer.isValid())
+        wait_timer.invalidate()  # fired now rather than after SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES
+        self.list_controller.searchAnswerWaitTimerFired_(wait_timer)
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
+        self.owner.answer_conversation_search(["s11"])  # the conversation matches come with the answer
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
+        # An answer in time stops the wait.
+        self.type_in_the_search_box("planning")
+        wait_timer = self.list_controller.search_answer_wait_timer
+        self.owner.answer_conversation_search([])
+        self.assertFalse(wait_timer.isValid())
+        self.assertIsNone(self.list_controller.search_answer_wait_timer)
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
 
     def test_the_aa_checkbox_makes_case_count_and_an_answer_to_an_older_search_is_dropped(self):
         panel = self.dropdown_panel_controller
@@ -876,12 +919,14 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.owner.search_is_case_sensitive_choices, [True])  # the owner saves it and shows it in every list
         panel.show_search_is_case_sensitive(True)
         self.type_in_the_search_box("Plan")
+        self.owner.answer_conversation_search([])
         self.assertEqual(self.list_row_item_ids(), ["new_window"])  # "planning" has no capital P
-        self.type_in_the_search_box("plan")  # while the core still answers for "Plan"
+        self.type_in_the_search_box("Pla")
+        self.type_in_the_search_box("plan")  # while the core still answers for "Pla"
         self.assertEqual([(text, is_case_sensitive) for text, is_case_sensitive, _ in self.owner.conversation_searches],
-                         [("Plan", True)])
-        self.owner.answer_conversation_search(["s10"])  # for "Plan": dropped, and "plan" asked
-        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
+                         [("Pla", True)])
+        self.owner.answer_conversation_search(["s10"])  # for "Pla": left out, and "plan" asked
+        self.assertEqual(self.list_row_item_ids(), ["new_window"])  # "Plan"'s rows until then
         self.assertEqual([(text, is_case_sensitive) for text, is_case_sensitive, _ in self.owner.conversation_searches],
                          [("plan", True)])
         self.owner.answer_conversation_search(["s11"])
@@ -1183,19 +1228,6 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.dropdown_panel_controller.list_sort_order_popup.titleOfSelectedItem(), "Name")
         self.assertEqual(self.list_controller.list_sort_order, "alphabet")
 
-    def test_a_new_agent_session_in_a_window_without_a_selected_tab_uses_its_first_tabs_folder(self):
-        # Not the folder of the tab in front or of the last one.
-        window = WindowEntry("w3", "three projects", False, (0, 0, 800, 600), 3, (
-            make_entry("31", "photos", "idle")._replace(working_folder="/code/photos"),
-            make_entry("32", "other", "idle", is_in_front=True)._replace(working_folder="/tmp/other-project"),
-            make_entry("33", "notes", "idle")._replace(working_folder="/tmp/notes"),
-        ))
-        self.list_controller.apply_snapshot(replace_windows_of_the_first_monitor(make_sample_snapshot(), (window,)))
-        self.list_controller.menu_target_item = self.list_controller.outline_view.itemAtRow_(0)
-        menu_item = unittest.mock.Mock(representedObject=lambda: "Codex")
-        self.list_controller.menuNewAgentSessionInWindow_(menu_item)
-        self.assertEqual(self.owner.started_agent_sessions, [("w3", "/code/photos", "Codex")])
-
     def build_right_click_menu(self, row):
         """Returns the menu the list builds as if the row were right-clicked."""
         return build_right_click_menu(self.list_controller, self.list_controller.outline_view, row)
@@ -1359,6 +1391,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
         self.assertEqual(menu_items_by_title["/compact"].toolTip(),
                          "Only available when the agent waits at its prompt (it is currently thinking)")
+        # A turn that failed on an API error leaves the agent at its prompt, though its row shows "error".
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id({"1": {"status": "error"}}))
+        self.assertTrue(self.build_right_click_menu_items_by_title(1)["/compact"].isEnabled())
 
     def select_rows(self, *rows):
         select_rows_of(self.list_controller.outline_view, rows)
@@ -1947,17 +1982,28 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual([(request.action, request.target) for request in self.submitted_actions],
                          [("close_window", {"window_id": "w1"})])
 
-    def test_new_agent_session_uses_the_folder_of_the_windows_selected_tab(self):
-        # A background window (nothing in front) whose selected tab is its second agent session.
-        window = WindowEntry("w3", "two projects", False, (0, 0, 800, 600), 2, (
-            make_entry("31", "photos", "idle")._replace(working_folder="/code/photos"),
-            make_entry("32", "other", "idle")._replace(working_folder="/tmp/other-project"),
-        ), selected_tab_id="32")
+    def start_a_new_agent_session_from_the_menu_of_the_only_window(self, window, agent_tool_name):
+        """Lists only this window and chooses New Agent Session with agent_tool_name in its row's menu."""
         self.list_controller.apply_snapshot(replace_windows_of_the_first_monitor(make_sample_snapshot(), (window,)))
         self.list_controller.menu_target_item = self.list_controller.outline_view.itemAtRow_(0)
-        menu_item = unittest.mock.Mock(representedObject=lambda: "Claude Code")
-        self.list_controller.menuNewAgentSessionInWindow_(menu_item)
+        self.list_controller.menuNewAgentSessionInWindow_(unittest.mock.Mock(representedObject=lambda: agent_tool_name))
+
+    def test_new_agent_session_uses_the_folder_of_the_windows_selected_tab(self):
+        # A background window (nothing in front) whose selected tab is its second agent session.
+        self.start_a_new_agent_session_from_the_menu_of_the_only_window(WindowEntry("w3", "two projects", False, (0, 0, 800, 600), 2, (
+            make_entry("31", "photos", "idle")._replace(working_folder="/code/photos"),
+            make_entry("32", "other", "idle")._replace(working_folder="/tmp/other-project"),
+        ), selected_tab_id="32"), "Claude Code")
         self.assertEqual(self.owner.started_agent_sessions, [("w3", "/tmp/other-project", "Claude Code")])
+
+    def test_a_new_agent_session_in_a_window_without_a_selected_tab_uses_its_first_tabs_folder(self):
+        # Not the folder of the tab in front or of the last one.
+        self.start_a_new_agent_session_from_the_menu_of_the_only_window(WindowEntry("w3", "three projects", False, (0, 0, 800, 600), 3, (
+            make_entry("31", "photos", "idle")._replace(working_folder="/code/photos"),
+            make_entry("32", "other", "idle", is_in_front=True)._replace(working_folder="/tmp/other-project"),
+            make_entry("33", "notes", "idle")._replace(working_folder="/tmp/notes"),
+        )), "Codex")
+        self.assertEqual(self.owner.started_agent_sessions, [("w3", "/code/photos", "Codex")])
 
     def test_dropping_a_window_on_another_monitor_moves_it_there(self):
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))

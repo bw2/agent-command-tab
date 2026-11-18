@@ -1,8 +1,9 @@
 """Agent session states, their urgency order, and how a session's state is worked out.
 
 A state comes from iTerm2's `status` variable plus the core's reading of whether the permission
-dialog is still on screen. A turn end the agent's hooks reported
-(hook_event_tracking) turns iTerm2's "working" into idle before this module sees the value
+dialog was answered (from Claude Code's own report of its session, else from the screen). A turn
+end the agent's hooks reported (hook_event_tracking) turns iTerm2's "working" into idle, and a
+turn they reported as failed turns any value into "failed", before this module sees the value
 (DashboardCore.update_session_tracking).
 """
 
@@ -14,6 +15,10 @@ dialog is still on screen. A turn end the agent's hooks reported
 STATES_IN_URGENCY_ORDER = ["asking", "error", "working", "background", "done", "new", "idle", "paused", "unknown", "exited"]
 # Between turns: the agent waits at its prompt, so /compact and /clear can be typed into it.
 STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT = frozenset({"idle", "done", "background", "new"})
+# Where a message or a command can be typed into the agent: between turns, and after a turn that
+# failed on an API error, which leaves the agent at its prompt too (its row shows "error" until
+# the session goes on, so the failure isn't missed).
+STATES_OF_AN_AGENT_THAT_TAKES_TEXT_AT_ITS_PROMPT = STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT | {"error"}
 # During a turn, as iTerm2's status shows it: a permission prompt in between doesn't end the turn.
 STATES_OF_A_TURN_UNDER_WAY = frozenset({"working", "asking"})
 
@@ -88,6 +93,8 @@ def update_permission_dialog_reading(session_reading, dialog_is_showing, interru
         reading.pop("permission_dialog_gone_since", None)  # shown again: asking again
         reading["turn_was_interrupted"] = False
     else:
+        # (No count yet when Claude Code's own report was read for this prompt until now.)
+        reading.setdefault("interrupted_line_count_while_asking", interrupted_line_count)
         turn_was_interrupted = interrupted_line_count > reading["interrupted_line_count_while_asking"]
         if reading.get("permission_dialog_is_showing") or turn_was_interrupted:
             reading.setdefault("permission_dialog_gone_since", now)
@@ -97,9 +104,58 @@ def update_permission_dialog_reading(session_reading, dialog_is_showing, interru
     return reading
 
 
+def update_permission_dialog_reading_from_claude_codes_own_status(session_reading, claude_code_session_status,
+                                                                  iterm2_status_change_time, now):
+    """Returns the session reading updated with Claude Code's own report of an asking session
+    (its session file's status), which needs no screen: the dialog shows while it says "waiting",
+    was approved once it then says "busy" or "shell" (the approved tool runs), and was denied
+    ("No" or Esc, which ends the turn) once it says "idle". Checked with Claude Code 2.1.326: the
+    status changed within 0.1 s of the answer, while no hook fires for one, and iTerm2's status
+    stays "waiting" until an approved tool finishes or the next prompt.
+
+    Returns None when the report doesn't tell, so the caller reads the screen instead. The file
+    is undocumented, and a Claude Code that named a waiting session otherwise, or went on saying
+    "busy" at its prompts, must not make them read as answered: "busy" and "shell" count only
+    after "waiting" was read since iTerm2's status changed (which this very Claude Code then
+    writes), and no other word counts at all. "idle" counts by itself: no prompt shows then.
+
+    Args:
+        session_reading: The session's reading so far; it is not changed.
+        claude_code_session_status: The session file's status ("waiting", "busy", "shell" or
+            "idle" in Claude Code 2.1.326).
+        iterm2_status_change_time: When iTerm2's status last changed; earlier checks belong to
+            an earlier prompt and are forgotten.
+        now: The time of this check.
+
+    Returns:
+        A new dict with the keys update_permission_dialog_reading sets, but for
+        "interrupted_line_count_while_asking", and once "waiting" was read,
+        "claude_code_reported_waiting_at"; or None.
+    """
+    claude_code_reported_waiting_for_this_prompt = (
+        session_reading.get("claude_code_reported_waiting_at", float("-inf")) >= iterm2_status_change_time)
+    if not (claude_code_session_status in ("waiting", "idle")
+            or (claude_code_session_status in ("busy", "shell") and claude_code_reported_waiting_for_this_prompt)):
+        return None
+    reading = dict(session_reading)
+    if reading.get("permission_dialog_checked_at", 0) < iterm2_status_change_time:  # a new prompt: forget the last one
+        reading.pop("permission_dialog_gone_since", None)
+    dialog_is_showing = claude_code_session_status == "waiting"
+    if dialog_is_showing:
+        reading["claude_code_reported_waiting_at"] = now
+        reading.pop("permission_dialog_gone_since", None)  # shown again: asking again
+    else:
+        reading.setdefault("permission_dialog_gone_since", now)
+    reading["turn_was_interrupted"] = claude_code_session_status == "idle"
+    reading["permission_dialog_is_showing"] = dialog_is_showing
+    reading["permission_dialog_checked_at"] = now
+    return reading
+
+
 def permission_dialog_was_answered(state, iterm2_status_change_time, session_reading):
-    """Returns whether an asking session's permission dialog was answered, by a screen check made
-    after the status last changed (see update_permission_dialog_reading)."""
+    """Returns whether an asking session's permission dialog was answered, by a check made
+    after the status last changed: of the screen (update_permission_dialog_reading), or of Claude
+    Code's own report (update_permission_dialog_reading_from_claude_codes_own_status)."""
     session_reading = session_reading or {}
     return (state == "asking" and session_reading.get("permission_dialog_checked_at", 0) > iterm2_status_change_time
             and not session_reading.get("permission_dialog_is_showing")
@@ -172,9 +228,10 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
                                         last_time_the_finished_turn_was_seen_or_cleared, tab_is_seen_now, session_reading):
     """Returns (state, reason) for one agent session.
 
-    - "asking" ends when a screen check made after the status changed no longer finds the
-      tool's permission dialog: Claude Code reports nothing when a prompt is answered, and
-      iTerm2's status stays "waiting" until the approved tool finishes.
+    - "asking" ends when a check made after the status changed finds the permission dialog
+      answered, since iTerm2's status stays "waiting" until the approved tool finishes: Claude
+      Code's own report no longer says it waits, or, for a tool without such a report, the
+      screen no longer shows the tool's permission dialog.
     - "done" means the last turn ended after the tab was last seen (selected in the key iTerm2
       window while iTerm2 was the active app) or its finished turn was cleared with /clear,
       whether the status now says done or idle, so it lasts until either happens; a turn that

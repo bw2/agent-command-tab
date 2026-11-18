@@ -286,6 +286,20 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         self.core.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=8.0))
         self.assertEqual(self.track(9.0), "working")  # a new turn, though iTerm2's value never changed
 
+    def test_a_turn_that_failed_on_an_api_error_is_failed_until_the_next_prompt(self):
+        self.assertEqual(self.track(1.0), "working")
+        self.core.note_hook_event(make_event("StopFailure", 101, sent_at=5.0, error="server_error"))
+        self.assertEqual(self.track(6.0), "failed")  # whatever iTerm2 says
+        self.assertNotIn("last_turn_ended_at", self.core.session_tracking_by_session_id["s1"])  # it isn't "done"
+        self.core.note_background_task_counts()
+        self.assertEqual(self.core.session_readings_by_session_id["s1"]["kind_of_api_error_the_last_turn_failed_on"], "server_error")
+        self.assertEqual(self.track(7.0, status_set_in_iterm2="idle"), "failed")
+        self.core.note_hook_event(make_event("UserPromptSubmit", 101, sent_at=8.0))
+        self.assertEqual(self.track(9.0, status_set_in_iterm2="working"), "working")
+        self.assertEqual(self.core.session_tracking_by_session_id["s1"]["turn_started_at"], 9.0)
+        self.core.note_background_task_counts()
+        self.assertIsNone(self.core.session_readings_by_session_id["s1"]["kind_of_api_error_the_last_turn_failed_on"])
+
     def test_claude_codes_shell_report_after_the_turn_ended_isnt_busy(self):
         # Claude Code says "shell" while its background task runs; its input box takes text then.
         self.report_claude_codes_own_status("shell")

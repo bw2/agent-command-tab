@@ -61,15 +61,6 @@ def find_agy_conversation_and_transcript(open_file_paths):
     return conversation_id, transcript_path if os.path.isfile(transcript_path) else None
 
 
-def find_conversation_and_transcript_of_agy_process(agent_process_id):
-    """Returns find_agy_conversation_and_transcript's result for an agy process, or None without a process ID."""
-    if not agent_process_id:
-        return None
-    open_files_by_file_descriptor = list_the_files_a_process_has_open(agent_process_id)
-    return find_agy_conversation_and_transcript(
-        None if open_files_by_file_descriptor is None else open_files_by_file_descriptor.values())
-
-
 class AgyAdapter(AgentToolAdapter):
     """agy runs as `agy ...`, a single program that runs its turns, and the commands it starts,
     itself. Its permission prompts need no screen check: it reports "waiting" for exactly as
@@ -88,19 +79,26 @@ class AgyAdapter(AgentToolAdapter):
         program_names = split_command_line_into_program_names(command_line)
         return bool(program_names) and program_names[0] == "agy"
 
+    async def find_conversation_and_transcript(self, agent_process_id):
+        """Returns find_agy_conversation_and_transcript's result for the process, its open files
+        listed in a worker thread, or None without a process ID."""
+        if not agent_process_id:
+            return None
+        open_files_by_file_descriptor = await asyncio.to_thread(list_the_files_a_process_has_open, agent_process_id)
+        return find_agy_conversation_and_transcript(
+            None if open_files_by_file_descriptor is None else open_files_by_file_descriptor.values())
+
     async def find_conversation_id(self, agent_process_id, claude_agent_record):
         """Returns the ID of the conversation whose presence lock the process has open."""
-        conversation_and_transcript = await asyncio.to_thread(find_conversation_and_transcript_of_agy_process, agent_process_id)
-        return (conversation_and_transcript or (None, None))[0]
+        return (await self.find_conversation_and_transcript(agent_process_id) or (None, None))[0]
 
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         """Returns the transcript of the conversation the process is in, once it has one."""
-        conversation_and_transcript = await asyncio.to_thread(find_conversation_and_transcript_of_agy_process, agent_process_id)
-        return (conversation_and_transcript or (None, None))[1]
+        return (await self.find_conversation_and_transcript(agent_process_id) or (None, None))[1]
 
     async def find_whether_no_message_was_sent_in_its_conversation(self, agent_process_id):
         """True while the process is in no conversation, or in one without a transcript yet."""
-        conversation_and_transcript = await asyncio.to_thread(find_conversation_and_transcript_of_agy_process, agent_process_id)
+        conversation_and_transcript = await self.find_conversation_and_transcript(agent_process_id)
         return None if conversation_and_transcript is None else conversation_and_transcript[1] is None
 
     def read_context_tokens(self, conversation_file_path):

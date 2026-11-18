@@ -3,7 +3,7 @@ about each agent process. Pure functions.
 
 An agent process whose hooks reported anything is known to report: when it is gone without a
 normal session end, it crashed or was killed. The events also list its background shells and
-agents, and tell when a prompt was submitted and when a turn ended.
+agents, and tell when a prompt was submitted, when a turn ended, and when one failed on an API error.
 """
 
 from agent_command_tab.agent_process_tree import (NAMES_OF_AGENT_PROGRAMS, SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS,
@@ -30,6 +30,10 @@ BACKGROUND_SHELL_TASK_TYPE = "shell"
 # The hook events of a tool call starting and finishing (hooks_installer registers both for Claude Code's
 # Bash, Agent and Task); the main agent's, after a Stop, show its turn going on.
 TOOL_EVENT_NAMES = frozenset({"PreToolUse", "PostToolUse"})
+# The events after which a turn that failed (StopFailure) no longer counts as the session's last
+# word: a new prompt, a new conversation, or a turn that ended normally. A tool call of the main
+# agent counts too (apply_hook_event).
+EVENT_NAMES_THAT_FOLLOW_A_FAILED_TURN = frozenset({"UserPromptSubmit", "SessionStart", "Stop"})
 
 
 def find_agent_process_id_of_hook_event(ancestor_processes):
@@ -122,7 +126,11 @@ def apply_hook_event(hook_state, event):
     "startup_reported_at": when it did, and once a list of background tasks or a background shell's
     start arrived, "background_shells_reported_at_by_task_id": {task ID: when the event that
     reported it was sent} for the shells the last list held and those started since (keys only
-    then, so the states hook_states_store saved before there were any still load).
+    then, so the states hook_states_store saved before there were any still load). After a turn
+    that ended on an API error (Claude Code's StopFailure), "last_turn_failed_at": when it did, and
+    "last_turn_failure": the kind of error Claude Code names (such as "server_error"), or None,
+    both until the session goes on (EVENT_NAMES_THAT_FOLLOW_A_FAILED_TURN, or a tool call of the
+    main agent).
 
     Args:
         hook_state: The state before, or None for the process's first event.
@@ -140,6 +148,12 @@ def apply_hook_event(hook_state, event):
         hook_state["last_turn_end_at"] = event.get("sent_at")
     if event_name in TOOL_EVENT_NAMES and not event.get("agent_id"):
         hook_state["last_main_agent_tool_event_at"] = event.get("sent_at")
+    if event_name in EVENT_NAMES_THAT_FOLLOW_A_FAILED_TURN or (event_name in TOOL_EVENT_NAMES and not event.get("agent_id")):
+        for key in ("last_turn_failed_at", "last_turn_failure"):
+            hook_state.pop(key, None)
+    if event_name == "StopFailure" and not event.get("agent_id"):
+        hook_state["last_turn_failed_at"] = event.get("sent_at")
+        hook_state["last_turn_failure"] = event.get("error")
     background_task_ids = set(hook_state["background_task_ids"]) if hook_state["background_task_ids"] is not None else None
     if event_name == "SessionStart" and event.get("source") == "startup":
         background_task_ids = set()  # a new process runs none yet
@@ -168,6 +182,12 @@ def hooks_report_no_prompt_since_the_agent_started(hook_state):
     before the app recorded starts (no "startup_reported_at") isn't new."""
     return (hook_state is not None
             and hook_state.get("startup_reported_at") is not None and hook_state.get("last_prompt_at") is None)
+
+
+def hooks_report_the_last_turn_failed(hook_state):
+    """Returns whether the agent's last turn ended on an API error (Claude Code's StopFailure) and
+    the session hasn't gone on since (apply_hook_event), which makes its row "error"."""
+    return hook_state is not None and hook_state.get("last_turn_failed_at") is not None
 
 
 def find_when_the_hooks_ended_the_turn(hook_state, iterm2_status_change_time):

@@ -1,7 +1,8 @@
 """The app's own hooks in Claude Code's settings: installing, removing and checking them.
 
 Each hook runs hook_event_forwarder.py, which sends the event to the app. The events tell the
-app when an agent's session ended normally (so a crash leaves an "exited" row), and
+app when an agent's session ended normally (so a crash leaves an "exited" row), when a turn
+ended on an API error (an "error" row), and
 Claude Code's background shells and agents (the lights after a tab's name). The entries
 are the app's by their command, which names hook_event_forwarder.py, so installing again
 replaces them and removing takes out only them. Each file the installer changes is copied first
@@ -41,10 +42,13 @@ BACKUP_FILE_SUFFIX = ".agent-command-tab-backup"
 # Code's prompts and turn ends tell when a turn ended while iTerm2's status still says working, as
 # its Claude Code integration keeps it while a background task runs, and the main agent's tool
 # calls after a Stop that another Stop hook blocked tell that the turn goes on, from the start of
-# its first command (PreToolUse; hook_event_tracking.find_when_the_hooks_ended_the_turn).
+# its first command (PreToolUse; hook_event_tracking.find_when_the_hooks_ended_the_turn). StopFailure
+# is a turn that ended on an API error, which makes the row "error"
+# (hook_event_tracking.hooks_report_the_last_turn_failed).
 HOOK_EVENTS_BY_AGENT_TOOL_NAME = {
-    "Claude Code": [("SessionStart", None), ("UserPromptSubmit", None), ("Stop", None), ("SubagentStop", None),
-                    ("SessionEnd", None), ("PreToolUse", "Bash|Agent|Task"), ("PostToolUse", "Bash|Agent|Task")],
+    "Claude Code": [("SessionStart", None), ("UserPromptSubmit", None), ("Stop", None), ("StopFailure", None),
+                    ("SubagentStop", None), ("SessionEnd", None), ("PreToolUse", "Bash|Agent|Task"),
+                    ("PostToolUse", "Bash|Agent|Task")],
 }
 # The agent tools whose hooks only earlier versions added, which the app takes out
 # (take_out_the_hooks_only_earlier_versions_added) and never installs.

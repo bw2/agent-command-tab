@@ -7,16 +7,10 @@ from the file reading and writing.
 
 import os
 
-from agent_command_tab.hook_states_store import is_number
 from agent_command_tab.monitor_assignment import frames_are_within_tolerance
-from agent_command_tab.settings_store import SETTINGS_FOLDER, read_json_file, write_json_file_atomically
+from agent_command_tab.settings_store import SETTINGS_FOLDER, frame_is_valid, read_json_file, write_json_file_atomically
 
 DOCKED_WINDOW_FRAMES_FILE_PATH = os.path.join(SETTINGS_FOLDER, "docked_window_frames.json")
-
-
-def frame_is_valid(frame):
-    """Whether a stored value is a frame: (x, y, width, height), four numbers."""
-    return isinstance(frame, (list, tuple)) and len(frame) == 4 and all(map(is_number, frame))
 
 
 def load_docked_window_frames(file_path):

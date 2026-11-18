@@ -1,7 +1,7 @@
 import time
 import unittest
 
-from agent_command_tab.snapshot_data_classes import AgentSessionEntry, ChildProcessEntry, MonitorEntry, WindowEntry
+from agent_command_tab.snapshot_data_classes import ChildProcessEntry, MonitorEntry, WindowEntry
 from agent_command_tab.session_status_computation import STATES_IN_URGENCY_ORDER
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
                                                                  LONGEST_TEXT_BY_COLUMN_FIELD_NAME, MEANING_BY_STATE,
@@ -15,12 +15,11 @@ from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_C
                                                                  choose_context_fill_percent_color_name,
                                                                  format_clock_time, format_context_text,
                                                                  format_elapsed_time, format_memory_size)
+from gathered_window_builders import make_agent_session_entry
 
 
 def make_entry(status):
-    return AgentSessionEntry(tab_id="1", session_id="s1", tab_title="reviews", tab_title_set_by_user=False,
-                             agent_session_name="", agent_tool_name="Claude Code", working_folder="/x",
-                             status=status)
+    return make_agent_session_entry("s1", "reviews", status=status)
 
 
 def make_window(statuses):
