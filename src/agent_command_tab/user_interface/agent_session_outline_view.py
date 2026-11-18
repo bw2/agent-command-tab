@@ -176,9 +176,9 @@ RESTORE_SESSIONS_TOOL_TIP = "Opens the Saved sessions window, to continue sessio
 SELECTION_OUTLINE_WIDTH = 1.5
 SELECTION_OUTLINE_INSET = 1
 SELECTION_OUTLINE_CORNER_RADIUS = 4
-# The outline of the tab in front's row, the size of the selection outline: dark gray in light
-# mode (white wouldn't show on the light rows), white in dark mode.
-FRONT_TAB_OUTLINE_COLOR_MAKER = make_light_and_dark_mode_color_maker(make_srgb_color_maker(85, 85, 85), NSColor.whiteColor)
+# The outline of the selected rows: dark gray in light mode (white wouldn't show on the light
+# rows), white in dark mode. The tab in front's row has one the same size in the accent color.
+SELECTION_OUTLINE_COLOR_MAKER = make_light_and_dark_mode_color_maker(make_srgb_color_maker(85, 85, 85), NSColor.whiteColor)
 TAB_DRAG_TYPE = "org.agent-command-tab.tab-id"
 WINDOW_DRAG_TYPE = "org.agent-command-tab.window-id"
 COLUMN_IDENTIFIER = "main"
@@ -262,11 +262,11 @@ def compute_selection_outline_rect(row_bounds, is_flipped, joins_the_row_above, 
 
 
 class RowViewWithSelectionAndFrontTabOutlines(NSTableRowView):
-    """A row that shows it is selected with an outline in the accent color rather than a filled
+    """A row that shows it is selected with an outline (SELECTION_OUTLINE_COLOR_MAKER) rather than a filled
     background, so its text keeps its colors; adjacent selected rows share one outline, which also takes in
     the process rows of a selected tab row, though
     they aren't selected. The row of the tab in front has an outline of its own around that row
-    alone (FRONT_TAB_OUTLINE_COLOR_MAKER), unless it is inside a selection outline."""
+    alone, in the accent color, unless it is inside a selection outline."""
 
     def drawSelectionInRect_(self, dirty_rect):
         self.draw_selection_outline_if_inside_one()
@@ -309,7 +309,7 @@ class RowViewWithSelectionAndFrontTabOutlines(NSTableRowView):
             traceback.print_exc()
             is_inside, joins_the_row_above, joins_the_row_below = self.isSelected(), self.isPreviousRowSelected(), self.isNextRowSelected()
         if is_inside:
-            self.stroke_outline(NSColor.controlAccentColor(), joins_the_row_above, joins_the_row_below)
+            self.stroke_outline(SELECTION_OUTLINE_COLOR_MAKER(), joins_the_row_above, joins_the_row_below)
         return is_inside
 
     @objc.python_method
@@ -322,7 +322,7 @@ class RowViewWithSelectionAndFrontTabOutlines(NSTableRowView):
             traceback.print_exc()  # rather than end the app, as for the selection outline
             return
         if is_the_tab_in_front:
-            self.stroke_outline(FRONT_TAB_OUTLINE_COLOR_MAKER(), False, False)
+            self.stroke_outline(NSColor.controlAccentColor(), False, False)
 
     @objc.python_method
     def stroke_outline(self, color, joins_the_row_above, joins_the_row_below):

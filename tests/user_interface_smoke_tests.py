@@ -1441,25 +1441,33 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                     read_drawn_color_components(bitmap, scale, row_rect.origin.x + 1, y_from_the_top)))
             return colors
 
+        def is_in_the_accent_color(edge, row_without_an_outline, appearance_name):
+            """Whether a row's drawn edge is nearer the accent color than the row's own color is: the
+            outline may blend with the row where it covers only part of a pixel."""
+            accent_color = resolve_color(NSColor.controlAccentColor(), appearance_name)
+            return math.dist(edge[:3], accent_color[:3]) < math.dist(edge[:3], row_without_an_outline[:3]) / 2
+
         for appearance_name, outline_is_darker_than_the_rows in ((NSAppearanceNameAqua, True), (NSAppearanceNameDarkAqua, False)):
             self.window.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
             outline_view.deselectAll_(None)
             front_tab_edge, other_tab_edge = read_the_middle_of_the_left_edge_of_each_row([1, 2])
-            brightness_difference = sum(front_tab_edge[:3]) / 3 - sum(other_tab_edge[:3]) / 3
-            # Dark gray on the light rows, white on the dark ones.
-            self.assertGreater(-brightness_difference if outline_is_darker_than_the_rows else brightness_difference, 60,
-                               (appearance_name, front_tab_edge, other_tab_edge))
-            # Selected, it has the selection outline instead, like another selected tab row.
+            self.assertTrue(is_in_the_accent_color(front_tab_edge, other_tab_edge, appearance_name),
+                            (appearance_name, front_tab_edge, other_tab_edge))
+            # Selected, it has the selection outline instead, like another selected tab row: dark gray on
+            # the light rows, white on the dark ones.
             outline_view.selectRowIndexes_byExtendingSelection_(build_index_set([1, 3]), False)
-            front_tab_edge, other_selected_tab_edge = read_the_middle_of_the_left_edge_of_each_row([1, 3])
+            front_tab_edge, other_tab_edge, other_selected_tab_edge = read_the_middle_of_the_left_edge_of_each_row([1, 2, 3])
             self.assertEqual(front_tab_edge, other_selected_tab_edge, appearance_name)
+            brightness_difference = sum(other_selected_tab_edge[:3]) / 3 - sum(other_tab_edge[:3]) / 3
+            self.assertGreater(-brightness_difference if outline_is_darker_than_the_rows else brightness_difference, 60,
+                               (appearance_name, other_selected_tab_edge, other_tab_edge))
         # Once another tab is in front, the outline moves to that tab's row.
         outline_view.deselectAll_(None)
         self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id(
             {"1": dict(is_in_front=False), "3": dict(is_in_front=True)}))
         self.assertEqual([row for row in range(outline_view.numberOfRows()) if self.list_controller.row_is_the_tab_in_front(row)], [3])
         planning_edge, codex_review_edge = read_the_middle_of_the_left_edge_of_each_row([1, 3])
-        self.assertGreater(sum(codex_review_edge[:3]) - sum(planning_edge[:3]), 180)  # white on the dark rows, as the loop left them
+        self.assertTrue(is_in_the_accent_color(codex_review_edge, planning_edge, NSAppearanceNameDarkAqua))  # as the loop left it
 
     def test_adjacent_selected_rows_draw_one_outline_around_them_all(self):
         bounds = NSMakeRect(0, 0, 300, 22)
