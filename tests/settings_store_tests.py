@@ -1,4 +1,6 @@
+import contextlib
 import copy
+import io
 import os
 import subprocess
 import sys
@@ -50,6 +52,16 @@ class MergeSettingsTests(unittest.TestCase):
         self.assertEqual((settings["list_sort_order"], settings["shown_columns"]),
                          (DEFAULT_SETTINGS["list_sort_order"], DEFAULT_SETTINGS["shown_columns"]))
         self.assertEqual(merge_settings_with_defaults({"shown_columns": []})["shown_columns"], [])  # every column off
+
+    def test_the_last_message_column_is_on_until_it_is_turned_off_and_the_list_can_be_sorted_by_it(self):
+        # On beside the two columns that were shown before it.
+        self.assertEqual(merge_settings_with_defaults({})["shown_columns"], ["context_tokens", "state", "time_since_last_message"])
+        # A file that names its columns keeps its own list, with the column on or off as it says.
+        for stored_shown_columns in (["context_tokens", "state"], ["state", "time_since_last_message"]):
+            self.assertEqual(merge_settings_with_defaults({"shown_columns": stored_shown_columns})["shown_columns"], stored_shown_columns)
+        settings = merge_settings_with_defaults({"list_sort_order": "time_since_last_message", "list_sort_order_is_reversed": True})
+        self.assertEqual((settings["list_sort_order"], settings["list_sort_order_is_reversed"]), ("time_since_last_message", True))
+        self.assertFalse(build_core_settings(settings)["resource_usage_is_read"])  # it reads no memory or CPU use
 
     def test_a_removed_column_leaves_the_other_shown_columns_and_its_sort_order_goes_back_to_tab_order(self):
         # The time since the last status change ("Status Changed") was removed.
@@ -118,6 +130,12 @@ class MergeSettingsTests(unittest.TestCase):
         self.assertEqual(codex_command_path_for("codex"), "/usr/local/bin/codex")  # a bare name, looked up on PATH
         self.assertEqual(codex_command_path_for("node /opt/codex/codex.js"), "/usr/local/bin/codex")  # a wrapper
         self.assertEqual(codex_command_path_for("CODEX_HOME=/x /opt/codex/bin/codex"), "/opt/codex/bin/codex")
+        # Quoted or escaped, as a folder with a space has to be: the program the shell runs, not the one on PATH.
+        self.assertEqual(codex_command_path_for('"/opt/codex/bin/codex" -s read-only'), "/opt/codex/bin/codex")
+        self.assertEqual(codex_command_path_for("CODEX_HOME=/x '/opt/My Tools/codex' --yolo"), "/opt/My Tools/codex")
+        self.assertEqual(codex_command_path_for("/opt/My\\ Tools/codex"), "/opt/My Tools/codex")
+        self.assertEqual(codex_command_path_for('"$HOME/bin/codex"'), os.path.join(os.environ["HOME"], "bin/codex"))
+        self.assertEqual(codex_command_path_for("'node' /opt/codex/codex.js"), "/usr/local/bin/codex")  # still a wrapper
 
     def test_a_boolean_is_not_a_width(self):
         self.assertEqual(merge_settings_with_defaults({"sidebar_width": True})["sidebar_width"], DEFAULT_SETTINGS["sidebar_width"])
@@ -143,7 +161,9 @@ class MergeSettingsTests(unittest.TestCase):
 
 
 class LaunchCommandEnvironmentSettingsTests(unittest.TestCase):
-    def test_the_settings_in_front_of_the_program_are_read_as_the_shell_reads_them(self):
+    def test_the_settings_in_front_of_the_program_are_read_with_their_quotes_taken_off_and_a_tilde_left_as_written(self):
+        # The shell would expand the unquoted "~" and keep the quoted one. Here both stay, and the reader
+        # of CODEX_HOME expands either (hooks_installer.list_codex_home_folders, tested in hooks_installer_tests.py).
         for launch_command, expected_settings, expected_words in (
                 ("CODEX_HOME=~/.codex-work codex", {"CODEX_HOME": "~/.codex-work"}, ["codex"]),
                 ("CODEX_HOME='~/Codex Work' codex --yolo", {"CODEX_HOME": "~/Codex Work"}, ["codex", "--yolo"]),
@@ -163,7 +183,12 @@ class LoadAndSaveTests(unittest.TestCase):
             self.assertEqual(load_settings(path)["show_as"], "sidebar")
             with open(path, "w") as settings_file:
                 settings_file.write("{not json")
-            self.assertEqual(load_settings(path), DEFAULT_SETTINGS)
+            # Said on stderr: dump-snapshot loads the settings, and its stdout holds only its JSON.
+            printed, printed_errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed_errors):
+                self.assertEqual(load_settings(path), DEFAULT_SETTINGS)
+            self.assertEqual(printed.getvalue(), "")
+            self.assertIn(f"settings file {path} could not be read", printed_errors.getvalue())
             self.assertEqual([name for name in os.listdir(os.path.dirname(path)) if name.endswith(".tmp")], [])
 
     def test_a_write_that_fails_leaves_the_file_as_it_was_and_no_temporary_file(self):
@@ -243,6 +268,21 @@ class LaunchCommandProblemTests(unittest.TestCase):
         self.assertEqual(self.check("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude"), "")
         self.assertIn("command not found", self.check("FOO=1 not-installed"))
         self.assertEqual(self.check("$HOME/bin/claude"), "")
+
+    def test_a_quoted_or_escaped_program_is_checked_as_the_shell_reads_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            os.mkdir(os.path.join(folder, "My Tools"))  # a folder with a space has to be escaped or quoted
+            write_executable_script(os.path.join(folder, "My Tools"), "claude", "#!/bin/sh\n")
+            for launch_command in (f"{folder}/My\\ Tools/claude --model opus", f'"{folder}/My Tools/claude" --model opus',
+                                   f"FOO=1 '{folder}/My Tools/claude'"):
+                self.assertEqual(self.check(launch_command), "", launch_command)
+            self.assertEqual(self.check(f"{folder}/My\\ Tools/codex"), f"{folder}/My Tools/codex doesn't exist")
+        self.assertEqual(self.check("\\claude"), "")  # a backslash that keeps an alias from replacing the program on PATH
+        self.assertIn("not-installed: command not found", self.check("\\not-installed"))
+        self.assertEqual(self.check('"$HOME/bin/claude" --model opus'), "")  # still a shell expansion
+        # A quote left open: the first word as written, checked only when it holds no shell syntax.
+        self.assertEqual(self.check("/no/such\\ folder/claude --name 'unfinished"), "")
+        self.assertIn("command not found", self.check("not-installed --name 'unfinished"))
 
 
 if __name__ == "__main__":

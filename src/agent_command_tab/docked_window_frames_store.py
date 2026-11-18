@@ -24,8 +24,7 @@ def load_docked_window_frames(file_path):
 
 
 def save_docked_window_frames(file_path, frames_by_window_id):
-    write_json_file_atomically({window_id: [list(frames[0]), list(frames[1])]
-                                for window_id, frames in frames_by_window_id.items()}, file_path)
+    write_json_file_atomically(frames_by_window_id, file_path)
 
 
 def adopt_records_of_restored_windows(frames_by_window_id, current_frames_by_window_id, tolerance_points):

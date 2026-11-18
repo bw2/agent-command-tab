@@ -146,6 +146,13 @@ class ReadTypedInputAreaTextTests(unittest.TestCase):
         # Its options start with ">" too, but no rule follows them: a box that can't be read.
         self.assertIsNone(self.read(AgyAdapter(), [mark_faint(line) for line in AGY_PERMISSION_PROMPT]))
 
+    def test_a_draft_line_that_begins_with_the_markers_character_is_not_taken_for_the_input_line(self):
+        # A Markdown quote typed into agy's box, whose marker is ">": the draft goes on, indented, on a line of ">" alone.
+        adapter = AgyAdapter()
+        draft = [mark_faint(line) for line in ("─" * 90, "> Explain this quote:", "  > ", "─" * 90, "? for shortcuts" + AGY_STATUS_LINE_END)]
+        self.assertEqual(self.read(adapter, draft), "Explainthisquote:\n>")
+        self.assertFalse(input_area_is_empty(draft, adapter.input_line_marker, adapter.input_area_end_pattern))
+
     def test_a_box_that_is_not_on_screen_reads_as_none(self):
         self.assertIsNone(self.read(ClaudeCodeAdapter(), [mark_faint("✻ Compacting conversation…")]))
         self.assertIsNone(self.read(ClaudeCodeAdapter(), [mark_faint("⏺ a reply with no input box below it")]))

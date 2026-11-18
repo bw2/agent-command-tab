@@ -39,10 +39,18 @@ FIELD_SEPARATOR = "\x1f"  # between the fields of one line of tmux's output: nam
 # pane_current_command changes when the program in front of the pane runs another in its place
 # (`exec claude` in the shell), which keeps its process ID (parse_pane_records_with_the_process_in_front
 # notices the other changes); the poll must notice it even in a renamed window. pane_active marks
-# the pane each window's keys go to, which a peek puts back.
+# the pane each window's keys go to, pane_last the pane that tmux's last-pane command goes back to
+# in its window, window_zoomed_flag whether the active pane is zoomed to fill its window, and
+# window_last_flag the window that tmux's last-window command goes back to in its session: a peek
+# puts all four back.
 PANE_FIELD_NAMES = ("session_id", "session_name", "session_created", "window_id", "window_active", "automatic-rename",
-                    "window_name", "pane_id", "pane_index", "pane_pid", "pane_current_path", "pane_current_command", "pane_active")
-CLIENT_FIELD_NAMES = ("client_pid", "client_tty", "session_id", "window_id", "client_activity")
+                    "window_name", "pane_id", "pane_index", "pane_pid", "pane_current_path", "pane_current_command", "pane_active",
+                    "pane_last", "window_zoomed_flag", "window_last_flag")
+# client_name is what switch-client -c takes: the client's terminal ("/dev/ttys004"), or
+# "client-<its process ID>" for a control mode client run without a terminal, whose client_tty is empty.
+# client_last_session is the name of the session the client showed before the one it shows, where
+# tmux's switch-client -l goes back to (empty when it showed none): a peek puts it back.
+CLIENT_FIELD_NAMES = ("client_pid", "client_name", "session_id", "window_id", "client_activity", "client_last_session")
 # Followed by the pane's number: one buffer per pane, since tmux's buffers are the server's, and
 # messages for several panes are pasted at the same time (a pane gets one paste at a time).
 PASTE_BUFFER_NAME_START = "agent-command-tab-paste-"
@@ -175,6 +183,12 @@ def build_list_panes_command():
     return ["list-panes", "-a", "-F", build_tmux_format("pane", PANE_FIELD_NAMES)]
 
 
+def build_list_panes_and_clients_arguments():
+    """Returns the arguments of one tmux run that lists every pane (build_list_panes_command),
+    then every client with CLIENT_FIELD_NAMES."""
+    return join_tmux_commands([build_list_panes_command(), ["list-clients", "-F", build_tmux_format("client", CLIENT_FIELD_NAMES)]])
+
+
 def parse_pane_records_with_the_process_in_front(tmux_output):
     """Returns the pane records in build_list_panes_command's output (other commands' lines are
     skipped), each with "process_id_in_front", its pane's find_process_in_front_of_the_pane. The
@@ -200,7 +214,8 @@ def build_gathered_windows(pane_records, describe_process=describe_the_process_i
     """Returns gathered window dicts (snapshot_builder's module docstring) for list-panes's records:
     one per tmux session, a tab per tmux window, and the window's first pane as its session.
 
-    A session named by its user (tmux names the others 0, 1, ...) and a window renamed by its user
+    A session named by its user (tmux names the others after the number in their ID: "3" for $3,
+    so another number is its user's choice, such as "2026") and a window renamed by its user
     (which turns automatic-rename off) count as titles of their own; otherwise the list names the
     row after its agent session.
 
@@ -216,7 +231,7 @@ def build_gathered_windows(pane_records, describe_process=describe_the_process_i
             session_name = pane_record["session_name"]
             gathered_windows_by_session_id[session_id] = {
                 "window_id": session_id, "terminal_name": TMUX_TERMINAL_NAME, "frame": None, "title": session_name,
-                "title_override_format": None if session_name.isdigit() else session_name, "tabs": [],
+                "title_override_format": None if session_name == session_id.lstrip("$") else session_name, "tabs": [],
                 "selected_tab_id": None}
         if pane_record["window_active"] == "1":
             gathered_windows_by_session_id[session_id]["selected_tab_id"] = window_id
@@ -237,7 +252,9 @@ def build_gathered_windows(pane_records, describe_process=describe_the_process_i
                     "session_id": pane_record["pane_id"], "command_line": command_line, "job_pid": job_process_id,
                     "job_folder": job_folder, "job_started_at": job_started_at,
                     "status_set_in_iterm2": None, "status_set_in_iterm2_at": None, "status": None,
-                    "path": pane_record["pane_current_path"]}})
+                    "path": pane_record["pane_current_path"],
+                    # Another pane of the window, zoomed to fill it, covers this one.
+                    "is_hidden_behind_a_zoomed_pane": pane_record["window_zoomed_flag"] == "1" and pane_record["pane_active"] != "1"}})
     return list(gathered_windows_by_session_id.values())
 
 
@@ -250,17 +267,23 @@ class TmuxTerminalSession(TerminalSession):
 
     async def refuse_typing_that_wouldnt_reach_the_agent_alone(self):
         """Raises TerminalTypingRefused when keys sent to the pane wouldn't reach its program
-        alone: with synchronize-panes on, tmux sends them to the window's other panes too (a
-        /clear would clear their agents' conversations); in copy mode (or another tmux mode), the
+        alone: with synchronize-panes on in a window of two or more panes, tmux sends them to the
+        window's other panes too (a /clear would clear their agents' conversations), while a
+        window's only pane gets them alone; in copy mode (or another tmux mode), the
         mode takes them, while capture-pane still reads the program's screen, so a command would
-        look typed."""
-        synchronize_panes, pane_in_mode = (await self.tmux_backend.run_tmux(
-            ["display-message", "-p", "-t", self.pane_id, FIELD_SEPARATOR.join(["#{synchronize-panes}", "#{pane_in_mode}"])]
-        )).strip().split(FIELD_SEPARATOR)
-        if synchronize_panes == "1":
+        look typed. pane_in_mode counts the pane's modes: 2 with copy mode opened over another mode.
+        Raises TerminalRequestFailed for a pane that is gone: display-message doesn't fail for
+        one, it prints the pane's and the window's fields empty."""
+        synchronize_panes, window_panes, pane_in_mode = (await self.tmux_backend.run_tmux(
+            ["display-message", "-p", "-t", self.pane_id,
+             FIELD_SEPARATOR.join(["#{synchronize-panes}", "#{window_panes}", "#{pane_in_mode}"])]
+        )).rstrip("\n").split(FIELD_SEPARATOR)
+        if not window_panes:
+            raise TerminalRequestFailed(f"can't find pane: {self.pane_id}")
+        if synchronize_panes == "1" and window_panes != "1":
             raise TerminalTypingRefused("its tmux window has synchronize-panes on, so the keys would reach the window's "
                                         "other panes too; turn it off to type into one pane")
-        if pane_in_mode == "1":
+        if pane_in_mode != "0":
             raise TerminalTypingRefused("its tmux pane is in copy mode, which would take the keys; leave it (q) and try again")
 
     async def send_text(self, text):
@@ -278,8 +301,8 @@ class TmuxTerminalSession(TerminalSession):
                                 ["paste-buffer", "-p", "-r", "-d", "-b", buffer_name, "-t", self.pane_id]]), input_text=text)
 
     async def read_screen_lines(self):
-        return [text for text, _ in parse_screen_lines_with_faint_flags(
-            await self.tmux_backend.run_tmux(["capture-pane", "-p", "-t", self.pane_id]))]
+        # Without -e, capture-pane prints the text alone, a line per row and a newline after the last.
+        return (await self.tmux_backend.run_tmux(["capture-pane", "-p", "-t", self.pane_id])).removesuffix("\n").split("\n")
 
     async def read_screen_lines_with_faint_flags(self):
         return parse_screen_lines_with_faint_flags(await self.tmux_backend.run_tmux(["capture-pane", "-p", "-e", "-t", self.pane_id]))
@@ -296,7 +319,8 @@ class TmuxTerminalBackend(TerminalBackend):
         """
         Args:
             socket_path: The tmux server's socket; the default server's when None.
-            tmux_program_path: The tmux program; looked up on PATH and in the usual folders when None.
+            tmux_program_path: The tmux program; looked up on PATH and in the usual folders when
+                None: here and, until it is found, at each poll that finds a server listening.
         """
         super().__init__(request_regather, request_snapshot, report_problem)
         self.socket_path = socket_path or find_default_tmux_socket_path()
@@ -308,7 +332,6 @@ class TmuxTerminalBackend(TerminalBackend):
         # The sessions and tmux windows start_agent_session opened since the last gather, which a
         # restore adds tabs to and renames before a gather lists them.
         self.window_and_tab_ids_opened_since_the_last_gather = set()
-        self.active_pane_id_by_tab_id = {}  # the pane each tmux window's keys go to, at the last gather
 
     async def run_tmux(self, arguments, input_text=None):
         """Runs tmux (-u: its output is UTF-8 whatever the locale) on the server's socket with
@@ -337,14 +360,16 @@ class TmuxTerminalBackend(TerminalBackend):
     async def read_pane_and_client_records(self):
         """Returns (list-panes's records, list-clients's records sorted the most recently used
         first), or None when no tmux server runs. While none ran at the last poll, tmux is run
-        only once a server listens at the socket: the socket file stays after its server ends."""
-        if self.tmux_program_path is None or (
-                not self.server_is_running and not await asyncio.to_thread(another_process_listens_at, self.socket_path)):
+        only once a server listens at the socket: the socket file stays after its server ends.
+        A tmux program that wasn't found when the backend was made is looked for again then, so
+        the sessions of a tmux installed since are listed without the app starting again."""
+        if not self.server_is_running and not await asyncio.to_thread(another_process_listens_at, self.socket_path):
             return None
+        if self.tmux_program_path is None:
+            self.tmux_program_path = await asyncio.to_thread(find_program_on_path_or_in_the_usual_folders, "tmux")
         try:
-            output = await self.run_tmux(join_tmux_commands([
-                build_list_panes_command(), ["list-clients", "-F", build_tmux_format("client", CLIENT_FIELD_NAMES)]]))
-        except TerminalRequestFailed:  # no server listens at the socket (it ended)
+            output = await self.run_tmux(build_list_panes_and_clients_arguments())
+        except TerminalRequestFailed:  # no server listens at the socket (it ended), or the tmux program still isn't found
             return None
         client_records = parse_tmux_output_lines(output, "client", CLIENT_FIELD_NAMES)
         client_records.sort(key=lambda client_record: -int(client_record["client_activity"] or 0))
@@ -388,8 +413,6 @@ class TmuxTerminalBackend(TerminalBackend):
         pane_records = await asyncio.to_thread(parse_pane_records_with_the_process_in_front,
                                                await self.run_tmux(build_list_panes_command()))
         self.pane_records_of_the_last_gather = pane_records
-        self.active_pane_id_by_tab_id = {pane_record["window_id"]: pane_record["pane_id"] for pane_record in pane_records
-                                         if pane_record["pane_active"] == "1"}
         self.gathered_windows = await asyncio.to_thread(build_gathered_windows, pane_records)
         self.window_and_tab_ids_opened_since_the_last_gather -= ids_opened_before_this_gather
         return self.gathered_windows
@@ -422,29 +445,90 @@ class TmuxTerminalBackend(TerminalBackend):
     def find_session(self, session_id):
         return TmuxTerminalSession(self, session_id) if self.find_tab_id_of_session(session_id) is not None else None
 
-    def remember_what_is_in_front(self):
-        """Returns each session's selected window, each window's active pane (a peek selects the
-        agent's), and each client's session."""
-        return {"selected_tab_id_by_window_id": {gathered_window["window_id"]: gathered_window["selected_tab_id"]
-                                                 for gathered_window in self.gathered_windows},
-                "active_pane_id_by_tab_id": dict(self.active_pane_id_by_tab_id),
-                "window_id_by_client_tty": {client_record["client_tty"]: client_record["session_id"]
-                                            for client_record in self.client_records}}
+    async def remember_what_is_in_front(self):
+        """Returns each session's selected window and the one it showed before that (where tmux's
+        last-window command goes), each window's active pane (a peek selects the agent's), the
+        pane that was active before that one (where tmux's last-pane command goes) and whether
+        the window was zoomed (selecting another pane ends the zoom), and each client's session
+        and the one it showed before that (where tmux's switch-client -l goes), as tmux reports
+        them now: what the last gather and poll read is up to a poll old, so a peek right after
+        another window was selected (in tmux, or by the peek before) would put back the window
+        from before that. None, so nothing is put back, when tmux can't be asked (its server
+        ended since the last poll)."""
+        try:
+            output = await self.run_tmux(build_list_panes_and_clients_arguments())
+        except TerminalRequestFailed:
+            return None
+        pane_records = parse_tmux_output_lines(output, "pane", PANE_FIELD_NAMES)
+        client_records = parse_tmux_output_lines(output, "client", CLIENT_FIELD_NAMES)
+        # tmux tells a client's last session by its name; the commands that put it back take its ID.
+        window_id_by_session_name = {pane_record["session_name"]: pane_record["session_id"] for pane_record in pane_records}
+        return {"selected_tab_id_by_window_id": {pane_record["session_id"]: pane_record["window_id"] for pane_record in pane_records
+                                                 if pane_record["window_active"] == "1"},
+                "last_tab_id_by_window_id": {pane_record["session_id"]: pane_record["window_id"] for pane_record in pane_records
+                                             if pane_record["window_last_flag"] == "1"},
+                "active_pane_id_by_tab_id": {pane_record["window_id"]: pane_record["pane_id"] for pane_record in pane_records
+                                             if pane_record["pane_active"] == "1"},
+                "last_pane_id_by_tab_id": {pane_record["window_id"]: pane_record["pane_id"] for pane_record in pane_records
+                                           if pane_record["pane_last"] == "1"},
+                "zoomed_tab_ids": {pane_record["window_id"] for pane_record in pane_records if pane_record["window_zoomed_flag"] == "1"},
+                "window_id_by_client_name": {client_record["client_name"]: client_record["session_id"] for client_record in client_records},
+                "last_window_id_by_client_name": {
+                    client_record["client_name"]: window_id_by_session_name[client_record["client_last_session"]]
+                    for client_record in client_records if client_record["client_last_session"] in window_id_by_session_name}}
 
     async def put_back_what_was_in_front(self, what_was_in_front, bring_back_the_front_window):
-        """Selects again each window's active pane and each session's window from before, and
-        switches each client back to its session from before. Every one is sent, since the cached
-        state lags a peek's own switch by up to a poll; tmux does nothing for a pane, window or
-        session already shown."""
+        """Selects again each window's active pane and each session's window from before, zooms
+        again each pane that was zoomed, and switches each client back to its session from before.
+        Every one is sent, since the cached state lags a peek's own switch by up to a poll; tmux
+        does nothing for a pane, window or session already shown. A window whose active pane, a
+        session whose window and a client whose session the peek changed also get back the one
+        that tmux's last-pane, last-window or switch-client -l command went to before."""
         if what_was_in_front is None:
             return ActionResult(True)
-        commands = [["select-pane", "-t", pane_id] for tab_id, pane_id in what_was_in_front["active_pane_id_by_tab_id"].items()
-                    if self.find_gathered_window_of_tab(tab_id) is not None]
-        commands += [["select-window", "-t", tab_id] for window_id, tab_id in what_was_in_front["selected_tab_id_by_window_id"].items()
-                     if tab_id and self.find_gathered_window(window_id) is not None]
-        commands += [["switch-client", "-c", client_tty, "-t", window_id]
-                     for client_tty, window_id in what_was_in_front["window_id_by_client_tty"].items()
-                     if self.find_gathered_window(window_id) is not None]
+        commands = []
+        for tab_id, pane_id in what_was_in_front["active_pane_id_by_tab_id"].items():
+            if self.find_gathered_window_of_tab(tab_id) is not None:
+                last_pane_id = what_was_in_front["last_pane_id_by_tab_id"].get(tab_id)
+                if last_pane_id is not None:
+                    # The window's last pane from before is selected first, so that tmux's
+                    # last-pane command goes back to it again rather than to the pane the peek
+                    # selected. Only while it is no longer the last pane, that is, in a window
+                    # whose pane the peek changed: the other windows are left as they are (a
+                    # zoomed one stays zoomed). Its ID is compared since, for a pane closed
+                    # meanwhile, tmux answers for the pane that an attached client shows.
+                    commands.append(["if-shell", "-F", "-t", last_pane_id, "#{?pane_last,,#{==:#{pane_id}," + last_pane_id + "}}",
+                                     f"select-pane -t {last_pane_id}"])
+                commands.append(["select-pane", "-t", pane_id])
+                if tab_id in what_was_in_front["zoomed_tab_ids"]:
+                    # Only in a window that isn't zoomed now (the peek selected its agent's pane):
+                    # resize-pane -Z would end the zoom of one that still is.
+                    commands.append(["if-shell", "-F", "-t", pane_id, "#{?window_zoomed_flag,,1}", f"resize-pane -Z -t {pane_id}"])
+        for window_id, tab_id in what_was_in_front["selected_tab_id_by_window_id"].items():
+            if self.find_gathered_window(window_id) is not None:
+                last_tab_id = what_was_in_front["last_tab_id_by_window_id"].get(window_id)
+                if last_tab_id is not None:
+                    # The session's last window from before is selected first, so that tmux's
+                    # last-window command goes back to it again rather than to the window the peek
+                    # showed. Only while it is no longer the last window, that is, in a session
+                    # whose window the peek changed: the other sessions are left as they are. Its
+                    # ID is compared since, for a window closed meanwhile, tmux answers for the
+                    # window that an attached client shows.
+                    commands.append(["if-shell", "-F", "-t", last_tab_id, "#{?window_last_flag,,#{==:#{window_id}," + last_tab_id + "}}",
+                                     f"select-window -t {last_tab_id}"])
+                commands.append(["select-window", "-t", tab_id])
+        for client_name, window_id in what_was_in_front["window_id_by_client_name"].items():
+            if self.find_gathered_window(window_id) is not None:
+                last_window_id = what_was_in_front["last_window_id_by_client_name"].get(client_name)
+                if last_window_id is not None and self.find_gathered_window(last_window_id) is not None:
+                    # The client's last session from before is shown first, so that tmux's
+                    # switch-client -l goes back to it again rather than to the session the peek
+                    # showed. Only while the client shows another session than before (as a
+                    # target, a client's name stands for the session it shows), that is, for the
+                    # client the peek switched: the other clients aren't sent to their last session.
+                    commands.append(["if-shell", "-F", "-t", f"{client_name}:", "#{!=:#{session_id}," + window_id + "}",
+                                     f"switch-client -c {client_name} -t {last_window_id}"])
+                commands.append(["switch-client", "-c", client_name, "-t", window_id])
         if commands:
             try:
                 await self.run_tmux(join_tmux_commands(commands))
@@ -463,7 +547,7 @@ class TmuxTerminalBackend(TerminalBackend):
                              self.client_records[0] if self.client_records else None)
         if client_record is None:
             return None
-        await self.run_tmux(["switch-client", "-c", client_record["client_tty"], "-t", window_id])
+        await self.run_tmux(["switch-client", "-c", client_record["client_name"], "-t", window_id])
         return int(client_record["client_pid"])
 
     async def show_session_and_name_its_client(self, window_id):
@@ -552,7 +636,8 @@ class TmuxTerminalBackend(TerminalBackend):
         shell when the agent exits (as iTerm2's do). A new session is shown in the most recently
         used client, if any. Its result has details {"tab_id": the new tmux window's ID}, plus
         {"window_id"} for a new session and, when a client shows it, {"terminal_client_process_id"}.
-        The core has checked the folder and the launch command."""
+        The core has checked the folder and the launch command. When the typing is refused
+        (TerminalTypingRefused), the window it opened is closed again first."""
         start_folder = escape_tmux_format_argument(folder)  # tmux expands -c as a format ("C#Projects")
         opens_a_new_session = window_id is None
         if opens_a_new_session:
@@ -572,7 +657,15 @@ class TmuxTerminalBackend(TerminalBackend):
                                ).strip().split(FIELD_SEPARATOR)
             details = {"tab_id": tab_id}
         self.window_and_tab_ids_opened_since_the_last_gather.add(tab_id)
-        await TmuxTerminalSession(self, pane_id).send_text(launch_command + "\r")
+        try:
+            await TmuxTerminalSession(self, pane_id).send_text(launch_command + "\r")
+        except TerminalTypingRefused:
+            # Nothing was typed (a tmux hook that runs after every new window can put its pane in
+            # copy mode first), so the window just opened is closed again, and with it a new
+            # session, whose only window it is: every try would otherwise leave one more shell behind.
+            await self.run_tmux(["kill-window", "-t", tab_id])
+            self.window_and_tab_ids_opened_since_the_last_gather -= set(details.values())  # the IDs of what was just opened
+            raise
         if opens_a_new_session:
             client_process_id = await self.show_session_in_a_client(window_id)
             if client_process_id is not None:

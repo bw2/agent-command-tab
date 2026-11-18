@@ -63,6 +63,7 @@ def read_new_search_texts(file_path, start_byte, extract_search_texts_from_recor
         (texts, the byte after the last complete line read, whether the file was read from its
         start because it got shorter), or None when the file can't be read.
     """
+    texts = []
     try:
         with open(file_path, "rb") as file:
             file.seek(0, os.SEEK_END)
@@ -70,21 +71,24 @@ def read_new_search_texts(file_path, start_byte, extract_search_texts_from_recor
             if started_over:
                 start_byte = 0
             file.seek(start_byte)
-            new_bytes = file.read()
+            read_up_to_byte = start_byte
+            # A line at a time, since a file read for the first time may hold tens of megabytes,
+            # nearly all of it tool output that has no search text.
+            for line in file:
+                if not line.endswith(b"\n"):
+                    break  # a line still being written waits for the next read
+                read_up_to_byte += len(line)
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(record, dict):
+                    texts.extend(text for text in extract_search_texts_from_record(record) if text)
     except OSError:
         return None
-    complete_lines_length = new_bytes.rfind(b"\n") + 1  # a line still being written waits for the next read
-    texts = []
-    for line in new_bytes[:complete_lines_length].split(b"\n"):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(record, dict):
-            texts.extend(text for text in extract_search_texts_from_record(record) if text)
-    return texts, start_byte + complete_lines_length, started_over
+    return texts, read_up_to_byte, started_over
 
 
 def describe_claude_code_command_the_user_typed(text):
@@ -158,12 +162,17 @@ def extract_search_texts_from_codex_record(record):
 
 
 def decode_agy_argument(value):
-    """Returns an agy tool call's argument as text: agy writes each one as JSON ("\\"ls -la\\"")."""
+    """Returns an agy tool call's text argument as text ("" for an argument of another kind). Its
+    transcript.jsonl has each argument as JSON ("\\"ls -la\\""), which is decoded; its whole
+    transcript (agent_adapters.agy.AGY_WHOLE_TRANSCRIPT_FILE_NAME) has the text itself, which stays
+    as it is, also when it reads as JSON of another kind (the command "true")."""
+    if not isinstance(value, str):
+        return ""
     try:
         decoded = json.loads(value)
-    except (TypeError, ValueError):
-        return value if isinstance(value, str) else ""
-    return decoded if isinstance(decoded, str) else ""
+    except ValueError:
+        return value
+    return decoded if isinstance(decoded, str) else value
 
 
 def extract_search_texts_from_agy_record(record):

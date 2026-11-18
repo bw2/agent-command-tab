@@ -50,7 +50,7 @@ class LongestColumnTextTests(unittest.TestCase):
         longest_length = {field_name: len(text) for field_name, text in LONGEST_TEXT_BY_COLUMN_FIELD_NAME.items()}
         elapsed_seconds_samples = list(range(0, 2 * 86400, 7)) + [999 * 86400 + 5]
         self.assertLessEqual(max(len(format_elapsed_time(seconds)) for seconds in elapsed_seconds_samples),
-                             longest_length["existence_duration_text"])
+                             min(longest_length["existence_duration_text"], longest_length["time_since_last_message_text"]))
         self.assertLessEqual(max(len(format_context_text(context_tokens, context_fill_percent))
                                  for context_tokens in range(0, 2_000_000, 37)  # context windows hold up to 1M
                                  for context_fill_percent in (None, 9, 100)),
@@ -132,6 +132,26 @@ class RowTextPartsTests(unittest.TestCase):
         self.assertEqual((parts.created_time_text, parts.existence_duration_text), ("Oct 7", "11d"))
         parts = build_agent_session_row_text_parts(make_entry("idle"), [True], now)  # start unknown
         self.assertEqual((parts.created_time_text, parts.existence_duration_text), ("", ""))
+
+    def test_time_since_the_last_message_shows_in_every_state_but_working_while_it_is_known(self):
+        now = 50_000.0
+
+        def build_time_since_last_message_text(status, last_message_at):
+            entry = make_entry(status)._replace(last_message_at=last_message_at)
+            return build_agent_session_row_text_parts(entry, [True], now).time_since_last_message_text
+        states_that_show_it = ["asking", "error", "background", "done", "new", "idle", "paused", "unknown", "exited"]
+        self.assertEqual(sorted([*states_that_show_it, "working"]), sorted(STATES_IN_URGENCY_ORDER))  # every state but working
+        self.assertEqual({state: build_time_since_last_message_text(state, now - 725) for state in states_that_show_it},
+                         dict.fromkeys(states_that_show_it, "12m"))
+        self.assertEqual(build_time_since_last_message_text("working", now - 725), "")
+        self.assertEqual(build_time_since_last_message_text("done", None), "")  # not known
+        # In the Age column's format, to the second in the first minute.
+        self.assertEqual([build_time_since_last_message_text("done", now - seconds) for seconds in (4, 3 * 3600 + 5 * 60, 2 * 86400)],
+                         ["4s", "3h 5m", "2d"])
+        # Window rows and process rows show nothing in the column.
+        self.assertEqual(build_window_row_text_parts(make_window(["done"]), [], True).time_since_last_message_text, "")
+        self.assertEqual(build_child_process_row_text_parts(ChildProcessEntry(77, "sleep 60", now - 30, False, None, None), [True], now)
+                         .time_since_last_message_text, "")
 
     def test_asking_dot(self):
         parts = build_agent_session_row_text_parts(make_entry("asking"), [False], 1.0)

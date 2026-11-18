@@ -34,8 +34,12 @@ def dump_snapshot(verbose):
     tests and bug reports).
 
     Waits a few seconds after the first snapshot, so that iTerm2's windows (it connects in the
-    background) and names from `claude agents --json` (read in the background) are included.
+    background) and names from `claude agents --json` (read in the background) are included. A
+    core that stops meanwhile (iTerm2 quit) publishes nothing more, so its reason is printed on
+    stderr instead of the list from before it stopped, with exit status 1.
     """
+    from agent_command_tab.codex_processes_that_shared_their_folder_store import (
+        CODEX_PROCESSES_THAT_SHARED_THEIR_FOLDER_FILE_PATH, load_codex_processes_that_shared_their_folder)
     from agent_command_tab.hook_states_store import HOOK_STATES_FILE_PATH, load_hook_states
     from agent_command_tab.dashboard_core import DashboardCoreThread
     from agent_command_tab.pause_records_store import PAUSE_RECORDS_FILE_PATH, load_pause_records
@@ -44,6 +48,7 @@ def dump_snapshot(verbose):
     from agent_command_tab.user_interface.screen_layout import read_monitors_from_screens
 
     first_snapshot_arrived = threading.Event()
+    core_stopped = threading.Event()
     received = {}
 
     def publish_snapshot(snapshot):
@@ -52,15 +57,19 @@ def dump_snapshot(verbose):
 
     def report_connection_lost(message):
         received.setdefault("problem", message)
-        first_snapshot_arrived.set()
+        core_stopped.set()
+        first_snapshot_arrived.set()  # ends the wait for a snapshot that won't come
 
-    # The app's pause records, so paused sessions are listed, and its hook states, so a turn the
-    # hooks saw end shows as the app shows it, kept in memory only: this
+    # The app's pause records, so paused sessions are listed, its hook states, so a turn the
+    # hooks saw end shows as the app shows it, and the Codex processes it saw share their folder,
+    # so their rows show no other session's context size, kept in memory only: this
     # run never changes the app's files.
     connection_thread = DashboardCoreThread(
         publish_snapshot, report_connection_lost, verbose,
         pause_record_by_tab_and_agent_to_start_with=load_pause_records(PAUSE_RECORDS_FILE_PATH),
-        started_at_and_hook_state_by_agent_process_id_to_start_with=load_hook_states(HOOK_STATES_FILE_PATH))
+        started_at_and_hook_state_by_agent_process_id_to_start_with=load_hook_states(HOOK_STATES_FILE_PATH),
+        started_at_by_codex_process_id_that_shared_its_folder_to_start_with=load_codex_processes_that_shared_their_folder(
+            CODEX_PROCESSES_THAT_SHARED_THEIR_FOLDER_FILE_PATH))
     connection_thread.start()
     # The app's settings, so the agent tools left out in Settings are left out here too.
     connection_thread.send_core_settings(build_core_settings(load_settings()))
@@ -68,18 +77,19 @@ def dump_snapshot(verbose):
     if not first_snapshot_arrived.wait(timeout=30):
         print("no snapshot within 30 seconds", file=sys.stderr)
         return 1
-    if "snapshot" not in received:
-        print(received["problem"], file=sys.stderr)
-        return 1
     # The first snapshot may come before a terminal that runs is connected (iTerm2 connects in the
     # background); one that refused to connect (a problem it reported) isn't waited for.
     deadline = time.time() + SECONDS_TO_WAIT_FOR_THE_TERMINALS_TO_CONNECT
-    while time.time() < deadline and any(
+    while not core_stopped.is_set() and time.time() < deadline and any(
             terminal_backend.terminal_runs() and not terminal_backend.is_connected()
             and terminal_backend.terminal_name not in connection_thread.core.terminal_problem_by_terminal_name
             for terminal_backend in connection_thread.core.terminal_backends):
         time.sleep(0.1)
-    time.sleep(SECONDS_TO_WAIT_FOR_AGENT_NAMES)
+    # The wait for the agents' names ends as soon as the core stops; one that stopped earlier,
+    # even before its first snapshot, ends it at once.
+    if core_stopped.wait(timeout=SECONDS_TO_WAIT_FOR_AGENT_NAMES):
+        print(received["problem"], file=sys.stderr)
+        return 1
     print(json.dumps(convert_snapshot_to_json_ready_dict(received["snapshot"]), indent=1))
     return 0
 
@@ -163,19 +173,28 @@ def clean_up_before_uninstalling():
     uninstall it: stops the running copy, whose files the uninstall
     deletes, then removes its hooks from Claude Code's settings and those earlier versions added to
     Codex's (whose commands would otherwise fail on every event) and its script in iTerm2's
-    AutoLaunch folder. Leaves its settings folder and its log. Returns the exit status."""
+    AutoLaunch folder. Leaves its settings folder and its log. Says to uninstall the package only
+    when the copy has stopped and the hooks are out; otherwise it says what to do first, since the
+    uninstall would delete the files a running copy and the remaining hooks use. Returns the exit status."""
     from agent_command_tab.start_with_iterm2 import LOG_FILE_PATH, find_autolaunch_script_path, update_autolaunch_script_to_match_setting
     no_copy_runs, message = stop_the_running_copy()
     print(message)
-    exit_status = install_or_remove_hooks(install=False)
+    hooks_were_removed = install_or_remove_hooks(install=False) == 0
     autolaunch_script_path = find_autolaunch_script_path()
     if update_autolaunch_script_to_match_setting(False, None, None, autolaunch_script_path) == "removed":
         print(f"removed the script that started AgentCommandTab with iTerm2: {autolaunch_script_path}")
     else:
         print("iTerm2's AutoLaunch folder has no AgentCommandTab script")
     print(f"left in place (delete them if you like): the settings in {SETTINGS_FOLDER} and the log {LOG_FILE_PATH}")
+    # Uninstalling is suggested only once nothing is left that needs the package's files.
+    steps_left_before_uninstalling = ([] if no_copy_runs else ["quit AgentCommandTab (it still runs)"]) + (
+        [] if hooks_were_removed else ["fix the hooks file named above (its hooks couldn't be removed)"])
+    if steps_left_before_uninstalling:
+        print(f"don't uninstall the package yet: first {' and '.join(steps_left_before_uninstalling)}, then run "
+              "agent-command-tab clean-up-before-uninstalling again", file=sys.stderr)
+        return 1
     print("now uninstall the package: pipx uninstall agent-command-tab (or pip uninstall agent-command-tab)")
-    return exit_status if no_copy_runs else 1
+    return 0
 
 
 def run_app_process(verbose):

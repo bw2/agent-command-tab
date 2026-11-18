@@ -36,13 +36,11 @@ class SavedWindowsFileTests(unittest.TestCase):
             saved_windows = [make_saved_window("w1", ["a", "b"]), make_saved_window("w2", ["c"])]
             save_saved_windows(file_path, saved_windows)
             self.assertEqual(load_saved_windows(file_path), saved_windows)
-            # Saved before the CODEX_HOME was kept: the default.
-            for saved_window in saved_windows:
-                for saved_session in saved_window["saved_sessions"]:
-                    del saved_session["codex_home_folder"]
-            save_saved_windows(file_path, saved_windows)
-            self.assertEqual({saved_session["codex_home_folder"] for saved_window in load_saved_windows(file_path)
-                              for saved_session in saved_window["saved_sessions"]}, {None})
+            # A file saved before the CODEX_HOME was kept gives every session the default, None, which these have.
+            save_saved_windows(file_path, [dict(saved_window, saved_sessions=[
+                {field_name: value for field_name, value in saved_session.items() if field_name != "codex_home_folder"}
+                for saved_session in saved_window["saved_sessions"]]) for saved_window in saved_windows])
+            self.assertEqual(load_saved_windows(file_path), saved_windows)
 
     def test_entries_without_the_right_shape_are_left_out(self):
         good_window = make_saved_window("w1", ["a"])
@@ -150,10 +148,10 @@ class RenameDeleteAndChooseTests(unittest.TestCase):
         self.assertEqual(delete_saved_items(self.saved_windows, {("tmux", "w1", None)}, set()), self.saved_windows)  # another terminal's
 
     def test_a_selected_window_restores_all_of_its_sessions_and_a_selected_session_only_itself(self):
-        self.assertEqual(list_conversation_ids_by_window(choose_saved_windows_to_restore(self.saved_windows, {("iTerm2", "w2", None)},
-                                                                                         {"b"})),
-                         [("w1", ["b"]), ("w2", ["c"])])
-        self.assertEqual(choose_saved_windows_to_restore(self.saved_windows, set(), set()), [])
+        saved_windows = self.saved_windows + [make_saved_window("w3", ["d", "e"])]
+        self.assertEqual(list_conversation_ids_by_window(choose_saved_windows_to_restore(saved_windows, {("iTerm2", "w3", None)}, {"b"})),
+                         [("w1", ["b"]), ("w3", ["d", "e"])])  # nothing of w2, which has nothing selected
+        self.assertEqual(choose_saved_windows_to_restore(saved_windows, set(), set()), [])
 
 
 if __name__ == "__main__":

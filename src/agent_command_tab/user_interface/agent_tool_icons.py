@@ -5,7 +5,7 @@ logo's outline, so no logo files ship with the project. A tool without an icon h
 drawn as a small image instead.
 """
 
-from AppKit import (NSAttributedString, NSColor, NSCompositingOperationSourceAtop, NSFontAttributeName,
+from AppKit import (NSAttributedString, NSColor, NSCompositingOperationSourceIn, NSFontAttributeName,
                     NSForegroundColorAttributeName, NSImage, NSMakeRect, NSRectFill, NSRectFillUsingOperation)
 
 # One character per point, top row first: "#" body, "E" eye, " " empty.
@@ -106,7 +106,9 @@ def build_svg_image(svg_text, size, color):
     def draw(destination_rect):
         svg_image.drawInRect_(destination_rect)
         color.set()
-        NSRectFillUsingOperation(destination_rect, NSCompositingOperationSourceAtop)  # colors only the shapes
+        # Only where the shapes are, and in place of the black they are drawn in, so a translucent
+        # color stays as translucent as it is.
+        NSRectFillUsingOperation(destination_rect, NSCompositingOperationSourceIn)
         return True
 
     return NSImage.imageWithSize_flipped_drawingHandler_((size, size), False, draw)

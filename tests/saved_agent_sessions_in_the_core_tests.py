@@ -4,6 +4,7 @@ resumed: its own tab, a new tab, or a new window."""
 
 import asyncio
 import os
+import shlex
 import tempfile
 import unittest
 import unittest.mock
@@ -17,7 +18,9 @@ from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
 from agent_command_tab.snapshot_data_classes import ComputerSnapshot, MonitorEntry, WindowEntry
 from agent_command_tab.terminal_backends.base import TerminalBackend
 from gathered_window_builders import MONITOR, make_agent_session, make_agent_session_entry, make_gathered_tab, make_gathered_window
+from hook_event_builders import make_event
 from saved_session_builders import build_saved_session_record, build_saved_window_record
+from tab_duplicating import find_launch_command_of_a_duplicate_of_the_tab_of_s1
 
 
 class StandInTerminalSession:
@@ -124,7 +127,7 @@ def restore(core, saved_windows, launch_commands=None):
 class SaveAgentSessionsTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.mkdtemp()
-        self.core, self.iterm2 = make_core(self.folder)
+        self.core, _ = make_core(self.folder)
 
     def tearDown(self):
         os.rmdir(self.folder)
@@ -166,16 +169,30 @@ class SaveAgentSessionsTests(unittest.TestCase):
         self.assertEqual((action_result.message, action_result.details),
                          ('"planning": it has had no conversation since its /clear', {"saved_windows": []}))
 
-    def test_a_codex_session_that_started_another_conversation_isnt_saved_and_says_so(self):
-        # After Codex's /new and a message, two conversation files fit its process, the newer first.
+    def test_a_session_that_went_on_in_another_conversation_is_neither_saved_nor_copied_under_the_one_it_left(self):
+        self.assertEqual(find_launch_command_of_a_duplicate_of_the_tab_of_s1(self.core), "codex --resume conv-1 --fork-session")
+        # /clear or /resume typed in the terminal: `claude agents --json` hasn't named the next conversation yet.
+        self.core.note_hook_event(make_event("SessionStart", 101, source="resume"))
+        action_result = asyncio.run(self.core.handle_save_agent_sessions(
+            ActionRequest("save_agent_sessions", {"session_ids": ["s1"]})))
+        self.assertEqual((action_result.succeeded, action_result.details), (False, {"saved_windows": []}))
+        self.assertEqual(find_launch_command_of_a_duplicate_of_the_tab_of_s1(self.core), "codex")  # the copy starts fresh
+
+    def test_a_codex_session_with_more_than_one_conversation_file_or_none_isnt_saved_and_says_which(self):
         codex_adapter = CodexAdapter()
         self.core.agent_sessions["s1"].update(adapter=codex_adapter, agent_tool_name="Codex")
-        with unittest.mock.patch.object(codex_adapter, "find_conversation_files", return_value=[
-                "/sessions/rollout-2026-11-06T09-00-00-new.jsonl", "/sessions/rollout-2026-11-06T08-00-00-old.jsonl"]):
-            action_result = asyncio.run(self.core.handle_save_agent_sessions(
-                ActionRequest("save_agent_sessions", {"session_ids": ["s1"]})))
-        self.assertEqual(action_result.message,
-                         '"planning": it has started more than one conversation, and which one runs now can\'t be told')
+        del self.core.find_current_conversation_file  # make_core's stand-in: Codex's own lookups find the files below
+        for conversation_files_that_fit_its_process, reason_it_isnt_saved in (
+                # After Codex's /new and a message, two fit, the newer first.
+                (["/sessions/rollout-2026-11-06T09-00-00-0199a1b2-0000-7000-8000-00000000000b.jsonl",
+                  "/sessions/rollout-2026-11-06T08-00-00-0199a1b2-0000-7000-8000-00000000000a.jsonl"],
+                 "it has started more than one conversation, and which one runs now can't be told"),
+                ([], "it has no conversation yet (no message was sent to it)")):
+            with unittest.mock.patch.object(codex_adapter, "find_conversation_files",
+                                            return_value=conversation_files_that_fit_its_process):
+                action_result = asyncio.run(self.core.handle_save_agent_sessions(
+                    ActionRequest("save_agent_sessions", {"session_ids": ["s1"]})))
+            self.assertEqual(action_result, ActionResult(False, f'"planning": {reason_it_isnt_saved}', details={"saved_windows": []}))
 
     def test_a_codex_session_is_saved_with_its_own_codex_home_also_the_default(self):
         # The default too, so a CODEX_HOME the launch command sets doesn't take its place on restore.
@@ -194,7 +211,12 @@ class SaveAgentSessionsTests(unittest.TestCase):
 class RestoreSavedAgentSessionsTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.mkdtemp()
+        self.folder_as_typed_into_a_shell = shlex.quote(self.folder)  # in quotes when the temporary folder's path has a space
         self.core, self.iterm2 = make_core(self.folder)
+        # The agent processes of make_core's tabs run, whichever processes this Mac has.
+        patch = unittest.mock.patch.object(dashboard_core, "process_is_alive", lambda process_id: True)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self):
         os.rmdir(self.folder)
@@ -203,7 +225,7 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         action_result = restore(self.core, [make_saved_window([make_saved_session(
             "conv-7", self.folder, terminal_session_id="s2", name="reviews", name_was_set_by_user=True)])])
         self.assertEqual(action_result, ActionResult(True, details={"restored_conversation_ids": ["conv-7"]}))
-        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])
+        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder_as_typed_into_a_shell} && yc --resume conv-7\r")])
         self.assertEqual(self.iterm2.actions, [("rename_tab", "t-s2", "reviews")])
 
     def test_a_tab_running_an_agent_gets_a_new_tab_in_its_window(self):
@@ -235,7 +257,7 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         restore(self.core, [dict(make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2"),
                                                     make_saved_session("conv-8", self.folder)], terminal_window_id="w1"),
                                  terminal_window_opened_at=1793977852)])
-        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])
+        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder_as_typed_into_a_shell} && yc --resume conv-7\r")])
         self.assertEqual(self.iterm2.actions, [("start", "w1", self.folder, "yc --resume conv-8")])
 
     def test_a_terminal_failing_to_start_one_session_doesnt_end_the_restore(self):
@@ -281,7 +303,7 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2"),
                                                make_saved_session("conv-8", self.folder)],
                                               terminal_window_id="w1", name="saved-project", name_was_set_by_user=True)])
-        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])
+        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder_as_typed_into_a_shell} && yc --resume conv-7\r")])
         self.assertEqual(self.iterm2.actions, [("start", "w2", self.folder, "yc --resume conv-8"),
                                                ("rename_window", "w2", "saved-project")])
 
@@ -290,7 +312,7 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         action_result = restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2"),
                                                                make_saved_session("conv-8", self.folder, terminal_session_id="s2")])])
         self.assertEqual(action_result.details, {"restored_conversation_ids": ["conv-7", "conv-8"]})
-        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])
+        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder_as_typed_into_a_shell} && yc --resume conv-7\r")])
         self.assertEqual(self.iterm2.actions, [("start", "w1", self.folder, "yc --resume conv-8")])
 
     def test_a_conversation_named_only_in_a_command_line_that_doesnt_run_it_is_restored(self):
@@ -324,23 +346,72 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
 
     def test_the_conversation_a_tab_ended_with_clear_can_be_restored(self):
         # Codex keeps its process at a /clear, and its lookup still finds the old conversation's file.
-        self.core.conversation_was_cleared_and_the_next_has_no_file_yet = lambda session_id: session_id == "s1"
-        action_result = restore(self.core, [make_saved_window([make_saved_session("conv-1", self.folder)])])
-        self.assertEqual(action_result.details, {"restored_conversation_ids": ["conv-1"]})
+        ended_conversation_id = "0199a1b2-0000-7000-8000-00000000000a"
+        ended_conversation_file = f"/sessions/rollout-2026-11-06T09-00-00-{ended_conversation_id}.jsonl"
+        codex_adapter = CodexAdapter()
+        self.core.agent_sessions["s1"].update(adapter=codex_adapter, agent_tool_name="Codex")
+        del self.core.claude_agents_by_process_id[101]
+        self.core.gathered_windows[0]["tabs"][0]["first_session"]["command_line"] = "codex"
+        saved_windows = [make_saved_window([make_saved_session(ended_conversation_id, self.folder, name="A", agent_tool_name="Codex")])]
+        with unittest.mock.patch.object(codex_adapter, "find_conversation_files", return_value=[ended_conversation_file]):
+            self.assertEqual(restore(self.core, saved_windows).message, '"A": its conversation already runs in a tab')
+            self.core.forget_the_cleared_conversation("s1", self.core.agent_sessions["s1"], ended_conversation_file)
+            action_result = restore(self.core, saved_windows)
+        self.assertEqual(action_result.details, {"restored_conversation_ids": [ended_conversation_id]})
+
+    def test_the_conversation_a_tab_ended_with_clear_can_still_be_restored_once_the_next_one_has_a_file(self):
+        # Both files then fit the Codex process, whose command line still names the ended
+        # conversation: a restore started it to resume that one.
+        ended_conversation_id, next_conversation_id = "0199a1b2-0000-7000-8000-00000000000a", "0199a1b2-0000-7000-8000-00000000000b"
+        ended_conversation_file, next_conversation_file = (
+            f"/sessions/rollout-2026-11-06T09-00-00-{conversation_id}.jsonl"
+            for conversation_id in (ended_conversation_id, next_conversation_id))
+        codex_adapter = CodexAdapter()
+        self.core.agent_sessions["s1"].update(adapter=codex_adapter, agent_tool_name="Codex")
+        del self.core.claude_agents_by_process_id[101]
+        self.core.gathered_windows[0]["tabs"][0]["first_session"]["command_line"] = f"codex resume {ended_conversation_id}"
+        self.core.forget_the_cleared_conversation("s1", self.core.agent_sessions["s1"], ended_conversation_file)
+        # As the lookup that follows the new conversation's first prompt notes its file.
+        self.core.conversation_files_by_session_id["s1"]["path"] = next_conversation_file
+        saved_windows = [make_saved_window([
+            make_saved_session(ended_conversation_id, self.folder, name="ended", agent_tool_name="Codex"),
+            make_saved_session(next_conversation_id, self.folder, name="next", agent_tool_name="Codex")])]
+        with unittest.mock.patch.object(codex_adapter, "find_conversation_files",
+                                        return_value=[next_conversation_file, ended_conversation_file]):
+            action_result = restore(self.core, saved_windows)
+            self.assertEqual(action_result.message, '"next": its conversation already runs in a tab')
+            self.assertEqual(action_result.details, {"restored_conversation_ids": [ended_conversation_id]})
+            # Another tab whose agent was started to resume the ended conversation keeps it from starting twice.
+            self.core.gathered_windows[0]["tabs"][4]["first_session"]["command_line"] = f"claude --resume {ended_conversation_id}"
+            self.assertEqual(restore(self.core, saved_windows).message, '"ended": its conversation already runs in a tab; '
+                                                                         '"next": its conversation already runs in a tab')
+
+    def restore_while_an_earlier_restore_waits_for_its_agent(self, earlier_request, later_request):
+        """Runs two restore requests that overlap, and returns the later one's result. The later
+        one starts when the earlier one first looks for the agent it started, so while the earlier
+        one holds the conversations and tabs it took. The earlier one's agent shows in its tab only
+        once the later request has ended; an agent the later one started shows at once."""
+        later_restores = []  # the later request's task, once it has started
+
+        def an_agent_runs_in_the_tab(tab_id):
+            if not later_restores:
+                later_restores.append(asyncio.ensure_future(self.core.handle_restore_saved_agent_sessions(later_request)))
+            # Asked by the later request, in its own task, or by the earlier one once the later one has ended.
+            return asyncio.current_task() is later_restores[0] or later_restores[0].done()
+        self.core.an_agent_runs_in_the_tab = an_agent_runs_in_the_tab
+
+        async def restore_both():
+            await self.core.handle_restore_saved_agent_sessions(earlier_request)
+            (later_restore,) = later_restores
+            return await later_restore
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT", 0.01):
+            return asyncio.run(restore_both())
 
     def test_a_second_restore_of_a_conversation_being_restored_doesnt_start_it_again(self):
-        self.core.an_agent_runs_in_the_tab = lambda tab_id: False  # not yet seen when the second restore comes
         request = ActionRequest("restore_saved_agent_sessions", {}, {
             "saved_windows": [make_saved_window([make_saved_session("conv-7", self.folder, name="planning")])],
             "launch_command_by_agent_tool_name": {"Claude Code": "yc"}})
-
-        async def restore_twice():
-            first = asyncio.ensure_future(self.core.handle_restore_saved_agent_sessions(request))
-            await asyncio.sleep(0.02)  # the first is waiting for its agent
-            return await self.core.handle_restore_saved_agent_sessions(request), await first
-        with unittest.mock.patch.object(dashboard_core, "SECONDS_A_RESTORED_AGENT_HAS_TO_START", 0.1), \
-                unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT", 0.01):
-            second_result, _ = asyncio.run(restore_twice())
+        second_result = self.restore_while_an_earlier_restore_waits_for_its_agent(request, request)
         self.assertEqual(second_result.message, '"planning": another restore is starting it')
         self.assertEqual([action for action in self.iterm2.actions if action[0] == "start"],
                          [("start", None, self.folder, "yc --resume conv-7")])
@@ -348,23 +419,13 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
 
     def test_a_restore_meanwhile_of_another_session_from_the_same_tab_opens_a_new_tab(self):
         # Saved before and after a /clear in s2; each restored by its own request.
-        self.core.an_agent_runs_in_the_tab = lambda tab_id: False  # not yet seen when the second restore comes
-
         def make_request(conversation_id):
             return ActionRequest("restore_saved_agent_sessions", {}, {
                 "saved_windows": [make_saved_window([make_saved_session(conversation_id, self.folder, terminal_session_id="s2")],
                                                     terminal_window_id="w1")],
                 "launch_command_by_agent_tool_name": {"Claude Code": "yc"}})
-
-        async def restore_both():
-            first = asyncio.ensure_future(self.core.handle_restore_saved_agent_sessions(make_request("conv-7")))
-            await asyncio.sleep(0.02)  # the first is waiting for its agent
-            await self.core.handle_restore_saved_agent_sessions(make_request("conv-8"))
-            await first
-        with unittest.mock.patch.object(dashboard_core, "SECONDS_A_RESTORED_AGENT_HAS_TO_START", 0.1), \
-                unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT", 0.01):
-            asyncio.run(restore_both())
-        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])
+        self.restore_while_an_earlier_restore_waits_for_its_agent(make_request("conv-7"), make_request("conv-8"))
+        self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder_as_typed_into_a_shell} && yc --resume conv-7\r")])
         self.assertEqual(self.iterm2.actions, [("start", "w1", self.folder, "yc --resume conv-8")])
         self.assertEqual(self.core.terminal_session_ids_restores_typed_into, set())  # released when they ended
 
@@ -396,12 +457,12 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         self.assertEqual([DashboardCore.an_agent_runs_in_the_tab(core, tab_id) for tab_id in ("t-s1", "t-s2", "gone")],
                          [True, False, False])
 
-    def test_a_session_whose_new_tab_closed_at_once_stays_saved(self):
+    def test_a_session_whose_new_window_closed_at_once_stays_saved(self):
         async def start_a_session_that_ends_at_once(window_id, folder, launch_command, after_tab_id=None):
-            return ActionResult(True)  # iTerm2 gave no window: its session ended right away
+            return ActionResult(False, "the new window closed at once")  # as iTerm2's backend does when iTerm2 gives no window
         self.iterm2.start_agent_session = start_a_session_that_ends_at_once
         action_result = restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, name="planning")])])
-        self.assertEqual(action_result, ActionResult(False, '"planning": its new tab closed at once',
+        self.assertEqual(action_result, ActionResult(False, '"planning": the new window closed at once',
                                                      details={"restored_conversation_ids": []}))
 
     def test_an_open_window_none_of_whose_sessions_was_restored_keeps_its_name(self):
@@ -412,14 +473,14 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
     def test_a_codex_session_resumes_with_the_codex_home_it_was_saved_with(self):
         restore(self.core, [make_saved_window([make_saved_session(
             "0199-ab", self.folder, terminal_session_id="s2", agent_tool_name="Codex", codex_home_folder="/Users/me/.codex-work")])])
-        self.assertEqual(self.iterm2.typed_texts,
-                         [("s2", f"\x05\x15cd {self.folder} && CODEX_HOME=/Users/me/.codex-work codex resume 0199-ab\r")])
+        self.assertEqual(self.iterm2.typed_texts, [
+            ("s2", f"\x05\x15cd {self.folder_as_typed_into_a_shell} && CODEX_HOME=/Users/me/.codex-work codex resume 0199-ab\r")])
 
     def test_a_conversation_whose_process_runs_unlisted_is_not_started_again(self):
         # Suspended with Ctrl+Z, with a newer agent started at its tab's shell: no tab lists it.
         self.core.claude_agents_by_process_id[777] = {"sessionId": "conv-7", "config_folder": None}
-        for process_is_alive, expected_typed_texts in ((True, []),
-                                                       (False, [("s2", f"\x05\x15cd {self.folder} && yc --resume conv-7\r")])):
+        for process_is_alive, expected_typed_texts in (
+                (True, []), (False, [("s2", f"\x05\x15cd {self.folder_as_typed_into_a_shell} && yc --resume conv-7\r")])):
             self.iterm2.typed_texts.clear()
             with unittest.mock.patch.object(dashboard_core, "process_is_alive", lambda process_id: process_is_alive):
                 restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s2")])])

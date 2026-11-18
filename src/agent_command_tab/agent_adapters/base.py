@@ -2,9 +2,8 @@
 
 import os
 import re
-import shlex
 
-from agent_command_tab.settings_store import split_off_the_environment_settings_of_launch_command
+from agent_command_tab.settings_store import split_command_line_into_words, split_off_the_environment_settings_of_launch_command
 
 SHELL_PROGRAM_NAMES = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "elvish"}
 # The slash command that ends the conversation and starts a new one: the menu asks first, and
@@ -23,17 +22,6 @@ def remove_environment_settings_from_launch_command(launch_command, variable_nam
     front of it isn't overridden by the launch command's own."""
     environment_settings, rest = split_off_the_environment_settings_of_launch_command(launch_command)
     return "".join(match.group(0) for match in environment_settings if match.group(1) != variable_name) + rest
-
-
-def split_command_line_into_words(command_line):
-    """Returns the words of a command line (iTerm2's `commandLine` variable for a session, or
-    None), possibly none. Unbalanced quotes fall back to splitting on spaces."""
-    if not command_line:
-        return []
-    try:
-        return shlex.split(command_line)
-    except ValueError:
-        return command_line.split()
 
 
 def split_command_line_into_program_names(command_line):
@@ -149,22 +137,22 @@ class AgentToolAdapter:
         Code, whose hooks tell instead. Asked only while find_conversation_file finds no file."""
         return None
 
-    def read_context_tokens(self, conversation_file_path):
-        """Returns how many tokens the conversation's context holds, from its file, or None.
-        The core calls this, and read_turn_started_at, in a worker thread."""
-        return None
-
-    def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
-        """Returns the size of the session's context window, for the share of it in use, or None
-        if unknown. The core calls this in a worker thread, after read_context_tokens.
+    def read_context_tokens_and_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record,
+                                                      context_tokens_read_before):
+        """Returns (how many tokens the conversation's context holds, the size of the session's
+        context window, for the share of it in use), from the conversation's file, each None if
+        unknown. Read together, since a tool may report both in one record. The core calls this,
+        and read_turn_started_at, in a worker thread.
 
         Args:
             conversation_file_path: The conversation's file.
             agent_process_id: The agent's process ID.
             claude_agent_record: The process's record from `claude agents --json`, or None.
-            context_tokens: What read_context_tokens returned.
+            context_tokens_read_before: The context tokens an earlier reading of the file gave, or
+                None: the size a window that depends on it goes by when the file's end now holds
+                no usage (after one huge line).
         """
-        return None
+        return None, None
 
     def read_turn_started_at(self, conversation_file_path):
         """Returns when the current turn began, from the conversation file, or None."""
@@ -175,21 +163,26 @@ class AgentToolAdapter:
         tell. Called in a worker thread."""
         return None
 
-    def read_turns_run_outside_the_tab(self, conversation_file_path):
-        """Returns whether the conversation's turns and commands run in a process outside the
-        tab (Codex's shared background server), which a pause of the tab's processes can't stop.
-        Called in a worker thread."""
-        return False
+    def read_turns_run_outside_the_tab(self, conversation_file_path, agent_process_id):
+        """Returns whether the turns and commands of the agent process's conversation run in a
+        process outside the tab (Codex's shared background server), which a pause of the tab's
+        processes can't stop. Called in a worker thread.
 
-    def read_whether_a_conversation_it_may_be_in_runs_outside_the_tab(self, agent_process_id):
-        """Returns whether any conversation file that may be the agent process's, when its own
-        can't be told apart from another session's, says its turns run outside the tab
-        (read_turns_run_outside_the_tab). Called in a worker thread."""
+        Args:
+            conversation_file_path: The conversation's file.
+            agent_process_id: The agent's process ID.
+        """
         return False
 
     def read_open_tool_call(self, conversation_file_path):
         """Returns the tool call the agent waits on, from the end of the conversation file
         (open_tool_call_reading), or None. Called in a worker thread."""
+        return None
+
+    def read_last_message_at(self, conversation_file_path):
+        """Returns when the last message of the conversation was written, from the end of the
+        conversation file (last_message_time_reading), or None when it isn't known. Called in a
+        worker thread."""
         return None
 
     def extract_search_texts_from_conversation_record(self, record):

@@ -16,7 +16,8 @@ import time
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSCarriageReturnCharacter, NSDeleteCharacter,
-                    NSDeleteFunctionKey, NSEnterCharacter, NSEventTypeKeyDown, NSMakeRect, NSMenu, NSOutlineView, NSScrollView, NSTableColumn, NSText, NSViewHeightSizable, NSViewMaxYMargin,
+                    NSDeleteFunctionKey, NSEnterCharacter, NSEventTypeKeyDown, NSMakeRect, NSMenu, NSOutlineView, NSScrollView,
+                    NSTableColumn, NSTableViewUniformColumnAutoresizingStyle, NSText, NSViewHeightSizable, NSViewMaxYMargin,
                     NSViewMinXMargin, NSViewWidthSizable, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskResizable,
                     NSWindowStyleMaskTitled)
 from Foundation import NSIndexSet, NSObject
@@ -29,9 +30,13 @@ from agent_command_tab.user_interface.screen_layout import WindowFrameSavingCont
 from agent_command_tab.user_interface.settings_window import is_a_plain_press_of
 
 WINDOW_TITLE = "Saved sessions"
-# Each column's title and starting width; the name column holds the tree and is the one to rename in.
-COLUMN_TITLE_AND_WIDTH_BY_COLUMN_NAME = {"name": ("Name", 230), "agent_tool_name": ("Agent", 100),
-                                         "folder": ("Folder", 240), "saved_at": ("Saved", 130)}
+# Each column's title, starting width and smallest width; the name column holds the tree and is the
+# one to rename in. The columns share the window's width (build_window), and at their smallest
+# widths all four fit in the narrowest window (settings_store.SMALLEST_WINDOW_SIZES), the Agent
+# column still showing "Claude Code" and the Saved column a whole date and time.
+COLUMN_TITLE_STARTING_WIDTH_AND_SMALLEST_WIDTH_BY_COLUMN_NAME = {
+    "name": ("Name", 230, 96), "agent_tool_name": ("Agent", 100, 84), "folder": ("Folder", 240, 80),
+    "saved_at": ("Saved", 130, 120)}
 WINDOW_SIZE = (720, 360)
 BUTTON_BAR_HEIGHT = 44
 SIDE_MARGIN = 12
@@ -132,24 +137,39 @@ class SavedSessionsWindowController(WindowFrameSavingController):
     @objc.python_method
     def show(self, saved_windows, saved_frame):
         """Opens the window listing these saved windows, at its last frame while that is on a
-        connected screen, else in the middle of the main screen; brings an open one forward."""
+        connected screen, else in the middle of the main screen; brings an open one forward as it
+        is. The owner has every change of the saved windows listed in an open one
+        (show_saved_windows), and listing them here again would end a rename under way there
+        without renaming."""
         if not self.is_open():
             self.window = self.build_window()
             place_window_at_saved_frame_or_center(self.window, saved_frame)
-        self.show_saved_windows(saved_windows)
+            self.show_saved_windows(saved_windows)
         NSApp.activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
 
     @objc.python_method
     def show_saved_windows(self, saved_windows):
-        """Lists these saved windows, each opened to show its sessions, keeping the selection of
-        the rows still listed; closes the window when nothing is saved any more."""
+        """Lists these saved windows, each opened to show its sessions unless the user closed its
+        row (a rename or a delete elsewhere in the list leaves it closed), keeping the selection
+        of the rows still listed; closes the window when nothing is saved any more.
+
+        A rename still under way when they come (a session saved or restored meanwhile changed
+        the list) is ended first, without renaming, as Esc ends it: listed under the name being
+        typed, they would end the rename with the half-typed name kept, and from inside that
+        reload the owner would have the list reloaded once more, which AppKit doesn't support.
+        When the owner lists them for a name it keeps, that rename has ended already."""
         if self.window is None:
             return
+        if self.outline_view.currentEditor() is not None:
+            self.end_the_rename_without_renaming()
         if not saved_windows:
             self.close_if_open()
             return
         selected_keys = {item.key for item in self.list_selected_items()}
+        collapsed_window_keys = {window_item.key for window_item in self.window_items
+                                 if not self.outline_view.isItemExpanded_(window_item)}
+        outline_view_has_listed_nothing_yet = not self.window_items  # just built (build_window)
         self.window_items = [make_saved_item("window", saved_window, child_items=[
             make_saved_item("session", saved_window, saved_session) for saved_session in saved_window["saved_sessions"]])
             for saved_window in saved_windows]
@@ -158,10 +178,22 @@ class SavedSessionsWindowController(WindowFrameSavingController):
                             for saved_session in saved_window["saved_sessions"]}
         self.outline_view.tableColumnWithIdentifier_("agent_tool_name").setHidden_(len(agent_tool_names) < 2)
         self.outline_view.reloadData()
-        self.outline_view.expandItem_expandChildren_(None, True)
+        if outline_view_has_listed_nothing_yet:
+            # Together with the Agent column, the columns start wider than the window does, and
+            # AppKit keeps the columns as wide as the window only from when they fit it.
+            self.outline_view.sizeToFit()
+        for window_item in self.window_items:
+            if window_item.key not in collapsed_window_keys:
+                self.outline_view.expandItem_(window_item)
         self.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(
             row for row in range(self.outline_view.numberOfRows()) if self.outline_view.itemAtRow_(row).key in selected_keys), False)
         self.update_buttons()
+
+    @objc.python_method
+    def end_the_rename_without_renaming(self):
+        """Puts back the name of the row being renamed and gives the rows the keyboard."""
+        self.outline_view.abortEditing()
+        self.window.makeFirstResponder_(self.outline_view)
 
     @objc.python_method
     def list_selected_items(self):
@@ -188,7 +220,11 @@ class SavedSessionsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def delete_items(self, items):
+        """Has the owner delete these rows' saved windows and sessions. A name being renamed is kept
+        first, as for a restore: the list without the deleted rows would otherwise end the rename
+        without renaming (show_saved_windows)."""
         if items:
+            self.window.makeFirstResponder_(self.outline_view)
             self.owner.delete_saved_items(*self.split_items_into_window_keys_and_conversation_ids(items))
 
     @objc.python_method
@@ -212,12 +248,22 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, BUTTON_BAR_HEIGHT, width, height - BUTTON_BAR_HEIGHT))
         scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         scroll_view.setHasVerticalScroller_(True)
+        # Sideways too, for columns the window has no room for even at their smallest widths (a
+        # column dragged wider, or a scroller that takes room).
+        scroll_view.setHasHorizontalScroller_(True)
         scroll_view.setAutohidesScrollers_(True)
         outline_view = SavedSessionsOutlineView.alloc().initWithFrame_(scroll_view.bounds())
-        for column_name, (title, column_width) in COLUMN_TITLE_AND_WIDTH_BY_COLUMN_NAME.items():
+        # Every column gets narrower with the window, down to its smallest width, and wider with
+        # it: AppKit's own choice squeezes the last column alone, until the Saved times are gone.
+        # The Name column stays as wide as that leaves it when a row is opened: AppKit by itself
+        # widens it for the opened rows, which pushes the last column out of the window.
+        outline_view.setColumnAutoresizingStyle_(NSTableViewUniformColumnAutoresizingStyle)
+        outline_view.setAutoresizesOutlineColumn_(False)
+        for column_name, (title, starting_width, smallest_width) in COLUMN_TITLE_STARTING_WIDTH_AND_SMALLEST_WIDTH_BY_COLUMN_NAME.items():
             column = NSTableColumn.alloc().initWithIdentifier_(column_name)
             column.setTitle_(title)
-            column.setWidth_(column_width)
+            column.setWidth_(starting_width)
+            column.setMinWidth_(smallest_width)
             column.setEditable_(column_name == "name")
             outline_view.addTableColumn_(column)
         outline_view.setOutlineTableColumn_(outline_view.tableColumns()[0])
@@ -231,6 +277,9 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         scroll_view.setDocumentView_(outline_view)
         window.contentView().addSubview_(scroll_view)
         self.outline_view = outline_view
+        # A window opened before left its rows: the new outline view has listed none of them, and
+        # would take each for one the user closed (show_saved_windows).
+        self.window_items = []
         self.restore_button = self.add_button(window, "Restore", "restoreClicked:", width - SIDE_MARGIN)
         self.delete_button = self.add_button(window, "Delete", "deleteClicked:",
                                              self.restore_button.frame().origin.x - GAP_BETWEEN_BUTTONS)
@@ -262,8 +311,7 @@ class SavedSessionsWindowController(WindowFrameSavingController):
     def control_textView_doCommandBySelector_(self, control, text_view, command_selector):
         # Esc ends a rename without renaming.
         if command_selector == "cancelOperation:":
-            self.outline_view.abortEditing()
-            self.window.makeFirstResponder_(self.outline_view)
+            self.end_the_rename_without_renaming()
             return True
         return False
 
@@ -340,9 +388,17 @@ class SavedSessionsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def start_renaming(self, item):
-        """Selects the item's row alone and puts its name into editing, wherever a header drag moved the Name column."""
-        row = self.outline_view.rowForItem_(item)
-        if row < 0:
+        """Selects the item's row alone and puts its name into editing, wherever a header drag moved the Name column.
+
+        A rename under way ends first, its name kept. The row is looked up after that, and by the
+        item's key: the owner lists the saved windows again for a name it keeps, and may have
+        listed others since the item was taken from a row (while its right-click menu was open),
+        so the item itself is no longer a row's, and the row number it had may be another's.
+        Nothing is renamed when no row has its key any more."""
+        self.window.makeFirstResponder_(self.outline_view)
+        row = next((row for row in range(self.outline_view.numberOfRows())
+                    if self.outline_view.itemAtRow_(row).key == item.key), None)
+        if row is None:
             return
         self.outline_view.selectRowIndexes_byExtendingSelection_(NSIndexSet.indexSetWithIndex_(row), False)
         self.outline_view.editColumn_row_withEvent_select_(self.outline_view.columnWithIdentifier_("name"), row, None, True)

@@ -150,10 +150,25 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         # "shell" after a turn the hooks saw end, with its background tasks running.
         self.assertEqual(build_entry(None, "shell", session_reading={"hooks_report_background_tasks_after_the_turn": True,
                                                                     "background_task_count": 1}).status, "background")
-        self.assertEqual(build_entry(None, "idle").status_reason, "from claude agents --json: iTerm2 reports no status for this tab")
+        # The core reads the status again from Claude Code's session file, so the reason doesn't name `claude agents --json`.
+        self.assertEqual(build_entry(None, "idle").status_reason,
+                         "from Claude Code's own report of its session: iTerm2 reports no status for this tab")
         self.assertEqual(build_entry("working", "idle").status, "working")  # iTerm2's status wins once there is one
         self.assertEqual(build_entry(None, "idle", {"session-1": DisplayedState("idle", 500.0, 400.0)}).status_since, 500.0)
         self.assertEqual(build_entry(None, "idle", {"session-1": DisplayedState("unknown", 500.0, 400.0)}).status_since, 1000.0)
+
+    def test_a_finished_turn_goes_on_waiting_to_be_seen_once_iterm2_reports_no_status(self):
+        # Its end was recorded while iTerm2 still had a status for the tab; Claude Code's own report says only idle.
+        def build_entry(tracking):
+            return build_snapshot([make_window("w", [make_tab("1", "claude", status=None, job_pid=42)])],
+                                  claude_agents_by_process_id={42: {"status": "idle"}},
+                                  tracking={"session-1": tracking}).monitors[0].windows[0].agent_sessions[0]
+        tracking = {"status_change_time": 950.0, "last_turn_ended_at": 900.0, "last_time_tab_was_seen": 850.0}
+        entry = build_entry(tracking)
+        self.assertEqual((entry.status, entry.status_reason), ("done", "turn finished"))
+        self.assertEqual(build_entry(dict(tracking, last_time_tab_was_seen=950.0)).status, "idle")  # seen since
+        self.assertEqual(build_entry(dict(tracking, finished_turn_cleared_at=950.0)).status, "idle")  # cleared with /clear
+        self.assertEqual(build_entry({"status_change_time": 950.0, "last_time_tab_was_seen": None}).status, "idle")  # no turn ended
 
     def test_session_readings_reach_the_status(self):
         tracking = {"session-1": {"status_change_time": 100.0, "last_time_tab_was_seen": None}}
@@ -257,7 +272,8 @@ class BuildComputerSnapshotTests(unittest.TestCase):
         self.assertEqual(list_agent_tool_names("working", "working", 501.0), ["gh"])
         self.assertEqual(list_agent_tool_names("idle", "idle", 499.0), [])  # left by Claude Code before it exited
         self.assertEqual(list_agent_tool_names("idle", "idle", None), [])  # already set when the dashboard connected
-        self.assertEqual(list_agent_tool_names("idle", None, 501.0), [])  # shown only in iTerm2's tab bar
+        # The variable was emptied after gh started: the status its row last went by doesn't count.
+        self.assertEqual(list_agent_tool_names("idle", None, 501.0), [])
 
     def test_an_unknown_program_with_a_status_does_not_replace_an_agent_whose_process_lives(self):
         agent_sessions = resolve([make_window("w", [make_tab("1", "claude", status="working", job_pid=42)])])
@@ -291,6 +307,27 @@ class BuildComputerSnapshotTests(unittest.TestCase):
                                now=1010.0).monitors[0].windows[0].agent_sessions[0]
         self.assertEqual(entry.status, "unknown")
 
+    def test_a_paused_agents_reason_says_what_is_stopped_and_names_the_processes_its_pause_left_running(self):
+        at_the_shell = [make_window("w", [make_tab("1", "-zsh", status=None, job_pid=77)])]
+        agent_sessions = resolve(at_the_shell, resolve([make_window("w", [make_tab("1", "claude", status="working", job_pid=42)])]),
+                                 alive_process_ids={42}, stopped_process_ids={42})
+
+        def build_entry_with_what_the_core_adds_for_its_pause(**added_by_the_core):
+            return build_snapshot(at_the_shell, agent_sessions={"session-1": dict(agent_sessions["session-1"], **added_by_the_core)}
+                                  ).monitors[0].windows[0].agent_sessions[0]
+        entry = build_entry_with_what_the_core_adds_for_its_pause()  # suspended with Ctrl+Z by hand
+        self.assertEqual((entry.is_paused_with_the_processes_below_it, entry.status_reason),
+                         (False, "suspended with Ctrl+Z: the agent is stopped, but commands it started may still run"))
+        entry = build_entry_with_what_the_core_adds_for_its_pause(is_paused_with_the_processes_below_it=True,
+                                                                  names_of_processes_its_pause_left_running=())
+        self.assertEqual((entry.is_paused_with_the_processes_below_it, entry.status_reason),
+                         (True, "paused: the agent and the processes below it are stopped until it is resumed"))
+        entry = build_entry_with_what_the_core_adds_for_its_pause(is_paused_with_the_processes_below_it=True,
+                                                                  names_of_processes_its_pause_left_running=("node", "sudo"))
+        self.assertEqual((entry.is_paused_with_the_processes_below_it, entry.status_reason),
+                         (True, "paused: the agent is stopped until it is resumed, but its pause left these processes below it "
+                                "running, since they run as another user (with sudo): node, sudo"))
+
     def test_background_tasks_and_child_processes_come_from_the_readings(self):
         child_process = ChildProcessEntry(77, "python3 -m unittest", 990.0, True, None, None)
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude", status="working")])], session_readings={
@@ -321,6 +358,37 @@ class BuildComputerSnapshotTests(unittest.TestCase):
                                  exited_agent_sessions_by_session_id={"session-1": (last_entry, 1500.0)})
         exited_entry = renamed.monitors[0].windows[0].agent_sessions[0]
         self.assertEqual((exited_entry.tab_title, exited_entry.tab_title_set_by_user), ("crashed run", True))
+
+    def test_an_exited_rows_tab_looked_at_after_its_agent_ended_was_last_seen_then(self):
+        last_entry = build_snapshot([make_window("w", [make_tab("1", "claude", status="working", job_pid=42)])],
+                                    tracking={"session-1": {"status_change_time": 900.0, "last_time_tab_was_seen": 950.0}}
+                                    ).monitors[0].windows[0].agent_sessions[0]
+        self.assertEqual(last_entry.last_time_tab_was_seen, 950.0)
+
+        def build_exited_entry(tracking):
+            return build_snapshot([make_window("w", [make_tab("1", "-zsh", job_pid=80)])], tracking=tracking,
+                                  exited_agent_sessions_by_session_id={"session-1": (last_entry, 1500.0)}
+                                  ).monitors[0].windows[0].agent_sessions[0]
+        # The tab's tracking goes on after its agent ended, so the list's previous tab can be the crashed one.
+        self.assertEqual(build_exited_entry({"session-1": {"status_change_time": 900.0, "last_time_tab_was_seen": 1550.0}}
+                                            ).last_time_tab_was_seen, 1550.0)
+        self.assertEqual(build_exited_entry({}).last_time_tab_was_seen, 950.0)  # no tracking: what its row last showed
+
+    def test_an_exited_row_whose_tabs_title_the_user_cleared_is_named_as_a_tab_without_one(self):
+        running = [make_window("w", [make_tab("1", "claude", status="working", job_pid=42, title="Review bot",
+                                              title_override_format="Review bot")])]
+        last_entry = build_snapshot(running).monitors[0].windows[0].agent_sessions[0]
+        self.assertEqual((last_entry.tab_title, last_entry.tab_title_set_by_user), ("Review bot", True))
+
+        def build_exited_entry(**title_of_the_tab_now):
+            return build_snapshot([make_window("w", [make_tab("1", "-zsh", job_pid=80, **title_of_the_tab_now)])],
+                                  exited_agent_sessions_by_session_id={"session-1": (last_entry, 1500.0)}
+                                  ).monitors[0].windows[0].agent_sessions[0]
+        exited_entry = build_exited_entry(title="Review bot", title_override_format="Review bot")
+        self.assertEqual((exited_entry.tab_title, exited_entry.tab_title_set_by_user), ("Review bot", True))
+        # Cleared with the row's Rename: the terminal shows its own title again, and the row its folder.
+        exited_entry = build_exited_entry(title="-zsh")
+        self.assertEqual((exited_entry.tab_title, exited_entry.tab_title_set_by_user), ("project", False))
 
     def test_the_hooks_status_is_in_the_snapshot(self):
         snapshot = build_snapshot([make_window("w", [make_tab("1", "claude")])],

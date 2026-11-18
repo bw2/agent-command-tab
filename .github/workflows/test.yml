@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         # From requires-python (>=3.10) in pyproject.toml to the newest release.
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14', '3.15']
       fail-fast: false
 
     steps:
@@ -30,6 +30,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install .
+
+      - name: Install tmux
+        # The tests that run a real tmux server are skipped where tmux isn't installed.
+        run: |
+          brew install tmux
+          tmux -V
 
       - name: Run tests
         run: python -m unittest discover -s tests -p '*_tests.py'
@@ -56,7 +62,7 @@ jobs:
 
       - name: Install each into a fresh environment and run it
         run: |
-          expected_version_line="agent-command-tab $(python -c 'import re; print(re.search(r"__version__ = \"(.+)\"", open("src/agent_command_tab/__init__.py").read()).group(1))')"
+          expected_version_line="agent-command-tab $(python -c 'import runpy; print(runpy.run_path("src/agent_command_tab/__init__.py")["__version__"])')"
           for archive in dist/*.whl dist/*.tar.gz; do
             environment="$RUNNER_TEMP/environment-for-$(basename "$archive")"
             python -m venv "$environment"

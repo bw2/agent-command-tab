@@ -41,7 +41,7 @@ SECONDS_TO_WAIT_FOR_THE_APPLESCRIPT_COMPILER = 30
 
 def find_iterm2_autolaunch_folder(preferences_file_path=ITERM2_PREFERENCES_FILE_PATH):
     """Returns the AutoLaunch folder iTerm2 runs scripts from: in the scripts folder its settings name
-    (General > Magic > "Use custom scripts folder"; one that has a space in its path or isn't a folder
+    (General > Magic > "Custom Python API Scripts Folder"; one that has a space in its path or isn't a folder
     is ignored, as iTerm2 does), else in ITERM2_SCRIPTS_FOLDER."""
     try:
         with open(preferences_file_path, "rb") as preferences_file:

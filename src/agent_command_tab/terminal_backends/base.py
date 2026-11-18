@@ -148,13 +148,15 @@ class TerminalBackend:
         one whose IDs aren't (ids_are_never_reused), or for a window that is gone."""
         return None
 
-    def remember_what_is_in_front(self):
-        """Returns what a peek (pressing and holding a tab row) changes, for put_back_what_was_in_front."""
+    async def remember_what_is_in_front(self):
+        """Returns what a peek (pressing and holding a tab row) changes, as it is now, for
+        put_back_what_was_in_front; None when there is nothing to put back."""
         return None
 
     async def put_back_what_was_in_front(self, what_was_in_front, bring_back_the_front_window):
-        """Undoes a peek: each window shows its tab from before, and, when bring_back_the_front_window,
-        the front window from before comes back to the front. Returns an ActionResult."""
+        """Undoes a peek: each tab's keys go to its pane from before, each window shows its tab from
+        before, and, when bring_back_the_front_window, the front window from before comes back to
+        the front. Returns an ActionResult."""
         raise NotImplementedError
 
     # ----- actions, each returning an ActionResult (dashboard_core_api) -----

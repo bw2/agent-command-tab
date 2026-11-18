@@ -52,6 +52,14 @@ class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
         self.assertTrue(message.endswith("run: CODEX_HOME='/Users/me/Codex Work' codex queue --thread "
                                          '01a15e4e-facd-7073-85e7-90d8392b1d54 --message="<your message>"'))
 
+    def test_the_codex_queue_command_runs_the_codex_program_the_app_queues_with(self):  # the sender's shell may find another
+        codex_docs_with_the_apps_codex_program = CODEX_DOCS._replace(codex_command_path="/opt/My Tools/codex")
+        command = "run: '/opt/My Tools/codex' queue --thread 01a15e4e-facd-7073-85e7-90d8392b1d54 --message=\"<your message>\""
+        self.assertTrue(build_message_asking_agent_session_to_talk_to_the_others(
+            "Please sync up.", PLANNING, [codex_docs_with_the_apps_codex_program],
+            [PLANNING, codex_docs_with_the_apps_codex_program]).endswith(command))
+        self.assertTrue(build_contact_info(codex_docs_with_the_apps_codex_program).endswith(command))
+
     def test_a_codex_session_sent_the_only_message_isnt_promised_messages_from_claude_code(self):
         message = build_message_asking_agent_session_to_talk_to_the_others("Please sync up.", CODEX_TESTS, [PLANNING], [CODEX_TESTS])
         self.assertTrue(message.endswith("A Codex session has no way to send a Claude Code session a message, so it can't hear "

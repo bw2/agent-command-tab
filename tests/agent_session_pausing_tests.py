@@ -5,6 +5,7 @@ and a real tmux pane, whose agent isn't paused (skipped where tmux isn't install
 
 import asyncio
 import collections
+import contextlib
 import json
 import os
 import pty
@@ -27,6 +28,7 @@ from agent_command_tab.session_status_computation import split_agent_sessions_in
 from agent_command_tab.snapshot_builder import turns_of_the_agent_run_outside_its_tab
 from agent_command_tab.terminal_backends import iterm2_terminal_backend
 from condition_waiting import SECONDS_TO_WAIT_FOR_A_REAL_PROCESS, wait_for_the_process_named_below, wait_until
+from gathered_window_builders import make_agent_session
 from private_tmux_server import TMUX_PROGRAM_PATH, start_a_private_tmux_server
 
 AGENT_PROCESS_ID = 100
@@ -105,14 +107,10 @@ class FakeProcesses:
 
 
 def run_with_patches(processes, function, *arguments, **keyword_arguments):
-    patches = processes.patch()
-    for patch in patches:
-        patch.start()
-    try:
+    with contextlib.ExitStack() as patches:
+        for patch in processes.patch():
+            patches.enter_context(patch)
         return function(*arguments, **keyword_arguments)
-    finally:
-        for patch in reversed(patches):
-            patch.stop()
 
 
 class SplitTests(unittest.TestCase):
@@ -225,6 +223,9 @@ class PauseTests(unittest.TestCase):
         self.assertFalse(action_result.succeeded)
         self.assertIn("keep running: node", action_result.message)
         self.assertEqual(pause_record.stopped_processes, [(101, STARTED_AT), (103, STARTED_AT)])  # still continued later
+        # The record names the one left running, so the paused row and a Pause repeated on it still say so.
+        self.assertEqual(pause_record.names_of_processes_left_running, ("node",))
+        self.assertEqual(agent_session_pausing.build_action_result_of_the_pause(pause_record), action_result)
 
     def test_a_process_started_before_its_parent_was_stopped_is_stopped_and_recorded_too(self):
         processes = FakeProcesses()
@@ -246,7 +247,7 @@ class PauseTests(unittest.TestCase):
         self.assertEqual((action_result.succeeded, action_result.message[-len("keep running: sudo"):]),
                          (False, "keep running: sudo"))
         self.assertEqual(processes.signals[2:], [(101, signal.SIGSTOP), (102, signal.SIGSTOP)])
-        self.assertEqual(pause_record, make_pause_record())
+        self.assertEqual(pause_record, make_pause_record()._replace(names_of_processes_left_running=("sudo",)))
 
     def test_the_dashboard_started_from_the_agents_commands_is_not_stopped(self):
         processes = FakeProcesses(process_ids_below=(101, 102, 103))
@@ -294,6 +295,20 @@ class PauseTests(unittest.TestCase):
             save_pause_records(records_file_path, {("s1", AGENT_PROCESS_ID): make_pause_record()})
             self.assertEqual(load_pause_records(records_file_path), {("s1", AGENT_PROCESS_ID): make_pause_record()})
 
+    def test_the_names_of_the_processes_a_pause_left_running_are_saved_with_its_record(self):
+        with tempfile.TemporaryDirectory() as folder:
+            records_file_path = os.path.join(folder, "paused_agent_sessions.json")
+            records = {("s1", AGENT_PROCESS_ID): make_pause_record()._replace(names_of_processes_left_running=("node", "sudo"))}
+            save_pause_records(records_file_path, records)
+            self.assertEqual(load_pause_records(records_file_path), records)
+            # A record saved before pauses recorded those names loads with none.
+            with open(records_file_path) as records_file:
+                stored_record = json.load(records_file)[0]
+            del stored_record["names_of_processes_left_running"]
+            with open(records_file_path, "w") as records_file:
+                json.dump([stored_record], records_file)
+            self.assertEqual(load_pause_records(records_file_path), {("s1", AGENT_PROCESS_ID): make_pause_record()})
+
 
 class ResumeTests(unittest.TestCase):
     def test_a_paused_agent_is_continued_with_what_its_pause_stopped_the_shell_last(self):
@@ -326,12 +341,33 @@ class ResumeTests(unittest.TestCase):
         self.assertTrue(action_result.succeeded)
         self.assertEqual(processes.signals, [(AGENT_PROCESS_ID, signal.SIGCONT)])
 
+    def test_an_agent_under_no_shell_paused_while_a_program_below_it_was_in_front_is_continued(self):
+        # The tab's own command: its pause records no shell, as one after a Ctrl+Z does, but no
+        # shell took the terminal back, and there is none to type fg into.
+        processes = FakeProcesses(shell_process_ids=(), process_ids_with_their_terminal=(101,))
+        _, pause_record = run_with_patches(processes, agent_session_pausing.pause_agent_session, AGENT_PROCESS_ID, TOOL)
+        self.assertEqual(pause_record.shell_processes, [])
+        processes.signals.clear()
+        action_result = run_with_patches(processes, agent_session_pausing.resume_agent_session, AGENT_PROCESS_ID, pause_record)
+        self.assertTrue(action_result.succeeded)
+        self.assertEqual(processes.signals, [(101, signal.SIGCONT), (102, signal.SIGCONT), (AGENT_PROCESS_ID, signal.SIGCONT)])
+        # One stopped from elsewhere, with no record, gets its CONT signal too.
+        processes = FakeProcesses(stopped_process_ids={AGENT_PROCESS_ID}, shell_process_ids=(), process_ids_with_their_terminal=(101,))
+        self.assertTrue(run_with_patches(processes, agent_session_pausing.resume_agent_session, AGENT_PROCESS_ID, None).succeeded)
+        self.assertEqual(processes.signals, [(AGENT_PROCESS_ID, signal.SIGCONT)])
+
+    def test_an_agent_with_no_record_that_ended_before_the_cont_signal_is_reported_as_ended(self):
+        processes = FakeProcesses()
+        processes.gone_process_ids = {AGENT_PROCESS_ID}
+        action_result = run_with_patches(processes, agent_session_pausing.resume_agent_session, AGENT_PROCESS_ID, None)
+        self.assertEqual(action_result, ActionResult(False, "the agent's process has ended"))
+        self.assertEqual(processes.signals, [])
+
 
 class PausingInTheCoreTests(unittest.TestCase):
     def make_core_with_one_agent_tab(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
-        core.agent_sessions = {"s1": {"process_id": AGENT_PROCESS_ID, "is_in_background": False, "is_stopped": False,
-                                      "agent_tool_name": TOOL}}
+        core.agent_sessions = {"s1": make_agent_session(AGENT_PROCESS_ID, agent_tool_name=TOOL)}
         core.gathered_windows = [{"window_id": "w1", "terminal_name": "iTerm2", "tabs": [
             {"tab_id": "t1", "first_session": {"session_id": "s1", "command_line": "claude"}}]}]
         return core
@@ -483,11 +519,63 @@ class PausingInTheCoreTests(unittest.TestCase):
         for runs_in_the_shared_server in (False, True):
             with unittest.mock.patch.object(CodexAdapter, "find_conversation_files", return_value=["rollout-a.jsonl", "rollout-b.jsonl"]), \
                     unittest.mock.patch.object(CodexAdapter, "read_turns_run_outside_the_tab",
-                                               side_effect=lambda path: runs_in_the_shared_server and path == "rollout-b.jsonl"):
+                                               side_effect=lambda path, agent_process_id: (
+                                                   runs_in_the_shared_server and path == "rollout-b.jsonl")):
                 core.conversation_files_by_session_id.pop("s1", None)  # a lookup is due
                 asyncio.run(core.update_conversation_file_readings("s1", core.agent_sessions["s1"]))
             self.assertEqual(turns_of_the_agent_run_outside_its_tab(core.session_readings_by_session_id.get("s1"), AGENT_PROCESS_ID),
                              runs_in_the_shared_server)
+
+    def test_a_codex_whose_conversation_file_wasnt_read_yet_is_asked_where_its_turns_run_before_it_is_paused(self):
+        # The file is first read seconds after the session's row shows, so nothing read says yet where its turns run.
+        for files_that_may_be_its_conversation, the_file_says_the_shared_server_runs_it, turns_run_outside_the_tab in (
+                (["rollout-a.jsonl"], True, True), (["rollout-a.jsonl"], False, False),
+                ([], True, False)):  # no file yet: it has had no prompt, so no turn can run on
+            core = self.make_core_with_one_agent_tab()
+            core.agent_sessions["s1"] = make_agent_session(AGENT_PROCESS_ID, CodexAdapter(), "Codex")
+            with unittest.mock.patch.object(CodexAdapter, "find_conversation_files", return_value=files_that_may_be_its_conversation), \
+                    unittest.mock.patch.object(CodexAdapter, "read_turns_run_outside_the_tab",
+                                               return_value=the_file_says_the_shared_server_runs_it), \
+                    unittest.mock.patch.object(dashboard_core, "pause_agent_session",
+                                               return_value=(ActionResult(False, "can't be paused"), None)) as pause:
+                asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
+            self.assertEqual(pause.call_args.kwargs["turns_run_outside_the_tab"], turns_run_outside_the_tab)
+
+    def test_an_agent_that_another_replaced_in_the_tab_while_it_was_asked_where_its_turns_run_isnt_paused(self):
+        core = self.make_core_with_one_agent_tab()
+        core.agent_sessions["s1"] = make_agent_session(AGENT_PROCESS_ID, CodexAdapter(), "Codex")
+
+        def find_no_file_while_another_agent_starts_in_the_tab(agent_process_id):
+            core.agent_sessions = {"s1": make_agent_session(AGENT_PROCESS_ID + 1, CodexAdapter(), "Codex")}  # as a snapshot would
+            return []
+        with unittest.mock.patch.object(CodexAdapter, "find_conversation_files",
+                                        side_effect=find_no_file_while_another_agent_starts_in_the_tab), \
+                unittest.mock.patch.object(dashboard_core, "pause_agent_session",
+                                           return_value=(ActionResult(True), make_pause_record())) as pause:
+            action_result = asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
+        pause.assert_not_called()
+        self.assertEqual(action_result, ActionResult(False, '"a tab": that tab no longer runs the agent'))
+
+    def test_a_pause_that_left_processes_running_says_so_when_it_is_repeated_and_marks_the_agent_with_their_names(self):
+        core = self.make_core_with_one_agent_tab()
+        pause_record = make_pause_record()._replace(names_of_processes_left_running=("sudo",))
+        result_of_the_pause = agent_session_pausing.build_action_result_of_the_pause(pause_record)
+        with unittest.mock.patch.object(dashboard_core, "pause_agent_session", return_value=(result_of_the_pause, pause_record)) as pause:
+            asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
+            result_of_the_repeated_pause = asyncio.run(core.handle_pause_agent_sessions(
+                ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
+        self.assertEqual(pause.call_count, 1)
+        self.assertEqual(core.pause_record_by_tab_and_agent, {("s1", AGENT_PROCESS_ID): pause_record})  # kept, so Resume continues the rest
+        self.assertFalse(result_of_the_repeated_pause.succeeded)  # not "paused already", as after a pause that stopped them all
+        self.assertTrue(result_of_the_repeated_pause.message.endswith("keep running: sudo"))
+        with unittest.mock.patch.object(dashboard_core, "pause_has_ended", return_value=False):
+            core.continue_the_processes_of_agents_no_longer_paused()
+            self.assertEqual((core.agent_sessions["s1"]["is_paused_with_the_processes_below_it"],
+                              core.agent_sessions["s1"]["names_of_processes_its_pause_left_running"]), (True, ("sudo",)))
+            core.pause_record_by_tab_and_agent = {("s1", AGENT_PROCESS_ID): make_pause_record()}  # a pause that stopped them all
+            core.continue_the_processes_of_agents_no_longer_paused()
+            self.assertEqual((core.agent_sessions["s1"]["is_paused_with_the_processes_below_it"],
+                              core.agent_sessions["s1"]["names_of_processes_its_pause_left_running"]), (True, ()))
 
     def test_a_pause_waits_for_a_message_being_typed_into_the_tab(self):  # its paste and Enter stay together
         core = self.make_core_with_one_agent_tab()

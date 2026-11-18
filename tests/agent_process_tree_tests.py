@@ -14,8 +14,9 @@ from agent_command_tab.agent_process_tree import (ProcessInfo, an_agent_program_
                                                   build_command_text, child_process_is_a_background_shell,
                                                   choose_command_the_agent_is_waiting_on,
                                                   choose_detached_processes_of_the_conversation, choose_helper_process_ids,
-                                                  compute_cpu_percent, find_the_command_a_claude_code_shell_runs,
-                                                  list_child_processes_of_the_agent, list_descendant_processes,
+                                                  compute_cpu_percent, find_process_ids_of_the_shells_of_claude_code_tasks,
+                                                  find_the_command_a_claude_code_shell_runs,
+                                                  list_child_process_ids, list_child_processes_of_the_agent, list_descendant_processes,
                                                   list_detached_processes, read_child_processes,
                                                   read_name_the_process_was_started_as,
                                                   read_process_info, read_process_resource_usage,
@@ -37,10 +38,30 @@ WAIT_LOOP_SLEEP = ProcessInfo(5, 4, "sleep", 1050.0)
 def processes_below_the_agent(descendants, arguments_by_process_id):
     """Has agent_process_tree find these processes below the agent, with these arguments (none
     for the others) and no environment."""
-    with unittest.mock.patch("agent_command_tab.agent_process_tree.list_descendant_processes", lambda process_id: descendants), \
+    with unittest.mock.patch("agent_command_tab.agent_process_tree.list_descendant_processes",
+                             lambda process_id, maximum_depth: descendants), \
             unittest.mock.patch("agent_command_tab.agent_process_tree.read_process_arguments_and_environment",
                                 lambda process_id: (arguments_by_process_id.get(process_id, []), {})):
         yield
+
+
+@contextlib.contextmanager
+def sleep_running_eight_shells_down():
+    """Starts `/bin/sleep 30` at the bottom of eight shells, each the child of the one before, in a
+    process group of their own. Yields (the outermost shell's process ID, the sleep's ProcessInfo)
+    once the sleep runs, and kills them all at the end."""
+    command = "/bin/sleep 30"
+    for _ in range(8):  # each shell waits on a background child, so none of them is replaced by its command
+        command = f"/bin/sh -c {shlex.quote(command + ' & wait')}"
+    chain = subprocess.Popen(command, shell=True, start_new_session=True)
+    try:
+        sleep_process = wait_for_the_process_named_below("sleep", chain.pid, maximum_depth=None)
+        if sleep_process is None:
+            raise AssertionError("the sleep at the bottom of the shells never ran")
+        yield chain.pid, sleep_process
+    finally:
+        os.killpg(chain.pid, signal.SIGKILL)
+        chain.wait()
 
 
 class CommandTheAgentIsWaitingOnTests(unittest.TestCase):
@@ -90,6 +111,52 @@ class CommandTheAgentIsWaitingOnTests(unittest.TestCase):
         self.assertEqual(choose_command_the_agent_is_waiting_on(
             [WAIT_LOOP_SHELL, WAIT_LOOP_SLEEP], TURN_STARTED_AT, frozenset(), NOW, read_process_arguments=lambda process_id: ["zsh"]),
             (WAIT_LOOP_SLEEP, 1050.0))
+
+    def test_codexs_own_program_below_its_node_launcher_is_not_a_command_but_what_it_starts_is(self):
+        # Agent 1 is Codex's node launcher in a session started with its first prompt: its own
+        # program (2) is as young as the turn.
+        codex_program = ProcessInfo(2, 1, "codex", 1000.1)
+        self.assertIsNone(choose_command_the_agent_is_waiting_on([codex_program], TURN_STARTED_AT, {"codex-code-mode-host"}, NOW))
+        shell, pytest_process = ProcessInfo(3, 2, "zsh", 1040.0), ProcessInfo(4, 3, "pytest", 1040.1)
+        self.assertEqual(choose_command_the_agent_is_waiting_on(
+            [codex_program, shell, pytest_process], TURN_STARTED_AT, {"codex-code-mode-host"}, NOW), (pytest_process, 1040.0))
+        # A `codex exec` that the agent's shell tool runs is a command: a shell started it, not the agent process.
+        inner_shell, inner_codex = ProcessInfo(5, 2, "bash", 1050.0), ProcessInfo(6, 5, "codex", 1050.1)
+        self.assertEqual(choose_command_the_agent_is_waiting_on(
+            [codex_program, inner_shell, inner_codex], TURN_STARTED_AT, {"codex-code-mode-host"}, NOW), (inner_codex, 1050.0))
+
+    def test_a_command_claude_code_runs_in_the_background_is_not_the_one_the_agent_waits_on(self):
+        # Started in this turn: first a command in the background, then the one the agent waits on.
+        background_shell, background_python = ProcessInfo(3, 1, "bash", 1001.0), ProcessInfo(4, 3, "python3", 1001.1)
+        foreground_shell, foreground_python = ProcessInfo(5, 1, "bash", 1050.0), ProcessInfo(6, 5, "python3", 1050.1)
+        descendants = [background_shell, background_python, foreground_shell, foreground_python]
+        # By the processes alone, the older of the two is taken.
+        self.assertEqual(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, frozenset(), NOW),
+                         (background_python, 1001.0))
+        # Each shell writes to its task's output file, and the hooks list the first task as running in the background.
+        paths_written_to_by_process_id = {3: {1: "/tmp/claude-502/-repo/tasks/b7x1ehsbe.output", 2: "/tmp/claude-502/-repo/tasks/b7x1ehsbe.output"},
+                                          5: {1: "/tmp/claude-502/-repo/tasks/bq2m4k0wd.output"}}
+        with unittest.mock.patch("agent_command_tab.agent_process_tree.list_the_files_a_process_has_open",
+                                 lambda process_id, only_those_open_for_writing: paths_written_to_by_process_id.get(process_id)):
+            background_shell_process_ids = find_process_ids_of_the_shells_of_claude_code_tasks(descendants, {"b7x1ehsbe"})
+        self.assertEqual(background_shell_process_ids, frozenset({3}))
+        self.assertEqual(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, frozenset(), NOW, background_shell_process_ids),
+                         (foreground_python, 1050.0))
+        # Once only the background command runs, the agent waits on none.
+        self.assertIsNone(choose_command_the_agent_is_waiting_on(descendants[:2], TURN_STARTED_AT, frozenset(), NOW,
+                                                                 background_shell_process_ids))
+        # Without background tasks, or before the hooks have listed them, no process's files are read.
+        with unittest.mock.patch("agent_command_tab.agent_process_tree.list_the_files_a_process_has_open") as list_the_files:
+            self.assertEqual([find_process_ids_of_the_shells_of_claude_code_tasks(descendants, task_ids) for task_ids in (set(), None)],
+                             [frozenset(), frozenset()])
+        list_the_files.assert_not_called()
+
+    def test_a_command_more_than_six_shells_down_is_the_one_the_agent_waits_on(self):
+        with sleep_running_eight_shells_down() as (outermost_shell_process_id, sleep_process):
+            # The processes below an agent as the dashboard lists them: at every level. (A command counts once it has run 2 s.)
+            command_process, _ = choose_command_the_agent_is_waiting_on(
+                list_descendant_processes(outermost_shell_process_id), time.time() - 60, frozenset(), time.time() + 60)
+            self.assertEqual(command_process, sleep_process)
 
 
 class ChildProcessTests(unittest.TestCase):
@@ -146,6 +213,17 @@ class ChildProcessTests(unittest.TestCase):
         self.assertEqual((entry["command_text"], entry["command_started_at"]), ("python3 train.py", 1030.0))
         self.assertFalse(entry["is_background_shell"])  # it may be the command the agent waits on
         self.assertTrue(entry_in_a_later_turn["is_background_shell"])
+
+    def test_the_arguments_of_a_child_that_is_shown_as_itself_are_read_once(self):
+        python_process = ProcessInfo(2, 1, "python3", 1000.0)  # a command the agent runs without a shell
+        read_arguments_and_environment = unittest.mock.Mock(return_value=(["python3", "train.py"], {}))
+        with unittest.mock.patch("agent_command_tab.agent_process_tree.list_descendant_processes",
+                                 lambda process_id, maximum_depth: [python_process]), \
+                unittest.mock.patch("agent_command_tab.agent_process_tree.read_process_arguments_and_environment",
+                                    read_arguments_and_environment):
+            (entry,) = read_child_processes(1, False, None, False, NOW)
+        self.assertEqual(entry["command_text"], "python3 train.py")
+        read_arguments_and_environment.assert_called_once_with(2)  # for whether it is a Claude Code shell, and for its name
 
     def test_a_command_is_named_by_its_program_and_arguments(self):
         self.assertEqual(build_command_text(["/opt/homebrew/bin/python3", "-m", "unittest"], "Python"), "python3 -m unittest")
@@ -272,6 +350,10 @@ class ChildProcessTests(unittest.TestCase):
                     {"task": ("b3jvsqvs2", False, False), "loop sent to /dev/null": ("b5loop", False, False),
                      "other file": (None, True, False), "pipe": (None, False, False), "monitor": (None, False, True),
                      "device": (None, False, False)})
+                # The shell of a task that runs in the background is found among them by that file.
+                self.assertEqual(find_process_ids_of_the_shells_of_claude_code_tasks(
+                    [read_process_info(shell.pid) for shell in shells.values()], {"b5loop"}),
+                    frozenset({shells["loop sent to /dev/null"].pid}))
             finally:
                 for shell in shells.values():
                     os.killpg(shell.pid, signal.SIGKILL)
@@ -298,6 +380,14 @@ class ChildProcessTests(unittest.TestCase):
         finally:
             child.kill()
             child.wait()
+
+    def test_a_command_more_than_six_shells_down_names_its_row_and_counts_as_left_in_the_background(self):
+        with sleep_running_eight_shells_down() as (outermost_shell_process_id, _):
+            # (A child counts once it has run 2 s.)
+            (entry,) = [entry for entry in read_child_processes(os.getpid(), False, None, False, time.time() + 60)
+                        if entry["child"].process_id == outermost_shell_process_id]
+            self.assertEqual(entry["command_text"], "sleep 30")  # not the outermost shell
+            self.assertTrue(entry["is_background_shell"])  # between turns, a shell with a command running in it
 
 
 class HelperProcessTests(unittest.TestCase):
@@ -339,6 +429,19 @@ class ProcessTreeReadingTests(unittest.TestCase):
         self.assertIsNone(read_process_info(999999))
         self.assertEqual(read_name_the_process_was_started_as(999999), "")
         self.assertIsNone(list_the_files_a_process_has_open(999999))
+        self.assertEqual(list_child_process_ids(999999), [])
+
+    def test_every_child_is_listed_when_there_are_more_than_the_first_list_has_room_for(self):
+        children = [subprocess.Popen(["/bin/sleep", "30"]) for _ in range(5)]
+        try:
+            # As for launchd, whose children can outnumber the IDs asked for at first.
+            with unittest.mock.patch("agent_command_tab.agent_process_tree.CHILD_PROCESS_IDS_LISTED_AT_FIRST", 2):
+                child_process_ids = list_child_process_ids(os.getpid())
+            self.assertLessEqual({child.pid for child in children}, set(child_process_ids))
+        finally:
+            for child in children:
+                child.kill()
+                child.wait()
 
     def test_the_folders_and_files_a_process_has_open_only_for_reading_are_listed_too(self):  # as agy's presence lock
         with tempfile.TemporaryDirectory() as folder:
@@ -388,25 +491,14 @@ class ResourceUsageTests(unittest.TestCase):
         self.assertIsNone(read_process_tree_resource_usage(child.pid))  # gone
 
     def test_resource_totals_reach_a_command_more_than_six_levels_down(self):
-        command = "/bin/sleep 5"
-        for _ in range(8):  # each shell waits on a background child, so none of them is replaced by its command
-            command = f"/bin/sh -c {shlex.quote(command + ' & wait')}"
-        chain = subprocess.Popen(command, shell=True, start_new_session=True)
-        try:
-            deepest_command = wait_for_the_process_named_below("sleep", os.getpid(), maximum_depth=None)
-            self.assertIsNotNone(deepest_command)
-            self.assertNotIn(deepest_command.process_id,
-                             [process.process_id for process in list_descendant_processes(os.getpid())])  # below six levels
-            sleep_memory, _ = read_process_resource_usage(deepest_command.process_id)
-            usages_within_six_levels = [read_process_resource_usage(process_id) for process_id in
-                                        [os.getpid()] + [process.process_id for process in list_descendant_processes(os.getpid())]]
-            memory_within_six_levels = sum(usage[0] for usage in usages_within_six_levels if usage is not None)
-            tree_memory, _ = read_process_tree_resource_usage(os.getpid())
-            # The shells below six levels and the sleep at the bottom are counted too (the six-level limit left them out).
-            self.assertGreaterEqual(tree_memory - memory_within_six_levels, sleep_memory)
-        finally:
-            os.killpg(chain.pid, signal.SIGKILL)
-            chain.wait()
+        with sleep_running_eight_shells_down() as (outermost_shell_process_id, sleep_process):
+            self.assertNotIn(sleep_process.process_id, [process.process_id for process in list_descendant_processes(
+                outermost_shell_process_id, maximum_depth=6)])  # more than six levels down
+            # Only the sleep is given any memory and CPU time here (not the shells above it, which
+            # really use some), so the totals are these exactly when the sleep itself is counted.
+            with unittest.mock.patch("agent_command_tab.agent_process_tree.read_process_resource_usage",
+                                     lambda process_id: (4096, 1.5) if process_id == sleep_process.process_id else (0, 0.0)):
+                self.assertEqual(read_process_tree_resource_usage(outermost_shell_process_id), (4096, 1.5))
 
     def test_a_finished_childs_cpu_time_stays_in_the_tree(self):
         _, cpu_seconds_before = read_process_tree_resource_usage(os.getpid())

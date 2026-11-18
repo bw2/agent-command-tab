@@ -1,7 +1,6 @@
 """The settings window. Every change applies at once and is saved (see settings_store)."""
 
 import collections
-import threading
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSBezierPath, NSBox, NSBoxCustom, NSBoxSeparator, NSButton,
@@ -14,8 +13,8 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSBezierPath, NSBox, NSBoxCus
 from Foundation import NSURL
 from PyObjCTools import AppHelper
 
-from agent_command_tab.settings_store import (LIST_COLUMNS, SMALLEST_WINDOW_SIZES, find_launch_command_problem,
-                                              is_valid_setting_value, replace_agent_tool_field)
+from agent_command_tab.settings_store import (LIST_COLUMNS, SMALLEST_WINDOW_SIZES, is_valid_setting_value,
+                                              replace_agent_tool_field)
 from agent_command_tab.start_with_iterm2 import START_WITH_ITERM2_SETTING_TITLE
 from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_TITLES, ESCAPE_CHARACTER
 from agent_command_tab.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
@@ -69,7 +68,7 @@ SIDEBAR_EDGE_TITLES = {"right": "Right", "left": "Left"}
 # The tab rows' information columns, in the order the Columns section lists them (memory before
 # CPU, unlike LIST_COLUMNS). Each is labeled with the title over its column in the list (COLUMN_TITLES).
 LIST_COLUMN_NAMES_IN_SETTINGS_ORDER = ["state", "context_tokens", "created_time", "existence_duration",
-                                       "memory_usage", "cpu_usage"]
+                                       "time_since_last_message", "memory_usage", "cpu_usage"]
 # One row in a section's box: its label at the left, its control at the right, and the units after the
 # control. A row that continues the one above it (a harness's command; the accessibility button under
 # the shortcut) has no line above it, and its label is indented.
@@ -89,7 +88,7 @@ class FlippedView(NSView):
 
 class LaunchCommandField(NSTextField):
     """A launch command's field, outlined in red while its command can't be run
-    (show_launch_command_problem). Drawn here rather than as its layer's border, whose color is a
+    (show_launch_command_problems). Drawn here rather than as its layer's border, whose color is a
     CGColor, which PyObjC without its Quartz package passes only as an untyped pointer, with a
     warning each time."""
 
@@ -198,7 +197,8 @@ class SettingsWindow(NSWindow):
 class SettingsWindowController(WindowFrameSavingController):
     """Builds the settings window and reports each change to the owner's settings_changed(settings),
     its moves and resizes to window_frame_changed("settings_window_frame", frame), and its closing
-    to settings_window_closed()."""
+    to settings_window_closed(). It asks the owner's find_installed_agent_tools(agent_tools) to
+    check the launch commands, which answers with show_launch_command_problems."""
 
     frame_setting_name = "settings_window_frame"
 
@@ -215,14 +215,16 @@ class SettingsWindowController(WindowFrameSavingController):
     def show(self, settings):
         """Opens the window showing these settings, at its last frame while that is on a connected
         screen, else in the middle of the main screen, as tall as its rows; brings an open one
-        forward as it is, which every settings change reaches already (it was closed and built
-        again, losing its scroll position and an edit under way)."""
+        forward as it is, since every settings change already reaches it (building it again would
+        lose its scroll position and an edit under way)."""
         if self.is_open():
             NSApp.activateIgnoringOtherApps_(True)
             self.window.makeKeyAndOrderFront_(None)
             return
         self.settings = dict(settings)
         self.window = self.build_window()
+        # The owner checks whether each launch command can be run and answers with show_launch_command_problems.
+        self.owner.find_installed_agent_tools(settings["agent_tools"])
         place_window_at_saved_frame_or_center(self.window, settings["settings_window_frame"])
         # The saved height can be from other sections, shown for another "Show as", or from older margins.
         self.fit_window_height_to_rows()
@@ -285,7 +287,7 @@ class SettingsWindowController(WindowFrameSavingController):
         self.column_switches = {column_name: self.make_switch(column_name in self.settings["shown_columns"])
                                 for column_name in LIST_COLUMN_NAMES_IN_SETTINGS_ORDER}
         self.edge_note = make_section_note_field()
-        # Under the Harnesses box while none of the tools is installed (show_whether_no_harness_is_installed).
+        # Under the Harnesses box while none of the tools' launch commands can be run (show_whether_no_launch_command_can_be_run).
         self.harness_note = make_section_note_field()
         # A General section first: "Show as", the keyboard shortcut with its accessibility button
         # under it, then Appearance, then whether iTerm2 starts the app.
@@ -347,17 +349,17 @@ class SettingsWindowController(WindowFrameSavingController):
         window.setInitialFirstResponder_(self.show_as_popup)
         window.setMinSize_(SMALLEST_WINDOW_SIZES["settings_window_frame"])
         window.setDelegate_(self)
-        for launch_command_field in self.launch_command_fields:
-            self.check_launch_command(launch_command_field)
         return window
 
     @objc.python_method
     def find_what_the_layout_depends_on(self, show_as):
         """The things that change which rows are laid out: the "Show as" choice (which sections show),
         whether the accessibility button shows, and whether the sidebar's note and the Harnesses
-        note say something."""
-        return (show_as, bool(self.accessibility_settings_button.isHidden()), not self.edge_note.stringValue(),
-                not self.harness_note.stringValue())
+        note say something. The sidebar's note counts only while its section shows: laying the
+        rows out again for a note that isn't among them would fit the window's height again, undoing
+        a height the user gave it, for nothing."""
+        return (show_as, bool(self.accessibility_settings_button.isHidden()),
+                show_as == "sidebar" and bool(self.edge_note.stringValue()), not self.harness_note.stringValue())
 
     @objc.python_method
     def lay_out_sections(self, show_as):
@@ -376,13 +378,21 @@ class SettingsWindowController(WindowFrameSavingController):
     @objc.python_method
     def lay_out_sections_again_if_needed(self, show_as):
         """Lays the sections out again, and fits the window's height to them, once a section shows
-        or hides, or the accessibility button or a note does."""
+        or hides, or the accessibility button or a note does. A launch command or width being
+        typed goes on being typed in its field, unsaved: a note can appear or go at any moment (a
+        check of the launch commands answers, a monitor is connected), and the layout, which takes
+        every field out and puts it back, would otherwise end the edit and save the half-typed
+        text. Only when its field is no longer among the rows (the width, once "Show as" isn't
+        Sidebar) is it saved, as when the window closes."""
         if self.find_what_the_layout_depends_on(show_as) == self.layout_depended_on:
             return
-        # A width being typed is saved first, as when the window closes: its field would end
-        # editing, and save, as it is taken out during the layout.
         control_that_had_the_keyboard = find_the_control_that_has_the_keyboard(self.window)
-        self.window.makeFirstResponder_(None)
+        editor = control_that_had_the_keyboard.currentEditor() if isinstance(control_that_had_the_keyboard, NSTextField) else None
+        if editor is not None:
+            # A copy: PyObjC would hand what string() returns back to AppKit as the editor's own
+            # text, which by then is the field's saved one again.
+            text_being_typed, selected_range = str(editor.string()), editor.selectedRange()
+            control_that_had_the_keyboard.abortEditing()  # ends the edit without saving
         self.lay_out_sections(show_as)
         self.window.recalculateKeyViewLoop()  # Tab goes through the fields shown now
         # Taken out of the window with the views it was among; the keyboard goes back to the control
@@ -390,6 +400,14 @@ class SettingsWindowController(WindowFrameSavingController):
         self.window.setInitialFirstResponder_(self.show_as_popup)
         if control_that_had_the_keyboard is not None and control_that_had_the_keyboard.window() is self.window:
             self.window.makeFirstResponder_(control_that_had_the_keyboard)
+            if editor is not None:
+                editor_afterwards = control_that_had_the_keyboard.currentEditor()
+                editor_afterwards.setString_(text_being_typed)
+                editor_afterwards.setSelectedRange_(selected_range)
+                editor_afterwards.scrollRangeToVisible_(selected_range)  # in a command longer than its field
+        elif editor is not None:
+            control_that_had_the_keyboard.setStringValue_(text_being_typed)
+            self.controlChanged_(control_that_had_the_keyboard)
         self.fit_window_height_to_rows()
 
     @objc.python_method
@@ -570,11 +588,16 @@ class SettingsWindowController(WindowFrameSavingController):
                                              if self.column_switches[column_name].state()]
         elif sender in self.launch_command_fields:
             tool_index = self.launch_command_fields.index(sender)
-            launch_command = sender.stringValue().strip() or new_settings["agent_tools"][tool_index]["launch_command"]
+            launch_command_before = new_settings["agent_tools"][tool_index]["launch_command"]
+            launch_command = sender.stringValue().strip() or launch_command_before
             sender.setStringValue_(launch_command)
             new_settings["agent_tools"] = replace_agent_tool_field(new_settings["agent_tools"], tool_index, "launch_command",
                                                                    launch_command)
-            self.check_launch_command(sender)
+            if launch_command == launch_command_before and sender.shows_a_problem:
+                # A command that couldn't be run, entered again as it was, is checked again: its
+                # program may have been installed since. (The owner itself starts the check of a
+                # changed command as it takes the new settings below.)
+                self.owner.find_installed_agent_tools(new_settings["agent_tools"])
         elif sender in self.include_switches:
             new_settings["agent_tools"] = replace_agent_tool_field(
                 new_settings["agent_tools"], self.include_switches.index(sender), "is_included", bool(sender.state()))
@@ -590,34 +613,38 @@ class SettingsWindowController(WindowFrameSavingController):
         self.accessibility_settings_button.setHidden_(not self.owner.global_shortcut_lacks_permission())
 
     @objc.python_method
-    def check_launch_command(self, launch_command_field):
-        """Checks, off the main thread, that the field's command can be run, then gives the field
-        a red border and an explanation if it can't (asking the login shell can take a moment)."""
-        launch_command = launch_command_field.stringValue()
-
-        def check():
-            problem = find_launch_command_problem(launch_command)
-            AppHelper.callAfter(self.show_launch_command_problem, launch_command_field, launch_command, problem)
-        threading.Thread(target=check, name="launch-command-check", daemon=True).start()
+    def show_launch_command_problems(self, problem_by_launch_command):
+        """Gives each launch command's field a red border and an explanation while its command
+        can't be run, from the owner's check of the launch commands (find_installed_agent_tools):
+        {launch command: "" when it can be run, else why not}. That one check, which the window
+        asks for as it opens and the owner starts for an edited command, also decides which tools
+        the menus offer, so no command is checked twice (asking the login shell takes a moment).
+        Each field shows the answer about its saved command, not about a text being typed in it:
+        typed back to the saved command, the field would otherwise have missed that answer for
+        good. A field whose command was changed since the check keeps its look until that
+        change's own check answers. Does nothing before the window was first opened."""
+        if self.window is None:
+            return
+        for launch_command_field, agent_tool in zip(self.launch_command_fields, self.owner.settings["agent_tools"]):
+            problem = problem_by_launch_command.get(agent_tool["launch_command"])
+            if problem is not None:
+                launch_command_field.shows_a_problem = bool(problem)
+                launch_command_field.setNeedsDisplay_(True)
+                launch_command_field.setToolTip_(problem or None)
+        self.show_whether_no_launch_command_can_be_run()
 
     @objc.python_method
-    def show_launch_command_problem(self, launch_command_field, checked_launch_command, problem):
-        if launch_command_field.stringValue() != checked_launch_command:
-            return  # edited since; that edit's own check decides
-        launch_command_field.shows_a_problem = bool(problem)
-        launch_command_field.setNeedsDisplay_(True)
-        launch_command_field.setToolTip_(problem or None)
-        self.show_whether_no_harness_is_installed()
-
-    @objc.python_method
-    def show_whether_no_harness_is_installed(self):
-        """Says under the Harnesses box, while every tool's launch command shows a problem (none is
-        installed, as the menus that start agent sessions find too), "None of these are installed:
-        Claude Code, Codex, agy". A single tool that isn't installed shows only in its field."""
-        no_harness_is_installed = all(launch_command_field.shows_a_problem for launch_command_field in self.launch_command_fields)
+    def show_whether_no_launch_command_can_be_run(self):
+        """Says under the Harnesses box, while every tool's launch command shows a problem (so the
+        menus that start agent sessions offer no tool), "None of these launch commands can be run:
+        Claude Code, Codex, agy". It doesn't say the tools aren't installed: a command with a
+        mistyped path can't be run either, and each field's own explanation says which it is. A
+        single command that can't be run shows only in its field."""
+        no_launch_command_can_be_run = all(launch_command_field.shows_a_problem for launch_command_field in self.launch_command_fields)
         self.harness_note.setStringValue_(
-            "None of these are installed: " + ", ".join(agent_tool["agent_tool_name"] for agent_tool in self.settings["agent_tools"])
-            if no_harness_is_installed else "")
+            "None of these launch commands can be run: "
+            + ", ".join(agent_tool["agent_tool_name"] for agent_tool in self.settings["agent_tools"])
+            if no_launch_command_can_be_run else "")
         self.lay_out_sections_again_if_needed(self.layout_depended_on[0])  # the note can appear or go
 
     @objc.python_method

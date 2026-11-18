@@ -2,7 +2,7 @@
 
 import objc
 from AppKit import (NSApp, NSAttributedString, NSColor, NSEventMaskLeftMouseDown, NSEventMaskLeftMouseUp,
-                    NSEventMaskRightMouseUp, NSEventTypeLeftMouseDown, NSEventTypeRightMouseUp, NSFont,
+                    NSEventMaskRightMouseUp, NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSEventTypeRightMouseUp, NSFont,
                     NSFontAttributeName, NSFontWeightBold, NSForegroundColorAttributeName, NSMenu, NSMenuItem,
                     NSMinYEdge, NSMutableAttributedString, NSStatusBar, NSVariableStatusItemLength, NSWorkspace)
 from Foundation import NSObject, NSProcessInfo
@@ -10,6 +10,7 @@ from Foundation import NSObject, NSProcessInfo
 from agent_command_tab.session_status_computation import pick_most_urgent_state
 from agent_command_tab.snapshot_data_classes import iterate_agent_session_entries
 from agent_command_tab.user_interface.agent_session_outline_view import RESTORE_SESSIONS_TOOL_TIP
+from agent_command_tab.user_interface.control_helpers import add_menu_item_that_sends_action_to_target
 from agent_command_tab.user_interface.named_colors import build_color_from_name
 from agent_command_tab.user_interface.row_text_rendering import DOT_GLYPH_AND_COLOR_BY_STATE
 
@@ -113,12 +114,23 @@ class MenuBarStatusItemController(NSObject):
         self.status_item.button().setAttributedTitle_(title)
 
     def statusItemClicked_(self, sender):
+        # The button sends this for its three mouse events (initWithPopover_owner_), and also for a
+        # press without the mouse: the accessibility "Press" action, which VoiceOver sends. Such a
+        # press has no event of its own: the current event is then None (the app took no event
+        # yet) or the last event the app took. Only when that is none of the three mouse events
+        # does it show that the press came without the mouse; the press then counts as a left click.
         event = NSApp.currentEvent()
-        if event.type() == NSEventTypeLeftMouseDown:
+        event_type = event.type() if event is not None else None
+        if event_type == NSEventTypeLeftMouseDown:
             self.left_button_pressed_at = event.timestamp()
-        elif event.type() == NSEventTypeRightMouseUp:
+        elif event_type == NSEventTypeRightMouseUp:
             self.show_right_click_menu()
         else:
+            if event_type != NSEventTypeLeftMouseUp:
+                # A press without the mouse counts as a left click whose mouse-down wasn't seen: the
+                # time of an earlier click's mouse-down would keep it from opening a dropdown that
+                # closed since that click.
+                self.left_button_pressed_at = 0
             self.owner.menu_bar_icon_clicked()
 
     @objc.python_method
@@ -157,8 +169,9 @@ class MenuBarStatusItemController(NSObject):
         NSApp.activateIgnoringOtherApps_(True)  # so the list can take typing (rename)
         list_panel_controller = self.popover.contentViewController()
         list_panel_controller.list_controller.prepare_to_appear()  # the list skips redraws while closed
-        list_panel_controller.fit_size_to_rows()
         button = self.status_item.button()
+        # Sized for the screen the icon is on, where the dropdown opens: not always the first screen.
+        list_panel_controller.fit_size_to_rows(button.window().screen())
         self.popover.showRelativeToRect_ofView_preferredEdge_(button.bounds(), button, NSMinYEdge)
 
     @objc.python_method
@@ -178,10 +191,7 @@ class MenuBarStatusItemController(NSObject):
             if title is None:
                 menu.addItem_(NSMenuItem.separatorItem())
                 continue
-            menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action_name, "")
-            menu_item.setTarget_(self)
-            menu_item.setToolTip_(tool_tip)
-            menu.addItem_(menu_item)
+            add_menu_item_that_sends_action_to_target(menu, title, action_name, self, tool_tip)
         return menu
 
     @objc.python_method

@@ -1,5 +1,8 @@
 """Which monitor each window is on. Frames are (x, y, width, height) in one shared coordinate system."""
 
+# A docked sidebar never makes an iTerm2 window narrower than this (compute_frame_clear_of_area), and
+# is never so wide that less than this is left beside it on its monitor.
+SMALLEST_WINDOW_WIDTH_BESIDE_A_DOCKED_SIDEBAR = 400
 
 def compute_overlap_area(first_frame, second_frame):
     """Returns the area where two (x, y, width, height) rectangles overlap (0 when they don't)."""
@@ -53,7 +56,8 @@ def compute_window_frame_on_another_monitor(window_frame, source_visible_frame, 
 
 def compute_frame_clear_of_area(window_frame, reserved_area, sidebar_edge, monitor_visible_frame, smallest_width):
     """Returns the window frame changed so it no longer reaches into a docked sidebar's area,
-    or None when it already doesn't.
+    or None when it already doesn't, or when the sidebar is as wide as the monitor's usable area
+    or wider: no width is left to give the window, so it stays as it is.
 
     The window is fitted into the rest of the monitor's usable area: it keeps whatever part
     lies there, and if that is narrower than smallest_width, it gets that width (or the whole
@@ -75,6 +79,8 @@ def compute_frame_clear_of_area(window_frame, reserved_area, sidebar_edge, monit
         usable_left, usable_right = monitor_x, area_x
     else:
         usable_left, usable_right = area_x + area_width, monitor_x + monitor_width
+    if usable_right <= usable_left:
+        return None
     new_x = max(x, usable_left)
     new_width = min(x + width, usable_right) - new_x
     if new_width < smallest_width:

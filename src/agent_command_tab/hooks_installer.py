@@ -145,24 +145,26 @@ def normalize_forwarder_command(command):
     return [os.path.realpath(words[0])] + words[1:] if words else None
 
 
-def hook_group_is_the_same_as(hook_group, expected_hook_group):
-    """Whether a hooks entry is the one add_the_apps_hooks adds (expected_hook_group), its command
-    perhaps naming the same Python by another link (normalize_forwarder_command): the app's entry
-    point runs as python3.11, `python -m agent_command_tab.command_line` as python."""
-    if not (isinstance(hook_group, dict) and isinstance(hook_group.get("hooks"), list) and len(hook_group["hooks"]) == 1
-            and isinstance(hook_group["hooks"][0], dict)):
+def hook_group_holds_the_hook_of(hook_group, expected_hook_group):
+    """Whether a hooks entry holds the hook of the entry add_the_apps_hooks adds
+    (expected_hook_group), under the same matcher: that entry itself, or one another tool added
+    its own hook to, which runs the app's just the same. The hook's command may name the same
+    Python by another link (normalize_forwarder_command): the app's entry point runs as
+    python3.11, `python -m agent_command_tab.command_line` as python."""
+    if not (isinstance(hook_group, dict) and isinstance(hook_group.get("hooks"), list)):
         return False
-    hook, expected_hook = hook_group["hooks"][0], expected_hook_group["hooks"][0]
+    expected_hook = expected_hook_group["hooks"][0]
     return (dict(hook_group, hooks=None) == dict(expected_hook_group, hooks=None)
-            and dict(hook, command=None) == dict(expected_hook, command=None)
-            and normalize_forwarder_command(str(hook.get("command", ""))) == normalize_forwarder_command(expected_hook["command"]))
+            and any(isinstance(hook, dict) and dict(hook, command=None) == dict(expected_hook, command=None)
+                    and normalize_forwarder_command(str(hook.get("command", ""))) == normalize_forwarder_command(expected_hook["command"])
+                    for hook in hook_group["hooks"]))
 
 
 def settings_have_the_apps_hooks(settings, command, events):
-    """Whether every event has the entry add_the_apps_hooks adds (hook_group_is_the_same_as)."""
+    """Whether every event has an entry with the hook add_the_apps_hooks adds (hook_group_holds_the_hook_of)."""
     hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
     return all(isinstance(hooks.get(event_name), list)
-               and any(hook_group_is_the_same_as(hook_group, build_the_apps_hook_group(command, matcher))
+               and any(hook_group_holds_the_hook_of(hook_group, build_the_apps_hook_group(command, matcher))
                        for hook_group in hooks[event_name])
                for event_name, matcher in events)
 
@@ -239,10 +241,8 @@ def install_hooks(agent_tool_name):
         settings = read_settings_file(file_path)
         if settings_have_the_apps_hooks(settings, command, events):
             continue
-        new_settings = add_the_apps_hooks(settings, command, events)
-        if new_settings != settings:
-            write_settings_file(new_settings, file_path)
-            changed_file_paths.append(file_path)
+        write_settings_file(add_the_apps_hooks(settings, command, events), file_path)
+        changed_file_paths.append(file_path)
     return changed_file_paths
 
 

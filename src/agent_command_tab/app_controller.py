@@ -24,6 +24,7 @@ from PyObjCTools import AppHelper
 import objc
 
 from agent_command_tab.agent_process_tree import list_the_process_and_its_ancestor_ids
+from agent_command_tab.codex_processes_that_shared_their_folder_store import CODEX_PROCESSES_THAT_SHARED_THEIR_FOLDER_FILE_PATH
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS, SECONDS_TO_WAIT_FOR_ROOM_BACK_BEFORE_EXITING
 from agent_command_tab.dashboard_core_api import ActionRequest
 from agent_command_tab.docked_window_frames_store import DOCKED_WINDOW_FRAMES_FILE_PATH
@@ -40,7 +41,8 @@ from agent_command_tab.saved_agent_sessions_store import (SAVED_AGENT_SESSIONS_F
                                                           rename_saved_session, rename_saved_window, save_saved_windows)
 from agent_command_tab.settings_store import (SMALLEST_WINDOW_SIZES, build_core_settings,
                                               build_launch_command_by_agent_tool_name, find_installed_agent_tool_names,
-                                              find_launch_command, list_included_agent_tool_names, load_settings,
+                                              find_launch_command, find_launch_command_problem,
+                                              list_included_agent_tool_names, list_left_out_agent_tool_names, load_settings,
                                               save_settings)
 from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list, choose_folder_for_new_agent_window
 from agent_command_tab.terminal_backends.iterm2_terminal_backend import ITERM2_BUNDLE_IDENTIFIER, list_running_iterm2_applications
@@ -203,7 +205,9 @@ class AppController(NSObject):
                                                      DOCKED_WINDOW_FRAMES_FILE_PATH, PAUSE_RECORDS_FILE_PATH,
                                                      hook_events_socket_path=HOOK_EVENTS_SOCKET_PATH,
                                                      hook_states_file_path=HOOK_STATES_FILE_PATH,
-                                                     report_terminal_problem=self.receive_terminal_problem_on_background_thread)
+                                                     report_terminal_problem=self.receive_terminal_problem_on_background_thread,
+                                                     codex_processes_that_shared_their_folder_file_path=(
+                                                         CODEX_PROCESSES_THAT_SHARED_THEIR_FOLDER_FILE_PATH))
         self.note_application_unless_it_is_the_dashboard(NSWorkspace.sharedWorkspace().frontmostApplication())
         notification_center = NSNotificationCenter.defaultCenter()
         for notification_name, selector_name in (
@@ -481,9 +485,14 @@ class AppController(NSObject):
 
     @objc.python_method
     def save_settings_if_scheduled(self):
+        """Writes a moved window's frame that waits to be saved. A file that can't be written (a
+        full disk) is printed, not raised: this also runs as the app quits, which must go on."""
         if self.settings_save_is_scheduled:
             self.settings_save_is_scheduled = False
-            save_settings(self.settings)
+            try:
+                save_settings(self.settings)
+            except OSError as error:
+                print(f"agent-command-tab: couldn't save the settings ({error})", flush=True)
 
     # Dragging the dropdown's top bar detaches it into the list window, and dropping the list
     # window on the menu bar icon turns it back into the dropdown.
@@ -739,30 +748,50 @@ class AppController(NSObject):
     @objc.python_method
     def find_installed_agent_tools(self, agent_tools):
         """Finds out, off the main thread (asking the login shell about a command takes a moment),
-        which of the agent tools (the agent_tools setting) are installed, for list_agent_tool_names."""
+        which of the agent tools (the agent_tools setting) are installed, for list_agent_tool_names,
+        and why the launch command of each of the others can't be run, for the settings window: one
+        check of each command for both (the settings window asks for it as it opens)."""
         self.installed_agent_tools_checked_at = time.time()
 
         def find():
-            installed_agent_tool_names = find_installed_agent_tool_names(agent_tools)
-            AppHelper.callAfter(self.note_installed_agent_tools, agent_tools, installed_agent_tool_names)
+            problem_by_launch_command = {agent_tool["launch_command"]: find_launch_command_problem(agent_tool["launch_command"])
+                                         for agent_tool in agent_tools}
+            AppHelper.callAfter(self.note_installed_agent_tools, agent_tools, problem_by_launch_command)
         threading.Thread(target=find, name="installed-agent-tools-check", daemon=True).start()
 
     @objc.python_method
-    def note_installed_agent_tools(self, checked_agent_tools, installed_agent_tool_names):
-        """Keeps find_installed_agent_tools's answer while the settings still have the launch commands it checked."""
+    def note_installed_agent_tools(self, checked_agent_tools, problem_by_launch_command):
+        """Keeps find_installed_agent_tools's answer ({launch command: "" when it can be run, else
+        why not}) and shows it in the settings window, while the settings still have the launch
+        commands it checked."""
         if build_launch_command_by_agent_tool_name(checked_agent_tools) == build_launch_command_by_agent_tool_name(
                 self.settings["agent_tools"]):
-            self.installed_agent_tool_names = installed_agent_tool_names
+            self.installed_agent_tool_names = find_installed_agent_tool_names(checked_agent_tools, problem_by_launch_command.get)
+            self.settings_window_controller.show_launch_command_problems(problem_by_launch_command)
 
     @objc.python_method
     def confirm_closing_window(self, window_entry):
-        """Asks "Are you sure?" before an iTerm2 window, and the agent sessions in it, is closed."""
-        agent_session_count = len(window_entry.agent_sessions)
-        other_tab_count = window_entry.total_tab_count - agent_session_count
-        explanation = (f'Closing "{build_window_title_shown_in_the_list(window_entry)}" ends the {agent_session_count} agent '
-                       f'session{"" if agent_session_count == 1 else "s"} running in it')
-        if other_tab_count:
-            explanation += f' and closes its {other_tab_count} other tab{"" if other_tab_count == 1 else "s"}'
+        """Asks "Are you sure?" before an iTerm2 window, and the agent sessions in it, is closed.
+        A tab whose agent has ended (its row still shows "exited") counts with the window's other
+        tabs: only its shell is left to close. The window's rows don't hold the sessions of the
+        agent tools that the settings' Harnesses section leaves out of the list, so they can't be
+        counted: while a tool is left out and the window has a tab without a running row, the
+        question says that those sessions end too."""
+        running_agent_session_count = sum(entry.status != "exited" for entry in window_entry.agent_sessions)
+        other_tab_count = window_entry.total_tab_count - running_agent_session_count
+        window_title = build_window_title_shown_in_the_list(window_entry)
+        if running_agent_session_count == 0:
+            explanation = (f'Closing "{window_title}" closes its {other_tab_count} tab{"" if other_tab_count == 1 else "s"}, '
+                           "where no listed agent session is running anymore")
+        else:
+            explanation = (f'Closing "{window_title}" ends the {running_agent_session_count} agent '
+                           f'session{"" if running_agent_session_count == 1 else "s"} running in it')
+            if other_tab_count:
+                explanation += f' and closes its {other_tab_count} other tab{"" if other_tab_count == 1 else "s"}'
+        left_out_agent_tool_names = list_left_out_agent_tool_names(self.settings)
+        if other_tab_count and left_out_agent_tool_names:
+            explanation += (f'. Any {" or ".join(left_out_agent_tool_names)} session in the window ends too: '
+                            "Settings > Harnesses leaves those out of the list")
         return self.ask_for_confirmation(explanation + ".", "close_window")
 
     @objc.python_method
@@ -963,8 +992,6 @@ class AppController(NSObject):
         """Has every list select the tab row of the window start_agent_session opened once the
         window shows in it (in the folder of another window, it looked
         like that window)."""
-        if action_result.details is None:  # iTerm2 gave no window: its session ended right away
-            return
         for list_controller in self.list_all_list_controllers():
             list_controller.select_window_once_it_shows(action_result.details["window_id"])
 
@@ -1092,7 +1119,8 @@ class AppController(NSObject):
     def settings_changed(self, new_settings):
         """Saves new settings and applies them to the global shortcut, the appearance, the sidebar,
         the list window (shown when "Show as" turns to Window, hidden when it turns away) and an
-        open settings window."""
+        open settings window. They are applied also when the file can't be written, which the
+        output then says."""
         show_as_before = self.settings["show_as"]
         list_window_was_always_on_top = self.settings["list_window_is_always_on_top"]
         sidebar_may_have_moved = any(new_settings[name] != self.settings[name] for name in SETTINGS_THAT_PLACE_THE_SIDEBAR)
@@ -1107,8 +1135,14 @@ class AppController(NSObject):
         self.settings = new_settings
         if launch_commands_changed:
             self.find_installed_agent_tools(new_settings["agent_tools"])
-        save_settings(new_settings)
-        self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
+        try:
+            save_settings(new_settings)
+            self.settings_save_is_scheduled = False  # a frame waiting to be written is in new_settings too
+        except OSError as error:
+            # A file that can't be written (a full disk) doesn't stop the change: every step
+            # below still runs, so the windows show what the settings the app goes by say.
+            print(f"agent-command-tab: couldn't save the settings ({error}); the change applies, and is in the file "
+                  "once a later change can be saved", flush=True)
         list_window_is_shown_now = new_settings["show_as"] == "window" and show_as_before != "window"
         if new_settings["show_as"] != show_as_before:
             self.close_dropdown()

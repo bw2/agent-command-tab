@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import tracemalloc
 import unittest
 
 from agent_command_tab.conversation_search_texts import (add_texts_to_conversation_search_text,
@@ -87,6 +88,10 @@ class AgyRecordTests(unittest.TestCase):
                 {"name": "run_command", "args": {"CommandLine": "\"pytest -q\"", "toolSummary": "\"Run the tests\""}},
                 {"name": "read_file", "args": {"Path": "\"/repo/foo.py\""}}]}, ["It adds numbers.", "pytest -q"]),
             ({"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "ls -la"}}]}, ["ls -la"]),
+            # Its whole transcript has each argument as it is, not as JSON: a command that reads as JSON stays a command.
+            ({"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"CommandLine": "true", "WaitMsBeforeAsync": 500}},
+                {"name": "run_command", "args": {"CommandLine": "echo \"a\" > notes.txt"}}]}, ["true", "echo \"a\" > notes.txt"]),
             ({"type": "GENERIC", "content": "a tool's output"}, []),
         ]
         for record, expected_texts in records_and_texts:
@@ -120,6 +125,25 @@ class ReadingNewLinesTests(unittest.TestCase):
         self.write(json.dumps({"text": "new"}) + "\n", mode="w")
         self.assertEqual(self.read_texts(10_000), (["new"], os.path.getsize(self.path), True))
         self.assertIsNone(read_new_search_texts(self.path + ".gone", 0, lambda record: []))
+
+    def test_a_long_file_is_read_a_line_at_a_time_rather_than_held_in_memory_whole(self):
+        # A transcript read for the first time may hold tens of megabytes, nearly all of it tool output.
+        line_of_tool_output = json.dumps({"text": "", "tool_output": "x" * 4000}) + "\n"
+        self.write(line_of_tool_output * 2000 + json.dumps({"text": "found"}) + "\n")  # 8 MB
+        # Python may be tracing already (python -X tracemalloc): then only the read's own share of
+        # what was traced counts, not what was held before it, and the tracing is left on.
+        python_was_tracing_already = tracemalloc.is_tracing()
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            bytes_held_before_the_read, _ = tracemalloc.get_traced_memory()
+            texts, read_up_to_byte, _ = self.read_texts(0)
+            most_bytes_the_read_held_at_once = tracemalloc.get_traced_memory()[1] - bytes_held_before_the_read
+        finally:
+            if not python_was_tracing_already:
+                tracemalloc.stop()
+        self.assertEqual((texts, read_up_to_byte), (["found"], os.path.getsize(self.path)))
+        self.assertLess(most_bytes_the_read_held_at_once, os.path.getsize(self.path) / 8)
 
 
 class MatchingTests(unittest.TestCase):

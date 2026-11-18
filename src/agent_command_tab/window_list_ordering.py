@@ -9,7 +9,8 @@ def update_window_list_order(previous_window_order, current_window_ids):
 
     Args:
         previous_window_order: Window IDs in list order, from the last update.
-        current_window_ids: IDs of the windows that exist now, in iTerm2's order.
+        current_window_ids: IDs of the windows that exist now, in the terminals' order (iTerm2's
+            windows, then tmux sessions).
 
     Returns:
         A list of window IDs.

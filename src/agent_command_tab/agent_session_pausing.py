@@ -19,7 +19,9 @@ A Codex session that runs through Codex's shared background server (`codex app-s
 Codex 0.165 and later start, a child of launchd rather than of the tab) isn't paused: the server,
 not the codex process in the tab, runs its turns and commands, and stopping the server would
 pause every Codex session. Its conversation file's header tells (source "vscode", originator
-"codex-tui").
+"codex-tui"), or, for a conversation it resumed, which keeps the header it began with, how its
+process was started and whether such a server runs at all
+(agent_adapters.codex.codex_process_runs_its_turns_in_the_shared_server).
 
 A STOP of the agent alone isn't enough: its shell notices, takes the terminal back, and after a
 plain CONT the agent runs as a background job and stops or fails at its next key read (a `cat`
@@ -51,13 +53,16 @@ from agent_command_tab.agent_process_tree import (find_the_agents_job_leader_id,
                                                   process_terminal_has_hung_up, read_name_of_any_process, read_process_info)
 from agent_command_tab.dashboard_core_api import ActionResult
 
-PauseRecord = collections.namedtuple("PauseRecord", ["agent_process", "agent_tool_name", "shell_processes", "stopped_processes"])
+PauseRecord = collections.namedtuple("PauseRecord", ["agent_process", "agent_tool_name", "shell_processes", "stopped_processes",
+                                                     "names_of_processes_left_running"], defaults=[()])
 PauseRecord.__doc__ = ("What a pause left behind (kept across restarts by pause_records_store): the agent's (process "
                        "ID, start time) and tool name (\"Codex\"), to list it again after a restart; the (process ID, "
                        "start time) of each shell it stopped, outermost first, none when the agent runs under no job "
-                       "control shell or had been suspended with Ctrl+Z (by hand, or by a pause of version 0.3.0 or earlier); and "
+                       "control shell or had been suspended with Ctrl+Z (by hand, or by a pause of version 0.3.0 or earlier); "
                        "the (process ID, start time) of each other process it stopped: the rest of the agent's job and "
-                       "the processes below the agent.")
+                       "the processes below the agent; and the names of the processes below the agent that it could "
+                       "not stop, which run as another user (a tuple, empty when it stopped them all), so the paused "
+                       "row and a Pause repeated on it still say that they kept running.")
 
 
 def send_signal_to_processes(process_ids, signal_number):
@@ -148,7 +153,8 @@ def pause_agent_session(agent_process_id, agent_tool_name, detached_processes=()
         (ActionResult, PauseRecord), or (a failed ActionResult, None) when the agent is gone, runs
         in a tmux pane or runs its turns outside the tab. The ActionResult also fails, saying
         which, when processes below the agent run as another user (with sudo) and keep running;
-        the record then lists the others.
+        the record then lists the others, and names those left running
+        (build_action_result_of_the_pause).
     """
     agent = read_process_info(agent_process_id)
     job_leader_id = find_the_agents_job_leader_id(agent_process_id)
@@ -187,11 +193,19 @@ def pause_agent_session(agent_process_id, agent_tool_name, detached_processes=()
     pause_record = PauseRecord((agent_process_id, agent.started_at), agent_tool_name,
                                [(shell.process_id, shell.started_at) for shell in stopped_shells],
                                sorted((process_id, process.started_at) for process_id, process in processes_to_stop.items()
-                                      if process_id in stopped_process_ids))
-    if names_of_processes_left_running:
+                                      if process_id in stopped_process_ids),
+                               tuple(names_of_processes_left_running))
+    return build_action_result_of_the_pause(pause_record), pause_record
+
+
+def build_action_result_of_the_pause(pause_record):
+    """Returns the ActionResult of the pause that left pause_record: failed, naming them, when
+    processes below the agent kept running. A Pause repeated on the paused agent returns it
+    again rather than report that everything is stopped."""
+    if pause_record.names_of_processes_left_running:
         return ActionResult(False, "paused, but these processes below the agent run as another user (with sudo), so they "
-                                   "keep running: " + ", ".join(names_of_processes_left_running)), pause_record
-    return ActionResult(True), pause_record
+                                   "keep running: " + ", ".join(pause_record.names_of_processes_left_running))
+    return ActionResult(True)
 
 
 def resume_agent_session(agent_process_id, pause_record):
@@ -200,19 +214,28 @@ def resume_agent_session(agent_process_id, pause_record):
     with Ctrl+Z is left alone, since its shell has taken the terminal back: after a CONT it would
     run in the background and stop again at its next key read, and only `fg` typed in the tab
     brings it back to the front. One whose pause stopped its shells wasn't, also when a program in
-    a process group of its own below it was in front (so the agent doesn't have its terminal).
+    a process group of its own below it was in front (so the agent doesn't have its terminal). Nor
+    was one that runs under no shell (the tab's own command, whose pause records no shell either):
+    no shell could have taken the terminal back, and there is none to type `fg` into.
 
     Args:
         agent_process_id: The agent's process.
         pause_record: The PauseRecord of the agent's pause (kept across dashboard restarts), or
             None for an agent stopped from elsewhere and never paused from the list.
+
+    Returns:
+        An ActionResult, failed for an agent suspended with Ctrl+Z, and for one with no record
+        that the CONT signal didn't reach (it has ended).
     """
     if (not (pause_record and pause_record.shell_processes)
-            and process_is_stopped(agent_process_id) and not process_has_its_terminal(agent_process_id)):
+            and process_is_stopped(agent_process_id) and not process_has_its_terminal(agent_process_id)
+            # An agent gone meanwhile has no job leader (None), and no shells are listed for it.
+            and list_the_shells_the_job_runs_under(find_the_agents_job_leader_id(agent_process_id) or agent_process_id)):
         return ActionResult(False, "the agent was suspended with Ctrl+Z, so its shell has taken the terminal back, and a "
                                    "CONT signal would leave the agent in the background; type fg in the tab")
     if pause_record is None:
-        send_signal_to_processes([agent_process_id], signal.SIGCONT)
+        if not send_signal_to_processes([agent_process_id], signal.SIGCONT):
+            return ActionResult(False, "the agent's process has ended")
     else:
         continue_what_the_pause_stopped(pause_record)
     return ActionResult(True)

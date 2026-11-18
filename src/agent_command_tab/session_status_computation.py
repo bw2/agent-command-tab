@@ -162,6 +162,24 @@ def permission_dialog_was_answered(state, iterm2_status_change_time, session_rea
             and "permission_dialog_gone_since" in session_reading)
 
 
+def find_state_counting_an_answered_permission_prompt(iterm2_status_value, iterm2_status_change_time, session_reading):
+    """Returns the state for an iTerm2 status value (map_iterm2_status_value_to_state), with the
+    answer to a permission prompt counted (permission_dialog_was_answered), since iTerm2 goes on
+    saying waiting after it: "working" once the prompt was approved (the approved tool runs), and
+    "idle" once it was answered No or Esc, which ended the turn. The row's state and what is read
+    of the agent's processes (its turn's commands, its background shells) both go by it.
+
+    Args:
+        iterm2_status_value: iTerm2's `status` variable for the session's first pane.
+        iterm2_status_change_time: When that value was first observed.
+        session_reading: The session's reading (compute_session_status_from_sources), or None.
+    """
+    state = map_iterm2_status_value_to_state(iterm2_status_value)
+    if not permission_dialog_was_answered(state, iterm2_status_change_time, session_reading):
+        return state
+    return "idle" if session_reading.get("turn_was_interrupted") else "working"
+
+
 def status_values_put_the_agent_in_the_same_state(first_status_value, second_status_value):
     """Returns whether two iTerm2 status values give the same state, idle and done counting as
     one (both wait at the prompt; whether a turn just ended is tracked apart)."""
@@ -235,14 +253,17 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
     - "done" means the last turn ended after the tab was last seen (selected in the key iTerm2
       window while iTerm2 was the active app) or its finished turn was cleared with /clear,
       whether the status now says done or idle, so it lasts until either happens; a turn that
-      ended while the tab was seen counts as idle.
+      ended while the tab was seen counts as idle. With no turn end recorded, a session at its
+      prompt is idle, also when the status says done: a done that ended no turn of the tab's
+      agent (track_status_value's ends_no_turn: the one the tab's last agent left in iTerm2, or
+      one an agent running inside the tab's agent set) leaves nothing waiting to be seen.
 
     Args:
         iterm2_status_value: iTerm2's `status` variable for the session's first pane.
         iterm2_status_change_time: When that value was first observed (seconds since the epoch).
         last_turn_ended_at: When the status last changed in a way that ends a turn
-            (status_change_ends_a_turn), or None if it hasn't since the session was first seen;
-            track_status_value sets it for a session first seen as done.
+            (status_change_ends_a_turn), or None if no such change was recorded since the
+            session was first seen; track_status_value sets it for a session first seen as done.
         last_time_the_finished_turn_was_seen_or_cleared: When the tab was last seen or its finished
             turn was cleared with /clear, whichever is later, or None if neither happened.
         tab_is_seen_now: Whether the tab is being seen at this moment.
@@ -253,29 +274,26 @@ def compute_session_status_from_sources(iterm2_status_value, iterm2_status_chang
     Returns:
         A (state, reason) tuple; state is one of STATES_IN_URGENCY_ORDER.
     """
-    state = map_iterm2_status_value_to_state(iterm2_status_value)
-    session_reading = session_reading or {}
+    state = find_state_counting_an_answered_permission_prompt(iterm2_status_value, iterm2_status_change_time, session_reading)
     if state is None:
         return "unknown", "no status report"
-    if permission_dialog_was_answered(state, iterm2_status_change_time, session_reading):
-        if session_reading.get("turn_was_interrupted"):
-            # "No" or Esc ends the turn; Claude Code waits for new instructions while iTerm2 still says waiting.
-            return "idle", "turn interrupted"
-        state = "working"
-    if state == "working":
-        return "working", ""  # the tool it waits on: snapshot_builder.choose_tool_the_agent_is_waiting_on
-    if state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT and last_turn_ended_at is not None:
+    if state == "idle" and map_iterm2_status_value_to_state(iterm2_status_value) == "asking":
+        # "No" or Esc ends the turn; Claude Code waits for new instructions while iTerm2 still says waiting.
+        return "idle", "turn interrupted"
+    if state in STATES_OF_AN_AGENT_WAITING_AT_ITS_PROMPT:
+        if last_turn_ended_at is None:
+            return "idle", ""
         if tab_is_seen_now or (last_time_the_finished_turn_was_seen_or_cleared is not None
                                and last_time_the_finished_turn_was_seen_or_cleared >= last_turn_ended_at):
             return "idle", "turn finished and seen"
         return "done", "turn finished"
-    return state, ""
+    return state, ""  # a working agent's reason names the tool it waits on (snapshot_builder.choose_tool_the_agent_is_waiting_on)
 
 
 def pick_most_urgent_state(states):
     """Returns the most urgent of the given states, or "unknown" when there are none."""
-    ranked_states = [state for state in STATES_IN_URGENCY_ORDER if state in set(states)]
-    return ranked_states[0] if ranked_states else "unknown"
+    states_given = set(states)
+    return next((state for state in STATES_IN_URGENCY_ORDER if state in states_given), "unknown")
 
 
 def split_agent_sessions_into_pausable_and_resumable(agent_session_entries):

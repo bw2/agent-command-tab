@@ -36,6 +36,20 @@ class SortAgentSessionEntriesTests(unittest.TestCase):
                    ENTRIES[3]._replace(started_at=2000.0)]
         self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "created_time")], ["3", "4", "1", "2"])
 
+    def test_time_since_last_message_puts_the_most_recent_first_and_working_and_unknown_last_both_ways(self):
+        # planning (idle) and api (asking) show their times. Reviews is working, so its row shows none, though its
+        # message is the most recent of all; docs has finished a turn, but when its last message was written isn't known.
+        entries = [ENTRIES[0]._replace(last_message_at=1000.0), ENTRIES[1]._replace(last_message_at=5000.0),
+                   ENTRIES[2]._replace(last_message_at=3000.0), ENTRIES[3]._replace(status="done")]
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "time_since_last_message")],
+                         ["3", "1", "2", "4"])
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "time_since_last_message", is_reversed=True)],
+                         ["1", "3", "2", "4"])
+        # Once its turn ends, Reviews shows its time and goes first, as the most recent.
+        entries[1] = entries[1]._replace(status="done")
+        self.assertEqual([entry.tab_id for entry in sort_agent_session_entries(entries, "time_since_last_message")],
+                         ["2", "3", "1", "4"])
+
     def test_memory_usage_puts_the_largest_first_and_unknown_usage_last(self):
         entries = [ENTRIES[0]._replace(memory_bytes=200 * 1024 ** 2), ENTRIES[1], ENTRIES[2]._replace(memory_bytes=900 * 1024 ** 2),
                    ENTRIES[3]._replace(memory_bytes=0)]
@@ -86,15 +100,18 @@ class SortWindowEntriesTests(unittest.TestCase):
         self.assertEqual([window.window_id for window in sort_window_entries(self.windows, "activity")], ["w3", "w2", "w1", "w4"])
 
     def test_memory_usage_ranks_windows_by_their_largest_tab_and_reversed_by_their_smallest(self):
-        # w1's 300 bytes lie between w2's tabs, so w2 goes first both ways only if it is ranked by
-        # its largest tab, then by its smallest.
+        # w1's 300 bytes lie between w2's tabs, so w2 goes before w1 both ways only if it is ranked by
+        # its largest tab, then by its smallest. w3's 50 bytes are the least, so it follows both,
+        # then goes before both.
         windows = [make_window("w1", "one", [ENTRIES[0]._replace(memory_bytes=300)]),
                    make_window("w2", "two", [ENTRIES[1]._replace(memory_bytes=100), ENTRIES[2]._replace(memory_bytes=500)]),
-                   make_window("w3", "three", [ENTRIES[3]]), make_window("w4", "empty", [])]
-        self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")], ["w2", "w1", "w3", "w4"])
-        # The smallest first: w2's smallest tab (100), then w1; unknown usage and no tabs still last.
+                   make_window("w3", "three", [ENTRIES[0]._replace(memory_bytes=50)]),
+                   make_window("w4", "four", [ENTRIES[3]]), make_window("w5", "empty", [])]
+        self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage")],
+                         ["w2", "w1", "w3", "w4", "w5"])
+        # The smallest first: w3 (50), w2's smallest tab (100), then w1; unknown usage and no tabs still last.
         self.assertEqual([window.window_id for window in sort_window_entries(windows, "memory_usage", is_reversed=True)],
-                         ["w2", "w1", "w3", "w4"])
+                         ["w3", "w2", "w1", "w4", "w5"])
 
     def test_a_window_ranks_by_the_agent_sessions_the_list_shows(self):
         # With Hide Idle on, w1's idle tab (the largest) is hidden, so w2's 800M tab comes first.

@@ -153,6 +153,23 @@ class KillProcessTests(unittest.TestCase):
             self.assertTrue(wait_until(lambda: shell.returncode is not None))
         self.assertEqual(shell.returncode, -signal.SIGKILL)
 
+    def test_kill_names_the_processes_below_it_that_run_as_another_user_and_keep_running(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shell = start_claude_code_style_shell(folder)
+            core = make_core_listing("s1", shell.pid)
+            # Below the shell also two commands run with sudo, which this user can neither read nor
+            # signal (process IDs no Mac gives out): one still runs after the Kill, one has ended by then.
+            processes_below_and_other_users_process_ids = (list_descendant_processes(shell.pid), [4000001, 4000002])
+            with unittest.mock.patch.object(dashboard_core, "list_descendant_processes_and_other_users_process_ids",
+                                            return_value=processes_below_and_other_users_process_ids), \
+                    unittest.mock.patch.object(dashboard_core, "read_name_of_any_process",
+                                               lambda process_id: {4000001: "sudo"}.get(process_id, "")):
+                action_result = asyncio.run(core.handle_end_child_process(
+                    ActionRequest("end_child_process", {"session_id": "s1"}, {"process_id": shell.pid})))
+            self.assertTrue(wait_until(lambda: shell.returncode is not None))  # the shell itself was ended
+        self.assertEqual((action_result.succeeded, action_result.message),
+                         (False, "ended, but these processes below it run as another user (with sudo), so they keep running: sudo"))
+
     def test_kill_leaves_a_process_its_tab_row_doesnt_list(self):
         with tempfile.TemporaryDirectory() as folder:
             shell = start_claude_code_style_shell(folder)
@@ -165,23 +182,34 @@ class KillProcessTests(unittest.TestCase):
         self.assertFalse(action_result.succeeded)
 
 
-@unittest.skipIf(RUNNING_IN_CODEX_SANDBOX, REASON_FOR_SKIPPING_WINDOW_TESTS_IN_CODEX_SANDBOX)
-class ProcessInfoWindowTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        NSApplication.sharedApplication()
+def make_process_details(**changes):
+    """Returns the details the core reads of a Claude Code shell with two subprocesses, with these changes."""
+    details = {"process_id": 61167, "command_line": "/bin/bash -c true && eval 'cat <<EOF\nline two\nEOF'",
+               "agent_command": "cat <<EOF\nline two\nEOF", "working_folder": "/Users/someone/code",
+               "started_at": time.mktime((2026, 10, 29, 7, 14, 47, 0, 0, -1)),
+               "subprocesses": [{"process_id": 61170, "command_text": "python3 check.py"},
+                                {"process_id": 61171, "command_text": "sleep 600"}],
+               "memory_bytes": 3 * 1024 ** 2, "cpu_seconds": 75.0, "cpu_percent": 12}
+    return dict(details, **changes)
 
-    def make_details(self, **changes):
-        details = {"process_id": 61167, "command_line": "/bin/bash -c true && eval 'cat <<EOF\nline two\nEOF'",
-                   "agent_command": "cat <<EOF\nline two\nEOF", "working_folder": "/Users/someone/code",
-                   "started_at": time.mktime((2026, 10, 29, 7, 14, 47, 0, 0, -1)),
-                   "subprocesses": [{"process_id": 61170, "command_text": "python3 check.py"},
-                                    {"process_id": 61171, "command_text": "sleep 600"}],
-                   "memory_bytes": 3 * 1024 ** 2, "cpu_seconds": 75.0, "cpu_percent": 12}
-        return dict(details, **changes)
+
+def make_session_details(**changes):
+    """Returns the details the core reads of a tab's Claude Code session, with these changes."""
+    details = dict(make_process_details(
+        process_id=29769, command_line="claude --model opus", agent_command=None,
+        subprocesses=[{"process_id": 29800, "command_text": "node mcp-server.js"}]),
+        tab_kind_name="iTerm2 tab",
+        conversation_id="2aa37546-5264-4b90-a553-5c668c422d40",
+        conversation_file="/Users/someone/.claude/projects/x/2aa37546-5264-4b90-a553-5c668c422d40.jsonl",
+        claude_config_folder=None, codex_home_folder=None)
+    return dict(details, **changes)
+
+
+class ProcessAndSessionInfoLinesTests(unittest.TestCase):
+    """What the Info windows say, as lines of text: these need no window, so they run in the Codex sandbox too."""
 
     def test_the_lines_say_what_the_process_is_its_subprocesses_and_what_they_use_in_all(self):
-        details = self.make_details()
+        details = make_process_details()
         self.assertEqual(list_process_info_lines(details, details["started_at"] + 19 * 60), [
             ("Process ID", "61167"),
             ("Started", "Oct 29, 7:14:47 AM (19 minutes ago)"),
@@ -192,8 +220,8 @@ class ProcessInfoWindowTests(unittest.TestCase):
             ("Memory", "3M (total, including subprocesses)"),
             ("Command", "cat <<EOF\nline two\nEOF"),
             ("Full command line", "/bin/bash -c true && eval 'cat <<EOF\nline two\nEOF'")])
-        details = self.make_details(agent_command=None, command_line="clangd --background-index", subprocesses=[],
-                                    working_folder="")
+        details = make_process_details(agent_command=None, command_line="clangd --background-index", subprocesses=[],
+                                       working_folder="")
         lines = dict(list_process_info_lines(details, details["started_at"]))
         self.assertNotIn("Command", lines)  # not a Claude Code shell: the command line is the command
         self.assertNotIn("Subprocesses", lines)
@@ -204,34 +232,8 @@ class ProcessInfoWindowTests(unittest.TestCase):
                          ["0 seconds", "1 second", "45 seconds", "1 minute", "3 minutes", "1 hour", "1 hour 5 minutes",
                           "2 hours 1 minute", "1 day", "3 days"])
 
-    def test_the_window_shows_the_lines_in_text_that_can_be_selected_but_not_edited_with_room_above_ok(self):
-        details = self.make_details()
-        alert = build_process_info_alert(details, details["started_at"])
-        scroll_view, = alert.accessoryView().subviews()
-        text_view = scroll_view.documentView()
-        self.assertEqual(alert.messageText(), "Process info")
-        self.assertFalse(text_view.isEditable())
-        self.assertTrue(text_view.isSelectable())
-        self.assertIn("Full command line\t/bin/bash -c true && eval 'cat <<EOF\nline two\nEOF'", text_view.string())
-        self.assertEqual(scroll_view.frame().origin.y, ROOM_ABOVE_THE_BUTTONS)
-        self.assertEqual(alert.accessoryView().frame().size.height, scroll_view.frame().size.height + ROOM_ABOVE_THE_BUTTONS)
-        self.assertLessEqual(scroll_view.frame().size.height, LARGEST_TEXT_HEIGHT)
-        long_details = self.make_details(command_line="x " * 20000)
-        self.assertEqual(build_process_info_alert(long_details, details["started_at"]).accessoryView().frame().size.height,
-                         LARGEST_TEXT_HEIGHT + ROOM_ABOVE_THE_BUTTONS)  # a longer one scrolls
-
-    def make_session_details(self, **changes):
-        details = dict(self.make_details(
-            process_id=29769, command_line="claude --model opus", agent_command=None,
-            subprocesses=[{"process_id": 29800, "command_text": "node mcp-server.js"}]),
-            tab_kind_name="iTerm2 tab",
-            conversation_id="2aa37546-5264-4b90-a553-5c668c422d40",
-            conversation_file="/Users/someone/.claude/projects/x/2aa37546-5264-4b90-a553-5c668c422d40.jsonl",
-            claude_config_folder=None, codex_home_folder=None)
-        return dict(details, **changes)
-
     def test_the_session_info_lines_start_with_the_name_and_process_id_then_the_age(self):
-        details = self.make_session_details()
+        details = make_session_details()
         entry = make_agent_session_entry("s1", "agent-command-tab", agent_session_name="agent-command-tab-f7",
                                          working_folder="/Users/someone/code", context_tokens=134000, context_fill_percent=13)
         self.assertEqual(list_session_info_lines(entry, details, details["started_at"] + 3 * 86400 + 600), [
@@ -248,8 +250,8 @@ class ProcessInfoWindowTests(unittest.TestCase):
             ("Command Line", "claude --model opus"),
             ("Context", "134k tokens (13% of the context window)")])
         # A Codex session: no name, its CODEX_HOME, no conversation yet, and no context size or subprocesses.
-        details = self.make_session_details(conversation_id=None, conversation_file=None,
-                                            codex_home_folder="/Users/someone/.codex", subprocesses=[])
+        details = make_session_details(conversation_id=None, conversation_file=None,
+                                       codex_home_folder="/Users/someone/.codex", subprocesses=[])
         lines = dict(list_session_info_lines(make_agent_session_entry("s3", "codex", agent_tool_name="Codex"), details,
                                              details["started_at"]))
         self.assertEqual((lines["Session"], lines["Conversation Id"], lines["Conversation Log"], lines["CODEX_HOME"], lines["CPU"]),
@@ -257,11 +259,40 @@ class ProcessInfoWindowTests(unittest.TestCase):
         self.assertNotIn("Context", lines)
         self.assertNotIn("Claude Code config folder", lines)
         lines = dict(list_session_info_lines(make_agent_session_entry("s1", "work"),
-                                             self.make_session_details(claude_config_folder="/Users/someone/.claude_work"), 0))
+                                             make_session_details(claude_config_folder="/Users/someone/.claude_work"), 0))
         self.assertEqual(lines["Claude Code config folder"], "/Users/someone/.claude_work")
 
+    def test_a_command_named_in_the_kill_question_is_one_line_and_cut_when_long(self):
+        self.assertEqual(shorten_command_for_alert("sleep 60"), "sleep 60")
+        self.assertEqual(shorten_command_for_alert("cat <<EOF\n  two\nEOF"), "cat <<EOF two EOF")
+        long_command = shorten_command_for_alert("x" * 500)
+        self.assertEqual((len(long_command), long_command[-1]), (LONGEST_COMMAND_IN_AN_ALERT, "…"))
+
+
+@unittest.skipIf(RUNNING_IN_CODEX_SANDBOX, REASON_FOR_SKIPPING_WINDOW_TESTS_IN_CODEX_SANDBOX)
+class ProcessInfoWindowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        NSApplication.sharedApplication()
+
+    def test_the_window_shows_the_lines_in_text_that_can_be_selected_but_not_edited_with_room_above_ok(self):
+        details = make_process_details()
+        alert = build_process_info_alert(details, details["started_at"])
+        scroll_view, = alert.accessoryView().subviews()
+        text_view = scroll_view.documentView()
+        self.assertEqual(alert.messageText(), "Process info")
+        self.assertFalse(text_view.isEditable())
+        self.assertTrue(text_view.isSelectable())
+        self.assertIn("Full command line\t/bin/bash -c true && eval 'cat <<EOF\nline two\nEOF'", text_view.string())
+        self.assertEqual(scroll_view.frame().origin.y, ROOM_ABOVE_THE_BUTTONS)
+        self.assertEqual(alert.accessoryView().frame().size.height, scroll_view.frame().size.height + ROOM_ABOVE_THE_BUTTONS)
+        self.assertLessEqual(scroll_view.frame().size.height, LARGEST_TEXT_HEIGHT)
+        long_details = make_process_details(command_line="x " * 20000)
+        self.assertEqual(build_process_info_alert(long_details, details["started_at"]).accessoryView().frame().size.height,
+                         LARGEST_TEXT_HEIGHT + ROOM_ABOVE_THE_BUTTONS)  # a longer one scrolls
+
     def test_the_session_info_window_shows_its_lines_in_text_that_can_be_selected_but_not_edited(self):
-        details = self.make_session_details()
+        details = make_session_details()
         alert = build_session_info_alert(make_agent_session_entry("s1", "agent-command-tab", agent_session_name="agent-command-tab-f7"),
                                          details, details["started_at"])
         scroll_view, = alert.accessoryView().subviews()
@@ -270,12 +301,6 @@ class ProcessInfoWindowTests(unittest.TestCase):
         self.assertFalse(text_view.isEditable())
         self.assertTrue(text_view.isSelectable())
         self.assertTrue(text_view.string().startswith("Session\tagent-command-tab-f7 (process ID 29769)\nAge\t0 seconds (started "))
-
-    def test_a_command_named_in_the_kill_question_is_one_line_and_cut_when_long(self):
-        self.assertEqual(shorten_command_for_alert("sleep 60"), "sleep 60")
-        self.assertEqual(shorten_command_for_alert("cat <<EOF\n  two\nEOF"), "cat <<EOF two EOF")
-        long_command = shorten_command_for_alert("x" * 500)
-        self.assertEqual((len(long_command), long_command[-1]), (LONGEST_COMMAND_IN_AN_ALERT, "…"))
 
 
 if __name__ == "__main__":

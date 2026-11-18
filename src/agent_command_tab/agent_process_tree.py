@@ -46,13 +46,16 @@ MAXIMUM_PATH_LENGTH = 1024
 # a background shell by (its tool result names the file too, "Output is being written to: ...").
 CLAUDE_CODE_TASK_OUTPUT_FILE = re.compile(r"/tasks/([A-Za-z0-9]+)\.output\Z")
 DEVICES_FOLDER = "/dev/"  # a process writing to a terminal or /dev/null writes to a device here, not to a file
-MAXIMUM_CHILD_PROCESSES = 1024
+# How many child process IDs list_child_process_ids makes room for at first: more than nearly
+# every process has. launchd, which has hundreds, can have more, and then gets a longer list.
+CHILD_PROCESS_IDS_LISTED_AT_FIRST = 1024
 # Shells and wrappers that agents run commands in: the command's name is the first process
 # below them (python3 rather than the zsh that Claude Code runs it in).
 SHELL_AND_WRAPPER_PROCESS_NAMES = frozenset({"bash", "zsh", "sh", "dash", "fish", "env", "login", "sandbox-exec", "timeout"})
 # The names agent programs are started as. One started inside a tab's agent (a `claude -p` or
 # `codex exec` run by its shell tool) fires the same user-level hooks, so it sets the tab's status too.
-NAMES_OF_AGENT_PROGRAMS = frozenset({"claude", "codex"})
+CODEX_PROGRAM_NAME = "codex"
+NAMES_OF_AGENT_PROGRAMS = frozenset({"claude", CODEX_PROGRAM_NAME})
 # A command counts as started in this turn even if it started this long before the dashboard
 # noticed the turn begin.
 SECONDS_OF_SLACK_AT_TURN_START = 2
@@ -389,20 +392,29 @@ def read_name_the_process_was_started_as(process_id):
 
 
 def list_child_process_ids(process_id):
-    buffer = (ctypes.c_int * MAXIMUM_CHILD_PROCESSES)()
-    count = LIBPROC.proc_listchildpids(process_id, buffer, ctypes.sizeof(buffer))
-    return [buffer[index] for index in range(max(count, 0)) if buffer[index] > 0]
+    """Returns the IDs of all the process's children (none for a process that is gone).
+    proc_listchildpids fills the list it is given and doesn't say whether there were more, so a
+    list that comes back full is asked for again with room for twice as many."""
+    capacity = CHILD_PROCESS_IDS_LISTED_AT_FIRST
+    while True:
+        buffer = (ctypes.c_int * capacity)()
+        count = LIBPROC.proc_listchildpids(process_id, buffer, ctypes.sizeof(buffer))
+        if count < capacity:
+            return [buffer[index] for index in range(max(count, 0)) if buffer[index] > 0]
+        capacity *= 2
 
 
-def list_descendant_processes(process_id, maximum_depth=6):
+def list_descendant_processes(process_id, maximum_depth=None):
     """Returns the ProcessInfo of every process below process_id (children, their children, ...),
-    down to maximum_depth levels, or all of them for None. Each process is listed once, even if
-    a process ID is reused while the tree is read. Another user's processes are left out
+    at every level, or only down to maximum_depth levels when one is given: a command may run
+    below any number of shells and wrappers, so only a caller that looks for something near
+    process_id gives one. Each process is listed once, even if a process ID is reused while the
+    tree is read. Another user's processes are left out
     (list_descendant_processes_and_other_users_process_ids)."""
     return list_descendant_processes_and_other_users_process_ids(process_id, maximum_depth)[0]
 
 
-def list_descendant_processes_and_other_users_process_ids(process_id, maximum_depth=6):
+def list_descendant_processes_and_other_users_process_ids(process_id, maximum_depth=None):
     """Returns (list_descendant_processes's list, the IDs of the processes below process_id that
     belong to another user, such as a command run with sudo, which can't be read and whose own
     children aren't listed)."""
@@ -446,19 +458,17 @@ def list_child_processes_of_the_agent(agent_process_id, descendant_processes, no
     own_program_process_ids = {agent_process_id} | {
         process.process_id for process in descendant_processes
         if process.parent_process_id == agent_process_id and process.name in NAMES_OF_AGENT_PROGRAMS}
-    process_ids_by_parent_process_id = collections.defaultdict(list)
+    processes_by_parent_process_id = collections.defaultdict(list)
     for process in descendant_processes:
-        process_ids_by_parent_process_id[process.parent_process_id].append(process.process_id)
-    process_by_id = {process.process_id: process for process in descendant_processes}
+        processes_by_parent_process_id[process.parent_process_id].append(process)
 
     def find_first_process_run_below(shell):
         below = []
-        parent_process_ids = [shell.process_id]
-        while parent_process_ids:  # every level, so a shell inside a shell is looked through too
-            children = [process_by_id[process_id] for parent_process_id in parent_process_ids
-                        for process_id in process_ids_by_parent_process_id[parent_process_id]]
+        parents = [shell]
+        while parents:  # every level, so a shell inside a shell is looked through too
+            children = [child for parent in parents for child in processes_by_parent_process_id[parent.process_id]]
             below.extend(child for child in children if child.name not in SHELL_AND_WRAPPER_PROCESS_NAMES)
-            parent_process_ids = [child.process_id for child in children]
+            parents = children
         return min(below, key=lambda process: process.started_at, default=None)
     children = sorted((process for process in descendant_processes if process.parent_process_id in own_program_process_ids
                        and process.process_id not in own_program_process_ids
@@ -533,7 +543,16 @@ def list_detached_processes(earliest_started_at):
 def process_is_codex_shared_background_server(process, arguments):
     """Returns whether a process is Codex's shared background server (`codex app-server`, which
     Codex 0.165 and later start when none runs) or its helper (`codex app-server daemon pid-update-loop`)."""
-    return process.name == "codex" and arguments[1:2] == ["app-server"]
+    return process.name == CODEX_PROGRAM_NAME and arguments[1:2] == ["app-server"]
+
+
+def a_codex_shared_background_server_runs():
+    """Returns whether Codex's shared background server or its helper
+    (process_is_codex_shared_background_server) runs as this user. launchd adopts them, and has
+    hundreds of other children, so only the arguments of those named as Codex's program are read."""
+    return any(process_is_codex_shared_background_server(process, read_process_arguments_and_environment(process.process_id)[0])
+               for process in map(read_process_info, list_child_process_ids(LAUNCHD_PROCESS_ID))
+               if process is not None and process.name == CODEX_PROGRAM_NAME)
 
 
 def choose_detached_processes_of_the_conversation(detached_processes, conversation_id, agent_started_at):
@@ -579,8 +598,13 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
         detached_processes_of_the_conversation: choose_detached_processes_of_the_conversation's list.
     """
     child_processes = []
-    for child, shown_process in list_child_processes_of_the_agent(agent_process_id, list_descendant_processes(agent_process_id), now):
-        claude_code_shell_command = find_the_command_a_claude_code_shell_runs(read_process_arguments_and_environment(child.process_id)[0])
+    # Every level, so a command below any number of shells and wrappers is found (a script that
+    # runs a script that runs it with timeout and env).
+    for child, shown_process in list_child_processes_of_the_agent(
+            agent_process_id, list_descendant_processes(agent_process_id, maximum_depth=None), now):
+        # Read once: they tell whether it is a Claude Code shell, and name a child that is shown as itself.
+        child_arguments = read_process_arguments_and_environment(child.process_id)[0]
+        claude_code_shell_command = find_the_command_a_claude_code_shell_runs(child_arguments)
         command_started_at = child.started_at if claude_code_shell_command else shown_process.started_at
         # Any file it writes to, not only its standard output: a shell that runs a loop or a { }
         # block with its output sent elsewhere (`done > /dev/null`) keeps its own on another descriptor meanwhile.
@@ -591,7 +615,8 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
         child_processes.append({
             "child": child,
             "command_text": (shorten_scratchpad_paths(" ".join(claude_code_shell_command.split())) if claude_code_shell_command
-                             else build_command_text(read_process_arguments_and_environment(shown_process.process_id)[0],
+                             else build_command_text(child_arguments if shown_process is child
+                                                     else read_process_arguments_and_environment(shown_process.process_id)[0],
                                                      shown_process.name)),
             "command_started_at": command_started_at,
             "is_background_shell": child_process_is_a_background_shell(child, shown_process, command_started_at,
@@ -677,6 +702,28 @@ def an_agent_program_runs_through_a_shell_below(descendant_processes, read_start
                for process in descendant_processes)
 
 
+def find_process_ids_of_the_shells_of_claude_code_tasks(descendant_processes, claude_code_task_ids):
+    """Returns the IDs of the shells and wrappers among the processes below an agent that write to
+    the output file of one of the Claude Code tasks (find_the_claude_code_task_of_an_output_file).
+    Given the tasks Claude Code runs in the background, as its hooks list them, they are the
+    shells of the commands the agent doesn't wait on, which choose_command_the_agent_is_waiting_on
+    then leaves out (as helper_process_ids) with everything below them: by the processes alone, a
+    command started in the background earlier in the turn would be taken for the one the agent
+    waits on. No process's files are read when there are no tasks.
+
+    Args:
+        descendant_processes: ProcessInfo of every process below the agent process.
+        claude_code_task_ids: The IDs of the tasks the hooks reported so far
+            (hook_event_tracking.list_background_task_ids_known_so_far); empty or None for none.
+    """
+    if not claude_code_task_ids:
+        return frozenset()
+    return frozenset(
+        process.process_id for process in descendant_processes if process.name in SHELL_AND_WRAPPER_PROCESS_NAMES
+        and any(find_the_claude_code_task_of_an_output_file(path) in claude_code_task_ids
+                for path in (list_the_files_a_process_has_open(process.process_id, only_those_open_for_writing=True) or {}).values()))
+
+
 def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at, helper_process_names, now,
                                            helper_process_ids=frozenset(), read_process_arguments=lambda process_id: []):
     """Returns (the command's process, started at) for the command an agent started in this turn
@@ -684,20 +731,26 @@ def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at
 
     Not commands, and nor is anything below them: the tool's own helpers (Claude Code's
     caffeinate, Codex's code mode host), processes that were already running while the session
-    was idle (MCP servers, from the second turn on), and Claude Code shells older than the turn:
+    was idle (MCP servers, from the second turn on), the shells of the commands Claude Code's
+    hooks list as running in the background, and Claude Code shells older than the turn:
     each runs one command, so one from an earlier turn is a command left in the background, and
     what it starts now (a wait loop's next `sleep 30`) isn't this turn's. Any other process older
     than the turn isn't a command itself, but what it starts in this turn is (Codex runs new
-    commands in a terminal it keeps, so its shells aren't told apart this way). A shell with
-    nothing running in it doesn't count either, nor does a command younger than
-    SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS.
+    commands in a terminal it keeps, so its shells aren't told apart this way). The same goes
+    for the agent's own program, which the agent process starts itself (Codex's below its node
+    launcher, as young as the turn in a session started with its first prompt): not a command,
+    though what it starts is. A shell with nothing running in it doesn't count either, nor does
+    a command younger than SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS.
 
     Args:
-        descendant_processes: ProcessInfo of every process below the agent process.
+        descendant_processes: ProcessInfo of every process below the agent process (a process
+            whose parent isn't one of them was started by the agent process itself).
         turn_started_at: When the agent's current turn began.
         helper_process_names: Executable names of the agent tool's own helper processes.
         now: The current time.
-        helper_process_ids: IDs of processes seen running while the session was idle.
+        helper_process_ids: IDs of processes seen running while the session was idle, and of the
+            shells of the commands Claude Code runs in the background
+            (find_process_ids_of_the_shells_of_claude_code_tasks).
         read_process_arguments: Returns a process's arguments (read_process_arguments_and_environment's
             first part); asked only about shells older than the turn.
     """
@@ -714,11 +767,14 @@ def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at
         excluded_process_ids |= below_excluded
         found_more = bool(below_excluded)
     parent_process_ids = {process.parent_process_id for process in descendant_processes}
+    descendant_process_ids = {process.process_id for process in descendant_processes}
     started_in_this_turn = sorted(
         (process for process in descendant_processes
          if process.process_id not in excluded_process_ids
          and process.started_at >= turn_started_at - SECONDS_OF_SLACK_AT_TURN_START
-         and not (process.name in SHELL_AND_WRAPPER_PROCESS_NAMES and process.process_id not in parent_process_ids)),
+         and not (process.name in SHELL_AND_WRAPPER_PROCESS_NAMES and process.process_id not in parent_process_ids)
+         # The agent's own program: started by the agent process itself, whose ID isn't among those below it.
+         and not (process.name in NAMES_OF_AGENT_PROGRAMS and process.parent_process_id not in descendant_process_ids)),
         key=lambda process: process.started_at)
     if not started_in_this_turn or now - started_in_this_turn[0].started_at < SECONDS_A_COMMAND_RUNS_BEFORE_IT_COUNTS:
         return None

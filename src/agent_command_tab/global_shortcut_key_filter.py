@@ -5,7 +5,7 @@ both before macOS's usual way of making a global shortcut (RegisterEventHotKey) 
 with Fn held, so they are caught by a key filter instead: an active event tap (CGEventTapCreate)
 that sees every key press before the app switcher does and holds back only the chosen shortcut.
 While the app switcher is open (Command still held after a Command-Tab press), the shortcut goes
-to the app switcher, where Shift-Command-Tab moves backward. Both were checked with real key presses.
+to the app switcher, where Shift-Command-Tab moves backward.
 
 The filter needs the Accessibility permission (macOS checks it for the app that started this one,
 such as iTerm2). It runs on its own thread, so key presses never wait for the main thread's run

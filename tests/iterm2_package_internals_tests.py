@@ -5,14 +5,15 @@ back to NSAppleScript on a background thread, losing half of its connection watc
 failing every read of iTerm2's windows.
 """
 
-import inspect
+import asyncio
 import os
 import unittest
 from unittest import mock
 
 import iterm2
 import iterm2.auth
-import iterm2.rpc
+
+from agent_command_tab.terminal_backends.iterm2_terminal_backend import read_iterm2_variables
 
 
 class Iterm2PackageInternalsTests(unittest.TestCase):
@@ -30,10 +31,18 @@ class Iterm2PackageInternalsTests(unittest.TestCase):
         self.assertIn("_Connection__dispatch_forever_future", vars(iterm2.Connection()))
 
     def test_variable_request_still_takes_several_names_for_a_session_tab_or_window(self):
-        # read_iterm2_variables reads several variables in one request through this function.
-        parameters = inspect.signature(iterm2.rpc.async_variable).parameters
-        self.assertEqual(list(parameters), ["connection", "session_id", "sets", "gets", "tab_id", "window_id"])
-        self.assertTrue(hasattr(iterm2.api_pb2.VariableResponse.Status, "Value"))
+        # read_iterm2_variables reads several variables in one request through iterm2.rpc.async_variable,
+        # which runs here for real, up to the connection that would send its request to iTerm2.
+        response = iterm2.api_pb2.ServerOriginatedMessage()
+        response.variable_response.status = iterm2.api_pb2.VariableResponse.Status.Value("OK")
+        response.variable_response.values.extend(['"zsh"', "null"])
+        for id_field_name in ("session_id", "tab_id", "window_id"):
+            connection = mock.Mock(async_send_message=mock.AsyncMock(), async_dispatch_until_id=mock.AsyncMock(return_value=response))
+            self.assertEqual(asyncio.run(read_iterm2_variables(connection, ["title", "titleOverrideFormat"], **{id_field_name: "id-1"})),
+                             ["zsh", None])
+            variable_request = connection.async_send_message.await_args.args[0].variable_request
+            self.assertEqual((variable_request.WhichOneof("scope"), getattr(variable_request, id_field_name)), (id_field_name, "id-1"))
+            self.assertEqual(list(variable_request.get), ["title", "titleOverrideFormat"])
 
 
 if __name__ == "__main__":

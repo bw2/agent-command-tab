@@ -12,6 +12,8 @@ from agent_command_tab.dashboard_core import DashboardCore
 from agent_command_tab.terminal_backends import iterm2_terminal_backend
 from agent_command_tab.terminal_backends.iterm2_terminal_backend import Iterm2TerminalBackend, read_status_shown_in_iterm2s_tab_bar
 from condition_waiting import wait_until_in_a_coroutine
+from gathered_window_builders import make_gathered_window
+from snapshot_builder_tests import resolve
 
 
 class StandInSession:
@@ -37,10 +39,15 @@ def make_iterm2_terminal_backend():
 
 def gather_tab(command_line, status_variable, session, iterm2_terminal_backend_to_gather_with=None):
     """Returns the first session that the iTerm2 backend (a new one when None) gathers for a tab
-    with this one session."""
+    with this one session, from stand-in iTerm2 variables of the tab and of the session, each
+    read by its name."""
     iterm2_terminal_backend_to_gather_with = iterm2_terminal_backend_to_gather_with or make_iterm2_terminal_backend()
+    variables_by_tab_id_and_session_id = {
+        ("1", None): {"title": "tab title", "titleOverrideFormat": None},
+        (None, session.session_id): {"jobPid": None, "commandLine": command_line, "status": status_variable, "path": "/p"}}
+
     def read_variables(connection, names, session_id=None, tab_id=None, window_id=None):
-        return ["tab title", None] if tab_id is not None else [None, command_line, status_variable, "/p"]
+        return [variables_by_tab_id_and_session_id[(tab_id, session_id)][name] for name in names]
     tab = unittest.mock.Mock(tab_id="1", sessions=[session])
     with unittest.mock.patch.object(iterm2_terminal_backend, "read_iterm2_variables",
                                     unittest.mock.AsyncMock(side_effect=read_variables)):
@@ -64,6 +71,23 @@ class StatusInIterm2sTabBarTests(unittest.TestCase):
         self.assertEqual(gather_tab("claude --verbose", "working", session)["status"], "working")  # the variable wins
         self.assertEqual(gather_tab("-zsh", None, session)["status"], None)  # a shell is no agent
         self.assertEqual(session.invocations, [])
+
+    def test_the_tab_bars_status_makes_an_unknown_program_an_agent_only_when_the_variable_changed_after_the_program_started(self):
+        # `gh` runs since 500 in a tab whose variable is empty while its tab bar shows idle. A gather
+        # passes the tab bar's status on as the one set in iTerm2, so it counts as the variable's
+        # own value does: by when iTerm2 last reported a change of the variable.
+        def list_agent_tool_names(status_set_in_iterm2_at_by_session_id):
+            backend = make_iterm2_terminal_backend()
+            backend.status_set_in_iterm2_at_by_session_id = status_set_in_iterm2_at_by_session_id
+            first_session = gather_tab("gh pr view 12", None, StandInSession({"status": "idle"}), backend)
+            self.assertEqual((first_session["status"], first_session["status_set_in_iterm2"]), ("idle", "idle"))
+            # The stand-in tab has no job process whose start the gather could read.
+            gathered_tab = {"tab_id": "1", "first_session": dict(first_session, job_pid=77, job_started_at=500.0)}
+            return [agent_session["agent_tool_name"] for agent_session in resolve([make_gathered_window("w", [gathered_tab])]).values()]
+
+        self.assertEqual(list_agent_tool_names({}), [])  # no change reported since the dashboard connected, as after iTerm2 restarts
+        self.assertEqual(list_agent_tool_names({"session-1": 499.0}), [])  # the last change came before gh started
+        self.assertEqual(list_agent_tool_names({"session-1": 501.0}), ["gh"])
 
 
 class TimeIterm2SetTheStatusTests(unittest.TestCase):

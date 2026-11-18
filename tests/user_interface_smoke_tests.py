@@ -19,6 +19,7 @@ import unittest
 import unittest.mock
 import warnings
 
+import objc
 from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, NSAppearance, NSAppearanceNameAqua,
                     NSAppearanceNameDarkAqua, NSApplication,
                     NSApplicationActivationPolicyAccessory, NSBackgroundStyleNormal, NSBackingStoreBuffered,
@@ -26,15 +27,15 @@ from AppKit import (NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApp, 
                     NSControlStateValueOn, NSControlTextDidChangeNotification, NSCursor, NSDragOperationMove, NSDragOperationNone, NSEvent,
                     NSDownArrowFunctionKey, NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagShift,
                     NSEventTypeKeyDown, NSSwitch, NSUpArrowFunctionKey,
-                    NSEventTypeLeftMouseDown,
+                    NSEventTypeLeftMouseDown, NSEventTypeLeftMouseDragged,
                     NSEventTypeLeftMouseUp, NSLeftArrowFunctionKey, NSMakePoint, NSMakeRect, NSMidX, NSMidY, NSPointInRect,
                     NSRightArrowFunctionKey,
-                    NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaleNone,
+                    NSFloatingWindowLevel, NSFontAttributeName, NSForegroundColorAttributeName, NSImage,
                     NSImageScaleProportionallyUpOrDown, NSImageView, NSMenu,
                     NSNormalWindowLevel, NSPopover, NSPopoverBehaviorApplicationDefined, NSPopoverBehaviorTransient,
                     NSParagraphStyleAttributeName, NSScreen, NSTextAlignmentRight, NSTextField, NSView, NSWindow, NSWindowOcclusionStateVisible,
-                    NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable, NSWorkspaceApplicationKey)
-from Foundation import NSContainsRect, NSIndexSet, NSNotification
+                    NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable, NSWindowStyleMaskTitled, NSWorkspaceApplicationKey)
+from Foundation import NSContainsRect, NSIndexSet, NSMaxY, NSMinY, NSNotification
 
 from agent_command_tab.app_controller import SECONDS_BEFORE_THE_INSTALLED_AGENT_TOOLS_ARE_CHECKED_AGAIN, AppController, yield_activation_to
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS
@@ -70,8 +71,7 @@ from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk
 from agent_command_tab.user_interface.list_window import ListWindowController
 from agent_command_tab.user_interface.screen_layout import (compute_list_window_content_rect_for_a_dragged_sidebar,
                                                             convert_rect_to_frame_list, frame_is_on_a_screen,
-                                                            grow_frame_to_smallest_size, list_screen_frames,
-                                                            place_window_at_saved_frame_or_center)
+                                                            grow_frame_to_smallest_size, place_window_at_saved_frame_or_center)
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 from agent_command_tab.user_interface.menu_bar_status_item import (MenuBarStatusItemController, choose_icon_color_name,
                                                                    choose_what_a_click_on_the_icon_does_to_the_dropdown)
@@ -181,6 +181,7 @@ class RecordingOwner:
 
     def submit_action_and_report_failure(self, action_request, failure_title, after_success=None, after_failure=None):
         self.submitted_actions.append(action_request)
+        self.after_success_of_the_last_action = after_success
         self.after_failure_of_the_last_action = after_failure
 
     def list_sort_order_chosen(self, list_sort_order, list_sort_order_is_reversed):
@@ -271,7 +272,7 @@ def make_sample_snapshot(second_window_tabs=2):
         make_entry("2", "phase0-tests", "asking"),
         make_entry("3", "codex-review", "done", tool="Codex"),
     ))
-    window_two = WindowEntry("w2", "tandem-repeats", False, (0, 0, 800, 600), 2, tuple(
+    window_two = WindowEntry("w2", "tandem-repeats", False, (0, 0, 800, 600), second_window_tabs, tuple(
         make_entry(str(10 + index), f"analysis-{index}", "idle") for index in range(second_window_tabs)))
     monitor = MonitorEntry("1", "Built-in", (0, 0, 2000, 1300), (0, 0, 2000, 1260), (window_one, window_two))
     return ComputerSnapshot("c", "Test Mac", 1.0, (monitor,))
@@ -353,14 +354,40 @@ def select_rows_of(outline_view, rows):
     outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(rows), False)
 
 
+def list_recipient_radio_buttons_top_first(recipient_choices):
+    """Returns the Talk to Each Other window's "Send the message to:" radio buttons, top first: the list's order, then "each of"."""
+    return sorted(recipient_choices.recipients_by_radio_button, key=lambda radio_button: -radio_button.frame().origin.y)
+
+
 def make_key_down_event(window, characters, key_code, modifier_flags=0):
     """Returns a key press in the window, as AppKit sends it."""
     return NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
         NSEventTypeKeyDown, NSMakePoint(0, 0), modifier_flags, 0, window.windowNumber(), None, characters, characters, False, key_code)
 
 
+def make_mouse_event(window, event_type, point_in_the_window):
+    """Returns a press, drag or release (the event type) of the left mouse button at this point of the window, as AppKit sends it."""
+    return NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+        event_type, point_in_the_window, 0, 0, window.windowNumber(), None, 0, 1, 1.0)
+
+
 class UserInterfaceSmokeTests(unittest.TestCase):
+    def run(self, result=None):
+        # AppKit keeps each test's window and views in the autorelease pool, which nothing empties while no event loop
+        # runs: without a pool of its own for each test, every test's window would stay in memory until the last test ends.
+        with objc.autorelease_pool():
+            return super().run(result)
+
     def setUp(self):
+        # A stand-in for NSApp that does nothing when asked to make the app the active one, which would take the keyboard
+        # from the app the person running the tests is typing in, and passes everything else on to the real NSApp. The
+        # list asks for that to rename a row in the dropdown, and the app controller before it shows an alert.
+        self.application_that_is_never_made_active = unittest.mock.Mock(wraps=NSApp)
+        self.application_that_is_never_made_active.activateIgnoringOtherApps_ = unittest.mock.Mock()
+        for module_name in ("agent_command_tab.user_interface.agent_session_outline_view", "agent_command_tab.app_controller"):
+            application_patch = unittest.mock.patch(f"{module_name}.NSApp", self.application_that_is_never_made_active)
+            application_patch.start()
+            self.addCleanup(application_patch.stop)
         self.owner = RecordingOwner()
         self.submitted_actions = self.owner.submitted_actions
         self.list_controller = AgentSessionListController.alloc().initWithOwner_(self.owner)
@@ -453,6 +480,20 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.outlineView_acceptDrop_item_childIndex_(outline_view, None, None, 2)
         self.assertEqual(self.submitted_actions[-1].action, "reorder_window_list")
         self.assertIsNone(self.submitted_actions[-1].arguments["drop_before_window_id"])  # after the last window
+
+    def test_dropping_the_last_shown_window_below_the_plus_row_moves_nothing(self):
+        # AppKit counts the "+" row among the top-level rows, so a drop below it comes with an index one past
+        # the windows': moving the window to the end would put it past the window Hide Idle hides after it.
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.list_controller.set_idle_tabs_are_hidden(True)  # tandem-repeats' two tabs are idle
+        outline_view = self.list_controller.outline_view
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "2", "3", "new_window"])
+        self.list_controller.dragged_item = outline_view.itemAtRow_(0)
+        for child_index in (1, 2):  # above the "+" row, and below it
+            self.assertEqual(self.list_controller.outlineView_validateDrop_proposedItem_proposedChildIndex_(
+                outline_view, None, None, child_index), NSDragOperationMove)
+            self.list_controller.outlineView_acceptDrop_item_childIndex_(outline_view, None, None, child_index)
+        self.assertEqual(self.submitted_actions, [])
 
     def test_sort_orders_change_only_the_order_of_the_rows(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -635,6 +676,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(name_title_frame.origin.x + name_title_frame.size.width,
                          row_view.column_views["agent_tool_icon"].frame().origin.x - GAP_BEFORE_DETAILS)
 
+    def press_and_release_on_the_column_titles_row(self, press_point_in_the_row, release_point_in_the_row):
+        """Presses the mouse button at one point of the row of titles and releases it at another, as AppKit delivers
+        both: to the row of titles, whatever is under the pointer."""
+        titles_row_view = self.list_controller.column_titles_row_view
+        for event_type, row_view_method, point_in_the_row in (
+                (NSEventTypeLeftMouseDown, titles_row_view.mouseDown_, press_point_in_the_row),
+                (NSEventTypeLeftMouseUp, titles_row_view.mouseUp_, release_point_in_the_row)):
+            row_view_method(make_mouse_event(self.window, event_type, titles_row_view.convertPoint_toView_(point_in_the_row, None)))
+
     def click_column_title(self, title_name):
         """Clicks the middle of a title, as AppKit delivers the click: to the row of titles, whatever label is under it."""
         titles_row_view = self.list_controller.column_titles_row_view
@@ -645,11 +695,46 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         point_in_the_row = NSMakePoint(frame.origin.x + frame.size.width / 2, frame.origin.y + frame.size.height / 2)
         self.assertIs(titles_row_view.hitTest_(titles_row_view.convertPoint_toView_(point_in_the_row, titles_row_view.superview())),
                       titles_row_view)
-        point_in_the_window = titles_row_view.convertPoint_toView_(point_in_the_row, None)
-        for event_type, row_view_method in ((NSEventTypeLeftMouseDown, titles_row_view.mouseDown_),
-                                            (NSEventTypeLeftMouseUp, titles_row_view.mouseUp_)):
-            row_view_method(NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
-                event_type, point_in_the_window, 0, 0, self.window.windowNumber(), None, 0, 1, 1.0))
+        self.press_and_release_on_the_column_titles_row(point_in_the_row, point_in_the_row)
+
+    def test_a_click_on_the_top_bar_leaves_no_drag_for_a_later_press_on_a_column_title_to_go_on_with(self):
+        # A press on a column title passes its drags up to the panel. Were the place of an earlier press on the top bar
+        # still kept then, the pointer's first movement on the title would count as the top bar dragged from that
+        # place, which turns the dropdown or the sidebar into the list window.
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        panel = self.dropdown_panel_controller
+        top_bar_drag_starts = []
+        self.owner.top_bar_dragged = lambda list_panel_controller, start_point_on_screen: top_bar_drag_starts.append(start_point_on_screen)
+        # The top bar's own space, between Hide Idle and the expand button.
+        idle_tabs_button_frame = panel.idle_tabs_button.frame()
+        point_on_the_top_bar = NSMakePoint(
+            idle_tabs_button_frame.origin.x + idle_tabs_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS / 2,
+            panel.view().bounds().size.height - TOP_BAR_HEIGHT / 2)
+        self.assertIs(panel.view().hitTest_(point_on_the_top_bar), panel.view())
+        titles_row_view = self.list_controller.column_titles_row_view
+        title_frame = titles_row_view.name_title_text_field.frame()
+        point_on_a_title = titles_row_view.convertPoint_toView_(NSMakePoint(NSMidX(title_frame), NSMidY(title_frame)), None)
+
+        def send_mouse_event(event_type, point_in_the_window):  # through the window, which chooses the view as for a real press
+            self.window.sendEvent_(make_mouse_event(self.window, event_type, point_in_the_window))
+        with unittest.mock.patch("agent_command_tab.user_interface.popover_container.NSEvent") as stand_in_event_class:
+            stand_in_event_class.mouseLocation.return_value = NSMakePoint(500, 800)  # the pointer, on the screen
+            send_mouse_event(NSEventTypeLeftMouseDown, point_on_the_top_bar)
+            self.assertIsNotNone(panel.view().top_bar_drag_start)
+            send_mouse_event(NSEventTypeLeftMouseUp, point_on_the_top_bar)
+            stand_in_event_class.mouseLocation.return_value = NSMakePoint(400, 770)  # moved to the title, then pressed there
+            send_mouse_event(NSEventTypeLeftMouseDown, point_on_a_title)
+            send_mouse_event(NSEventTypeLeftMouseDragged, NSMakePoint(point_on_a_title.x + 1, point_on_a_title.y))
+            send_mouse_event(NSEventTypeLeftMouseUp, NSMakePoint(point_on_a_title.x + 1, point_on_a_title.y))
+            self.assertEqual(top_bar_drag_starts, [])
+            # The top bar itself still drags, from where it was pressed.
+            stand_in_event_class.mouseLocation.return_value = NSMakePoint(500, 800)
+            send_mouse_event(NSEventTypeLeftMouseDown, point_on_the_top_bar)
+            stand_in_event_class.mouseLocation.return_value = NSMakePoint(490, 800)
+            send_mouse_event(NSEventTypeLeftMouseDragged, point_on_the_top_bar)
+            send_mouse_event(NSEventTypeLeftMouseUp, point_on_the_top_bar)
+        self.assertEqual(top_bar_drag_starts, [(500, 800)])
 
     def test_clicking_a_column_title_sorts_by_it_then_the_other_way_then_not_at_all(self):
         # Context sizes known for planning (467k of 1M) and codex-review (91k of 200k), not for phase0-tests.
@@ -680,6 +765,117 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.owner.chosen_list_sort_orders[-1], ("alphabet", False))
         self.assertEqual((self.list_controller.column_titles_row_view.name_title_text_field.stringValue(),
                           title_fields["state"].stringValue()), ("Name ▴", "Status"))  # A to Z: up, as in Finder
+
+    def test_the_last_msg_column_shows_the_time_since_the_last_message_and_its_title_sorts_by_it(self):
+        now = time.time()
+        # planning works, so its row shows no time; phase0-tests has asked for 1h 1m and codex-review has been done
+        # for 2m. The second window's two tabs have no time: when their last message was written isn't known.
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id({
+            "1": dict(last_message_at=now - 30), "2": dict(last_message_at=now - 3700), "3": dict(last_message_at=now - 150)}))
+        self.assertGreater(self.list_controller.column_widths["time_since_last_message"], 0)  # on by default
+        self.window.contentView().layoutSubtreeIfNeeded()
+        outline_view = self.list_controller.outline_view
+
+        def read_time_shown_in_row(row):
+            column_view = self.lay_out_row_view(row).column_views["time_since_last_message"]
+            self.assertFalse(column_view.isHidden())
+            return column_view.stringValue()
+
+        def list_tab_titles_and_times_shown_in_the_first_window():
+            return [(outline_view.itemAtRow_(row).entry.tab_title, read_time_shown_in_row(row)) for row in range(1, 4)]
+        self.assertEqual(list_tab_titles_and_times_shown_in_the_first_window(),
+                         [("planning", ""), ("phase0-tests", "1h 1m"), ("codex-review", "2m")])
+        self.assertEqual([read_time_shown_in_row(row) for row in (5, 6)], ["", ""])  # the second window's tabs
+        self.assertEqual(self.lay_out_row_view(0).column_views["time_since_last_message"].stringValue(), "")  # a window row
+
+        def choose_and_show(list_sort_order, list_sort_order_is_reversed):  # as the app controller does, for every list
+            self.owner.chosen_list_sort_orders.append((list_sort_order, list_sort_order_is_reversed))
+            self.list_controller.set_list_sort_order(list_sort_order, list_sort_order_is_reversed)
+        self.owner.list_sort_order_chosen = choose_and_show
+        title_field = self.list_controller.column_titles_row_view.column_title_text_fields["time_since_last_message"]
+        self.assertEqual(title_field.stringValue(), "Last Msg")
+        # The shortest time first, then the longest first, the working tab last both ways, then the tab order again.
+        for expected_sort, expected_title, expected_tab_titles_and_times in (
+                (("time_since_last_message", False), "Last Msg ▴", [("codex-review", "2m"), ("phase0-tests", "1h 1m"), ("planning", "")]),
+                (("time_since_last_message", True), "Last Msg ▾", [("phase0-tests", "1h 1m"), ("codex-review", "2m"), ("planning", "")]),
+                (("manual", False), "Last Msg", [("planning", ""), ("phase0-tests", "1h 1m"), ("codex-review", "2m")])):
+            self.click_column_title("time_since_last_message")
+            self.assertEqual(self.owner.chosen_list_sort_orders[-1], expected_sort)
+            self.assertEqual(title_field.stringValue(), expected_title)
+            self.assertEqual(list_tab_titles_and_times_shown_in_the_first_window(), expected_tab_titles_and_times)
+        self.list_controller.set_shown_columns(["context_tokens", "state"])  # turned off in Settings: it leaves the rows
+        self.assertEqual(self.list_controller.column_widths["time_since_last_message"], 0)
+        self.assertTrue(self.lay_out_row_view(2).column_views["time_since_last_message"].isHidden())
+
+    def test_last_msg_comes_right_after_age_in_the_rows_over_them_and_in_the_sort_popup(self):
+        now = time.time()
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(
+            status="done", context_tokens=40_546, started_at=now - 3700, last_message_at=now - 150, cpu_percent=12,
+            memory_bytes=512 * 1024 ** 2))
+        self.list_controller.set_shown_columns(LIST_COLUMNS)
+        self.window.setContentSize_((POPOVER_WIDTH + 400, 260))  # room for every column
+        self.window.contentView().layoutSubtreeIfNeeded()
+
+        def list_names_of_shown_views_left_to_right(views_by_column_name):
+            return sorted((column_name for column_name, view in views_by_column_name.items() if not view.isHidden()),
+                          key=lambda column_name: views_by_column_name[column_name].frame().origin.x)
+        column_names_left_to_right = ["agent_tool_icon", "state", "context_tokens", "created_time", "existence_duration",
+                                      "time_since_last_message", "cpu_usage", "memory_usage"]
+        self.assertEqual(list_names_of_shown_views_left_to_right(self.lay_out_row_view(1).column_views), column_names_left_to_right)
+        titles_row_view = self.list_controller.column_titles_row_view
+        titles_row_view.layoutSubtreeIfNeeded()
+        title_fields = titles_row_view.column_title_text_fields
+        self.assertEqual(list_names_of_shown_views_left_to_right(title_fields), column_names_left_to_right)
+        self.assertEqual([title_fields[column_name].stringValue() for column_name in column_names_left_to_right],
+                         ["", "Status", "Tokens", "Created", "Age", "Last Msg", "CPU", "Memory"])
+        self.assertEqual(list(self.dropdown_panel_controller.list_sort_order_popup.itemTitles()),
+                         ["Tab Order", "Status", "Name", "Tokens", "Age", "Last Msg", "Memory", "CPU"])
+
+    def test_a_sidebar_made_narrower_drops_last_msg_then_the_context_then_the_icon_then_the_state(self):
+        # The columns shown by default, each with something to show in the first window's rows.
+        snapshot = make_sample_snapshot_with_entries_changed(0, context_tokens=40_546, last_message_at=time.time() - 150)
+        self.list_controller.width_is_set_by_the_user = True
+        self.window.setContentSize_((560, 260))
+        self.list_controller.apply_snapshot(snapshot)
+        shown_column_names_as_the_sidebar_narrows = []
+        for width in range(560, 198, -2):  # down to the narrowest sidebar
+            self.window.setContentSize_((width, 260))
+            self.window.contentView().layoutSubtreeIfNeeded()
+            shown_column_names = [column_name for column_name, column_width in self.list_controller.column_widths.items() if column_width]
+            if shown_column_names not in shown_column_names_as_the_sidebar_narrows:
+                shown_column_names_as_the_sidebar_narrows.append(shown_column_names)
+        self.assertEqual(shown_column_names_as_the_sidebar_narrows, [
+            ["agent_tool_icon", "state", "context_tokens", "time_since_last_message"], ["agent_tool_icon", "state", "context_tokens"],
+            ["agent_tool_icon", "state"], ["state"], []])
+
+    def test_a_time_that_grows_in_a_column_that_is_not_shown_does_not_refill_its_row(self):
+        now = time.time()
+        # codex-review started 20 seconds ago and its last message is 5 seconds old: both times change every second.
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id({
+            "3": dict(started_at=now - 20.5, last_message_at=now - 5.5)}))
+        self.list_controller.set_shown_columns(["context_tokens", "state"])  # Last Msg turned off; Age is off by default
+        self.window.contentView().layoutSubtreeIfNeeded()
+        row_view = self.lay_out_row_view(3)
+        look_before = row_view.look
+        with unittest.mock.patch("agent_command_tab.user_interface.agent_session_outline_view.time.time", return_value=now + 3):
+            self.list_controller.refreshTimerFired_(None)
+            self.assertIs(row_view.look, look_before)  # neither the Age nor the Last Msg column shows
+            self.list_controller.set_shown_columns(["context_tokens", "state", "time_since_last_message"])
+            self.assertEqual(row_view.column_views["time_since_last_message"].stringValue(), "8s")
+        with unittest.mock.patch("agent_command_tab.user_interface.agent_session_outline_view.time.time", return_value=now + 4):
+            self.list_controller.refreshTimerFired_(None)
+            self.assertEqual(row_view.column_views["time_since_last_message"].stringValue(), "9s")  # a shown time stays current
+
+    def test_a_press_on_a_column_title_that_comes_up_below_the_row_of_titles_sorts_nothing(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        title_frame = self.list_controller.column_titles_row_view.name_title_text_field.frame()
+        self.press_and_release_on_the_column_titles_row(
+            NSMakePoint(NSMidX(title_frame), NSMidY(title_frame)),
+            NSMakePoint(NSMidX(title_frame), -40))  # dragged down over the rows, still in the title's column
+        self.assertEqual(self.owner.chosen_list_sort_orders, [])
+        self.click_column_title("name")  # a press that comes up on the title it went down on still sorts
+        self.assertEqual(self.owner.chosen_list_sort_orders, [("alphabet", False)])
 
     def test_the_pointer_is_the_pointing_hand_above_the_titles_that_sort(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
@@ -841,11 +1037,61 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(search_field_frame.size.width, SMALLEST_SEARCH_FIELD_WIDTH)
         self.assertGreaterEqual(panel.message_text_field.frame().origin.x, search_field_frame.origin.x + search_field_frame.size.width)
 
+    def test_the_top_bar_is_laid_out_a_second_time_only_after_a_layout_that_kept_the_controls_beside_the_message(self):
+        # Only such a layout can leave the message too little room that the controls can still give it by stepping aside.
+        panel = self.dropdown_panel_controller
+        for width, controls_step_aside, expected_layouts in ((100, True, [True]), (200, False, [False, True]), (560, False, [False])):
+            self.window.setContentSize_((width, 260))
+            with unittest.mock.patch.object(panel, "lay_out_top_bar", wraps=panel.lay_out_top_bar) as lay_out_top_bar:
+                panel.show_message("iTerm2: could not connect", sort_control_and_hide_idle_step_aside=controls_step_aside)
+            self.assertEqual([call.args[0] for call in lay_out_top_bar.call_args_list], expected_layouts, width)
+            self.assertEqual(panel.message_text_field.frame().size.width < SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS, width == 100, width)
+
     def type_in_the_search_box(self, text):
         """Puts text in the dropdown's search box, as typing does."""
         panel = self.dropdown_panel_controller
         panel.search_field.setStringValue_(text)
         panel.controlTextDidChange_(NSNotification.notificationWithName_object_(NSControlTextDidChangeNotification, panel.search_field))
+
+    def fire_search_answer_wait_timer(self):
+        """Ends the list's wait for the core's answer to a search now, rather than after
+        SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES, by firing its timer, which then won't fire a second time."""
+        self.list_controller.search_answer_wait_timer.fire()
+
+    def test_a_search_box_emptied_beside_a_message_steps_aside_for_it_and_the_rows_take_its_keyboard(self):
+        # An empty box left there would keep the message's room: the top bar is fitted again when the search goes, not
+        # only when the message comes.
+        panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.setContentSize_((400, 260))
+
+        def empty_it_with_its_button():
+            panel.search_field.setStringValue_("")
+            panel.searchFieldChanged_(panel.search_field)
+        for empty_the_search_box in (
+                lambda: self.type_in_the_search_box(""),  # the last letter deleted
+                empty_it_with_its_button,
+                lambda: panel.control_textView_doCommandBySelector_(panel.search_field, None, "cancelOperation:"),  # Esc
+                self.list_controller.clear_the_search):  # Return showed a tab the search found
+            panel.show_message("")
+            self.assertTrue(panel.put_the_keyboard_in_the_search_box())  # as Command-F does
+            self.type_in_the_search_box("planning")
+            panel.show_message("iTerm2: could not connect; the other terminals' tabs are listed")
+            self.assertFalse(panel.search_field.isHidden())  # it holds a search
+            empty_the_search_box()
+            self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_text), ("", ""))
+            self.assertTrue(panel.search_field.isHidden())
+            self.assertEqual(panel.message_text_field.frame().origin.x, panel.sort_label.frame().origin.x)  # from the left edge
+            self.assertIs(self.window.firstResponder(), self.list_controller.outline_view)  # Esc then closes the list
+        # Where the controls keep their places beside the message, an emptied box keeps its place and the keyboard.
+        self.window.setContentSize_((560, 260))
+        panel.show_message("iTerm2: could not connect", sort_control_and_hide_idle_step_aside=False)
+        self.assertTrue(panel.put_the_keyboard_in_the_search_box())
+        self.type_in_the_search_box("planning")
+        self.type_in_the_search_box("")
+        self.assertFalse(panel.search_field.isHidden())
+        self.assertIsNotNone(panel.search_field.currentEditor())
+        self.window.makeFirstResponder_(self.list_controller.outline_view)
 
     def row_alpha_of_tab(self, tab_id):
         row = self.list_row_item_ids().index(tab_id)
@@ -895,10 +1141,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
     def test_a_search_the_core_is_slow_to_answer_shows_its_title_matches_meanwhile(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.type_in_the_search_box("plan")
-        wait_timer = self.list_controller.search_answer_wait_timer
-        self.assertTrue(wait_timer.isValid())
-        wait_timer.invalidate()  # fired now rather than after SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES
-        self.list_controller.searchAnswerWaitTimerFired_(wait_timer)
+        self.assertTrue(self.list_controller.search_answer_wait_timer.isValid())
+        self.fire_search_answer_wait_timer()
         self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
         self.owner.answer_conversation_search(["s11"])  # the conversation matches come with the answer
         self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
@@ -931,8 +1175,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          [("plan", True)])
         self.owner.answer_conversation_search(["s11"])
         self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
-        # Each new snapshot asks again: conversations grow between snapshots.
-        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(0, 0, status="idle"))
+        # A snapshot whose conversation text changed asks again: conversations grow between snapshots.
+        self.list_controller.apply_snapshot(make_sample_snapshot()._replace(conversation_search_text_revision=1))
         self.assertEqual([text for text, _, _ in self.owner.conversation_searches], ["plan"])
         self.owner.answer_conversation_search(["s11"])
         # A closed dropdown keeps its search but asks only once it opens again.
@@ -955,17 +1199,20 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.window.makeFirstResponder_(outline_view)
             self.press_key(characters, key_code, modifier_flags)
             self.assertIsNotNone(panel.search_field.currentEditor(), characters)
-        self.type_in_the_search_box("a")  # in every tab's title but "codex-review", whose conversation holds it
+        # "l" is in the titles of three tabs and of neither window; "codex-review" shows for its conversation alone.
+        self.type_in_the_search_box("l")
         self.owner.answer_conversation_search(["s3"])
-        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "2", "3", "w2", "10", "11", "new_window"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "3", "w2", "10", "11", "new_window"])
+        self.assertEqual(self.row_alpha_of_tab("3"), CONVERSATION_ONLY_MATCH_ROW_ALPHA)
         self.select_rows(1)
-        for command, expected_tab_id in (("moveDown:", "2"), ("moveDown:", "3"), ("moveDown:", "10"), ("moveUp:", "3")):
+        for command, expected_tab_id in (("moveDown:", "3"), ("moveDown:", "10"), ("moveUp:", "3")):
             self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, command))
             self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], [expected_tab_id], command)
         self.assertFalse(panel.control_textView_doCommandBySelector_(panel.search_field, None, "deleteBackward:"))  # typing edits
-        # Return shows the selected row's tab and empties the search, which found what it was for.
+        # Return shows the selected row's tab and, once it is in front, empties the search, which found what it was for.
         self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "insertNewline:"))
         self.assertEqual(self.submitted_actions[-1], ActionRequest("focus_agent_session", {"session_id": "s3"}))
+        self.owner.after_success_of_the_last_action(ActionResult(True))
         self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_text), ("", ""))
         # Esc empties the box, then closes the list.
         self.type_in_the_search_box("codex")
@@ -974,6 +1221,204 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                          ("", "", []))
         self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "cancelOperation:"))
         self.assertEqual(self.owner.lists_closed_after_escape, [self.list_controller])
+
+    def press_return_in_the_search_box(self):
+        panel = self.dropdown_panel_controller
+        self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "insertNewline:"))
+
+    def test_return_in_the_search_box_waits_for_the_rows_of_the_text_it_holds(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("tandem")
+        self.owner.answer_conversation_search(["s10"])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["10"])
+        # The core hasn't answered for "zebra" yet: the rows, and the selected row, are still those of "tandem".
+        self.type_in_the_search_box("zebra")
+        self.press_return_in_the_search_box()
+        self.assertEqual((self.submitted_actions, self.list_controller.search_text), ([], "zebra"))
+        self.owner.answer_conversation_search(["s2"])  # only the conversation of phase0-tests holds "zebra"
+        self.assertEqual(self.submitted_actions, [ActionRequest("focus_agent_session", {"session_id": "s2"})])
+        self.assertFalse(self.list_controller.return_in_the_search_box_waits_for_its_rows)
+        # A core slow to answer: Return shows the first tab found by its title, once the rows show the title matches alone.
+        self.type_in_the_search_box("plan")
+        self.press_return_in_the_search_box()
+        self.assertEqual(len(self.submitted_actions), 1)
+        self.fire_search_answer_wait_timer()
+        self.assertEqual(self.submitted_actions[1:], [ActionRequest("focus_agent_session", {"session_id": "s1"})])
+        self.owner.answer_conversation_search(["s11"])  # the late answer shows no second tab
+        self.assertEqual(len(self.submitted_actions), 2)
+        # With the rows of the text the box holds, Return shows the selected row at once.
+        self.press_return_in_the_search_box()
+        self.assertEqual(len(self.submitted_actions), 3)
+
+    def test_a_return_with_no_row_among_the_title_matches_waits_on_for_the_cores_answer_and_no_longer(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("zebra")  # in no title: only the conversation of phase0-tests holds it
+        self.press_return_in_the_search_box()
+        self.fire_search_answer_wait_timer()
+        self.assertEqual((self.list_row_item_ids(), self.submitted_actions), (["new_window"], []))
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual(self.submitted_actions, [ActionRequest("focus_agent_session", {"session_id": "s2"})])
+        # An answer that finds no row either ends the wait: a row found for a later snapshot isn't shown.
+        self.type_in_the_search_box("quagga")
+        self.press_return_in_the_search_box()
+        self.fire_search_answer_wait_timer()
+        self.owner.answer_conversation_search([])
+        self.list_controller.apply_snapshot(make_sample_snapshot()._replace(conversation_search_text_revision=1))  # asks again
+        self.owner.answer_conversation_search(["s2"])  # its conversation holds "quagga" by now
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["2"])
+        self.assertEqual(len(self.submitted_actions), 1)
+
+    def test_a_return_pressed_once_the_title_matches_alone_show_no_row_waits_for_the_cores_answer_too(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("zebra")  # in no title: only the conversation of phase0-tests holds it
+        self.fire_search_answer_wait_timer()
+        self.assertEqual(self.list_row_item_ids(), ["new_window"])
+        self.press_return_in_the_search_box()  # the core is still answering
+        self.assertEqual(self.submitted_actions, [])
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual(self.submitted_actions, [ActionRequest("focus_agent_session", {"session_id": "s2"})])
+        # Once the core has answered, a Return with no row to show waits for nothing: a row a later answer finds is only selected.
+        self.type_in_the_search_box("quagga")
+        self.owner.answer_conversation_search([])
+        self.press_return_in_the_search_box()
+        self.list_controller.apply_snapshot(make_sample_snapshot()._replace(conversation_search_text_revision=1))  # asks again
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["2"])
+        self.assertEqual(len(self.submitted_actions), 1)
+
+    def test_a_search_answered_while_the_list_is_off_screen_selects_its_first_tab_row_once_the_list_appears(self):
+        self.list_controller.defers_rebuilding_while_hidden = True  # as the app sets it for its three lists
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("plan")
+        self.owner.answer_conversation_search([])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["1"])
+        # The answer for "zebra" comes while the list is off screen, which keeps the rows of "plan" until it appears.
+        self.type_in_the_search_box("zebra")
+        self.window.orderOut_(None)
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
+        self.list_controller.prepare_to_appear()  # just before it shows again, as show_popover does
+        self.window.orderFrontRegardless()
+        self.assertEqual(self.list_row_item_ids(), ["w1", "2", "new_window"])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["2"])
+        self.owner.answer_conversation_search(["s2"])  # the search asked again as the list appears finds the same
+        self.press_return_in_the_search_box()
+        self.assertEqual(self.submitted_actions, [ActionRequest("focus_agent_session", {"session_id": "s2"})])
+
+    def test_a_snapshot_asks_the_search_again_only_when_the_conversation_text_changed(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("zebra")  # in no title: only the conversation of phase0-tests holds it
+        self.owner.answer_conversation_search(["s2"])
+        # Only a state and a CPU reading changed: the core's answer still holds.
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(0, 0, status="idle", cpu_percent=12))
+        self.assertEqual((self.owner.conversation_searches, self.list_row_item_ids()), ([], ["w1", "2", "new_window"]))
+        # A title that comes to hold the text is found in the snapshot itself.
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(0, 0, tab_title="zebra crossing"))
+        self.assertEqual((self.owner.conversation_searches, self.list_row_item_ids()), ([], ["w1", "1", "2", "new_window"]))
+        # Conversation text that changed has the core asked again.
+        self.list_controller.apply_snapshot(make_sample_snapshot()._replace(conversation_search_text_revision=1))
+        self.assertEqual([(text, is_case_sensitive) for text, is_case_sensitive, _ in self.owner.conversation_searches],
+                         [("zebra", False)])
+        self.owner.answer_conversation_search(["s2", "s3"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "2", "3", "new_window"])
+
+    def test_a_search_whose_rows_show_when_a_held_button_comes_up_selects_its_first_tab_row_then(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("plan")
+        self.owner.answer_conversation_search([])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["1"])
+        # The answer for "zebra" comes while the button is down on a row, which keeps the rows of "plan" in place.
+        # The row selected among them goes when the button comes up.
+        self.type_in_the_search_box("zebra")
+        self.list_controller.row_pressed(0)
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
+        self.list_controller.row_released()
+        self.assertEqual(self.list_row_item_ids(), ["w1", "2", "new_window"])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["2"])
+        # A drag goes on holding a snapshot after its button's release: no row is selected among the rows it keeps in place.
+        outline_view = self.list_controller.outline_view
+        outline_view.deselectAll_(None)
+        self.list_controller.row_pressed(0)
+        self.list_controller.outlineView_draggingSession_willBeginAtPoint_forItems_(
+            outline_view, None, (0, 0), [outline_view.itemAtRow_(0)])
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(0, 0, status="idle"))
+        self.list_controller.row_released()  # mouseDown_ returns
+        self.assertEqual(self.list_controller.list_selected_items(), [])
+        self.list_controller.outlineView_draggingSession_endedAtPoint_operation_(outline_view, None, (0, 0), 0)
+
+    def test_a_return_that_waits_in_the_search_box_is_dropped_when_the_search_changes_or_its_rows_cant_show(self):
+        panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.type_in_the_search_box("tandem")
+        self.owner.answer_conversation_search([])
+        # Typing on: the Return was for a text the box no longer holds.
+        self.type_in_the_search_box("zebra")
+        self.press_return_in_the_search_box()
+        self.type_in_the_search_box("zebr")
+        self.owner.answer_conversation_search(["s2"])  # for "zebra": left out, and "zebr" asked
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual(self.list_row_item_ids(), ["w1", "2", "new_window"])
+        # The "aA" checkbox changes the search too.
+        self.type_in_the_search_box("zebra")
+        self.press_return_in_the_search_box()
+        panel.show_search_is_case_sensitive(True)
+        self.owner.answer_conversation_search(["s2"])  # for "zebra" without "aA"
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual((self.list_controller.shown_list_search.is_case_sensitive, self.list_row_item_ids()),
+                         (True, ["w1", "2", "new_window"]))
+        # A text nothing holds has no row to show, and the Return doesn't wait for a later text's rows.
+        self.type_in_the_search_box("quagga")
+        self.press_return_in_the_search_box()
+        self.owner.answer_conversation_search([])
+        self.assertEqual(self.list_row_item_ids(), ["new_window"])
+        self.type_in_the_search_box("plan")
+        self.owner.answer_conversation_search([])
+        self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["1"])
+        # A button held down on a row keeps the earlier text's rows in place until it comes up.
+        self.type_in_the_search_box("zebra")
+        self.press_return_in_the_search_box()
+        self.list_controller.row_pressed(0)
+        self.owner.answer_conversation_search(["s2"])
+        self.list_controller.row_released()
+        self.assertEqual(self.list_row_item_ids(), ["w1", "2", "new_window"])
+        # The list closed before the rows came.
+        self.type_in_the_search_box("plan")
+        self.press_return_in_the_search_box()
+        self.window.orderOut_(None)
+        self.owner.answer_conversation_search([])
+        self.window.orderFrontRegardless()
+        self.assertEqual((self.submitted_actions, self.list_controller.return_in_the_search_box_waits_for_its_rows), ([], False))
+        # A row double-clicked meanwhile is the one row shown.
+        self.type_in_the_search_box("zebra")
+        self.press_return_in_the_search_box()
+        planning_item = self.list_controller.items_by_key[("tab", "1")]
+        self.list_controller.find_clicked_item = lambda: planning_item
+        self.list_controller.rowDoubleClicked_(None)
+        self.owner.answer_conversation_search(["s2"])
+        self.assertEqual(self.submitted_actions, [ActionRequest("focus_agent_session", {"session_id": "s1"})])
+
+    def test_a_tab_that_couldnt_be_shown_leaves_the_list_and_its_search_as_they_are(self):
+        panel = self.dropdown_panel_controller
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        tabs_shown = []
+        self.list_controller.on_tab_focused = lambda: tabs_shown.append(True)  # the dropdown closes itself
+        self.type_in_the_search_box("plan")
+        self.owner.answer_conversation_search([])
+        self.press_return_in_the_search_box()
+        self.assertEqual(self.submitted_actions, [ActionRequest("focus_agent_session", {"session_id": "s1"})])
+        # Nothing more until the core says the tab is in front, which it never does for a tab it couldn't show.
+        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_text), ([], "plan", "plan"))
+        self.owner.after_success_of_the_last_action(ActionResult(True))
+        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_text), ([True], "", ""))
+        # A text typed while the tab was coming to the front stays.
+        self.type_in_the_search_box("plan")
+        self.owner.answer_conversation_search([])
+        self.press_return_in_the_search_box()
+        self.type_in_the_search_box("planning")
+        self.owner.after_success_of_the_last_action(ActionResult(True))
+        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_text),
+                         ([True, True], "planning", "planning"))
 
     def test_hide_idle_hides_idle_tabs_and_windows_left_without_tabs_until_show_idle(self):
         panel = self.dropdown_panel_controller
@@ -1320,6 +1765,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertIn("Resume 1 session", window_menu_titles)
         tab_menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # "planning", paused
         self.assertNotIn("Pause session", tab_menu_items_by_title)
+        # Resume leaves an agent suspended with Ctrl+Z to fg typed in its tab, which the tooltip says.
+        self.assertIn("typing fg in its tab", tab_menu_items_by_title["Resume session"].toolTip())
         self.list_controller.menuResumeSessions_(tab_menu_items_by_title["Resume session"])
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("resume_agent_sessions", {"session_ids": ["s1"]}))
@@ -1337,7 +1784,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual((button.isHidden(), button.toolTip()), (False, {
                 "pause_agent_sessions": ("Pause the selected rows' agent processes, their shells and any subprocesses that they "
                                          "started (a STOP signal)"),
-                "resume_agent_sessions": "Resume the selected rows' paused agent processes (a CONT signal)"}[action]), rows)
+                # As the row menus' Resume items say: a CONT signal doesn't bring back an agent suspended with Ctrl+Z.
+                "resume_agent_sessions": ("Resume the selected rows' paused agent processes (a CONT signal); those suspended "
+                                          "with Ctrl+Z are resumed by typing fg in their tabs instead")}[action]), rows)
             panel.pauseOrResumeSelectedRowsClicked_(button)
             self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                              (action, {"session_ids": session_ids}), rows)
@@ -1347,6 +1796,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel.pauseOrResumeSelectedRowsClicked_(button)
         self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target),
                          ("resume_agent_sessions", {"session_ids": ["s1", "s2", "s3", "s10", "s11"]}))
+        self.assertIn("typing fg in their tabs",  # in the menu of the selected rows
+                      self.build_right_click_menu_items_by_title(0)["Resume 5 sessions"].toolTip())
         self.apply_snapshot_with_child_processes()
         self.click_row_arrow(1)  # planning's process rows show below it
         self.select_rows(2)  # a process row stands for its tab's agent session, which a pause stops with it
@@ -1386,7 +1837,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         menu_items_by_title = self.build_right_click_menu_items_by_title(5)  # idle, but its tool takes no commands
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
         # Worded as in the menu of several rows.
-        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "AgentCommandTab can't type commands into Aider")
+        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "AgentCommandTab can't type /compact into Aider")
         menu_items_by_title = self.build_right_click_menu_items_by_title(1)  # working: its row says "thinking"
         self.assertFalse(menu_items_by_title["/compact"].isEnabled())
         self.assertEqual(menu_items_by_title["/compact"].toolTip(),
@@ -1415,11 +1866,24 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertTrue(outline_view.allowsMultipleSelection())
         every_row = build_index_set(range(outline_view.numberOfRows()))  # a Shift-click range over everything
         allowed_rows = self.list_controller.outlineView_selectionIndexesForProposedSelection_(outline_view, every_row)
-        self.assertEqual([outline_view.itemAtRow_(row).kind for row in range(outline_view.numberOfRows()) if allowed_rows.containsIndex_(row)],
+        self.assertEqual([outline_view.itemAtRow_(row).kind for row in allowed_rows],
                          ["window", "tab", "tab", "tab", "window", "tab", "tab"])  # no monitor rows, no "+" row
         row_view = self.list_controller.outlineView_rowViewForItem_(outline_view, outline_view.itemAtRow_(1))
         self.assertIsInstance(row_view, RowViewWithSelectionAndFrontTabOutlines)
         self.assertEqual(row_view.interiorBackgroundStyle(), NSBackgroundStyleNormal)  # the text keeps its colors
+
+    def test_reading_a_selection_looks_only_at_its_own_rows(self):
+        # Each key press reads the selection, so it mustn't go over every row of a long list.
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        outline_view = self.list_controller.outline_view
+        self.select_rows(2, 5)
+        with unittest.mock.patch.object(outline_view, "itemAtRow_", wraps=outline_view.itemAtRow_) as item_at_row, \
+                unittest.mock.patch.object(outline_view, "numberOfRows", wraps=outline_view.numberOfRows) as number_of_rows:
+            self.assertEqual([item.item_id for item in self.list_controller.list_selected_items()], ["2", "10"])
+            allowed_rows = self.list_controller.outlineView_selectionIndexesForProposedSelection_(outline_view, build_index_set([6, 7]))
+        self.assertEqual(list(allowed_rows), [6])  # analysis-1, not the "+" row
+        self.assertFalse(number_of_rows.called)  # no pass over every row
+        self.assertEqual([call.args for call in item_at_row.call_args_list], [(2,), (5,), (6,), (7,)])  # each item read once
 
     def test_the_tab_in_front_has_an_outline_of_its_own_unless_it_is_inside_the_selection_outline(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())  # planning (row 1) is in front
@@ -1547,26 +2011,46 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.build_right_click_menu_titles(5)[0], "Show tab")  # so does a single selected row
 
     def test_the_menu_of_several_rows_types_commands_only_into_agents_that_take_them(self):
-        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(1, agent_tool_name="Aider", slash_commands=()))
-        self.select_rows(3, 5)  # codex-review (Codex) and analysis-0 (Aider)
-        self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 session"].toolTip(),
-                         COMPACT_IN_THE_MENU_OF_SEVERAL_ROWS_TOOL_TIP + "\nTyped only into the 1 of 2 where this command is supported.")
-        self.select_rows(5, 6)  # two Aider tabs
-        menu_items_by_title = self.build_right_click_menu_items_by_title(5)
-        self.assertFalse(menu_items_by_title["/compact"].isEnabled())
-        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "AgentCommandTab can't type commands into Aider")
+        # The second window's two tabs take no commands: their tool has none, or they are paused (the core can't
+        # type into a suspended agent, so a paused session isn't counted).
+        for (fields_changed_in_the_second_window, why_a_selected_agent_is_left_out, tool_tip_when_no_selected_agent_takes_commands,
+             resume_is_offered) in (
+                ({"agent_tool_name": "Aider", "slash_commands": ()}, "AgentCommandTab can't type /compact into Aider",
+                 "AgentCommandTab can't type /compact into Aider", False),
+                ({"status": "paused"}, "A paused session is left out: nothing can be typed into it until it is resumed",
+                 "Only available after the paused sessions are resumed", True)):
+            with self.subTest(fields_changed_in_the_second_window):
+                self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(1, **fields_changed_in_the_second_window))
+                self.select_rows(3, 5)  # codex-review, which takes commands, and analysis-0
+                compact_item = self.build_right_click_menu_items_by_title(3)["/compact 1 session"]
+                self.assertEqual(compact_item.toolTip(), COMPACT_IN_THE_MENU_OF_SEVERAL_ROWS_TOOL_TIP
+                                 + "\n" + why_a_selected_agent_is_left_out)
+                self.list_controller.menuSendSlashCommandToSelectedSessions_(compact_item)
+                action_request = self.submitted_actions.pop()  # taken out, so the other case can't pass on this one's command
+                self.assertEqual((action_request.action, action_request.target, action_request.arguments),
+                                 ("send_slash_command_to_agent_sessions", {"session_ids": ["s3"]}, {"command": "/compact"}))
+                self.select_rows(5, 6)  # analysis-0 and analysis-1
+                menu_items_by_title = self.build_right_click_menu_items_by_title(5)
+                self.assertFalse(menu_items_by_title["/compact"].isEnabled())
+                self.assertEqual(menu_items_by_title["/compact"].toolTip(), tool_tip_when_no_selected_agent_takes_commands)
+                self.assertEqual("Resume 2 sessions" in menu_items_by_title, resume_is_offered)
 
-    def test_the_menu_of_several_rows_leaves_out_paused_sessions(self):
-        # The core can't type into a suspended agent, so a paused session isn't counted.
-        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(1, status="paused"))
-        self.select_rows(3, 5)  # codex-review (done) and analysis-0 (paused)
-        self.assertEqual(self.build_right_click_menu_items_by_title(3)["/compact 1 session"].toolTip(),
-                         COMPACT_IN_THE_MENU_OF_SEVERAL_ROWS_TOOL_TIP + "\nTyped only into the 1 of 2 where this command is supported.")
-        self.select_rows(5, 6)  # both paused
-        menu_items_by_title = self.build_right_click_menu_items_by_title(5)
-        self.assertFalse(menu_items_by_title["/compact"].isEnabled())
-        self.assertEqual(menu_items_by_title["/compact"].toolTip(), "Only available after the paused sessions are resumed")
-        self.assertIn("Resume 2 sessions", menu_items_by_title)
+    def test_a_tooltip_names_the_slash_command_a_tool_doesnt_take_apart_from_a_paused_session(self):
+        # A tool can take one command and not the other, as agy takes /compact and not /clear; analysis-1 is paused too.
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id({
+            "10": {"agent_tool_name": "agy", "slash_commands": ("/compact",)},
+            "11": {"agent_tool_name": "agy", "slash_commands": ("/compact",), "status": "paused"}}))
+        menu_items_by_title = self.build_right_click_menu_items_by_title(5)  # analysis-0, idle
+        self.assertTrue(menu_items_by_title["/compact"].isEnabled())
+        self.assertEqual((menu_items_by_title["/clear"].isEnabled(), menu_items_by_title["/clear"].toolTip()),
+                         (False, "AgentCommandTab can't type /clear into agy"))
+        self.select_rows(3, 5, 6)  # codex-review, which takes both commands, and the two agy tabs
+        menu_items_by_title = self.build_right_click_menu_items_by_title(3)
+        # After the line saying what the command does: why the others don't get it.
+        self.assertEqual(menu_items_by_title["/clear 1 session"].toolTip().split("\n")[1:],
+                         ["AgentCommandTab can't type /clear into agy"])
+        self.assertEqual(menu_items_by_title["/compact 2 sessions"].toolTip().split("\n")[1:],
+                         ["A paused session is left out: nothing can be typed into it until it is resumed"])
 
     def test_the_menu_of_several_rows_that_all_exited_has_nothing_to_send_or_kill(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(
@@ -1627,9 +2111,12 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         accessory_subviews = alert.accessoryView().subviews()
         labels = [subview.stringValue() for subview in accessory_subviews if isinstance(subview, NSTextField)]
         self.assertIn("Send the message to:", labels)
-        self.assertIn("The message will also include the other agents' names, and process ids", labels)
-        radio_buttons = [subview for subview in accessory_subviews if isinstance(subview, NSButton)]
-        radio_buttons.sort(key=lambda radio_button: -radio_button.frame().origin.y)  # top first
+        # Everything the message adds to the note, so nothing is sent that the window doesn't mention.
+        self.assertIn("The message will also include each agent's name, process ID, folder and tab title, and how to message "
+                      "each of the others: for a Codex session, a command with its conversation ID and Codex home folder. "
+                      "A Codex session has no way to message a Claude Code session, so the message it gets says so instead.", labels)
+        radio_buttons = list_recipient_radio_buttons_top_first(recipient_choices)
+        self.assertTrue(all(radio_button.window() is alert.window() for radio_button in radio_buttons))
         self.assertEqual([radio_button.title() for radio_button in radio_buttons], ["planning", "reviews", "each of the 2 agents"])
         self.assertEqual([radio_button.state() for radio_button in radio_buttons], [0, 0, 1])
         self.assertEqual(recipient_choices.list_chosen_recipients(), entries)
@@ -1642,6 +2129,46 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertIs(alert.window().initialFirstResponder(), note_text_view)
         self.assertFalse(note_text_view.isAutomaticDashSubstitutionEnabled())
 
+    def test_the_talk_to_each_other_window_tells_tabs_with_the_same_title_apart(self):
+        # Two sessions started in one folder have the same title: with that alone on their buttons, nothing would tell
+        # which button sends the message to which session.
+        entries = [make_entry("1", "project", "idle"), make_entry("2", "reviews", "working"), make_entry("3", "project", "working")]
+        alert, _, recipient_choices = build_talk_to_each_other_alert(entries, [])
+        radio_buttons = list_recipient_radio_buttons_top_first(recipient_choices)  # the list's order
+        self.assertEqual([radio_button.title() for radio_button in radio_buttons],
+                         ["project (1 of 2)", "reviews", "project (2 of 2)", "each of the 3 agents"])
+        radio_buttons[2].performClick_(None)
+        self.assertEqual(recipient_choices.list_chosen_recipients(), [entries[2]])
+
+    def test_the_talk_to_each_other_window_scrolls_a_long_list_of_recipients_and_gets_no_taller_with_it(self):
+        # A row per agent session made the window of a large selection taller than the screen, its buttons out of reach.
+        def build_alert_and_radio_buttons(agent_session_count):
+            alert, _, recipient_choices = build_talk_to_each_other_alert(
+                [make_entry(str(number), f"tab {number}", "idle") for number in range(agent_session_count)], [])
+            return alert, list_recipient_radio_buttons_top_first(recipient_choices)
+        alert, radio_buttons = build_alert_and_radio_buttons(40)
+        self.assertEqual(alert.window().frame().size.height, build_alert_and_radio_buttons(80)[0].window().frame().size.height)
+        recipients_view = radio_buttons[0].superview()
+        scroll_view = recipients_view.enclosingScrollView()
+        self.assertLess(scroll_view.frame().size.height, recipients_view.frame().size.height)
+        # The end of the list shows at first: the button chosen at first, "each of the 40 agents". Only how far up the
+        # buttons are is compared, so this holds whatever width a scroll bar beside the list leaves it where macOS is
+        # set to always show scroll bars.
+        visible_rect = scroll_view.documentVisibleRect()
+        self.assertLessEqual(NSMinY(visible_rect), NSMinY(radio_buttons[-1].frame()))
+        self.assertLessEqual(NSMaxY(radio_buttons[-1].frame()), NSMaxY(visible_rect))
+        self.assertGreaterEqual(NSMinY(radio_buttons[0].frame()), NSMaxY(visible_rect))  # the first one is out of sight, above
+        # Still one group, of which only one is on: AppKit groups the radio buttons of one view.
+        self.assertTrue(all(radio_button.superview() is recipients_view for radio_button in radio_buttons))
+        radio_buttons[0].performClick_(None)
+        self.assertEqual([radio_button.state() for radio_button in radio_buttons], [1] + [0] * 40)
+        # A short list shows whole, and the window grows with it as before.
+        radio_buttons_of_few = build_alert_and_radio_buttons(3)[1]
+        scroll_view_of_few = radio_buttons_of_few[0].enclosingScrollView()
+        self.assertEqual(scroll_view_of_few.frame().size.height, radio_buttons_of_few[0].superview().frame().size.height)
+        self.assertLess(build_alert_and_radio_buttons(2)[0].window().frame().size.height,
+                        build_alert_and_radio_buttons(3)[0].window().frame().size.height)
+
     def test_every_alert_the_app_runs_shows_the_apps_icon(self):  # rather than Python's rocket
         stand_in_app_controller = unittest.mock.Mock()
         stand_in_app_controller.sidebar_controller.window.level.return_value = 0
@@ -1649,6 +2176,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         AppController.run_alert_in_front(stand_in_app_controller, alert)
         (icon,), _ = alert.setIcon_.call_args
         self.assertEqual(tuple(icon.size()), (1024, 1024))  # app_icon.build_app_icon's
+        self.application_that_is_never_made_active.activateIgnoringOtherApps_.assert_called_once_with(True)  # the alert takes the keyboard
         alert.runModal.assert_called_once()
 
     def test_dragging_one_of_several_selected_rows_drags_only_that_row(self):
@@ -1707,11 +2235,18 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         """Ends the row's rename as AppKit does when its name field's editing ends."""
         self.list_controller.controlTextDidEndEditing_(unittest.mock.Mock(object=lambda: row_view.name_text_field))
 
-    def test_a_confirmed_rename_shows_the_new_name_at_once(self):
+    def begin_rename_of_the_first_sample_tab(self):
+        """Shows the sample snapshot in the laid out window and begins renaming its first tab, in row 1; returns that tab's item."""
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.window.contentView().layoutSubtreeIfNeeded()
         tab_item = self.list_controller.outline_view.itemAtRow_(1)
         self.list_controller.begin_rename(tab_item)
+        return tab_item
+
+    def test_a_confirmed_rename_shows_the_new_name_at_once(self):
+        tab_item = self.begin_rename_of_the_first_sample_tab()
+        # The dropdown takes typing only while the app is the active one.
+        self.application_that_is_never_made_active.activateIgnoringOtherApps_.assert_called_once_with(True)
         row_view = self.type_new_name_during_rename(1, "new name")
         self.end_rename(row_view)
         self.assertEqual(row_view.name_text_field.stringValue(), "new name")
@@ -1719,11 +2254,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.submitted_actions[-1].action, "rename_tab")
 
     def test_a_refused_rename_puts_the_old_name_back(self):
-        self.list_controller.apply_snapshot(make_sample_snapshot())
-        self.window.contentView().layoutSubtreeIfNeeded()
-        tab_item = self.list_controller.outline_view.itemAtRow_(1)
-        old_title = tab_item.entry.tab_title
-        self.list_controller.begin_rename(tab_item)
+        old_title = self.begin_rename_of_the_first_sample_tab().entry.tab_title
         self.end_rename(self.type_new_name_during_rename(1, "new name"))
         self.owner.after_failure_of_the_last_action()  # the terminal refused it
         self.assertEqual(self.list_controller.outline_view.itemAtRow_(1).entry.tab_title, old_title)
@@ -1759,10 +2290,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(self.submitted_actions[-1].action, "rename_window")
 
     def test_a_rename_ended_by_a_click_on_another_row_keeps_the_new_name_after_the_release(self):
-        self.list_controller.apply_snapshot(make_sample_snapshot())
-        self.window.contentView().layoutSubtreeIfNeeded()
-        tab_item = self.list_controller.outline_view.itemAtRow_(1)
-        self.list_controller.begin_rename(tab_item)
+        self.begin_rename_of_the_first_sample_tab()
         # Arrives during the rename, with another tab's change: held.
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(0, 1, status="idle"))
         row_view = self.type_new_name_during_rename(1, "new name")
@@ -1774,11 +2302,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def check_a_refused_rename_ended_by_a_click_on_another_row_puts_the_old_name_back(self, refused_before_the_release):
         # The held snapshot got the new name.
-        self.list_controller.apply_snapshot(make_sample_snapshot())
-        self.window.contentView().layoutSubtreeIfNeeded()
-        tab_item = self.list_controller.outline_view.itemAtRow_(1)
-        old_title = tab_item.entry.tab_title
-        self.list_controller.begin_rename(tab_item)
+        old_title = self.begin_rename_of_the_first_sample_tab().entry.tab_title
         self.list_controller.apply_snapshot(make_sample_snapshot())  # arrives during the rename: held
         row_view = self.type_new_name_during_rename(1, "new name")
         self.list_controller.row_pressed(3)  # the click on another row that ends the rename
@@ -1802,7 +2326,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.row_released()  # a click: released before the hold time
         self.assertEqual(self.owner.peeks, [])
         self.list_controller.row_pressed(1)
-        self.list_controller.peekTimerFired_(self.list_controller.peek_timer)  # held long enough
+        self.list_controller.peek_timer.fire()  # held long enough
         self.list_controller.row_released()
         self.assertEqual(self.owner.peeks, [("start", "s1"), ("end",)])
         self.list_controller.row_pressed(0)  # a window row doesn't peek
@@ -1816,7 +2340,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         drag_states_seen_by_the_owner = []
         self.owner.row_drag_began_or_ended = lambda: drag_states_seen_by_the_owner.append(self.list_controller.drag_in_progress)
         self.list_controller.row_pressed(1)
-        self.list_controller.peekTimerFired_(self.list_controller.peek_timer)  # held long enough to peek
+        self.list_controller.peek_timer.fire()  # held long enough to peek
         # The drag begins inside the outline view's mouseDown_, before the release, and ends the peek itself.
         self.list_controller.outlineView_draggingSession_willBeginAtPoint_forItems_(
             outline_view, None, (0, 0), [outline_view.itemAtRow_(1)])
@@ -1899,9 +2423,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(self.build_right_click_menu_items_by_title(5)["Duplicate this tab"].isEnabled())  # the "aider" tab
 
     def test_closing_the_dropdown_cancels_an_open_rename_so_the_list_keeps_updating(self):
-        self.list_controller.apply_snapshot(make_sample_snapshot())
-        self.window.contentView().layoutSubtreeIfNeeded()
-        self.list_controller.begin_rename(self.list_controller.outline_view.itemAtRow_(1))
+        self.begin_rename_of_the_first_sample_tab()
         self.assertTrue(self.list_controller.rename_in_progress)
         # A new name typed, so a rename submitted instead of cancelled would show.
         type_into_the_open_rename_editor(self.list_controller.outline_view, 1, "typed but cancelled")
@@ -1932,10 +2454,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         for collapse_number, collapse in enumerate((lambda: self.click_row_arrow(0), lambda: self.list_controller.set_all_expanded(False),
                                                     lambda: self.collapse_from_the_right_click_menu(0)), 1):
             self.list_controller.set_all_expanded(True)
-            self.list_controller.apply_snapshot(make_sample_snapshot())
-            self.window.contentView().layoutSubtreeIfNeeded()
             del self.submitted_actions[:]  # so each way of collapsing must submit its own rename
-            self.list_controller.begin_rename(self.list_controller.outline_view.itemAtRow_(1))
+            self.begin_rename_of_the_first_sample_tab()
             type_into_the_open_rename_editor(self.list_controller.outline_view, 1, f"renamed {collapse_number}")
             collapse()  # AppKit raised an exception here while the name was being edited
             self.assertFalse(self.list_controller.rename_in_progress)
@@ -2013,6 +2533,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         )), "Codex")
         self.assertEqual(self.owner.started_agent_sessions, [("w3", "/code/photos", "Codex")])
 
+    def test_the_new_tab_and_new_window_tooltips_name_the_folders_used_when_the_first_choice_has_none(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.assertEqual(self.build_right_click_menu_items_by_title(0)["New tab with Codex session…"].toolTip(),
+                         "Opens Codex in a new tab of this window, in the folder of the agent in its current tab, "
+                         "or of its first agent when the current tab runs none")
+        self.assertEqual(self.build_right_click_menu_items_by_title(7)["New Codex window"].toolTip(),  # the "+" row's menu
+                         "Opens Codex in a new window, in the folder of the tab in front, else of the tab used most recently "
+                         "within a day, else your home folder")
+
     def test_dropping_a_window_on_another_monitor_moves_it_there(self):
         self.list_controller.apply_snapshot(make_two_monitor_snapshot(make_sample_snapshot()))
         outline_view = self.list_controller.outline_view
@@ -2032,12 +2561,14 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.dropdown_panel_controller.fit_size_to_rows()
             return self.dropdown_panel_controller.preferredContentSize()[0]
 
-        # "99k (9%)", "9M", "0%", "done" and "5s" grow to "100k (100%)", "1024M", "100%", "working" and "23h 59m".
+        # "99k (9%)", "9M", "0%", "done" and "5s" grow to "100k (100%)", "1024M", "100%", "working" and "23h 59m". The
+        # time since the last message, "5s" too, is one no row shows once every agent works: its column keeps its room.
         self.assertEqual(
             measure_dropdown_width(context_tokens=99_000, context_fill_percent=9, memory_bytes=9 * 1024 ** 2, cpu_percent=0,
-                                   started_at=now - 5, status="done"),
+                                   started_at=now - 5, last_message_at=now - 5, status="done"),
             measure_dropdown_width(context_tokens=100_000, context_fill_percent=100, memory_bytes=1024 ** 3 - 1, cpu_percent=100,
-                                   started_at=now - 86399, status="working"))
+                                   started_at=now - 86399, last_message_at=now - 86399, status="working"))
+        self.assertGreater(self.list_controller.column_widths["time_since_last_message"], 0)
 
     def test_dropdown_fits_its_size_to_all_rows(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(
@@ -2055,6 +2586,28 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(name_text_field.frame().size.width, name_text_field.fittingSize().width)
         details_text_field = row_view.details_text_field
         self.assertGreaterEqual(details_text_field.frame().size.width, details_text_field.fittingSize().width)
+
+    def test_the_dropdown_opens_sized_for_the_screen_its_menu_bar_icon_is_on(self):
+        # Not for the first screen, which may be larger: before the dropdown opens, its panel is in no window on the
+        # icon's screen, so only the icon tells which screen's size limits it.
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(
+            0, 0, tab_title="a-tab-name-long-enough-to-widen-the-dropdown-past-its-default-width"))
+
+        def make_screen(width, height):
+            return unittest.mock.Mock(visibleFrame=lambda: NSMakeRect(0, 0, width, height))
+        status_item_controller = MenuBarStatusItemController.alloc().init()  # no status item of its own
+        status_item_controller.owner = unittest.mock.Mock()
+        status_item_controller.popover = unittest.mock.Mock(contentViewController=lambda: self.dropdown_panel_controller)
+        status_item_controller.status_item = unittest.mock.Mock()
+        status_item_controller.status_item.button().window().screen.return_value = make_screen(400, 300)
+        with unittest.mock.patch("agent_command_tab.user_interface.menu_bar_status_item.NSApp"), \
+                unittest.mock.patch("agent_command_tab.user_interface.popover_container.NSScreen",
+                                    unittest.mock.Mock(screens=lambda: [make_screen(3000, 2000)])):
+            status_item_controller.show_popover()
+        width, height = self.dropdown_panel_controller.preferredContentSize()
+        self.assertEqual(width, 360)  # the long name cut short at 90% of the icon's screen
+        self.assertLess(height, 300)
+        status_item_controller.popover.showRelativeToRect_ofView_preferredEdge_.assert_called_once()
 
     def apply_snapshot_with_processes_on_three_tabs(self):
         """Applies the sample snapshot with a process on both tabs of the second window and on the first tab of the first."""
@@ -2075,10 +2628,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(last_title_frame.origin.x + last_title_frame.size.width, last_column_frame.origin.x + last_column_frame.size.width)
 
     def click_row_arrow(self, row):
-        outline_view = self.list_controller.outline_view
-        row_view = outline_view.viewAtColumn_row_makeIfNecessary_(0, row, True)
-        with unittest.mock.patch.object(outline_view, "rowForView_", return_value=row):
-            self.list_controller.disclosureButtonClicked_(row_view.disclosure_button)
+        """Clicks the row's arrow button itself, so the action the button is wired to runs and finds the row from the button."""
+        self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, row, True).disclosure_button.performClick_(None)
 
     def lay_out_row_view(self, row):
         row_view = self.list_controller.outline_view.viewAtColumn_row_makeIfNecessary_(0, row, True)
@@ -2268,6 +2819,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual([row_view.column_views["agent_tool_icon"].toolTip() for row_view in row_views],
                          ["Claude Code", "Claude Code", "OpenAI Codex", "Claude Code", "Claude Code"])
 
+    def test_codex_shows_its_name_as_an_image_where_macos_cant_read_the_svg_of_its_logo(self):
+        with unittest.mock.patch("agent_command_tab.user_interface.agent_tool_icons.build_svg_image", return_value=None):
+            self.list_controller.agent_tool_icons_by_name = build_agent_tool_icons()
+        self.assertNotIn("Codex", self.list_controller.agent_tool_icons_by_name)
+        row_views = self.lay_out_tab_row_views(make_sample_snapshot())  # the third tab runs Codex
+        name_image = row_views[2].column_views["agent_tool_icon"].image()
+        self.assertGreater(name_image.size().width, name_image.size().height)  # a word, where the logo is square
+        self.assertEqual(self.list_controller.column_widths["agent_tool_icon"], name_image.size().width)  # the column has room for it
+
     def test_tool_icon_state_and_time_columns_line_up_when_two_tools_run(self):
         snapshot = make_sample_snapshot_with_entries_changed(started_at=time.time() - 3700)  # Claude Code and Codex
         self.list_controller.set_shown_columns(["state", "existence_duration"])  # Age, a time column
@@ -2336,7 +2896,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                                 for x in range(int(name_rect.size.width))}), 1)
         image_path = os.environ.get("AGENT_COMMAND_TAB_SMOKE_TEST_IMAGE")
         if image_path:
-            bitmap.representationUsingType_properties_(NSBitmapImageFileTypePNG, {}).writeToFile_atomically_(image_path, True)
+            self.assertTrue(
+                bitmap.representationUsingType_properties_(NSBitmapImageFileTypePNG, {}).writeToFile_atomically_(image_path, True),
+                f"The image could not be saved to {image_path}")
 
     # ----- process rows, background lights, exited rows and the hooks note -----
 
@@ -2378,9 +2940,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # Selectable alone or together, but not with a window or tab row: then its tab is selected
         # instead. A double-click shows its tab.
         def choose_selection(proposed_rows):
-            chosen_rows = self.list_controller.outlineView_selectionIndexesForProposedSelection_(
-                outline_view, build_index_set(proposed_rows))
-            return [row for row in range(outline_view.numberOfRows()) if chosen_rows.containsIndex_(row)]
+            return list(self.list_controller.outlineView_selectionIndexesForProposedSelection_(
+                outline_view, build_index_set(proposed_rows)))
         self.assertEqual(choose_selection([2, 3]), [2, 3])
         self.assertEqual(choose_selection([2, 3, 5]), [1, 5])
         self.assertEqual(choose_selection([0, 1, 2]), [0, 1])
@@ -2485,19 +3046,21 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # A window row, which shows no tokens: across from the tab rows' tokens.
         self.assertEqual(self.list_controller.find_where_the_keyboard_opens_a_rows_menu(0),
                          (NSMidX(tokens_frame), NSMidY(outline_view.rectOfRow_(0))))
-        # AppKit sends the context menu key to showContextMenuForSelection_, never to keyDown_.
-        menu = MenuThatRecordsWhereItWouldOpen.alloc().initWithTitle_("")
-        menu.setDelegate_(self.list_controller)
-        outline_view.setMenu_(menu)
-        self.select_rows(1)
-        outline_view.contextMenuKeyDown_(make_key_down_event(outline_view.window(), "\r", 36, NSEventModifierFlagControl))
-        self.assertEqual(menu.openings, [(self.list_controller.find_where_the_keyboard_opens_a_rows_menu(1), outline_view.itemAtRow_(1))])
-        self.assertEqual(self.list_controller.row_whose_menu_the_keyboard_opened, -1)  # a right-click's menu finds its own row again
+        # macOS has its context menu key, Control-Return, from 15. AppKit sends it to showContextMenuForSelection_, never to keyDown_.
+        if outline_view.respondsToSelector_("contextMenuKeyDown:"):
+            menu = MenuThatRecordsWhereItWouldOpen.alloc().initWithTitle_("")
+            menu.setDelegate_(self.list_controller)
+            outline_view.setMenu_(menu)
+            self.select_rows(1)
+            outline_view.contextMenuKeyDown_(make_key_down_event(outline_view.window(), "\r", 36, NSEventModifierFlagControl))
+            self.assertEqual(menu.openings,
+                             [(self.list_controller.find_where_the_keyboard_opens_a_rows_menu(1), outline_view.itemAtRow_(1))])
+            self.assertEqual(self.list_controller.row_whose_menu_the_keyboard_opened, -1)  # a right-click's menu finds its own row again
         self.list_controller.set_shown_columns([])  # Tokens hidden: the middle of the row
         row_rect = outline_view.rectOfRow_(1)
         self.assertEqual(self.list_controller.find_where_the_keyboard_opens_a_rows_menu(1), (NSMidX(row_rect), NSMidY(row_rect)))
 
-    def test_delete_kills_what_the_selected_rows_show_always_asking_first(self):
+    def test_delete_kills_what_the_selected_rows_show_asking_first(self):
         self.apply_snapshot_with_child_processes()
         self.click_row_arrow(1)
         self.owner.answer_to_confirmation = True
@@ -2523,6 +3086,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         for characters, key_code in (("t", 17), ("a", 0)):
             self.press_key(characters, key_code)
         self.assertEqual([item.entry.title for item in self.list_controller.list_selected_items()], ["tandem-repeats"])
+
+    def test_typing_a_name_reads_the_names_of_window_and_tab_rows_without_building_their_other_texts(self):
+        outline_view = self.apply_snapshot_with_child_processes()
+        self.click_row_arrow(1)  # planning's two process rows show
+        with unittest.mock.patch.object(self.list_controller, "build_row_text_parts") as build_row_text_parts:
+            names = [self.list_controller.outlineView_typeSelectStringForTableColumn_item_(outline_view, None, outline_view.itemAtRow_(row))
+                     for row in range(outline_view.numberOfRows())]
+        self.assertFalse(build_row_text_parts.called)  # it formats a row's state, times and resource use too
+        self.assertEqual(names, ["agent-command-tab", "planning", None, None, "phase0-tests", "codex-review",
+                                 "tandem-repeats", "analysis-0", "analysis-1", None])  # no process rows, nor the "+" row
 
     def test_the_first_asking_tab_or_else_the_previous_tab_is_selected_opening_its_collapsed_window(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(1, 0, status="asking"))
@@ -2653,6 +3226,22 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         submenu = self.build_right_click_menu_items_by_title(1)["Move to window"].submenu()
         self.assertEqual([menu_item.title() for menu_item in submenu.itemArray()], ["tandem-repeats", "tandem-repeats (2)"])
 
+    def test_move_to_window_offers_the_windows_whose_rows_hide_idle_or_the_search_hides_too(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.list_controller.set_idle_tabs_are_hidden(True)  # tandem-repeats' two tabs are idle
+        self.assertEqual(self.list_row_item_ids(), ["w1", "1", "2", "3", "new_window"])
+        move_items = self.build_right_click_menu_items_by_title(1)["Move to window"].submenu().itemArray()
+        self.assertEqual([menu_item.title() for menu_item in move_items], ["tandem-repeats"])
+        self.list_controller.menuMoveToWindow_(move_items[0])
+        self.assertEqual((self.submitted_actions[-1].action, self.submitted_actions[-1].target, self.submitted_actions[-1].arguments),
+                         ("move_tab", {"tab_id": "1"}, {"target_window_id": "w2", "drop_before_tab_id": None}))
+        self.list_controller.set_idle_tabs_are_hidden(False)
+        self.type_in_the_search_box("analysis-0")
+        self.owner.answer_conversation_search([])
+        self.assertEqual(self.list_row_item_ids(), ["w2", "10", "new_window"])
+        move_items = self.build_right_click_menu_items_by_title(1)["Move to window"].submenu().itemArray()
+        self.assertEqual([menu_item.title() for menu_item in move_items], ["agent-command-tab"])
+
     def test_a_tmux_session_has_no_monitor_to_move_to_and_takes_no_iterm2_tab(self):
         snapshot = make_two_monitor_snapshot(make_sample_snapshot())
         tmux_window = snapshot.monitors[1].windows[0]._replace(terminal_name="tmux", can_move_to_another_monitor=False)
@@ -2743,15 +3332,13 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_the_bottom_bar_notes_missing_hooks_for_the_agent_tools_listed(self):
         panel = self.dropdown_panel_controller
-        snapshot = make_sample_snapshot()  # Claude Code and Codex sessions
+        snapshot = make_sample_snapshot()  # lists Claude Code sessions, the only agent tool the core reports a hooks status for
         for hooks_status_per_agent_tool, expected_note, shows_button in (
-                ((("Claude Code", "missing"), ("Codex", "missing")), "Claude Code and Codex hooks not installed yet", True),
-                ((("Claude Code", "missing"), ("Codex", "installed")), "Claude Code hooks not installed yet", True),
-                ((("Claude Code", "installed"), ("Codex", "installed")), "", False),
+                ((("Claude Code", "missing"),), "Claude Code hooks not installed yet", True),
+                ((("Claude Code", "installed"),), "", False),
                 # Hooks that don't work, which installing them again wouldn't fix.
-                ((("Claude Code", "can't run"), ("Codex", "can't run")),
-                 "Claude Code and Codex hooks can't run: reinstall AgentCommandTab", False),
-                ((("Claude Code", "send no events"), ("Codex", "installed")), "No events from the Claude Code hooks", False)):
+                ((("Claude Code", "can't run"),), "Claude Code hooks can't run: reinstall AgentCommandTab", False),
+                ((("Claude Code", "send no events"),), "No events from the Claude Code hooks", False)):
             self.list_controller.apply_snapshot(snapshot._replace(hooks_status_per_agent_tool=hooks_status_per_agent_tool))
             self.assertEqual((panel.hooks_note_text_field.stringValue(), panel.hooks_note_text_field.isHidden(),
                               panel.install_hooks_button.isHidden()), (expected_note, not expected_note, not shows_button))
@@ -2776,9 +3363,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertTrue(panel.install_hooks_button.isHidden())
         panel_view.setFrameSize_(wide_size)
         self.assertFalse(panel.install_hooks_button.isHidden())
-        only_claude_code = replace_windows_of_the_first_monitor(snapshot, (snapshot.monitors[0].windows[1],))._replace(
-            hooks_status_per_agent_tool=(("Codex", "missing"),))
-        self.list_controller.apply_snapshot(only_claude_code)  # no Codex session listed: nothing to say about its hooks
+        only_codex_sessions = make_sample_snapshot_with_entries_changed(agent_tool_name="Codex")._replace(
+            hooks_status_per_agent_tool=(("Claude Code", "missing"),))
+        self.list_controller.apply_snapshot(only_codex_sessions)  # no Claude Code session listed: nothing to say about its hooks
         self.assertTrue(panel.hooks_note_text_field.isHidden())
 
 
@@ -2818,6 +3405,47 @@ class RememberMyChoiceTests(unittest.TestCase):
             self.assertEqual((answer, len(shown_alerts), saved_settings), (expected_answer, 1, []))
 
 
+class CloseWindowConfirmationTests(unittest.TestCase):
+    """What the "Are you sure?" alert says before a window is closed."""
+
+    def ask_about_closing_a_window(self, total_tab_count, states, left_out_agent_tool_names=()):
+        """Runs AppController.confirm_closing_window, with a stand-in app controller whose settings
+        leave these agent tools out of the list, for the window "work" of total_tab_count tabs
+        whose agent rows show these states; returns what it asks with."""
+        stand_in_app_controller = unittest.mock.Mock(settings=dict(DEFAULT_SETTINGS, agent_tools=[
+            dict(agent_tool, is_included=agent_tool["agent_tool_name"] not in left_out_agent_tool_names)
+            for agent_tool in DEFAULT_SETTINGS["agent_tools"]]))
+        window_entry = WindowEntry("w1", "work", False, (0, 0, 800, 600), total_tab_count, tuple(
+            make_entry(str(index), f"tab-{index}", state) for index, state in enumerate(states)))
+        AppController.confirm_closing_window(stand_in_app_controller, window_entry)
+        stand_in_app_controller.ask_for_confirmation.assert_called_once()
+        explanation, action_name = stand_in_app_controller.ask_for_confirmation.call_args.args
+        self.assertEqual(action_name, "close_window")
+        return explanation
+
+    def test_an_agent_that_has_ended_isnt_counted_as_running(self):
+        self.assertEqual(self.ask_about_closing_a_window(2, ["working", "idle"]),
+                         'Closing "work" ends the 2 agent sessions running in it.')
+        # The tab of an "exited" row has only its shell left: it is one of the window's other tabs.
+        self.assertEqual(self.ask_about_closing_a_window(3, ["working", "exited"]),
+                         'Closing "work" ends the 1 agent session running in it and closes its 2 other tabs.')
+        self.assertEqual(self.ask_about_closing_a_window(1, ["exited"]),
+                         'Closing "work" closes its 1 tab, where no listed agent session is running anymore.')
+
+    def test_the_sessions_of_agent_tools_left_out_of_the_list_are_said_to_end_too(self):
+        # Their tabs are among the window's other tabs, since the window's rows don't hold them.
+        ends_those_left_out_too = " session in the window ends too: Settings > Harnesses leaves those out of the list."
+        self.assertEqual(self.ask_about_closing_a_window(3, ["working"], left_out_agent_tool_names=("Codex",)),
+                         'Closing "work" ends the 1 agent session running in it and closes its 2 other tabs. Any Codex'
+                         + ends_those_left_out_too)
+        self.assertEqual(self.ask_about_closing_a_window(1, ["exited"], left_out_agent_tool_names=("Codex", "agy")),
+                         'Closing "work" closes its 1 tab, where no listed agent session is running anymore. Any Codex or agy'
+                         + ends_those_left_out_too)
+        # Every tab has a running row: none is left for a session the list doesn't show.
+        self.assertEqual(self.ask_about_closing_a_window(2, ["working", "idle"], left_out_agent_tool_names=("Codex",)),
+                         'Closing "work" ends the 2 agent sessions running in it.')
+
+
 class AutomaticIconColorTests(unittest.TestCase):
     def snapshot_with_states(self, states):
         window = WindowEntry("w1", "work", False, (0, 0, 800, 600), len(states), tuple(
@@ -2847,6 +3475,26 @@ class MenuBarIconClickAndDropdownTests(unittest.TestCase):
             self.assertEqual(choose_what_a_click_on_the_icon_does_to_the_dropdown(
                 dropdown_is_shown, dropdown_closed_at, button_pressed_at), expected,
                 (dropdown_is_shown, dropdown_closed_at, button_pressed_at))
+
+    def test_a_press_of_the_icon_without_the_mouse_opens_the_dropdown_whatever_an_earlier_click_left(self):
+        # The accessibility "Press" action, which VoiceOver sends, has no event of its own: the current event is None
+        # before the app's first event, else the last event the app took (here a key). Without the mouse-down a click
+        # begins with, the time of an earlier click's mouse-down would keep the press from opening a dropdown that
+        # closed since that click.
+        status_item_controller = MenuBarStatusItemController.alloc().init()  # no status item of its own
+        status_item_controller.owner = unittest.mock.Mock(menu_bar_icon_clicked=status_item_controller.toggle_popover)
+        status_item_controller.popover = unittest.mock.Mock(isShown=lambda: False)
+        status_item_controller.dropdown_closed_at = 100.02
+        for current_event, opens_the_dropdown in (
+                (None, True), (unittest.mock.Mock(type=lambda: NSEventTypeKeyDown), True),
+                # A click's own mouse-up still leaves closed the dropdown that its mouse-down closed.
+                (unittest.mock.Mock(type=lambda: NSEventTypeLeftMouseUp), False)):
+            status_item_controller.left_button_pressed_at = 100.0  # the mouse-down of a click
+            with unittest.mock.patch("agent_command_tab.user_interface.menu_bar_status_item.NSApp",
+                                     unittest.mock.Mock(currentEvent=lambda: current_event)), \
+                    unittest.mock.patch.object(status_item_controller, "show_popover") as show_popover:
+                status_item_controller.statusItemClicked_(None)
+            self.assertEqual(show_popover.call_count, int(opens_the_dropdown), current_event)
 
     def test_a_click_closes_settings_and_slides_an_auto_hiding_sidebar_in_or_out_and_leaves_one_that_stays_visible(self):
         calls = []
@@ -3014,7 +3662,6 @@ class AgentSessionStartsInTheAppTests(unittest.TestCase):
         list_controllers = [unittest.mock.Mock(), unittest.mock.Mock(), unittest.mock.Mock()]
         stand_in_app_controller.list_all_list_controllers.return_value = list_controllers
         AppController.select_the_new_window_once_it_shows(stand_in_app_controller, ActionResult(True, details={"window_id": "w9"}))
-        AppController.select_the_new_window_once_it_shows(stand_in_app_controller, ActionResult(True))  # its session ended right away
         for list_controller in list_controllers:
             list_controller.select_window_once_it_shows.assert_called_once_with("w9")
 
@@ -3033,21 +3680,29 @@ class AgentSessionStartsInTheAppTests(unittest.TestCase):
 
 class AgentToolIconTests(unittest.TestCase):
     def test_codex_shows_the_openai_logo_in_the_names_color(self):
+        if NSImage.alloc().initWithData_(b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>') is None:
+            self.skipTest("this macOS can't read SVG, so Codex has no logo and the list shows its name as an image")
         logo = build_agent_tool_icons()["Codex"]
         self.assertEqual(tuple(logo.size()), (12, 12))
-        for appearance_name, expected_red in ((NSAppearanceNameAqua, 0), (NSAppearanceNameDarkAqua, 0.85)):
-            image_view = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 12, 12))
-            image_view.setImageScaling_(NSImageScaleNone)
+        for appearance_name in (NSAppearanceNameAqua, NSAppearanceNameDarkAqua):
+            # Drawn at four times its size, so that its lines are several pixels wide on any display.
+            image_view = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 48, 48))
+            image_view.setImageScaling_(NSImageScaleProportionallyUpOrDown)
             image_view.setImage_(logo)
             image_view.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
             bitmap = render_view_into_bitmap(image_view)
-            colors = [bitmap.colorAtX_y_(x, y).colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
+            colors = [convert_color_components_to_0_to_255(read_srgb_components(bitmap.colorAtX_y_(x, y)))
                       for x in range(bitmap.pixelsWide()) for y in range(bitmap.pixelsHigh())]
-            drawn_colors = [color for color in colors if color.alphaComponent() > 0.5]
+            drawn_colors = [color for color in colors if color[3] > 127]  # more than half covered
             self.assertGreater(len(drawn_colors), len(colors) / 5, appearance_name)
             self.assertLess(len(drawn_colors), len(colors) / 2, appearance_name)  # the logo's shape, not the whole square
-            for color in drawn_colors:  # labelColor: black in light mode, white at 85% opacity in dark mode
-                self.assertAlmostEqual(color.redComponent(), expected_red, delta=0.1, msg=appearance_name)
+            # Inside its lines the logo has labelColor, the names' color, as translucent as that is (a
+            # translucent black in light mode and a translucent white in dark mode), not laid over
+            # the black the SVG is drawn in.
+            color_inside_the_lines = max(set(drawn_colors), key=drawn_colors.count)  # the most common one
+            for drawn_component, expected_component in zip(color_inside_the_lines,
+                                                           resolve_color(NSColor.labelColor(), appearance_name)):
+                self.assertAlmostEqual(drawn_component, expected_component, delta=2, msg=appearance_name)
 
     def test_the_app_icon_is_a_command_key_with_a_status_dot_in_each_loop(self):
         icon = build_app_icon()
@@ -3129,6 +3784,60 @@ class SidebarControllerTests(unittest.TestCase):
         self.controller.finish_width_drag()
         self.assertEqual(self.owner.saved_widths, [])
 
+    def test_a_sidebar_wider_than_its_monitor_has_room_for_is_narrower_there_and_keeps_its_width_in_the_settings(self):
+        # At its 1200 points on a monitor 1000 wide, a docked sidebar's area would begin left of the monitor and leave
+        # the terminal windows beside it less than no width.
+        narrow_screen = {"name": "Narrow", "frame": (-4000, -4000, 1000, 800), "visible_frame": (-4000, -4000, 1000, 780)}
+        reserved_areas = []
+        self.owner.reserve_screen_area = reserved_areas.append
+
+        def read_x_and_width():
+            frame = self.controller.window.frame()
+            return frame.origin.x, frame.size.width
+        with unittest.mock.patch("agent_command_tab.user_interface.sidebar_panel.read_monitors_from_screens", lambda: [narrow_screen]):
+            self.controller.apply_settings(dict(self.controller.settings, sidebar_mode="docked", sidebar_width=1200))
+            self.assertEqual(reserved_areas[-1]["frame"], (-3600, -4000, 600, 780))  # 400 points stay the terminal windows'
+            self.assertEqual(read_x_and_width(), (-3600, 600))
+            # A click on its inner edge doesn't save that width over the settings' wider one, kept for a wider monitor,
+            self.controller.start_width_drag(-3600)
+            self.controller.finish_width_drag()
+            self.assertEqual(self.owner.saved_widths, [])
+            # and the edge drags it no wider than the monitor has room for.
+            self.controller.start_width_drag(-3600)
+            self.controller.continue_width_drag(-3950)
+            self.assertEqual(read_x_and_width(), (-3600, 600))
+            self.controller.continue_width_drag(-3500)
+            self.controller.finish_width_drag()
+            self.assertEqual(self.owner.saved_widths, [500])
+            # One that lies over the windows fills the monitor at most.
+            self.controller.apply_settings(dict(self.controller.settings, sidebar_mode="floating"))
+            self.assertEqual(read_x_and_width(), (-4000, 1000))
+            self.assertIsNone(reserved_areas[-1])
+            # So does the one "Show sidebar" slides in while the list shows as a popup, though the sidebar's mode in the
+            # settings is still the docked one: it keeps no room for the windows it lies over.
+            self.controller.apply_settings(dict(self.controller.settings, show_as="popup", sidebar_mode="docked"))
+            self.controller.set_shown(True, animate=False)  # as "Show sidebar" does, without sliding
+            self.assertEqual(read_x_and_width(), (-4000, 1000))
+            self.assertIsNone(reserved_areas[-1])
+
+    def test_a_visible_sidebar_changed_to_auto_hide_is_checked_for_hiding_though_the_pointer_doesnt_move(self):
+        # Changed in Settings with the keyboard, the pointer already off the sidebar: without a check started here, it
+        # would stay in until the pointer next moves.
+        with self.patch_screens_to_one_far_away():
+            self.controller.apply_settings(dict(self.controller.settings, sidebar_mode="floating"))
+            self.assertTrue(self.controller.is_shown)
+            self.assertIsNone(self.controller.hide_timer)
+            with unittest.mock.patch.object(self.controller, "pointer_is_over_sidebar", return_value=False):
+                self.controller.apply_settings(dict(self.controller.settings, sidebar_mode="auto_hide"))
+            self.assertTrue(self.controller.is_shown)  # until the check, which leaves it in while a rename or a menu is open in it
+            self.assertIsNotNone(self.controller.hide_timer)
+            # With the pointer on it (its width just dragged), the pointer starts the check as it leaves.
+            self.controller.cancel_hide_timer()
+            with unittest.mock.patch.object(self.controller, "pointer_is_over_sidebar", return_value=True):
+                self.controller.apply_settings(dict(self.controller.settings, sidebar_width=450))
+            self.assertTrue(self.controller.is_shown)
+            self.assertIsNone(self.controller.hide_timer)
+
     def test_the_shortcut_slides_it_out_at_once_even_while_it_was_to_stay_a_few_seconds(self):
         self.controller.keep_shown_until = time.time() + 4
         self.controller.check_whether_to_hide_in(4)
@@ -3196,6 +3905,23 @@ class SidebarControllerTests(unittest.TestCase):
         self.assertTrue(self.controller.has_the_keyboard)
         self.controller.hide_now(animate=False)
 
+    def test_a_search_box_that_hides_while_it_has_the_keyboard_leaves_the_keyboard_to_the_sidebars_rows(self):
+        # Emptied beside a message the other controls stepped aside for, the box steps aside too. The sidebar's panel
+        # makes the list its first responder only in the sidebar's own way, so the panel asks the sidebar to.
+        self.controller.screens = [FAR_AWAY_SCREEN]
+        self.controller.set_shown(True, animate=False)
+        panel = self.controller.list_panel_controller
+        self.assertTrue(panel.put_the_keyboard_in_the_search_box())  # as Command-F does
+        panel.search_field.setStringValue_("planning")
+        panel.searchFieldChanged_(panel.search_field)
+        panel.show_message("iTerm2 can't be reached; retrying")
+        self.assertFalse(panel.search_field.isHidden())  # it holds a search
+        self.controller.list_controller.clear_the_search()
+        self.assertTrue(panel.search_field.isHidden())
+        self.assertIs(self.controller.window.firstResponder(), self.controller.list_controller.outline_view)
+        self.assertTrue(self.controller.has_the_keyboard)  # Return, the arrows and Esc now go to the rows
+        self.controller.hide_now(animate=False)
+
     def test_giving_the_keyboard_back_ends_an_open_rename_without_renaming(self):
         self.controller.screens = [FAR_AWAY_SCREEN]
         self.controller.set_shown(True, animate=False)
@@ -3208,6 +3934,47 @@ class SidebarControllerTests(unittest.TestCase):
         self.controller.give_back_the_keyboard()  # another app became active
         self.assertFalse(list_controller.rename_in_progress)
         self.assertEqual([action_request.action for action_request in self.owner.submitted_actions if "rename" in action_request.action], [])
+        self.controller.hide_now(animate=False)
+
+    def test_a_rename_begun_from_a_rows_menu_gives_a_sidebar_that_stays_visible_the_keyboard_until_it_is_given_back(self):
+        # The rename makes the sidebar the key window without the shortcut having given it the keyboard. Not noted
+        # as having it, the sidebar left the core told that the dashboard had no keyboard, and didn't watch for the
+        # click in another app that takes the keyboard from it.
+        self.controller.screens = [FAR_AWAY_SCREEN]
+        self.controller.set_shown(True, animate=False)  # a floating sidebar, which stays visible
+        keyboard_reports = []
+        self.owner.tell_the_core_whether_the_dashboard_has_the_keyboard = lambda: keyboard_reports.append(self.controller.has_the_keyboard)
+        list_controller = self.controller.list_controller
+        list_controller.apply_snapshot(make_sample_snapshot())
+        self.controller.window.contentView().layoutSubtreeIfNeeded()
+        build_right_click_menu(list_controller, list_controller.outline_view, 1)
+        list_controller.menuRename_(None)
+        self.assertTrue(list_controller.rename_in_progress)
+        self.assertTrue(self.controller.has_the_keyboard)
+        self.assertEqual(keyboard_reports, [True])
+        self.assertIsNotNone(self.controller.click_monitor)
+        type_into_the_open_rename_editor(list_controller.outline_view, 1, "typed but cancelled")
+        self.controller.another_app_was_clicked()  # ends the rename without renaming, as giving the keyboard back does
+        self.assertFalse(list_controller.rename_in_progress)
+        self.assertEqual(self.owner.submitted_actions, [])
+        self.assertFalse(self.controller.has_the_keyboard)
+        self.assertEqual(keyboard_reports, [True, False])
+        self.assertIsNone(self.controller.click_monitor)
+        # A rename ended with Return leaves the sidebar the key window, its rows taking the keys: it still has the
+        # keyboard, until it gives it back.
+        list_controller.menuRename_(None)
+        self.controller.window.sendEvent_(make_key_down_event(self.controller.window, "\r", 36))
+        self.assertFalse(list_controller.rename_in_progress)
+        self.assertIs(self.controller.window.firstResponder(), list_controller.outline_view)
+        self.assertTrue(self.controller.has_the_keyboard)
+        self.controller.give_back_the_keyboard()
+        self.assertEqual(keyboard_reports, [True, False, True, False])
+        # A sidebar that hides by itself is left as it was: it slides out once the rename has ended and the pointer
+        # has left, which gives the keyboard back; noted as having the keyboard, it would stay in instead.
+        self.controller.settings = dict(self.controller.settings, sidebar_mode="auto_hide")
+        list_controller.menuRename_(None)
+        self.assertTrue(list_controller.rename_in_progress)
+        self.assertFalse(self.controller.has_the_keyboard)
         self.controller.hide_now(animate=False)
 
     def test_a_click_in_another_app_takes_the_keyboard_from_a_sidebar_that_stays_visible(self):
@@ -3294,10 +4061,10 @@ class SidebarControllerTests(unittest.TestCase):
                 action()
         at_time(100.0, self.controller.show_for_a_few_seconds)
         self.assertEqual((shown, self.controller.keep_shown_until), ([True], 100.0 + SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT))
-        at_time(99.9 + SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT, lambda: self.controller.hideTimerFired_(None))
+        at_time(99.9 + SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT, self.controller.hide_timer.fire)
         self.assertEqual(shown, [True])  # not yet, though the pointer is elsewhere
         self.assertIsNotNone(self.controller.hide_timer)  # checks again when the time is up
-        at_time(100.1 + SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT, lambda: self.controller.hideTimerFired_(None))
+        at_time(100.1 + SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT, self.controller.hide_timer.fire)
         self.assertEqual(shown, [True, False])
 
     def test_a_sidebar_the_menu_hid_stays_hidden_through_settings_changes_until_its_mode_changes(self):
@@ -3386,9 +4153,15 @@ class SettingsRecordingOwner:
     def __init__(self, settings):
         self.settings = settings
         self.shortcut_lacks_permission = False
+        # The agent_tools settings whose launch commands the settings window asked to have checked; the tests
+        # answer with show_launch_command_problems themselves, as the app controller does once its check is done.
+        self.agent_tools_asked_to_be_checked = []
 
     def settings_changed(self, new_settings):
         self.settings = new_settings
+
+    def find_installed_agent_tools(self, agent_tools):
+        self.agent_tools_asked_to_be_checked.append(agent_tools)
 
     def global_shortcut_lacks_permission(self):
         return self.shortcut_lacks_permission
@@ -3429,6 +4202,16 @@ class ListWindowSmokeTests(unittest.TestCase):
         controller.report_frame()
         self.assertEqual(owner.reported_frames[-1], ("list_window_frame", [-4000, -4000, 500, 400]))
 
+    def test_the_search_box_gives_the_keyboard_to_the_rows_once_the_window_no_longer_has_it(self):
+        # Left in the box (after Return showed a tab the search found, or Esc hid the window), the keyboard was still
+        # there the next time the window had it, and the rows' shortcuts typed into the box.
+        controller = ListWindowController.alloc().initWithOwner_(RecordingOwner())
+        controller.list_controller.refresh_timer.invalidate()
+        self.assertTrue(controller.list_panel_controller.put_the_keyboard_in_the_search_box())  # as Command-F or "/" does
+        self.assertIsNotNone(controller.list_panel_controller.search_field.currentEditor())
+        controller.windowDidResignKey_(None)  # as AppKit tells it when another window, or another app, takes the keyboard
+        self.assertIs(controller.window.firstResponder(), controller.list_controller.outline_view)
+
     def test_the_window_is_in_front_for_the_shortcut_only_while_shown_with_the_keyboard_or_always_on_top(self):
         controller = ListWindowController.alloc().initWithOwner_(RecordingOwner())
         controller.list_controller.refresh_timer.invalidate()
@@ -3441,8 +4224,50 @@ class ListWindowSmokeTests(unittest.TestCase):
                 (True, False, False, NSFloatingWindowLevel, False),  # always on top, but on another desktop
                 (False, True, True, NSFloatingWindowLevel, False)):
             controller.window = unittest.mock.Mock(isVisible=lambda: is_visible, isOnActiveSpace=lambda: is_on_active_space,
-                                                   isKeyWindow=lambda: is_key_window, level=lambda: level)
-            self.assertEqual(controller.is_in_front(), is_in_front, (is_visible, is_on_active_space, is_key_window, level))
+                                                   isKeyWindow=lambda: is_key_window, level=lambda: level,
+                                                   frame=lambda: NSMakeRect(100, 100, 480, 560))
+            with unittest.mock.patch("agent_command_tab.user_interface.list_window.NSApp",
+                                     unittest.mock.Mock(orderedWindows=lambda: [controller.window])):  # the app's only window
+                self.assertEqual(controller.is_in_front(), is_in_front, (is_visible, is_on_active_space, is_key_window, level))
+
+    def test_an_always_on_top_window_under_another_of_the_apps_windows_is_not_in_front(self):
+        # The settings window and the Saved sessions window open at its level, in front of it: counted as in front
+        # under them, it would have "Show window" do nothing and the shortcut hide a list that is out of sight.
+        controller = ListWindowController.alloc().initWithOwner_(RecordingOwner())
+        controller.list_controller.refresh_timer.invalidate()
+        controller.window = unittest.mock.Mock(isVisible=lambda: True, isOnActiveSpace=lambda: True, isKeyWindow=lambda: False,
+                                               level=lambda: NSFloatingWindowLevel, frame=lambda: NSMakeRect(100, 100, 480, 560))
+
+        def make_other_window(frame, is_titled=True, is_visible=True, is_on_active_space=True):
+            return unittest.mock.Mock(frame=lambda: NSMakeRect(*frame), isVisible=lambda: is_visible,
+                                      isOnActiveSpace=lambda: is_on_active_space,
+                                      styleMask=lambda: NSWindowStyleMaskTitled if is_titled else NSWindowStyleMaskBorderless)
+        frame_over_it, frame_beside_it = (300, 300, 720, 360), (700, 100, 720, 360)
+        for case, windows_front_to_back, is_in_front in (
+                ("over it", [make_other_window(frame_over_it), controller.window], False),
+                ("behind it", [controller.window, make_other_window(frame_over_it)], True),
+                ("in front of it, but beside it", [make_other_window(frame_beside_it), controller.window], True),
+                ("closed", [make_other_window(frame_over_it, is_visible=False), controller.window], True),
+                ("on another desktop", [make_other_window(frame_over_it, is_on_active_space=False), controller.window], True),
+                ("an open menu's window", [make_other_window(frame_over_it, is_titled=False), controller.window], True)):
+            with unittest.mock.patch("agent_command_tab.user_interface.list_window.NSApp",
+                                     unittest.mock.Mock(orderedWindows=lambda: windows_front_to_back)):
+                self.assertEqual(controller.is_in_front(), is_in_front, case)
+
+
+class PopUpThatRecordsPresses(KeyboardPopUpButton):
+    """A pop-up that, pressed, adds "pop-up" to recorded_presses (a list its test gives it) and stays closed: a real
+    menu would wait for a choice."""
+
+    def performClick_(self, sender):
+        self.recorded_presses.append("pop-up")
+
+
+class ButtonThatRecordsPresses(KeyboardButton):
+    """A button that, pressed, adds "button" to recorded_presses (a list its test gives it)."""
+
+    def performClick_(self, sender):
+        self.recorded_presses.append("button")
 
 
 class SettingsWindowSmokeTests(unittest.TestCase):
@@ -3459,14 +4284,20 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.settings = dict(self.owner.settings)
         self.controller.window = self.controller.build_window()  # built without showing it
 
+    def show_the_window_transparent(self):
+        """Opens the settings window as the app does, but transparent, since it shows on a real screen (macOS would pull
+        a titled window there from anywhere else), and without making the app the active one; it is hidden again after
+        the test."""
+        with unittest.mock.patch("agent_command_tab.user_interface.settings_window.NSApp"), \
+                unittest.mock.patch("agent_command_tab.user_interface.settings_window.place_window_at_saved_frame_or_center",
+                                    lambda window, frame: window.setAlphaValue_(0.0)):
+            self.controller.show(dict(self.owner.settings))
+        self.addCleanup(self.controller.window.orderOut_, None)
+
     def test_the_window_opens_with_the_keyboard_on_show_as(self):
         # Left to AppKit, it went to the first text field: with Keyboard navigation off, AppKit
         # passes over pop-ups for the window's initial first responder.
-        with unittest.mock.patch("agent_command_tab.user_interface.settings_window.NSApp"), \
-                unittest.mock.patch("agent_command_tab.user_interface.settings_window.place_window_at_saved_frame_or_center",
-                                    lambda window, frame: window.setAlphaValue_(0.0)):  # shown on a real screen, but transparent
-            self.controller.show(dict(self.owner.settings))
-        self.addCleanup(self.controller.window.orderOut_, None)
+        self.show_the_window_transparent()
         self.assertIs(self.controller.window.firstResponder(), self.controller.show_as_popup)
 
     def test_showing_an_open_window_brings_it_forward_as_it_is(self):
@@ -3603,6 +4434,30 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         stand_in_app_controller.list_window_controller.show.assert_called_once()
         stand_in_app_controller.place_the_settings_and_saved_sessions_windows_above_the_lists.assert_called_once()
 
+    def test_a_change_whose_save_fails_is_still_applied_so_the_windows_show_what_the_settings_say(self):
+        # A full disk: "Show as: Window" still shows the list window, rather than leaving the app
+        # with settings that say Window and no window, which choosing Window again wouldn't show either.
+        stand_in_app_controller = unittest.mock.Mock(settings=dict(DEFAULT_SETTINGS, show_as="popup"), settings_save_is_scheduled=True)
+        stand_in_app_controller.settings_window_controller.is_open.return_value = False
+        new_settings = dict(stand_in_app_controller.settings, show_as="window")
+        with unittest.mock.patch("agent_command_tab.app_controller.save_settings", side_effect=OSError(28, "No space left on device")), \
+                unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
+            AppController.settings_changed(stand_in_app_controller, new_settings)
+        self.assertEqual(stand_in_app_controller.settings, new_settings)
+        stand_in_app_controller.list_window_controller.show.assert_called_once()
+        stand_in_app_controller.apply_settings_to_the_core_and_every_list.assert_called_once()
+        stand_in_app_controller.settings_window_controller.reflect_settings.assert_called_once_with(new_settings)
+        self.assertIn("couldn't save the settings ([Errno 28] No space left on device)", printed.getvalue())
+        self.assertTrue(stand_in_app_controller.settings_save_is_scheduled)  # a moved window's frame is still waiting to be written
+
+    def test_a_moved_windows_frame_that_cant_be_saved_is_printed_so_quitting_goes_on(self):
+        stand_in_app_controller = unittest.mock.Mock(settings=dict(DEFAULT_SETTINGS), settings_save_is_scheduled=True)
+        with unittest.mock.patch("agent_command_tab.app_controller.save_settings", side_effect=OSError(28, "No space left on device")), \
+                unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
+            AppController.save_settings_if_scheduled(stand_in_app_controller)  # raised the OSError
+        self.assertIn("couldn't save the settings ([Errno 28] No space left on device)", printed.getvalue())
+        self.assertFalse(stand_in_app_controller.settings_save_is_scheduled)
+
     def test_the_saved_sessions_window_opens_clear_of_a_shown_sidebar(self):
         stand_in_app_controller = unittest.mock.Mock(settings=dict(DEFAULT_SETTINGS), saved_windows=[])
         AppController.open_saved_sessions_window(stand_in_app_controller)
@@ -3658,14 +4513,18 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_column_switches_choose_the_shown_columns_in_their_left_to_right_order(self):
         switches = self.controller.column_switches
         self.assertEqual([self.find_label_of_control(column_switch) for column_switch in switches.values()],
-                         ["Status", "Tokens", "Created", "Age", "Memory", "CPU"])  # as over the list's columns
-        self.assertEqual([column_switch.state() for column_switch in switches.values()], [1, 1, 0, 0, 0, 0])  # the defaults
+                         ["Status", "Tokens", "Created", "Age", "Last Msg", "Memory", "CPU"])  # as over the list's columns
+        self.assertEqual([column_switch.state() for column_switch in switches.values()], [1, 1, 0, 0, 1, 0, 0])  # the defaults
         switches["state"].setState_(0)
         self.controller.controlChanged_(switches["state"])
         for column_name in ("created_time", "memory_usage", "cpu_usage"):
             switches[column_name].setState_(1)
             self.controller.controlChanged_(switches[column_name])
         # The list's order, CPU before memory, not the switches' order.
+        self.assertEqual(self.owner.settings["shown_columns"],
+                         ["context_tokens", "created_time", "time_since_last_message", "cpu_usage", "memory_usage"])
+        switches["time_since_last_message"].setState_(0)  # on by default, and turned off like the others
+        self.controller.controlChanged_(switches["time_since_last_message"])
         self.assertEqual(self.owner.settings["shown_columns"], ["context_tokens", "created_time", "cpu_usage", "memory_usage"])
 
     def test_text_fields_save_when_they_lose_focus_too(self):
@@ -3711,16 +4570,9 @@ class SettingsWindowSmokeTests(unittest.TestCase):
 
     def test_keys_open_a_focused_pop_ups_menu_and_press_a_focused_button(self):
         pressed = []
-
-        class PopUpThatRecordsPresses(KeyboardPopUpButton):  # a real menu would wait for a choice
-            def performClick_(self, sender):
-                pressed.append("pop-up")
-
-        class ButtonThatRecordsPresses(KeyboardButton):
-            def performClick_(self, sender):
-                pressed.append("button")
         popup = PopUpThatRecordsPresses.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 100, 24), False)
         button = ButtonThatRecordsPresses.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 24))
+        popup.recorded_presses = button.recorded_presses = pressed
         for characters, key_code in ((" ", 49), ("\r", 36), (NSUpArrowFunctionKey, 126), (NSDownArrowFunctionKey, 125)):
             popup.keyDown_(self.make_key_press(characters, key_code))
         for characters, key_code in ((" ", 49), ("\r", 36)):
@@ -3833,7 +4685,10 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.assertIs(self.controller.window.contentView().documentView(), rows_view)
         width_before = rows_view.frame().size.width
         self.controller.window.setContentSize_((self.controller.window.contentView().frame().size.width + 160, 300))
-        self.assertEqual(rows_view.frame().size.width, width_before + 160)  # the rows follow the window's width
+        # The rows follow the window's width: the whole of it, or what a scroll bar beside them leaves where macOS is
+        # set to always show scroll bars (at 300 points high the rows scroll).
+        self.assertEqual(rows_view.frame().size.width, self.controller.window.contentView().contentSize().width)
+        self.assertGreater(rows_view.frame().size.width, width_before)
 
     def test_the_rows_end_20_points_below_the_last_box(self):
         # That is 27 below the last control.
@@ -3850,24 +4705,53 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         command_field = self.controller.launch_command_fields[0]
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            for problem in ("nosuchprogram: command not found", None):
-                self.controller.show_launch_command_problem(command_field, command_field.stringValue(), problem)
-                self.assertEqual((command_field.shows_a_problem, command_field.toolTip()), (bool(problem), problem))
+            for problem, tool_tip in (("nosuchprogram: command not found", "nosuchprogram: command not found"), ("", None)):
+                self.controller.show_launch_command_problems({command_field.stringValue(): problem})
+                self.assertEqual((command_field.shows_a_problem, command_field.toolTip()), (bool(problem), tool_tip))
                 render_view_into_bitmap(command_field)  # draws the outline
 
-    def test_the_harnesses_note_says_none_is_installed_only_while_every_command_cant_run(self):
-        command_fields = self.controller.launch_command_fields
-        for command_field in command_fields[:-1]:  # agy alone still runs: its field and the others' red outlines say enough
-            self.controller.show_launch_command_problem(command_field, command_field.stringValue(), "command not found")
+    def test_the_harnesses_note_says_no_launch_command_can_be_run_only_while_every_one_cant(self):
+        claude_command, codex_command, agy_command = [command_field.stringValue()
+                                                      for command_field in self.controller.launch_command_fields]
+        # agy alone still runs: its field and the others' red outlines say enough.
+        self.controller.show_launch_command_problems(
+            {claude_command: "claude: command not found", codex_command: "codex: command not found", agy_command: ""})
         self.assertIsNone(self.controller.harness_note.superview())
         height_without_the_note = self.controller.rows_view.frame().size.height
-        self.controller.show_launch_command_problem(command_fields[-1], command_fields[-1].stringValue(), "agy: command not found")
-        self.assertEqual(self.controller.harness_note.stringValue(), "None of these are installed: Claude Code, Codex, agy")
+        # The note says what was checked: that no command can be run, not that no tool is installed (one may be
+        # installed elsewhere than a mistyped path says).
+        self.controller.show_launch_command_problems(
+            {claude_command: "claude: command not found", codex_command: "codex: command not found",
+             agy_command: "~/bin/agy doesn't exist"})
+        self.assertEqual(self.controller.harness_note.stringValue(), "None of these launch commands can be run: Claude Code, Codex, agy")
         self.assertIs(self.controller.harness_note.superview(), self.controller.rows_view)
         self.assertGreater(self.controller.rows_view.frame().size.height, height_without_the_note)
-        self.controller.show_launch_command_problem(command_fields[0], command_fields[0].stringValue(), "")  # one runs again
+        self.controller.show_launch_command_problems({claude_command: ""})  # one runs again
         self.assertEqual(self.controller.harness_note.stringValue(), "")
         self.assertIsNone(self.controller.harness_note.superview())
+
+    def test_the_owner_checks_the_launch_commands_for_the_window_which_starts_no_check_of_its_own(self):
+        # One check of each command serves the window and the menus that start agent sessions: a check of the window's
+        # own would ask the login shell about an edited command a second time.
+        self.show_the_window_transparent()
+        self.assertEqual(self.owner.agent_tools_asked_to_be_checked, [self.owner.settings["agent_tools"]])  # as it opens
+        claude_field = self.controller.launch_command_fields[0]
+        # A command edited: the owner starts its check as it takes the new settings (AppController.settings_changed).
+        claude_field.setStringValue_("~/bin/claude")
+        self.controller.controlChanged_(claude_field)
+        self.assertEqual(self.owner.settings["agent_tools"][0]["launch_command"], "~/bin/claude")
+        self.assertEqual(len(self.owner.agent_tools_asked_to_be_checked), 1)
+        # The answer about the command the field held before leaves the field as it is; the one about its own shows.
+        self.controller.show_launch_command_problems({"claude": "claude: command not found", "codex": "", "agy": ""})
+        self.assertFalse(claude_field.shows_a_problem)
+        self.controller.show_launch_command_problems({"~/bin/claude": "~/bin/claude doesn't exist", "codex": "", "agy": ""})
+        self.assertEqual((claude_field.shows_a_problem, claude_field.toolTip()), (True, "~/bin/claude doesn't exist"))
+        # Entered again as it is, a command that couldn't be run is checked again (its program may be installed by
+        # now); one that can be run isn't.
+        self.controller.controlChanged_(claude_field)
+        self.assertEqual(self.owner.agent_tools_asked_to_be_checked[1:], [self.owner.settings["agent_tools"]])
+        self.controller.controlChanged_(self.controller.launch_command_fields[1])
+        self.assertEqual(len(self.owner.agent_tools_asked_to_be_checked), 2)
 
     def test_the_command_fields_start_together_keep_their_width_and_scroll_a_longer_command(self):
         command_fields = self.controller.launch_command_fields
@@ -3899,10 +4783,8 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         height_without_note = self.controller.rows_view.frame().size.height
         self.assertIsNone(self.controller.edge_note.superview())
         # A monitor right of the menu bar's: the saved right edge borders it, so the note says where the sidebar is.
-        two_monitors = [BUILT_IN_SCREEN,
-                        {"name": "Studio", "frame": (1500, 0, 2500, 1400), "visible_frame": (1500, 0, 2500, 1400)}]
         with unittest.mock.patch("agent_command_tab.user_interface.settings_window.read_monitors_from_screens",
-                                 return_value=two_monitors):
+                                 return_value=[BUILT_IN_SCREEN, STUDIO_SCREEN_TO_THE_RIGHT]):
             self.controller.screen_layout_changed()
         self.assertTrue(self.controller.edge_note.stringValue())
         self.assertIs(self.controller.edge_note.superview(), self.controller.rows_view)
@@ -3912,6 +4794,88 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.screen_layout_changed()  # the one monitor again
         self.assertIsNone(self.controller.edge_note.superview())
         self.assertEqual(self.controller.rows_view.frame().size.height, height_without_note)
+
+    def test_a_monitor_connected_while_the_sidebar_section_is_hidden_leaves_a_launch_command_being_typed(self):
+        # The sidebar's note isn't among the rows then (Show as: Popup), so they aren't laid out again for it, which
+        # would fit the window's height again for nothing.
+        command_field = self.controller.launch_command_fields[0]
+        self.assertTrue(self.controller.window.makeFirstResponder_(command_field))
+        command_field.currentEditor().setString_("cla")  # typed so far, without Return or Tab
+        rows_height = self.controller.rows_view.frame().size.height
+        views_laid_out = list(self.controller.rows_view.subviews())
+        with unittest.mock.patch("agent_command_tab.user_interface.settings_window.read_monitors_from_screens",
+                                 return_value=[BUILT_IN_SCREEN, STUDIO_SCREEN_TO_THE_RIGHT]):  # the saved right edge borders it
+            self.controller.screen_layout_changed()
+            self.assertEqual(list(self.controller.rows_view.subviews()), views_laid_out)  # a layout makes new labels and boxes
+            self.assertEqual(command_field.currentEditor().string(), "cla")
+            self.assertEqual(self.owner.settings["agent_tools"][0]["launch_command"], "claude")
+            self.assertEqual(self.controller.rows_view.frame().size.height, rows_height)
+            # The note is up to date for when its section shows.
+            command_field.abortEditing()
+            self.show_the_sidebar_section()
+        self.assertTrue(self.controller.edge_note.stringValue())
+        self.assertIs(self.controller.edge_note.superview(), self.controller.rows_view)
+
+    def test_a_note_that_goes_while_a_launch_command_is_being_typed_leaves_it_being_typed_and_unsaved(self):
+        # A check of the launch commands answers at any moment. Laying the rows out again for the Harnesses note takes
+        # every field out and puts it back, which ended the edit and saved the half-typed command.
+        command_fields = self.controller.launch_command_fields
+        self.controller.show_launch_command_problems(
+            {command_field.stringValue(): "command not found" for command_field in command_fields})
+        self.assertIs(self.controller.harness_note.superview(), self.controller.rows_view)
+        self.assertTrue(self.controller.window.makeFirstResponder_(command_fields[0]))
+        command_fields[0].currentEditor().setString_("cla")  # typed so far, without Return or Tab
+        command_fields[0].currentEditor().setSelectedRange_((1, 0))  # the insertion point after the "c"
+        self.controller.show_launch_command_problems({command_fields[1].stringValue(): ""})  # Codex can be run: the note goes
+        self.assertIsNone(self.controller.harness_note.superview())
+        self.assertEqual(self.owner.settings["agent_tools"][0]["launch_command"], "claude")
+        editor = command_fields[0].currentEditor()
+        self.assertEqual((editor.string(), editor.selectedRange().location, editor.selectedRange().length), ("cla", 1, 0))
+        self.controller.window.makeFirstResponder_(None)  # the edit ends, as a click elsewhere ends it: saved now
+        self.assertEqual(self.owner.settings["agent_tools"][0]["launch_command"], "cla")
+
+    def test_the_end_of_a_long_command_being_typed_stays_in_view_when_a_note_goes(self):
+        # A field that takes the keyboard back after the layout shows its text from the start: the insertion point of
+        # a command longer than the field was out of view until the next key press.
+        command_fields = self.controller.launch_command_fields
+        self.controller.show_launch_command_problems(
+            {command_field.stringValue(): "command not found" for command_field in command_fields})
+        self.assertTrue(self.controller.window.makeFirstResponder_(command_fields[0]))
+        typed_command = "/a/folder/with/a/long/name" * 6 + "/claude"
+        command_fields[0].currentEditor().setString_(typed_command)
+        command_fields[0].currentEditor().setSelectedRange_((len(typed_command), 0))  # typed up to its end
+        self.controller.show_launch_command_problems({command_fields[1].stringValue(): ""})  # Codex can be run: the note goes
+        editor = command_fields[0].currentEditor()
+        last_character_x = editor.layoutManager().boundingRectForGlyphRange_inTextContainer_(
+            (len(typed_command) - 1, 1), editor.textContainer()).origin.x
+        self.assertGreater(last_character_x, LAUNCH_COMMAND_FIELD_WIDTH)  # the command is longer than its field
+        visible_rect = editor.visibleRect()
+        self.assertTrue(visible_rect.origin.x <= last_character_x <= visible_rect.origin.x + visible_rect.size.width)
+        command_fields[0].abortEditing()
+
+    def test_a_width_being_typed_is_saved_when_its_section_goes(self):
+        # Its field is no longer among the rows once "Show as" isn't Sidebar, so there is nowhere to go on typing it.
+        self.show_the_sidebar_section()
+        width_field = self.controller.sidebar_width_field
+        self.assertTrue(self.controller.window.makeFirstResponder_(width_field))
+        width_field.currentEditor().setString_("555")  # typed, without Return or Tab
+        self.owner.settings = dict(self.owner.settings, show_as="popup")  # chosen in the pop-up, which leaves the edit open
+        self.controller.reflect_settings(self.owner.settings)
+        self.assertIsNone(width_field.window())
+        self.assertEqual((self.owner.settings["sidebar_width"], self.owner.settings["show_as"]), (555, "popup"))
+
+    def test_a_check_that_answers_while_a_command_is_being_typed_shows_for_the_saved_command(self):
+        # Matched with the text being typed, the answer about the saved command was dropped: typed back to that command,
+        # the field showed no problem, and nothing checked it again.
+        claude_field = self.controller.launch_command_fields[0]
+        self.assertTrue(self.controller.window.makeFirstResponder_(claude_field))
+        claude_field.currentEditor().setString_("cla")  # typed so far, without Return or Tab
+        self.controller.show_launch_command_problems({"claude": "claude: command not found", "codex": "", "agy": ""})
+        self.assertEqual(claude_field.currentEditor().string(), "cla")
+        claude_field.currentEditor().setString_("claude")  # typed back to the saved command
+        self.controller.window.makeFirstResponder_(None)  # the edit ends
+        self.assertEqual(self.owner.settings["agent_tools"][0]["launch_command"], "claude")
+        self.assertEqual((claude_field.shows_a_problem, claude_field.toolTip()), (True, "claude: command not found"))
 
     def test_tab_goes_through_the_fields_of_a_section_shown_after_the_window_opened(self):
         self.controller.window.recalculateKeyViewLoop()  # as showing the window does, here as Popup
@@ -3957,13 +4921,16 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         place.assert_called_once_with(self.controller.window, saved_frame)
 
     def test_a_saved_frame_is_taken_while_it_is_on_a_connected_screen_else_the_middle_of_the_main_one(self):
-        # Here a connected screen far outside every real monitor.
+        # Here a connected screen far outside every real monitor. The window's center method (AppKit's, which puts a
+        # window in the middle of a screen) is a stand-in, so the window stays off the real screens.
         with unittest.mock.patch("agent_command_tab.user_interface.screen_layout.list_screen_frames",
-                                 lambda: [(-4000, -4000, 1500, 1000)]):
+                                 lambda: [(-4000, -4000, 1500, 1000)]), \
+                unittest.mock.patch.object(self.controller.window, "center") as center:
             place_window_at_saved_frame_or_center(self.controller.window, [-3900, -3900, 600, 450])
             self.assertEqual(convert_rect_to_frame_list(self.controller.window.frame()), [-3900, -3900, 600, 450])
             place_window_at_saved_frame_or_center(self.controller.window, [9000, 9000, 600, 450])  # a monitor that is gone
-        self.assertTrue(frame_is_on_a_screen(convert_rect_to_frame_list(self.controller.window.frame()), list_screen_frames()))
+            center.assert_called_once_with()  # for the second frame alone
+            self.assertEqual(convert_rect_to_frame_list(self.controller.window.frame()), [-3900, -3900, 600, 450])  # not moved there
 
     def test_harnesses_can_be_left_out_and_keep_their_commands(self):
         self.assertEqual([self.find_label_of_control(include_switch) for include_switch in self.controller.include_switches],
@@ -4082,30 +5049,18 @@ class ShowTheListAsTests(unittest.TestCase):
 
     def test_the_window_dropped_on_the_menu_bar_icon_turns_into_the_dropdown(self):
         calls = []
-
-        class StandInAppController:
-            def __init__(self, show_as):
-                self.settings = {"show_as": show_as}
-                self.status_item_controller = unittest.mock.Mock(show_popover=lambda: calls.append("show popup"))
-                self.list_window_controller = unittest.mock.Mock(hide=lambda: calls.append("hide window"))
-
-            def pointer_is_on_the_menu_bar_icon(self):
-                return True
-
-            def settings_changed(self, new_settings):
-                calls.append(f"show as {new_settings['show_as']}")
-
-            def list_window_closed(self):
-                calls.append("settings window level updated")
-
-            def hide_the_list_window(self):
-                AppController.hide_the_list_window(self)
         for show_as, expected_calls in (("window", ["show as popup", "show popup"]),
                                         # Opened by the menu's Show window: it just hides, and Show as stays.
                                         ("sidebar", ["hide window", "settings window level updated", "show popup"]),
                                         ("popup", ["hide window", "settings window level updated", "show popup"])):
             calls.clear()
-            AppController.list_window_drag_ended(StandInAppController(show_as))
+            AppController.list_window_drag_ended(make_stand_in_app_controller_with_real_methods(
+                ["hide_the_list_window"], settings={"show_as": show_as},
+                status_item_controller=unittest.mock.Mock(show_popover=lambda: calls.append("show popup")),
+                list_window_controller=unittest.mock.Mock(hide=lambda: calls.append("hide window")),
+                pointer_is_on_the_menu_bar_icon=lambda: True,
+                settings_changed=lambda new_settings: calls.append(f"show as {new_settings['show_as']}"),
+                list_window_closed=lambda: calls.append("settings window level updated")))
             self.assertEqual(calls, expected_calls, show_as)
 
 
@@ -4155,10 +5110,9 @@ def make_saved_windows():
                 make_saved_session_record("a", "planning", folder=os.path.expanduser("~/code/agent-command-tab")),
                 make_saved_session_record("b", "reviews", "Codex", saved_at=time.mktime((2026, 11, 5, 23, 28, 0, 0, 0, -1)))],
                 "w1", "agent-command-tab", (0, 0, 800, 600)),
-            # A tmux session: the builder makes iTerm2 windows only.
-            {"terminal_name": "tmux", "terminal_window_id": "$1", "terminal_window_opened_at": 1793977852, "name": "tmux: work",
-             "name_was_set_by_user": True,
-             "frame": None, "saved_sessions": [make_saved_session_record("c", "notes")]}]
+            dict(build_saved_window_record([make_saved_session_record("c", "notes")], "$1", "tmux: work", None,
+                                           name_was_set_by_user=True),
+                 terminal_name="tmux", terminal_window_opened_at=1793977852)]
 
 
 class SavedSessionsWindowSmokeTests(unittest.TestCase):
@@ -4208,6 +5162,59 @@ class SavedSessionsWindowSmokeTests(unittest.TestCase):
         self.assertTrue(agent_column.isHidden())
         self.controller.show_saved_windows(make_saved_windows())  # a Codex session saved again
         self.assertFalse(agent_column.isHidden())
+
+    def list_names(self):
+        return [row_texts[0] for row_texts in self.list_row_texts()]
+
+    def test_a_saved_window_the_user_closed_stays_closed_when_the_list_is_shown_again(self):
+        # A rename or a delete elsewhere in the list shows the list again, which mustn't open the rows the user closed.
+        self.outline_view.collapseItem_(self.outline_view.itemAtRow_(0))
+        self.assertEqual(self.list_names(), ["agent-command-tab", "tmux: work", "notes"])
+        self.controller.show_saved_windows(rename_saved_session(make_saved_windows(), "c", "renamed notes"))
+        self.assertEqual(self.list_names(), ["agent-command-tab", "tmux: work", "renamed notes"])
+        # A window saved since is listed opened.
+        self.controller.show_saved_windows(make_saved_windows() + [build_saved_window_record(
+            [make_saved_session_record("d", "new notes")], "w9", "saved since", (0, 0, 800, 600))])
+        self.assertEqual(self.list_names(), ["agent-command-tab", "tmux: work", "notes", "saved since", "new notes"])
+        # The Saved sessions window opened again starts with every saved window opened, whatever the last one left.
+        self.controller.window = self.controller.build_window()
+        self.controller.show_saved_windows(make_saved_windows())
+        self.outline_view = self.controller.outline_view
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "reviews", "tmux: work", "notes"])
+
+    def test_every_column_shows_in_the_narrowest_window_with_the_whole_agent_names_and_saved_times(self):
+        # Left to AppKit, the columns keep their widths in a narrowed window, the Saved column out of sight, or, in a
+        # window narrowed after it was wide, the Saved column alone is squeezed, down to nothing.
+        scroll_view = self.outline_view.enclosingScrollView()
+        self.assertTrue(scroll_view.hasHorizontalScroller())  # for columns dragged wider than the window
+        narrowest_width = SMALLEST_WINDOW_SIZES["saved_sessions_window_frame"][0]
+        self.assertEqual(self.controller.window.minSize().width, narrowest_width)
+        columns = list(self.outline_view.tableColumns())
+
+        def check_that_every_shown_column_shows_whole(window_width):
+            frame = self.controller.window.frame()
+            self.controller.window.setFrame_display_(NSMakeRect(frame.origin.x, frame.origin.y, window_width, frame.size.height), True)
+            visible_rect = scroll_view.documentVisibleRect()
+            for column_index, column in enumerate(columns):
+                if column.isHidden():
+                    continue
+                column_rect = self.outline_view.rectOfColumn_(column_index)
+                self.assertGreaterEqual(column_rect.origin.x, visible_rect.origin.x, (window_width, column.identifier()))
+                self.assertLessEqual(column_rect.origin.x + column_rect.size.width, visible_rect.origin.x + visible_rect.size.width,
+                                     (window_width, column.identifier()))
+                if column.identifier() in ("agent_tool_name", "saved_at"):  # texts that mean little when cut short
+                    for row in range(self.outline_view.numberOfRows()):
+                        self.assertLessEqual(self.outline_view.preparedCellAtColumn_row_(column_index, row).cellSize().width,
+                                             self.outline_view.frameOfCellAtColumn_row_(column_index, row).size.width,
+                                             (window_width, column.identifier(), row))
+        for window_width in (self.controller.window.frame().size.width, narrowest_width, 900, narrowest_width):
+            check_that_every_shown_column_shows_whole(window_width)
+        saved_windows = make_saved_windows()
+        saved_windows[0]["saved_sessions"][1]["agent_tool_name"] = "Claude Code"  # one tool: no Agent column
+        self.controller.show_saved_windows(saved_windows)
+        check_that_every_shown_column_shows_whole(narrowest_width)
+        self.controller.show_saved_windows(make_saved_windows())
+        check_that_every_shown_column_shows_whole(narrowest_width)
 
     def test_rows_cant_be_dragged(self):
         for selector in ("outlineView:writeItems:toPasteboard:", "outlineView:pasteboardWriterForItem:"):
@@ -4259,6 +5266,74 @@ class SavedSessionsWindowSmokeTests(unittest.TestCase):
         self.outline_view.currentEditor().setString_("Plans")
         self.controller.window.makeFirstResponder_(None)  # a click elsewhere, or closing the window, ends the edit
         self.assertEqual(self.list_row_texts()[1][0], "Plans")
+        self.assertEqual(self.outline_view.editedRow(), -1)
+
+    def test_saved_windows_to_list_during_a_rename_end_it_without_renaming(self):
+        # Listed under the name being typed (a session saved or restored meanwhile), they would end the rename keeping
+        # the name typed so far, and the owner would have the list reloaded again from inside that reload.
+        saved_windows_with_one_saved_since = make_saved_windows()
+        saved_windows_with_one_saved_since[0]["saved_sessions"].insert(0, make_saved_session_record("z", "newly saved"))
+        self.controller.window.orderFrontRegardless()
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))
+        self.outline_view.currentEditor().setString_("pla")
+        self.controller.show_saved_windows(saved_windows_with_one_saved_since)
+        self.assertEqual(self.outline_view.editedRow(), -1)
+        self.assertEqual(self.list_names(), ["agent-command-tab", "newly saved", "planning", "reviews", "tmux: work", "notes"])
+        self.assertIs(self.controller.window.firstResponder(), self.outline_view)  # the keys go to the rows again
+        self.controller.window.makeFirstResponder_(None)  # as the window closing does: no name is left to keep
+        self.assertEqual(self.owner.calls, [])
+
+    def test_restore_sessions_chosen_again_brings_the_open_window_forward_with_its_rename_still_under_way(self):
+        # Listed again in the open window, the same saved windows would end the rename without renaming. The tests'
+        # app is not made active, and its window not the key window, in either part.
+        self.controller.window.orderFrontRegardless()
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))
+        self.outline_view.currentEditor().setString_("Renamed planning")
+        with unittest.mock.patch("agent_command_tab.user_interface.saved_sessions_window.NSApp"), \
+                unittest.mock.patch.object(self.controller.window, "makeKeyAndOrderFront_") as bring_forward:
+            self.controller.show(make_saved_windows(), None)  # as the app controller does for "Restore sessions…"
+        bring_forward.assert_called_once_with(None)
+        self.assertEqual(self.outline_view.editedRow(), 1)
+        self.controller.window.makeFirstResponder_(None)  # the rename ends, as a click elsewhere ends it
+        self.assertEqual(self.owner.calls, [("rename session", "a", "Renamed planning")])
+        # Opened after it was closed, the window lists the saved windows it is opened with.
+        self.controller.window.orderOut_(None)
+        with unittest.mock.patch("agent_command_tab.user_interface.saved_sessions_window.NSApp"), \
+                unittest.mock.patch.object(self.controller, "build_window", return_value=self.controller.window), \
+                unittest.mock.patch.object(self.controller.window, "makeKeyAndOrderFront_"):
+            self.controller.show(make_saved_windows()[1:], None)
+        self.assertEqual(self.list_names(), ["tmux: work", "notes"])
+
+    def test_rename_from_the_menu_renames_the_row_it_was_opened_on_though_the_rows_changed_since(self):
+        # A session saved while the menu is open is listed above the row, which then has another number, and a new
+        # item. Renamed by the number it had (while another rename was under way, whose end let the new rows in), the
+        # name typed went to the row that took its place: the saved window's.
+        saved_windows_with_one_saved_since = make_saved_windows()
+        saved_windows_with_one_saved_since[0]["saved_sessions"].append(make_saved_session_record("z", "newly saved"))
+        self.controller.window.orderFrontRegardless()
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))  # "planning"
+        self.outline_view.currentEditor().setString_("pla")
+        self.build_right_click_menu_titles(4)  # "notes", right-clicked while "planning" is being renamed
+        self.controller.show_saved_windows(saved_windows_with_one_saved_since)
+        self.controller.menuRename_(None)
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "reviews", "newly saved", "tmux: work", "notes"])
+        self.assertEqual(self.outline_view.editedRow(), 5)  # "notes"
+        self.outline_view.currentEditor().setString_("Notes 2")
+        self.controller.window.makeFirstResponder_(None)  # the rename ends, as a click elsewhere ends it
+        self.assertEqual(self.owner.calls, [("rename session", "c", "Notes 2")])
+        # A row that left the list while its menu was open (its session was restored) renames nothing.
+        self.build_right_click_menu_titles(5)
+        self.controller.show_saved_windows(saved_windows_with_one_saved_since[:1])
+        self.controller.menuRename_(None)
+        self.assertEqual(self.outline_view.editedRow(), -1)
+        self.assertEqual(len(self.owner.calls), 1)
+
+    def test_delete_during_a_rename_keeps_the_new_name_first(self):  # or the list without the deleted row would end the rename unrenamed
+        self.controller.window.orderFrontRegardless()
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))
+        self.outline_view.currentEditor().setString_("Renamed planning")
+        self.controller.deleteClicked_(None)
+        self.assertEqual(self.owner.calls, [("rename session", "a", "Renamed planning"), ("delete", set(), {"a"})])
         self.assertEqual(self.outline_view.editedRow(), -1)
 
     def test_the_right_click_menu_renames_or_deletes_and_delete_covers_the_selected_rows_it_was_opened_on(self):
@@ -4343,14 +5418,9 @@ def make_stand_in_app_controller_for_saved_sessions(**attributes):
     return make_stand_in_app_controller_with_real_methods(["change_saved_windows", "submit_action_and_report_failure"], **attributes)
 
 
-class ThreadThatRunsAtOnce:
-    """Stands in for threading.Thread: start runs the target right away."""
-
-    def __init__(self, target, **keyword_arguments):
-        self.target = target
-
-    def start(self):
-        self.target()
+def run_started_threads_at_once():
+    """Returns a patch under which starting a thread runs its target at once, on the thread that starts it."""
+    return unittest.mock.patch.object(threading.Thread, "start", threading.Thread.run)
 
 
 class InstalledAgentToolsInTheMenusTests(unittest.TestCase):
@@ -4359,24 +5429,36 @@ class InstalledAgentToolsInTheMenusTests(unittest.TestCase):
             ["list_agent_tool_names", "find_installed_agent_tools", "note_installed_agent_tools"],
             settings=copy.deepcopy(DEFAULT_SETTINGS), installed_agent_tool_names=None, installed_agent_tools_checked_at=time.time())
         self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Claude Code", "Codex", "agy"])  # not checked yet
-        with unittest.mock.patch("agent_command_tab.app_controller.threading.Thread", ThreadThatRunsAtOnce), \
-                unittest.mock.patch("agent_command_tab.app_controller.find_installed_agent_tool_names",
-                                    return_value=frozenset({"Claude Code", "Codex"})), run_main_thread_calls_at_once():
+        problem_by_launch_command = {"claude": "", "codex": "", "agy": "agy: command not found"}
+        with run_started_threads_at_once(), \
+                unittest.mock.patch("agent_command_tab.app_controller.find_launch_command_problem",
+                                    problem_by_launch_command.get), run_main_thread_calls_at_once():
             stand_in_app_controller.find_installed_agent_tools(stand_in_app_controller.settings["agent_tools"])
         self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Claude Code", "Codex"])  # no agy installed
+        # The settings window shows the same check's answers, so it starts no check of its own.
+        show_launch_command_problems = stand_in_app_controller.settings_window_controller.show_launch_command_problems
+        show_launch_command_problems.assert_called_once_with(problem_by_launch_command)
         stand_in_app_controller.settings["agent_tools"][0]["is_included"] = False  # left out in Settings
         self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Codex"])
         # An answer about launch commands changed since is dropped: the change's own check decides.
         checked_agent_tools = copy.deepcopy(stand_in_app_controller.settings["agent_tools"])
         stand_in_app_controller.settings["agent_tools"][2]["launch_command"] = "~/.local/bin/agy"
-        stand_in_app_controller.note_installed_agent_tools(checked_agent_tools, frozenset({"Codex", "agy"}))
+        stand_in_app_controller.note_installed_agent_tools(checked_agent_tools, {"claude": "", "codex": "", "agy": ""})
         self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Codex"])
-        # A menu that opens a while after the last check has the tools checked again: agy was installed since.
+        show_launch_command_problems.assert_called_once()
+        # A menu that opens a while after the last check has the tools checked again, and still shows that last
+        # check's answer: the main thread takes the new one only after the menu's call returns. agy, installed
+        # since, is in the next menu.
         stand_in_app_controller.installed_agent_tools_checked_at -= SECONDS_BEFORE_THE_INSTALLED_AGENT_TOOLS_ARE_CHECKED_AGAIN
-        with unittest.mock.patch("agent_command_tab.app_controller.threading.Thread", ThreadThatRunsAtOnce), \
-                unittest.mock.patch("agent_command_tab.app_controller.find_installed_agent_tool_names",
-                                    return_value=frozenset({"Codex", "agy"})), run_main_thread_calls_at_once():
+        with run_started_threads_at_once(), \
+                unittest.mock.patch("agent_command_tab.app_controller.find_launch_command_problem",
+                                    {"claude": "", "codex": "", "~/.local/bin/agy": ""}.get), \
+                unittest.mock.patch("agent_command_tab.app_controller.AppHelper.callAfter") as call_after:
+            self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Codex"])
+            function_for_the_main_thread, *its_arguments = call_after.call_args.args
+            function_for_the_main_thread(*its_arguments)
             self.assertEqual(stand_in_app_controller.list_agent_tool_names(), ["Codex", "agy"])
+        call_after.assert_called_once()  # the next menu, opened right after, starts no check of its own
 
     def test_a_changed_launch_command_is_checked_again(self):
         for changed_agent_tool_field, value, is_checked_again in (("launch_command", "~/.local/bin/agy", True),

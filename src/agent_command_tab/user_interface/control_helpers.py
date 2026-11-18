@@ -1,10 +1,20 @@
-"""Helpers for buttons, pop-ups and text views shared by the list's rows, the panel around the
-list, the settings window and the alerts."""
+"""Helpers for buttons, pop-ups, menus and text views shared by the list's rows, the panel around
+the list, the menu bar icon, the settings window and the alerts."""
 
 from AppKit import (NSEventModifierFlagCommand, NSEventModifierFlagControl, NSEventModifierFlagOption, NSFontWeightBold, NSImage,
-                    NSImageOnly, NSImageSymbolConfiguration, NSMakeRect, NSTextView)
+                    NSImageOnly, NSImageSymbolConfiguration, NSMakeRect, NSMenuItem, NSTextView)
 
 LARGEST_TEXT_VIEW_SIZE = 1e7  # no limit to how far a text view's text, and a field's measured text, may reach
+
+
+def add_menu_item_that_sends_action_to_target(menu, title, action_name, target, tool_tip=None):
+    """Adds an item to the menu that sends action_name to target when chosen, with tool_tip, if
+    given, as its mouse-over help, and returns the item."""
+    menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action_name, "")
+    menu_item.setTarget_(target)
+    menu_item.setToolTip_(tool_tip)
+    menu.addItem_(menu_item)
+    return menu_item
 
 
 def make_text_view_that_wraps_lines(width, height):

@@ -107,8 +107,10 @@ class HookEventTests(unittest.IsolatedAsyncioTestCase):
 
     def test_background_tasks_count_from_claude_codes_list_or_else_from_the_shells_seen(self):
         self.core.note_hook_event(make_event("SessionStart", 101, source="startup"))
-        self.core.note_hook_event(make_event("PostToolUse", 101, background_task_launched_id="a1"))
-        self.core.note_hook_event(make_event("PostToolUse", 101, background_task_launched_id="b1"))
+        self.core.note_hook_event(make_event("PostToolUse", 101, background_task_launched_id="a1",
+                                             background_task_launched_type="subagent"))
+        self.core.note_hook_event(make_event("PostToolUse", 101, background_task_launched_id="b1",
+                                             background_task_launched_type="shell"))
         self.core.session_readings_by_session_id = {"s1": {"background_shell_count": 5}, "s2": {"background_shell_count": 1}}
         self.core.note_background_task_counts()
         self.assertEqual(self.core.session_readings_by_session_id["s1"]["background_task_count"], 2)
@@ -143,31 +145,37 @@ class HookEventTests(unittest.IsolatedAsyncioTestCase):
                         "the listener made no socket")
         self.assertFalse(listening_task.done(), listening_task)
 
-    async def test_events_arrive_through_the_socket_from_the_forwarder(self):
-        folder = tempfile.TemporaryDirectory()
+    def make_socket_path_in_a_new_folder_under_tmp(self):
+        """Returns the path for a socket in a new folder under /tmp, which is deleted when the test
+        ends. Not in the temporary folder TMPDIR names: a Unix socket's path may be at most 103
+        bytes long on macOS, and a long TMPDIR would make it longer."""
+        folder = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(folder.cleanup)
-        self.core.hook_events_socket_path = os.path.join(folder.name, "hook_events.sock")
+        return os.path.join(folder.name, "hook_events.sock")
+
+    async def test_events_arrive_through_the_socket_from_the_forwarder(self):
+        self.core.hook_events_socket_path = self.make_socket_path_in_a_new_folder_under_tmp()
         listening_task = asyncio.ensure_future(self.core.listen_for_hook_events())
         try:
             await self.wait_for_the_socket(self.core.hook_events_socket_path, listening_task)
             payload = {"hook_event_name": "SessionEnd", "reason": "prompt_input_exit", "session_id": "x"}
+            # The processes above the forwarder are stand-ins (the "sh" an agent, process 101, runs its
+            # hooks in), since those above the test differ with how the tests are started.
             with unittest.mock.patch.object(hook_event_forwarder, "HOOK_EVENTS_SOCKET_PATH", self.core.hook_events_socket_path), \
+                    unittest.mock.patch.object(hook_event_forwarder, "list_ancestor_processes",
+                                               lambda process_id, levels: [[1101, "sh"], [101, "2.1.311"]]), \
                     unittest.mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
                     unittest.mock.patch.object(sys, "argv", ["hook_event_forwarder.py", "Claude Code"]):
                 await asyncio.to_thread(hook_event_forwarder.main)
             self.assertTrue(await wait_until_in_a_coroutine(lambda: self.core.hook_state_by_agent_process_id), "no event arrived")
         finally:
             listening_task.cancel()
-        # The nearest process above the test that isn't a shell (its parent, or one further up when
-        # the tests run from a shell) stands for the agent.
-        (hook_state,) = self.core.hook_state_by_agent_process_id.values()
-        self.assertIsNotNone(hook_state["session_ended_at"])
+        self.assertEqual(set(self.core.hook_state_by_agent_process_id), {101})
+        self.assertIsNotNone(self.core.hook_state_by_agent_process_id[101]["session_ended_at"])
         self.assertTrue(self.core.snapshot_needed.is_set())
 
     async def test_a_second_copy_leaves_the_socket_to_the_copy_that_listens(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        socket_path = os.path.join(folder.name, "hook_events.sock")
+        socket_path = self.make_socket_path_in_a_new_folder_under_tmp()
         self.core.hook_events_socket_path = socket_path
         second_core = DashboardCore(lambda snapshot: None, lambda message: None, hook_events_socket_path=socket_path)
         first_listening_task = asyncio.ensure_future(self.core.listen_for_hook_events())
@@ -220,31 +228,6 @@ class HooksThatSendNoEventsTests(unittest.TestCase):
         # s1 started before they were found again, so it may have started without them.
         self.assertEqual(core.mark_hooks_that_send_no_events((("Claude Code", HOOKS_ARE_INSTALLED),), 5000.0),
                          (("Claude Code", HOOKS_ARE_INSTALLED),))
-
-
-class AnotherAgentInTheSameTabTests(unittest.TestCase):
-    def test_a_new_agent_in_the_tab_starts_without_the_last_agents_finished_turn(self):
-        core = DashboardCore(lambda snapshot: None, lambda message: None)
-        core.gathered_windows = [make_gathered_window("w1", [
-            make_gathered_tab("t1", "s1", "claude", 101, status_set_in_iterm2="working", status="working")])]
-        first_session = core.gathered_windows[0]["tabs"][0]["first_session"]
-
-        def track(now, status, agent_process_id):
-            first_session.update(status_set_in_iterm2=status, status=status, job_pid=agent_process_id or 90)
-            core.agent_sessions = {"s1": make_agent_session(agent_process_id)} if agent_process_id else {}
-            core.update_session_tracking(now)
-            return core.session_tracking_by_session_id["s1"]
-        track(0.5, "idle", 101)
-        track(1.0, "working", 101)  # a turn starts
-        core.session_tracking_by_session_id["s1"]["last_time_tab_was_seen"] = 0.5
-        tracking = track(2.0, "idle", 101)  # done, unseen
-        self.assertEqual((tracking["turn_started_at"], tracking["last_turn_ended_at"]), (1.0, 2.0))
-        tracking["finished_turn_cleared_at"] = 2.5  # as a /clear of the finished turn records
-        track(3.0, None, None)  # the agent ended; its shell is in front
-        tracking = track(4.0, "idle", 202)  # a new agent started in the tab (a restore, say)
-        for key in ("turn_started_at", "last_turn_ended_at", "finished_turn_cleared_at"):
-            self.assertNotIn(key, tracking)
-        self.assertEqual((tracking["agent_process_id"], tracking["last_time_tab_was_seen"]), (202, 0.5))
 
 
 class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
@@ -327,15 +310,9 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
         # above, and the next pass took the turn as one ending then: "done" for a turn long over.
         core = DashboardCore(lambda snapshot: None, lambda message: None)
         agent_sessions_seen_by_the_tracking = []
-
-        class StopAfterTheTracking(Exception):
-            pass
         core.update_session_tracking = lambda now: agent_sessions_seen_by_the_tracking.append(
             {session_id: agent_session["process_id"] for session_id, agent_session in core.agent_sessions.items()})
-        core.record_seen_time_for_the_seen_session = unittest.mock.Mock(side_effect=StopAfterTheTracking)
-        with unittest.mock.patch.object(dashboard_core, "resolve_agent_sessions",
-                                        return_value={"s1": make_agent_session(101)}), \
-                self.assertRaises(StopAfterTheTracking):
+        with unittest.mock.patch.object(dashboard_core, "resolve_agent_sessions", return_value={"s1": make_agent_session(101)}):
             core.publish_snapshot_if_changed()
         self.assertEqual(agent_sessions_seen_by_the_tracking, [{"s1": 101}])
 
@@ -413,12 +390,19 @@ class TurnEndWhileABackgroundTaskRunsTests(unittest.TestCase):
 class ChildProcessReadingTests(unittest.TestCase):
     def test_a_paused_agent_is_still_in_the_turn_its_tracking_last_saw(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
-        core.agent_sessions = {"paused": make_agent_session(101), "idle": make_agent_session(102)}
-        # The turn goes by the status its tracking last saw, which a pause keeps.
+        # Paused from the list, the agent stays in front of its tab; the other one waits behind its shell.
+        core.agent_sessions = {"paused": dict(make_agent_session(101), is_stopped=True),
+                               "paused behind its shell": dict(make_agent_session(103), is_stopped=True, is_in_background=True),
+                               "idle": make_agent_session(102)}
+        # The turn goes by the status its tracking last saw, which a pause keeps, not by the "paused" its row shows.
         core.session_tracking_by_session_id = {"paused": {"status_value": "working", "turn_started_at": 900.0},
+                                               "paused behind its shell": {"status_value": "working", "turn_started_at": 950.0},
                                                "idle": {"status_value": "idle"}}
+        core.displayed_state_by_session_id = {session_id: DisplayedState("paused", 1000.0, 1000.0)
+                                              for session_id in ("paused", "paused behind its shell")}
         self.assertEqual(core.list_agent_processes_and_their_turns(),
-                         {"paused": (101, True, 900.0, None, 10.0), "idle": (102, False, None, None, 10.0)})
+                         {"paused": (101, True, 900.0, None, 10.0), "paused behind its shell": (103, True, 950.0, None, 10.0),
+                          "idle": (102, False, None, None, 10.0)})
 
     def test_with_no_status_from_iterm2_an_agent_is_in_a_turn_by_the_state_its_row_shows(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
@@ -437,7 +421,7 @@ class ChildProcessReadingTests(unittest.TestCase):
         def read_once(cpu_seconds, now, cpu_time_readings_by_child):
             return core.note_child_processes({"s1": [make_child_reading(
                 child, command_text="python3 -m unittest", command_started_at=50.0, claude_code_task_id="b1",
-                resource_usage=(300 * 1024 ** 2 + 12345, cpu_seconds))], "s-closed": []}, cpu_time_readings_by_child, now)
+                resource_usage=(300 * 1024 ** 2 + 12345, cpu_seconds))]}, cpu_time_readings_by_child, now)
         cpu_time_readings_by_child = read_once(10.0, 100.0, {})
         self.assertEqual(core.session_readings_by_session_id["s1"]["child_processes"],
                          (ChildProcessEntry(201, "python3 -m unittest", 50.0, True, 300 * 1024 ** 2, None),))
@@ -446,7 +430,29 @@ class ChildProcessReadingTests(unittest.TestCase):
         self.assertEqual(core.session_readings_by_session_id["s1"]["background_shell_count"], 1)
         self.assertEqual(core.session_readings_by_session_id["s1"]["running_claude_code_task_ids"], ("b1",))
         self.assertEqual(core.session_readings_by_session_id["s1"]["running_claude_code_task_ids_read_at"], 103.0)
-        self.assertNotIn("s-closed", core.session_readings_by_session_id)
+
+    def test_a_reading_under_way_while_a_tab_closes_or_gets_another_agent_is_dropped(self):
+        # The processes are read in a worker thread; a snapshot published meanwhile may find the tabs changed.
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.agent_sessions = {"s1": make_agent_session(101), "s-closed": make_agent_session(102)}
+        readings_noted_when_the_next_agent_was_read = []
+
+        def read_child_processes(agent_process_id, *other_arguments):
+            if agent_process_id == 202:
+                readings_noted_when_the_next_agent_was_read.append(dict(core.session_readings_by_session_id))
+                return []
+            core.agent_sessions = {"s1": make_agent_session(202)}  # 202 took the place of 101 in s1, and the other tab closed
+            return [make_child_reading(ProcessInfo(agent_process_id + 100, agent_process_id, "bash", 5.0))]
+
+        async def read_until_the_next_agent_was_read():
+            reading_task = asyncio.ensure_future(core.read_child_processes_periodically())
+            await wait_until_in_a_coroutine(lambda: bool(readings_noted_when_the_next_agent_was_read))
+            reading_task.cancel()
+        with unittest.mock.patch.object(dashboard_core, "read_child_processes", read_child_processes), \
+                unittest.mock.patch.object(dashboard_core, "CHILD_PROCESS_CHECK_INTERVAL_SECONDS", 0.01):
+            asyncio.run(read_until_the_next_agent_was_read())
+        # The sub rows read below 101 weren't noted for 202 (Kill and Info go by them), nor anything for the closed tab.
+        self.assertEqual(readings_noted_when_the_next_agent_was_read[:1], [{}])
 
     def test_detached_jobs_add_to_claude_codes_own_count_of_background_tasks(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
@@ -457,10 +463,10 @@ class ChildProcessReadingTests(unittest.TestCase):
             for child, is_detached in ((background_shell, False), (detached_job, True))]}, {}, 100.0)
         core.note_background_task_counts()  # no hooks: the background shells seen, detached jobs included
         self.assertEqual(core.session_readings_by_session_id["s1"]["background_task_count"], 2)
-        # Claude Code's hooks list only the shell it started, not the job that shell left behind.
-        core.hook_state_by_agent_process_id = {101: {"background_task_ids": {"shell-1"}}}
+        # Claude Code's hooks list the shell it started and a background agent, not the job that shell left behind.
+        core.hook_state_by_agent_process_id = {101: {"background_task_ids": {"shell-1", "agent-1"}}}
         core.note_background_task_counts()
-        self.assertEqual(core.session_readings_by_session_id["s1"]["background_task_count"], 2)
+        self.assertEqual(core.session_readings_by_session_id["s1"]["background_task_count"], 3)
 
     def test_a_listed_shell_counts_only_while_a_shell_below_the_agent_writes_to_its_task_file(self):
         core = DashboardCore(lambda snapshot: None, lambda message: None)

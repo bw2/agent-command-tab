@@ -87,6 +87,15 @@ def compute_sidebar_frame(visible_frame, screen_frame, edge, width, is_shown):
     return (sidebar_x, y, width, height)
 
 
+def compute_largest_sidebar_width_on_monitor(visible_frame, room_kept_beside_the_sidebar, smallest_width, largest_width):
+    """Returns the widest the sidebar may be on the monitor whose usable area is visible_frame:
+    largest_width, or less where that would leave less than room_kept_beside_the_sidebar of the
+    usable width free. A docked sidebar keeps that much room for the windows it pushes aside (one
+    wider than its monitor would leave them none); one that lies over the windows keeps none (0),
+    and so fills the monitor at most. Never less than smallest_width."""
+    return max(min(largest_width, visible_frame[2] - room_kept_beside_the_sidebar), smallest_width)
+
+
 def compute_dragged_sidebar_width(width_at_start, pointer_x_at_start, pointer_x, edge, smallest_width, largest_width):
     """Returns the sidebar width while its inner edge is dragged: a sidebar on the right edge grows
     as the pointer moves left, one on the left edge as it moves right."""

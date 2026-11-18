@@ -22,7 +22,8 @@ def is_process_record(value):
 def build_pause_record_from_stored_value(value):
     """Returns the PauseRecord a stored value describes, or None when it doesn't have that shape.
     A record saved by version 0.3.0 or earlier, of a pause that pressed Ctrl+Z, has no shell_processes (it
-    has the shell's prompt instead, no longer used) and gets none: its shell has the terminal."""
+    has the shell's prompt instead, no longer used) and gets none: its shell has the terminal.
+    One saved before pauses recorded the names of the processes they left running gets none either."""
     if (not isinstance(value, dict) or not is_process_record(value.get("agent_process"))
             or not isinstance(value.get("agent_tool_name"), str)):
         return None
@@ -31,8 +32,13 @@ def build_pause_record_from_stored_value(value):
     if not all(isinstance(processes, list) and all(map(is_process_record, processes))
                for processes in (shell_processes, stopped_processes)):
         return None
+    names_of_processes_left_running = value.get("names_of_processes_left_running", [])
+    if not (isinstance(names_of_processes_left_running, list)
+            and all(isinstance(name, str) for name in names_of_processes_left_running)):
+        return None
     return PauseRecord(tuple(value["agent_process"]), value["agent_tool_name"],
-                       [tuple(process) for process in shell_processes], [tuple(process) for process in stopped_processes])
+                       [tuple(process) for process in shell_processes], [tuple(process) for process in stopped_processes],
+                       tuple(names_of_processes_left_running))
 
 
 def load_pause_records(file_path):

@@ -22,6 +22,7 @@ class ClaudeAgentsRefreshTests(unittest.TestCase):
         core.agent_sessions = {session_id: {"adapter": ClaudeCodeAdapter(), "process_id": process_id}
                                for session_id, process_id in (("s1", 42), ("s2", 43))}
         core.claude_agents_by_process_id = {42: {"sessionId": "a"}, 43: {"sessionId": "b"}, 99: {"sessionId": "ended"}}
+        core.process_ids_asked_about_in_claude_agents = {42, 43}  # as the gather that starts a run leaves them
 
         async def read_with_one_config_folder_timing_out(claude_command_path, config_folders):
             return {43: {"sessionId": "b-after-clear"}}
@@ -35,16 +36,41 @@ class ClaudeAgentsRefreshTests(unittest.TestCase):
         core = DashboardCore(lambda snapshot: None, lambda message: None)
         core.claude_command_path = "/stand-in/claude"
         core.agent_sessions = {"s1": {"adapter": ClaudeCodeAdapter(), "process_id": 42}}
+        core.claude_agents_by_process_id = {42: {"sessionId": "before-the-clear", "name": "planning"}}
         core.process_ids_asked_about_in_claude_agents = {42}
 
         async def read_while_a_clear_is_typed(claude_command_path, config_folders):
             core.note_hook_event(make_event("SessionStart", 42, source="clear", sent_at=5.0))
             core.regather_needed.clear()  # the gather it asks for finds this run under way
-            return {42: {"sessionId": "before-the-clear"}}
+            return {42: {"sessionId": "before-the-clear", "name": "planning"}}
         with unittest.mock.patch("agent_command_tab.dashboard_core.read_claude_agents_by_process_id",
                                  read_while_a_clear_is_typed):
             asyncio.run(core.refresh_claude_agents())
         self.assertTrue(core.regather_needed.is_set())  # so 42 is asked about again
+        # Meanwhile its record names no conversation: not the one it left, which this run read.
+        self.assertEqual(core.claude_agents_by_process_id, {42: {"name": "planning"}})
+
+    def test_a_clear_or_resume_typed_in_the_terminal_leaves_no_conversation_known_until_the_next_run(self):
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.claude_command_path = "/stand-in/claude"
+        core.agent_sessions = {"s1": {"adapter": ClaudeCodeAdapter(), "process_id": 42}}
+        for source in ("clear", "resume"):
+            with self.subTest(source=source):
+                core.claude_agents_by_process_id = {42: {"sessionId": "the-one-it-left", "name": "planning"}}
+                core.process_ids_asked_about_in_claude_agents = {42}
+                core.note_hook_event(make_event("SessionStart", 42, source=source, sent_at=5.0))
+                self.assertEqual(core.claude_agents_by_process_id, {42: {"name": "planning"}})
+                self.assertEqual(core.process_ids_asked_about_in_claude_agents, set())
+                core.process_ids_asked_about_in_claude_agents = {42}  # the gather it asked for starts a run
+
+                async def read_after_the_switch(claude_command_path, config_folders):
+                    return {42: {"sessionId": "the-next-one", "name": "planning"}}
+                with unittest.mock.patch("agent_command_tab.dashboard_core.read_claude_agents_by_process_id", read_after_the_switch):
+                    asyncio.run(core.refresh_claude_agents())
+                self.assertEqual(core.claude_agents_by_process_id, {42: {"sessionId": "the-next-one", "name": "planning"}})
+        # A compaction keeps the conversation, and so its ID.
+        core.note_hook_event(make_event("SessionStart", 42, source="compact", sent_at=6.0))
+        self.assertEqual(core.claude_agents_by_process_id[42]["sessionId"], "the-next-one")
 
 
 class ReadClaudeAgentsTests(unittest.TestCase):
@@ -58,9 +84,11 @@ class ReadClaudeAgentsTests(unittest.TestCase):
                                  {42: {"pid": 42, "sessionId": "s", "config_folder": None}})
 
     def test_a_failed_run_is_printed_on_standard_error_and_gives_no_records(self):
-        # Standard output stays clean for dump-snapshot, which prints only its JSON there.
+        # Standard output stays clean for dump-snapshot, which prints only its JSON there. The record
+        # a failed run printed isn't taken in.
         with tempfile.TemporaryDirectory() as folder:
-            claude_path = write_executable_script(folder, "claude", "#!/bin/sh\necho '[]'\necho 'unknown command agents' >&2\nexit 1\n")
+            claude_path = write_executable_script(
+                folder, "claude", '#!/bin/sh\necho \'[{"pid": 42, "sessionId": "s"}]\'\necho \'unknown command agents\' >&2\nexit 1\n')
             printed_on_standard_output, printed_on_standard_error = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(printed_on_standard_output), contextlib.redirect_stderr(printed_on_standard_error):
                 self.assertEqual(asyncio.run(read_claude_agents_by_process_id(claude_path, [None])), {})

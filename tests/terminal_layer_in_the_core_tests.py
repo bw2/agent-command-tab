@@ -81,8 +81,9 @@ def make_core():
     """An iTerm2 window w1 (tab t1, session s1) whose tab runs the tmux client (process 900), and
     a tmux session $1 (window @1, pane %1) running Claude Code (process 101)."""
     core = DashboardCore(lambda snapshot: None, lambda message: None)
-    iterm2 = StandInTerminalBackend("iTerm2", [make_gathered_window_with_one_claude_tab("iTerm2", "w1", "t1", "s1", 900, (0, 0, 800, 600))],
-                                    reports_agent_status=True, windows_have_frames=True, application_process_ids=[50])
+    iterm2 = StandInTerminalBackend(
+        "iTerm2", [make_gathered_window("w1", [make_gathered_tab("t1", "s1", "tmux attach", 900)], "iTerm2", (0, 0, 800, 600), title="w1")],
+        reports_agent_status=True, windows_have_frames=True, application_process_ids=[50])
     tmux = StandInTerminalBackend("tmux", [make_gathered_window_with_one_claude_tab("tmux", "$1", "@1", "%1", 101)],
                                   shows_windows_through_clients=True, clients=[TerminalClient(900, "@1")])
     core.terminal_backends = [iterm2, tmux]
@@ -91,9 +92,14 @@ def make_core():
     return core, iterm2, tmux
 
 
+def run_another_program_in_iterm2s_tab(iterm2):
+    """Has iTerm2's tab t1 (make_core) run Claude Code as process 777, in place of the tmux client."""
+    iterm2.gathered_windows[0]["tabs"][0]["first_session"].update(command_line="claude", job_pid=777)
+
+
 class RoutingTests(unittest.TestCase):
     def test_a_tab_moves_only_into_a_window_of_its_own_terminal(self):
-        core, iterm2, tmux = make_core()
+        core, _, tmux = make_core()
         action_result = asyncio.run(core.handle_move_tab(ActionRequest("move_tab", {"tab_id": "@1"}, {"target_window_id": "w1"})))
         self.assertEqual(action_result, ActionResult(False, "tmux tabs can't move into iTerm2 windows"))
         asyncio.run(core.handle_move_tab(ActionRequest("move_tab", {"tab_id": "@1"}, {"target_window_id": "$1"})))
@@ -106,9 +112,23 @@ class RoutingTests(unittest.TestCase):
         action_result = asyncio.run(core.handle_focus_agent_session(ActionRequest("focus_agent_session", {"session_id": "%1"})))
         self.assertEqual((tmux.actions, iterm2.actions), ([("focus_session", "%1")], [("focus_session", "s1")]))
         self.assertEqual(action_result, ActionResult(True))  # the app has no other terminal app to bring forward
-        iterm2.gathered_windows[0]["tabs"][0]["first_session"]["job_pid"] = 777  # the client runs elsewhere (Terminal, say)
+        run_another_program_in_iterm2s_tab(iterm2)  # the client runs elsewhere (Terminal, say)
         action_result = asyncio.run(core.handle_focus_agent_session(ActionRequest("focus_agent_session", {"session_id": "%1"})))
         self.assertEqual(action_result.details, {"terminal_client_process_id": 900})  # the app brings that app forward
+
+    def test_a_peek_asks_every_connected_terminal_what_it_shows_now_and_its_end_puts_that_back(self):
+        core, iterm2, tmux = make_core()
+        for terminal_backend in (iterm2, tmux):
+            terminal_backend.remember_what_is_in_front = unittest.mock.AsyncMock(
+                return_value=f"what {terminal_backend.terminal_name} shows")
+            terminal_backend.put_back_what_was_in_front = unittest.mock.AsyncMock(return_value=ActionResult(True))
+
+        async def peek_and_release():
+            await core.handle_peek_agent_session(ActionRequest("peek_agent_session", {"session_id": "%1"}))
+            return await core.handle_end_peek(ActionRequest("end_peek", {}, {"bring_back_iterm2_window": True}))
+        self.assertEqual(asyncio.run(peek_and_release()), ActionResult(True))
+        iterm2.put_back_what_was_in_front.assert_awaited_once_with("what iTerm2 shows", True)
+        tmux.put_back_what_was_in_front.assert_awaited_once_with("what tmux shows", True)
 
     def test_a_new_window_opens_in_the_first_terminal_that_runs(self):
         core, iterm2, tmux = make_core()
@@ -125,7 +145,7 @@ class RoutingTests(unittest.TestCase):
                          ActionResult(False, "iTerm2 can't be reached yet (see the line at the top of the list)"))
 
     def test_a_new_tab_needs_a_folder_that_exists_and_a_launch_command(self):  # checked once, for every terminal
-        core, iterm2, tmux = make_core()
+        core, _, tmux = make_core()
         for folder, launch_command, message in (("/nonexistent/folder", "claude", "the folder /nonexistent/folder doesn't exist"),
                                                 ("/", " ", "the agent tool has no launch command (see Settings)")):
             self.assertEqual(asyncio.run(core.handle_start_agent_session(ActionRequest(
@@ -168,7 +188,7 @@ class GatheringTests(unittest.TestCase):
 
 class StatusInATerminalThatReportsNoneTests(unittest.TestCase):
     def test_a_tmux_tab_goes_by_claude_codes_own_report(self):
-        core, iterm2, tmux = make_core()
+        core, _, _ = make_core()
         core.agent_sessions = {"%1": make_agent_session(101)}
         status = {"value": "busy"}
         with unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
@@ -185,19 +205,29 @@ class StatusInATerminalThatReportsNoneTests(unittest.TestCase):
 
 class SessionInFrontTests(unittest.TestCase):
     def test_the_tmux_tab_shown_by_the_client_in_iterm2s_front_tab_is_in_front(self):
-        core, iterm2, tmux = make_core()
+        core, iterm2, _ = make_core()
         iterm2.front_tab_id = "t1"
         self.assertIsNone(core.find_seen_session_id())  # iTerm2 has no keyboard focus
         iterm2.has_keyboard_focus = True
         self.assertEqual(core.find_seen_session_id(), "%1")
-        iterm2.gathered_windows[0]["tabs"][0]["first_session"]["job_pid"] = 777  # another program in that tab
+        run_another_program_in_iterm2s_tab(iterm2)
         core.gathered_windows = asyncio.run(core.gather_every_terminals_windows())
         self.assertEqual(core.find_seen_session_id(), "s1")
 
+    def test_a_tmux_pane_that_a_zoomed_pane_covers_is_highlighted_but_not_seen(self):
+        core, iterm2, tmux = make_core()
+        iterm2.front_tab_id = "t1"
+        iterm2.has_keyboard_focus = True
+        self.assertEqual(core.find_seen_session_id(), "%1")
+        # Another pane of its tmux window is zoomed to fill the window, as the tmux backend gathers it.
+        tmux.gathered_windows[0]["tabs"][0]["first_session"]["is_hidden_behind_a_zoomed_pane"] = True
+        self.assertIsNone(core.find_seen_session_id())
+        self.assertEqual(core.find_highlighted_session_id(), "%1")  # its tab is still the one in front
+
     def test_a_client_inside_another_terminal_app_is_highlighted_but_not_seen_while_that_app_is_active(self):
         # Terminal's tab in front may be another than the client's, so only the highlight goes by it.
-        core, iterm2, tmux = make_core()
-        iterm2.gathered_windows[0]["tabs"][0]["first_session"]["job_pid"] = 777
+        core, iterm2, _ = make_core()
+        run_another_program_in_iterm2s_tab(iterm2)
         core.gathered_windows = asyncio.run(core.gather_every_terminals_windows())
         ancestors_by_process_id = {900: [900, 800, 60]}  # 60: Terminal
         with unittest.mock.patch.object(dashboard_core, "list_the_process_and_its_ancestor_ids",
@@ -214,8 +244,8 @@ class SessionInFrontTests(unittest.TestCase):
             self.assertEqual(core.find_highlighted_session_id(), "s1")
 
     def test_a_tab_shown_from_the_list_counts_as_seen(self):
-        core, iterm2, tmux = make_core()
-        iterm2.gathered_windows[0]["tabs"][0]["first_session"]["job_pid"] = 777  # its client runs in another terminal app
+        core, iterm2, _ = make_core()
+        run_another_program_in_iterm2s_tab(iterm2)  # its client runs in another terminal app
         core.gathered_windows = asyncio.run(core.gather_every_terminals_windows())
         core.session_tracking_by_session_id["%1"] = {"last_time_tab_was_seen": None}
         with unittest.mock.patch.object(dashboard_core.time, "time", return_value=123.0):
@@ -223,13 +253,24 @@ class SessionInFrontTests(unittest.TestCase):
         self.assertEqual(core.session_tracking_by_session_id["%1"]["last_time_tab_was_seen"], 123.0)
 
     def test_the_tab_a_window_shown_from_the_list_shows_counts_as_seen(self):
-        core, iterm2, tmux = make_core()
+        core, _, tmux = make_core()
         tmux.find_selected_tab_id = lambda window_id: "@1"
         tmux.focus_window = unittest.mock.AsyncMock(return_value=ActionResult(True))
         core.session_tracking_by_session_id["%1"] = {"last_time_tab_was_seen": None}
         with unittest.mock.patch.object(dashboard_core.time, "time", return_value=124.0):
             asyncio.run(core.handle_focus_window(ActionRequest("focus_window", {"window_id": "$1"})))
         self.assertEqual(core.session_tracking_by_session_id["%1"]["last_time_tab_was_seen"], 124.0)
+
+    def test_a_pane_that_a_zoomed_pane_covers_stays_unseen_when_its_window_is_shown_from_the_list(self):
+        core, _, tmux = make_core()
+        tmux.find_selected_tab_id = lambda window_id: "@1"
+        tmux.focus_window = unittest.mock.AsyncMock(return_value=ActionResult(True))
+        # Showing a tmux window leaves the zoomed pane zoomed, so the agent's pane stays covered.
+        tmux.gathered_windows[0]["tabs"][0]["first_session"]["is_hidden_behind_a_zoomed_pane"] = True
+        core.session_tracking_by_session_id["%1"] = {"last_time_tab_was_seen": None}
+        action_result = asyncio.run(core.handle_focus_window(ActionRequest("focus_window", {"window_id": "$1"})))
+        self.assertTrue(action_result.succeeded)
+        self.assertIsNone(core.session_tracking_by_session_id["%1"]["last_time_tab_was_seen"])
 
     def test_while_the_dashboard_has_the_keyboard_a_client_in_the_app_used_last_wins_over_iterm2s_front_tab(self):
         core, iterm2, tmux = make_core()  # iTerm2's tab t1 runs the client 900, showing %1
@@ -246,8 +287,8 @@ class SessionInFrontTests(unittest.TestCase):
             self.assertEqual(core.find_highlighted_session_id(), "%1")
 
     def test_while_the_dashboard_has_the_keyboard_after_another_app_no_tab_is_highlighted(self):
-        core, iterm2, tmux = make_core()
-        iterm2.gathered_windows[0]["tabs"][0]["first_session"]["job_pid"] = 777  # no tmux client in iTerm2's tab
+        core, iterm2, _ = make_core()
+        run_another_program_in_iterm2s_tab(iterm2)  # no tmux client in iTerm2's tab
         core.gathered_windows = asyncio.run(core.gather_every_terminals_windows())
         iterm2.front_tab_id = "t1"
         core.dashboard_has_the_keyboard = True

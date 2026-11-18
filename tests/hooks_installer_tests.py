@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import stat
 import sys
 import tempfile
@@ -50,10 +51,12 @@ class CodexHomeFoldersTests(unittest.TestCase):
             settings_file_path = os.path.join(folder, "settings.json")
             for launch_command, expected_folders in (("codex", ["/app-codex-home"]),
                                                      ("RUST_LOG=info CODEX_HOME=/x codex -s read-only", ["/app-codex-home", "/x"]),
+                                                     # A "~" is expanded here: the settings' reader leaves it as written.
+                                                     ("CODEX_HOME=~/.codex-work codex", ["/app-codex-home", "/home-folder/.codex-work"]),
                                                      ("CODEX_HOME=/app-codex-home codex", ["/app-codex-home"])):  # listed once
                 with open(settings_file_path, "w") as settings_file:
                     json.dump({"agent_tools": [{"agent_tool_name": "Codex", "launch_command": launch_command}]}, settings_file)
-                with unittest.mock.patch.dict(os.environ, {"CODEX_HOME": "/app-codex-home"}):
+                with unittest.mock.patch.dict(os.environ, {"CODEX_HOME": "/app-codex-home", "HOME": "/home-folder"}):
                     self.assertEqual(hooks_installer.list_codex_home_folders(settings_file_path), expected_folders, launch_command)
 
 
@@ -67,7 +70,9 @@ class BuildForwarderCommandTests(unittest.TestCase):
             python_path = make_file_in_a_homebrew_version_folder(prefix, "libexec/bin/python")
             add_the_homebrew_opt_link(prefix)
             command = build_forwarder_command("Claude Code", python_path, "/code/hook_event_forwarder.py")
-        self.assertEqual(command, f"{prefix}/opt/agent-command-tab/libexec/bin/python -I -S /code/hook_event_forwarder.py 'Claude Code'")
+        # Compared part by part: the temporary folder's path may need quoting (a space in it), which the test above covers.
+        self.assertEqual(shlex.split(command), [f"{prefix}/opt/agent-command-tab/libexec/bin/python", "-I", "-S",
+                                                "/code/hook_event_forwarder.py", "Claude Code"])
 
 
 class SettingsTests(unittest.TestCase):
@@ -95,6 +100,8 @@ class SettingsTests(unittest.TestCase):
         settings = add_the_apps_hooks(USERS_SETTINGS, COMMAND, EVENTS)
         # Another tool's installer appended its hook to the app's entry.
         settings["hooks"]["SessionEnd"] = [dict(apps_entry, hooks=apps_entry["hooks"] + [other_hook])]
+        self.assertTrue(settings_have_the_apps_hooks(settings, COMMAND, EVENTS))  # the app's hook still runs from that entry
+        self.assertFalse(settings_have_the_apps_hooks(settings, "/other/python -I -S x 'Claude Code'", EVENTS))
         self.assertEqual(remove_the_apps_hooks(settings)["hooks"]["SessionEnd"], [{"hooks": [other_hook]}])
         reinstalled_settings = add_the_apps_hooks(settings, COMMAND, EVENTS)
         self.assertEqual(reinstalled_settings["hooks"]["SessionEnd"], [{"hooks": [other_hook]}, apps_entry])
@@ -203,7 +210,8 @@ class FilesTests(unittest.TestCase):
         os.symlink(linked_file_path, self.claude_settings_path)  # as a dotfiles manager keeps it
         install_hooks("Claude Code")
         self.assertTrue(os.path.islink(self.claude_settings_path))
-        self.assertIn("hooks", self.read_json(linked_file_path))
+        self.assertTrue(os.path.samefile(self.claude_settings_path, linked_file_path))
+        self.assertTrue(settings_have_the_apps_hooks(self.read_json(linked_file_path), build_forwarder_command("Claude Code"), EVENTS))
         self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
 
     def test_hooks_whose_python_or_forwarder_is_gone_cant_run(self):
@@ -218,13 +226,16 @@ class FilesTests(unittest.TestCase):
         self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
 
     def test_a_file_that_isnt_a_json_object_is_left_alone(self):
-        with open(self.claude_settings_path, "w") as settings_file:
-            settings_file.write('{"model": "opus",')  # cut short
-        with self.assertRaises(ValueError):
-            install_hooks("Claude Code")
-        with open(self.claude_settings_path) as settings_file:
-            self.assertEqual(settings_file.read(), '{"model": "opus",')
-        self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_MISSING)
+        for file_contents in ('{"model": "opus",',  # cut short, so not JSON
+                              '["opus"]', 'null'):  # JSON, but not the object that settings are
+            with self.subTest(file_contents=file_contents):
+                with open(self.claude_settings_path, "w") as settings_file:
+                    settings_file.write(file_contents)
+                with self.assertRaises(ValueError):
+                    install_hooks("Claude Code")
+                with open(self.claude_settings_path) as settings_file:
+                    self.assertEqual(settings_file.read(), file_contents)
+                self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_MISSING)
 
 
 if __name__ == "__main__":

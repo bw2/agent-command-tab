@@ -33,11 +33,13 @@ from AppKit import (NSAnimationContext, NSBackingStoreBuffered, NSCursor, NSEven
                     NSWindowStyleMaskNonactivatingPanel)
 from Foundation import NSObject, NSTimer
 
+from agent_command_tab.monitor_assignment import SMALLEST_WINDOW_WIDTH_BESIDE_A_DOCKED_SIDEBAR
 from agent_command_tab.settings_store import LARGEST_SIDEBAR_WIDTH, SMALLEST_SIDEBAR_WIDTH
 from agent_command_tab.user_interface.agent_session_outline_view import AgentSessionListController
 from agent_command_tab.user_interface.popover_container import ListPanelController
 from agent_command_tab.user_interface.screen_layout import read_monitors_from_screens
 from agent_command_tab.user_interface.sidebar_placement import (choose_sidebar_edge, compute_dragged_sidebar_width,
+                                                                compute_largest_sidebar_width_on_monitor,
                                                                 compute_sidebar_frame, pointer_is_at_edge)
 
 SECONDS_BEFORE_HIDING = 0.5
@@ -156,14 +158,17 @@ class SidebarController(NSObject):
         self.mouse_monitors = []
         self.click_monitor = None  # while a sidebar that hides by itself or has the keyboard is in (watch_for_clicks_in_other_apps)
         # Given by the global shortcut (take_the_keyboard) or taken by the search box
-        # (search_box_took_the_keyboard) until given back. Kept here, since the
-        # window still said it was the key window after another app became active (checked 2026-11-17).
+        # (a_text_field_took_the_keyboard) or a row's rename (a_rename_took_the_keyboard) until
+        # given back. Kept here, since the window still said it was the key window after another
+        # app became active.
         self.has_the_keyboard = False
         self.width_drag_start = None  # (pointer x, width) while the inner edge is dragged
         self.list_controller = AgentSessionListController.alloc().initWithOwner_(owner)
         self.list_controller.width_is_set_by_the_user = True
+        self.list_controller.on_rename_took_the_keyboard = self.a_rename_took_the_keyboard
         self.list_panel_controller = ListPanelController.alloc().initWithListController_(self.list_controller)
-        self.list_panel_controller.on_search_box_took_the_keyboard = self.search_box_took_the_keyboard
+        self.list_panel_controller.on_search_box_took_the_keyboard = self.a_text_field_took_the_keyboard
+        self.list_panel_controller.give_the_list_the_keyboard = self.give_the_list_the_keyboard_focus
         self.window = self.build_window()
         allow_pointer_changes_while_another_app_is_in_front()  # for the width strip's left-right arrows
         return self
@@ -283,6 +288,10 @@ class SidebarController(NSObject):
             # Keep the current visibility: a settings change (for example a width just dragged
             # with the pointer still on the sidebar) mustn't make it vanish; the pointer decides.
             self.set_shown(self.is_shown, animate=False)
+            if self.is_shown and self.hide_timer is None and not self.pointer_is_over_sidebar():
+                # The pointer decides only as it moves, and it may not: a sidebar that stayed visible
+                # until its mode was changed with the keyboard would stay in with the pointer off it.
+                self.check_whether_to_hide_in(SECONDS_BEFORE_HIDING)
         elif self.is_kept_hidden:  # hidden by the menu's Show popup or Show window: no room kept for it either
             self.stop_tracking_the_pointer()
             self.set_shown(False, animate=False)
@@ -299,7 +308,7 @@ class SidebarController(NSObject):
             screen = self.screens[self.placement.screen_index]
             self.owner.reserve_screen_area({
                 "frame": compute_sidebar_frame(visible_frame, screen["frame"], self.placement.edge,
-                                               self.settings["sidebar_width"], True),
+                                               self.find_width_on_its_monitor(), True),
                 "edge": self.placement.edge,
                 "monitor_visible_frame": visible_frame,
             })
@@ -314,7 +323,7 @@ class SidebarController(NSObject):
         keyboard focus (after a rename) and lets its list skip redraws while hidden."""
         screen = self.screens[self.placement.screen_index]
         frame = compute_sidebar_frame(screen["visible_frame"], screen["frame"], self.placement.edge,
-                                      self.settings["sidebar_width"], is_shown)
+                                      self.find_width_on_its_monitor(), is_shown)
         was_on_screen = self.window.isVisible()
         self.is_shown = is_shown
         if not is_shown:
@@ -431,19 +440,34 @@ class SidebarController(NSObject):
         self.watch_for_clicks_in_other_apps(True)
 
     @objc.python_method
-    def search_box_took_the_keyboard(self):
-        """A click in the search box, or Command-F or "/" in the list, made the sidebar the key
-        window, without making the dashboard the active app: as with take_the_keyboard, the
-        sidebar stays in while you type, and a click in another app gives the keyboard back."""
+    def a_text_field_took_the_keyboard(self):
+        """A click in the search box, Command-F or "/" in the list, or a row's rename
+        (a_rename_took_the_keyboard) made the sidebar the key window, without making the dashboard
+        the active app: as with take_the_keyboard, the sidebar stays in while you type, and a
+        click in another app gives the keyboard back."""
         self.note_whether_it_has_the_keyboard(True)
         self.watch_for_clicks_in_other_apps(True)
+
+    @objc.python_method
+    def a_rename_took_the_keyboard(self):
+        """A row's rename made the sidebar the key window (begun from the row's menu, it does so
+        without the global shortcut having given the sidebar the keyboard). A sidebar that stays
+        visible has the keyboard from then on, as after a click in the search box: the rename's
+        end leaves it the key window, its rows taking the keys, until it gives the keyboard back.
+
+        A sidebar that hides by itself is not noted as having it. The rename keeps it in
+        (something_belonging_to_the_sidebar_is_open), and once the rename has ended it slides out
+        when the pointer leaves, which gives the keyboard back; noted as having the keyboard, it
+        would stay in until a click in another app or Esc instead."""
+        if not self.hides_by_itself():
+            self.a_text_field_took_the_keyboard()
 
     @objc.python_method
     def give_back_the_keyboard(self):
         """Gives the keyboard back to the active app (Return showed a tab, Esc, or the global
         shortcut again): a sidebar that hides by itself slides out, and one that stays visible
         leaves the screen for an instant. macOS gives the keyboard back only then: activating
-        the app that is already active left the sidebar the key window (checked 2026-11-17)."""
+        the app that is already active left the sidebar the key window."""
         self.note_whether_it_has_the_keyboard(False)
         if self.hides_by_itself():
             self.hide_now()
@@ -544,6 +568,25 @@ class SidebarController(NSObject):
     # ----- width -----
 
     @objc.python_method
+    def find_largest_width_on_its_monitor(self):
+        """The widest the sidebar may be on the monitor it is placed on
+        (compute_largest_sidebar_width_on_monitor): a docked one leaves the narrowest terminal
+        window's width beside it, any other fills the monitor's usable width at most. That
+        includes the one "Show sidebar" slides in while the list shows as a popup or a window:
+        it lies over the windows and keeps no room (update_placement), whatever the sidebar's mode."""
+        is_docked = self.settings["show_as"] == "sidebar" and self.settings["sidebar_mode"] == "docked"
+        return compute_largest_sidebar_width_on_monitor(
+            self.screens[self.placement.screen_index]["visible_frame"],
+            SMALLEST_WINDOW_WIDTH_BESIDE_A_DOCKED_SIDEBAR if is_docked else 0, SMALLEST_SIDEBAR_WIDTH, LARGEST_SIDEBAR_WIDTH)
+
+    @objc.python_method
+    def find_width_on_its_monitor(self):
+        """The width the sidebar has on its monitor, in its frame and in a docked one's reserved
+        area: the settings' width, or less on a monitor too narrow for it. The settings keep
+        their width, for a wider monitor."""
+        return min(self.settings["sidebar_width"], self.find_largest_width_on_its_monitor())
+
+    @objc.python_method
     def width_drag_is_in_progress(self):
         return self.width_drag_start is not None
 
@@ -559,7 +602,7 @@ class SidebarController(NSObject):
             return
         pointer_x_at_start, width_at_start = self.width_drag_start
         width = compute_dragged_sidebar_width(width_at_start, pointer_x_at_start, pointer_x, self.placement.edge,
-                                              SMALLEST_SIDEBAR_WIDTH, LARGEST_SIDEBAR_WIDTH)
+                                              SMALLEST_SIDEBAR_WIDTH, self.find_largest_width_on_its_monitor())
         screen = self.screens[self.placement.screen_index]
         frame = compute_sidebar_frame(screen["visible_frame"], screen["frame"], self.placement.edge, width, True)
         self.window.setFrame_display_(NSMakeRect(*frame), True)
@@ -570,5 +613,7 @@ class SidebarController(NSObject):
             return
         self.width_drag_start = None
         width = round(self.window.frame().size.width)
-        if width != self.settings["sidebar_width"]:
+        # Against the width it had on this monitor: a click without movement on a sidebar its
+        # monitor made narrower mustn't save that width over the settings' wider one.
+        if width != self.find_width_on_its_monitor():
             self.owner.sidebar_width_changed(width)  # saves it; a docked sidebar then reserves the new strip

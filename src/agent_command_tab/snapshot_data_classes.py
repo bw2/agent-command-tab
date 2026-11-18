@@ -16,6 +16,7 @@ AGENT_SESSION_ENTRY_DEFAULTS_BY_OPTIONAL_FIELD = {
     "running_tool_name": "", "running_tool_started_at": None, "context_tokens": None, "started_at": None,
     "memory_bytes": None, "cpu_percent": None, "slash_commands": (), "is_paused_with_the_processes_below_it": False,
     "child_processes": (), "can_be_paused_while_it_runs": True, "turns_run_outside_the_tab": False,
+    "last_message_at": None,
 }
 AgentSessionEntry = collections.namedtuple(
     "AgentSessionEntry",
@@ -38,7 +39,8 @@ AgentSessionEntry.__doc__ = ("One terminal tab (an iTerm2 tab, or a tmux window)
                              "None until they are read. slash_commands are the commands the tab's menu can type "
                              "into its agent tool (its adapter's), in menu order. is_paused_with_the_processes_below_it "
                              "is True for a paused row whose pause also stopped the processes below the agent (Pause "
-                             "from the list), False for an agent suspended with Ctrl+Z by hand. "
+                             "from the list; its status_reason names any of them the pause could not stop, which "
+                             "run as another user), False for an agent suspended with Ctrl+Z by hand. "
                              "can_be_paused_while_it_runs is False in tmux, which would undo a pause "
                              "(agent_session_pausing); a Ctrl+Z there can still be followed by a pause. "
                              "turns_run_outside_the_tab is True for a Codex session whose turns run in Codex's shared "
@@ -46,7 +48,10 @@ AgentSessionEntry.__doc__ = ("One terminal tab (an iTerm2 tab, or a tmux window)
                              "ended without a normal session end (a crash, or killed) has the status "
                              "\"exited\", its status_since when that was noticed. background_task_count is "
                              "how many background shells and background agents it runs, and "
-                             "child_processes the ChildProcessEntry of each process it started, oldest first.")
+                             "child_processes the ChildProcessEntry of each process it started, oldest first. "
+                             "last_message_at is when the last message of its conversation was written, by its "
+                             "conversation file (last_message_time_reading), or None when that isn't known; the "
+                             "Last Msg column counts from it (find_last_message_time_unless_the_agent_is_working).")
 
 ChildProcessEntry = collections.namedtuple(
     "ChildProcessEntry", ["process_id", "command_text", "started_at", "is_background_shell", "memory_bytes", "cpu_percent"])
@@ -133,6 +138,14 @@ def build_window_title_shown_in_the_list(window_entry):
     number = window_entry.number_among_windows_with_the_same_title
     title = window_entry.title if number == 1 else f"{window_entry.title} ({number})"
     return title if window_entry.terminal_name == "iTerm2" else f"{window_entry.terminal_name}: {title}"
+
+
+def find_last_message_time_unless_the_agent_is_working(agent_session_entry):
+    """Returns when the last message of the agent session's conversation was written, for the
+    Last Msg column and the sort order of that name, which both go by this one rule: None while
+    the agent is working, since its next message is on its way, and None when the time isn't
+    known."""
+    return None if agent_session_entry.status == "working" else agent_session_entry.last_message_at
 
 
 def iterate_agent_session_entries(snapshot):

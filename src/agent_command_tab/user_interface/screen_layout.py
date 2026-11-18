@@ -8,8 +8,7 @@ from Foundation import NSObject
 
 def list_screen_frames():
     """Returns each connected screen's frame as (x, y, width, height)."""
-    return [(screen.frame().origin.x, screen.frame().origin.y, screen.frame().size.width, screen.frame().size.height)
-            for screen in NSScreen.screens()]
+    return [tuple(convert_rect_to_frame_list(screen.frame())) for screen in NSScreen.screens()]
 
 
 def frame_is_on_a_screen(frame, screen_frames):
@@ -96,13 +95,10 @@ def read_monitors_from_screens():
     """Returns the monitors as plain dicts, menu-bar monitor first (NSScreen's order)."""
     monitors = []
     for screen in NSScreen.screens():
-        frame = screen.frame()
-        visible_frame = screen.visibleFrame()
         monitors.append({
             "monitor_id": str(screen.deviceDescription()["NSScreenNumber"]),
             "name": screen.localizedName(),
-            "frame": (frame.origin.x, frame.origin.y, frame.size.width, frame.size.height),
-            "visible_frame": (visible_frame.origin.x, visible_frame.origin.y, visible_frame.size.width,
-                              visible_frame.size.height),
+            "frame": tuple(convert_rect_to_frame_list(screen.frame())),
+            "visible_frame": tuple(convert_rect_to_frame_list(screen.visibleFrame())),
         })
     return monitors

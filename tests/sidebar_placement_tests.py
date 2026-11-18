@@ -1,7 +1,7 @@
 import unittest
 
 from agent_command_tab.user_interface.sidebar_placement import (choose_sidebar_edge, compute_dragged_sidebar_width,
-                                                                compute_sidebar_frame,
+                                                                compute_largest_sidebar_width_on_monitor, compute_sidebar_frame,
                                                                 describe_sidebar_placement_fallback,
                                                                 find_outer_screen_edges, pointer_is_at_edge)
 from monitor_builders import BUILT_IN_SCREEN, DELL_SCREEN_TO_THE_LEFT, STUDIO_SCREEN_TO_THE_RIGHT
@@ -58,6 +58,17 @@ class SidebarFrameAndEdgeTests(unittest.TestCase):
         usable_area_left_of_dock = (0, 0, 1430, 970)
         self.assertEqual(compute_sidebar_frame(usable_area_left_of_dock, (0, 0, 1500, 1000), "right", 400, True), (1030, 0, 400, 970))
         self.assertEqual(compute_sidebar_frame(usable_area_left_of_dock, (0, 0, 1500, 1000), "right", 400, False), (1500, 0, 400, 970))
+
+    def test_largest_width_on_a_monitor(self):
+        # A monitor with room for it allows the widest sidebar the settings take.
+        self.assertEqual(compute_largest_sidebar_width_on_monitor((0, 0, 2560, 1400), 400, 200, 1200), 1200)
+        # On one 1000 wide, a docked sidebar leaves the windows beside it their 400, and one over the windows fills it at
+        # most: 1200 wide, its area would begin 200 left of the monitor, with a width below zero for the windows beside it.
+        self.assertEqual(compute_largest_sidebar_width_on_monitor((1000, 0, 1000, 780), 400, 200, 1200), 600)
+        self.assertEqual(compute_largest_sidebar_width_on_monitor((1000, 0, 1000, 780), 0, 200, 1200), 1000)
+        self.assertEqual(compute_sidebar_frame((1000, 0, 1000, 780), (1000, 0, 1000, 800), "right", 600, True), (1400, 0, 600, 780))
+        # Never narrower than the narrowest sidebar.
+        self.assertEqual(compute_largest_sidebar_width_on_monitor((0, 0, 500, 780), 400, 200, 1200), 200)
 
     def test_dragged_width(self):
         self.assertEqual(compute_dragged_sidebar_width(400, 1100, 1000, "right", 200, 1200), 500)

@@ -23,13 +23,15 @@ DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER = (
 AgentSessionForMessages = collections.namedtuple(
     "AgentSessionForMessages",
     ["agent_tool_name", "how_other_agent_sessions_send_it_messages", "address", "process_id", "working_folder", "tab_title",
-     "tab_kind_name", "codex_home_folder"], defaults=[None])
+     "tab_kind_name", "codex_home_folder", "codex_command_path"], defaults=[None, None])
 AgentSessionForMessages.__doc__ = (
     "What the messages say about one agent session: its tool (\"Codex\"), how other sessions send it messages "
     "(agent_adapters.base: MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL or MESSAGES_THROUGH_CODEX_QUEUE), its address "
     "for that (a Claude Code session's name, a Codex session's conversation ID), its agent's process ID, its "
-    "working folder, its tab's title, what its terminal calls the tab (\"iTerm2 tab\", \"tmux window\"), and for "
-    "a Codex session the CODEX_HOME `codex queue` needs to find its conversation (None when not known).")
+    "working folder, its tab's title, what its terminal calls the tab (\"iTerm2 tab\", \"tmux window\"), for "
+    "a Codex session the CODEX_HOME `codex queue` needs to find its conversation (None when not known), and the "
+    "codex program the app itself runs `codex queue` with (None when it found none), which the command for a "
+    "Codex session names.")
 
 
 def describe_agent_session_for_messages(agent_session):
@@ -43,11 +45,13 @@ def describe_agent_session_for_messages(agent_session):
 
 def build_codex_queue_command(recipient):
     """Returns the command that sends the recipient, a Codex session, a message, with
-    "<your message>" in place of the message."""
+    "<your message>" in place of the message. It runs the codex program the app itself runs
+    `codex queue` with (recipient.codex_command_path), which may not be the `codex` the sender's
+    shell finds, or plain `codex` when the app found none."""
     # The message attached to its option, so one starting with "-" isn't read as an option. Its
     # CODEX_HOME, since the sender's may differ.
-    return (f"{build_codex_home_setting(recipient.codex_home_folder)}codex queue --thread {shlex.quote(recipient.address)} "
-            f'--message="<your message>"')
+    return (f"{build_codex_home_setting(recipient.codex_home_folder)}{shlex.quote(recipient.codex_command_path or 'codex')} "
+            f'queue --thread {shlex.quote(recipient.address)} --message="<your message>"')
 
 
 def explain_how_to_send_a_message_to(recipient):

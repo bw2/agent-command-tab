@@ -8,6 +8,7 @@ lack the user's folders (login_shell_environment), in the folders programs are u
 installed in (USUAL_PROGRAM_FOLDERS).
 """
 
+import copy
 import json
 import os
 import pwd
@@ -15,6 +16,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from agent_command_tab.list_sorting import LIST_SORT_ORDERS  # the Sort pop-up's choices
@@ -33,7 +35,7 @@ LOGIN_SHELLS_THAT_CAN_BE_ASKED = frozenset({"bash", "zsh", "sh", "dash", "ksh"})
 # gets launchd's /usr/bin:/bin:/usr/sbin:/sbin.
 USUAL_PROGRAM_FOLDERS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin")
 # One "NAME=value" word in front of a launch command's program, the value maybe quoted, and the
-# space after it ("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude", "CODEX_HOME='~/Codex Work' codex").
+# space after it ("ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR=~/.claude_work claude", "CODEX_HOME='/Users/me/Codex Work' codex").
 LEADING_ENVIRONMENT_SETTING_PATTERN = re.compile(r"""([A-Za-z_][A-Za-z0-9_]*)=((?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s'"\\])*)(?:\s+|$)""")
 
 # How the list is shown: popup, the dropdown under the menu bar icon;
@@ -66,11 +68,15 @@ LARGEST_SIDEBAR_WIDTH = 1200
 # order (the tool icon column, right before state, shows by itself when two or more agent tools
 # run). Memory and CPU usage count the agent and every process below it. The state comes first,
 # right after the name, and CPU before memory.
-LIST_COLUMNS = ["state", "context_tokens", "created_time", "existence_duration", "cpu_usage", "memory_usage"]
+LIST_COLUMNS = ["state", "context_tokens", "created_time", "existence_duration", "time_since_last_message", "cpu_usage",
+                "memory_usage"]
 # Columns the app no longer has, which a saved shown_columns setting may still name: they are left
 # out of it, so the other columns it names stay shown. The time since the last status change
 # ("Status Changed") was removed.
 REMOVED_LIST_COLUMNS = ["state_duration"]
+# The settings whose value is one of a fixed list of choices.
+CHOICES_BY_SETTING_NAME = {"show_as": SHOW_AS_CHOICES, "global_shortcut": GLOBAL_SHORTCUT_CHOICES, "appearance": APPEARANCE_CHOICES,
+                           "sidebar_edge": SIDEBAR_EDGES, "sidebar_mode": SIDEBAR_MODES, "list_sort_order": LIST_SORT_ORDERS}
 
 DEFAULT_SETTINGS = {
     "show_as": "popup",
@@ -95,7 +101,7 @@ DEFAULT_SETTINGS = {
     ],
     "list_sort_order": "manual",
     "list_sort_order_is_reversed": False,  # a second click on a sorted column's title
-    "shown_columns": ["context_tokens", "state"],
+    "shown_columns": ["context_tokens", "state", "time_since_last_message"],
     "idle_tabs_are_hidden": False,  # the Hide Idle / Show Idle button at the top of the list
     "search_is_case_sensitive": False,  # the "aA" checkbox beside the search box at the top of the list
 }
@@ -113,23 +119,13 @@ def frame_is_valid(frame):
 def is_valid_setting_value(name, value):
     """Returns whether a stored value has the right shape for the setting (else the default is used)."""
     default_value = DEFAULT_SETTINGS[name]
-    if name == "show_as":
-        return value in SHOW_AS_CHOICES
-    if name == "global_shortcut":
-        return value in GLOBAL_SHORTCUT_CHOICES
-    if name == "appearance":
-        return value in APPEARANCE_CHOICES
+    if name in CHOICES_BY_SETTING_NAME:
+        return value in CHOICES_BY_SETTING_NAME[name]
     if name == "actions_that_run_without_asking":
         return isinstance(value, list) and all(action_name in ACTIONS_THAT_ASK_FOR_CONFIRMATION for action_name in value)
     if name in SMALLEST_WINDOW_SIZES:
         smallest_width, smallest_height = SMALLEST_WINDOW_SIZES[name]
         return value is None or (frame_is_valid(value) and value[2] >= smallest_width and value[3] >= smallest_height)
-    if name == "sidebar_edge":
-        return value in SIDEBAR_EDGES
-    if name == "sidebar_mode":
-        return value in SIDEBAR_MODES
-    if name == "list_sort_order":
-        return value in LIST_SORT_ORDERS
     if name == "shown_columns":
         return isinstance(value, list) and all(column_name in LIST_COLUMNS for column_name in value)
     if name == "sidebar_width":
@@ -147,7 +143,7 @@ def merge_settings_with_defaults(stored_settings):
     """Returns the defaults overlaid with every valid stored value (invalid or unknown values are
     dropped). A file from before "Show as" with the old sidebar checkbox on shows the sidebar, and
     the columns a file names that the app no longer has (REMOVED_LIST_COLUMNS) are left out."""
-    settings = json.loads(json.dumps(DEFAULT_SETTINGS))  # a deep copy
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
     if isinstance(stored_settings, dict):
         if "show_as" not in stored_settings and stored_settings.get("sidebar_is_on") is True:
             settings["show_as"] = "sidebar"
@@ -212,15 +208,38 @@ def split_off_the_environment_settings_of_launch_command(launch_command):
 
 def read_environment_settings_of_launch_command(launch_command):
     """Returns {name: value} of the NAME=value words in front of the launch command's program,
-    each value as the shell reads it ("CODEX_HOME='~/Codex Work' codex" gives {"CODEX_HOME": "~/Codex Work"})."""
+    each value as the shell reads it, its quotes taken off and a "~" left as written
+    ("CODEX_HOME='/Users/me/Codex Work' codex" gives {"CODEX_HOME": "/Users/me/Codex Work"})."""
     return {match.group(1): "".join(shlex.split(match.group(2)))
             for match in split_off_the_environment_settings_of_launch_command(launch_command)[0]}
 
 
+def split_command_line_into_words(command_line):
+    """Returns the words of a command line (a launch command, or the command line of a tab's
+    program, which may be None) as a shell reads them, without their quotes and backslashes;
+    possibly none. With a quote left open, the words are those between its spaces, as written."""
+    if not command_line:
+        return []
+    try:
+        return shlex.split(command_line)
+    except ValueError:
+        return command_line.split()
+
+
 def split_launch_command_into_words_after_environment_settings(launch_command):
-    """Returns the launch command's words from its program on: without the leading NAME=value
-    words (environment settings, as in "CODEX_HOME=~/.codex-work codex")."""
-    return split_off_the_environment_settings_of_launch_command(launch_command)[1].split()
+    """Returns the launch command's words from its program on (split_command_line_into_words):
+    without the leading NAME=value words (environment settings, as in "CODEX_HOME=~/.codex-work codex")."""
+    return split_command_line_into_words(split_off_the_environment_settings_of_launch_command(launch_command)[1])
+
+
+def read_program_of_launch_command(launch_command):
+    """Returns the launch command's program, after any environment settings, as the shell the
+    command is typed into reads it: without its quotes and backslashes, and with a leading ~ and
+    its $VARIABLEs filled in ('"/opt/My Tools/codex" -s read-only' gives "/opt/My Tools/codex",
+    "~/bin/codex" the one in the home folder); "" for a launch command without a program. With a
+    quote left open, the program is the text up to the first space, as written."""
+    words = split_launch_command_into_words_after_environment_settings(launch_command)
+    return os.path.expandvars(os.path.expanduser(words[0])) if words else ""
 
 
 def find_launch_command(settings, agent_tool_name):
@@ -231,15 +250,13 @@ def find_launch_command(settings, agent_tool_name):
 
 def find_codex_command_path(settings, find_command_path=find_program_on_path_or_in_the_usual_folders):
     """Returns the codex program that "Talk to Each Other" runs `codex queue` with: the program
-    of the Codex tool's launch command (after any environment settings), looked up on PATH and in
+    of the Codex tool's launch command (read_program_of_launch_command), looked up on PATH and in
     the usual folders when it is a bare name, or None when it isn't found. A launch command that
     starts with another program (a wrapper) gives the codex found that way."""
-    # "~/bin/codex" too, as Settings accepts
-    first_word = os.path.expanduser((split_launch_command_into_words_after_environment_settings(
-        find_launch_command(settings, "Codex")) or [""])[0])
-    if os.path.basename(first_word) != "codex":
-        first_word = "codex"
-    return first_word if os.path.isabs(first_word) else find_command_path(first_word)
+    program = read_program_of_launch_command(find_launch_command(settings, "Codex"))
+    if os.path.basename(program) != "codex":
+        program = "codex"
+    return program if os.path.isabs(program) else find_command_path(program)
 
 
 def build_core_settings(settings, find_command_path=find_program_on_path_or_in_the_usual_folders):
@@ -255,14 +272,15 @@ def build_core_settings(settings, find_command_path=find_program_on_path_or_in_t
 
 
 def load_settings(settings_file_path=SETTINGS_FILE_PATH):
-    """Returns the saved settings merged with the defaults; a missing or unreadable file gives the defaults."""
+    """Returns the saved settings merged with the defaults; a missing or unreadable file gives the
+    defaults. An unreadable one is said on stderr: dump-snapshot's stdout holds only its JSON."""
     try:
         with open(settings_file_path) as settings_file:
             stored_settings = json.load(settings_file)
     except FileNotFoundError:
         stored_settings = {}
     except (OSError, ValueError) as error:
-        print(f"settings file {settings_file_path} could not be read ({error}); using defaults")
+        print(f"settings file {settings_file_path} could not be read ({error}); using defaults", file=sys.stderr)
         stored_settings = {}
     return merge_settings_with_defaults(stored_settings)
 
@@ -349,16 +367,19 @@ def find_launch_command_problem(launch_command, find_command_path=find_program_o
                                 ask_the_login_shell=ask_the_login_shell_whether_it_knows_command):
     """Returns "" when the launch command's program can be run, else a short explanation.
 
-    Leading NAME=value words (environment settings) are skipped. A path must be an executable
-    file; a bare name must be on PATH or known to the login shell (such as an alias). A program
-    written with a shell variable or quotes ("$HOME/bin/claude") can't be checked without running
-    the shell's expansion, and a name the login shell didn't answer about in time may well be an
-    alias, so both count as fine.
+    Leading NAME=value words (environment settings) are skipped, and the program is read as the
+    shell reads it, without its quotes and backslashes ("/opt/My\\ Tools/claude", "\\claude"). A
+    path must be an executable file; a bare name must be on PATH or known to the login shell
+    (such as an alias). A program that still holds shell syntax then (a variable or a command
+    substitution, as in "$HOME/bin/claude"; or a quote or backslash, as the first word of a
+    launch command with a quote left open may) can't be checked without running the shell's
+    expansion, and a name the login shell didn't answer about in time may well be an alias, so
+    both count as fine.
     """
     words = split_launch_command_into_words_after_environment_settings(launch_command)
     if not words:
         return "No command"
-    if any(character in words[0] for character in "$`'\""):
+    if any(character in words[0] for character in "$`'\"\\"):
         return ""
     first_word = os.path.expanduser(words[0])
     if "/" in first_word:
@@ -377,11 +398,12 @@ def build_launch_command_by_agent_tool_name(agent_tools):
     return {agent_tool["agent_tool_name"]: agent_tool["launch_command"] for agent_tool in agent_tools}
 
 
-def find_installed_agent_tool_names(agent_tools, find_problem=find_launch_command_problem):
+def find_installed_agent_tool_names(agent_tools, find_problem):
     """Returns the names of the agent tools (the agent_tools setting) that are installed, as far
-    as the app can tell: those whose launch command can be run (find_launch_command_problem finds
-    no problem). Asking the login shell about a command takes a moment, so the app calls this off
-    the main thread."""
+    as the app can tell: those whose launch command can be run (find_problem, given a launch
+    command, returns no problem). The app gives it the problems find_launch_command_problem found
+    off the main thread, since asking the login shell about a command takes a moment, so the
+    settings window shows the same answers without a check of its own."""
     return frozenset(agent_tool["agent_tool_name"] for agent_tool in agent_tools if not find_problem(agent_tool["launch_command"]))
 
 

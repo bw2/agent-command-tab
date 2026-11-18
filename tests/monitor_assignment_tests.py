@@ -82,6 +82,16 @@ class ComputeFrameClearOfAreaTests(unittest.TestCase):
     def test_window_on_another_monitor_is_left_alone(self):
         self.assertIsNone(self.clear_of_right_sidebar((2100, 0, 800, 600)))
 
+    def test_a_sidebar_that_leaves_no_room_beside_it_leaves_the_window_alone(self):
+        # As wide as the monitor's usable area, or wider: the room left for the window, zero or
+        # less, would have become its width.
+        window_frame = (100, 50, 1800, 1000)
+        for sidebar_width in (2000, 2400):
+            self.assertIsNone(self.clear_of_right_sidebar(window_frame, sidebar=(2000 - sidebar_width, 0, sidebar_width, 1200)),
+                              sidebar_width)
+            self.assertIsNone(compute_frame_clear_of_area(window_frame, (0, 0, sidebar_width, 1200), "left", self.MONITOR, 300),
+                              sidebar_width)
+
 
 if __name__ == "__main__":
     unittest.main()

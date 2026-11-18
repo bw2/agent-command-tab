@@ -1,8 +1,10 @@
 """What the dashboard reads from an agent's screen. Pure functions.
 
-- Whether a permission dialog is showing: Claude Code reports nothing when the user answers a
-  permission prompt, and iTerm2's status stays "waiting" until the approved tool finishes, so
-  "asking" ends when the dialog is gone from the screen.
+- Whether a permission dialog is showing: iTerm2's status stays "waiting" from a permission
+  prompt until the approved tool finishes. Claude Code's own report of its session's status
+  tells whether the prompt was answered, and the core goes by that. The screen is the fallback
+  for a session whose report can't be read or doesn't tell: there, "asking" ends when the dialog
+  is gone from the screen.
 """
 
 import re
@@ -34,7 +36,10 @@ def read_typed_input_area_text(screen_lines_with_faint_flags, input_line_marker,
     """Returns the text typed into the agent's input box, or None when the box can't be found on
     screen.
 
-    The input line is the last line starting with the marker; the input area runs from it to
+    The input line is the last line with the marker in its first column, where the tools draw
+    it: they indent the lines a draft continues on, so one that begins with the marker's
+    character itself (a Markdown quote in agy's box, whose marker is ">") isn't taken for the
+    input line, which would leave out the draft above it. The input area runs from the input line to
     the line just below it that matches input_area_end_pattern (a multi-line draft continues on
     the lines in between). Typed text is what follows the marker except faint cells (the tool's
     placeholder or suggested prompt) and EMPTY_INPUT_CELL_PATTERN cells, with the area's lines
@@ -47,7 +52,7 @@ def read_typed_input_area_text(screen_lines_with_faint_flags, input_line_marker,
         input_area_end_pattern: Compiled pattern of the line just below the input area.
     """
     marker_line_indexes = [index for index, (text, _) in enumerate(screen_lines_with_faint_flags)
-                           if text.lstrip(" \x00").startswith(input_line_marker)]
+                           if text.startswith(input_line_marker)]
     if not marker_line_indexes:
         return None
     input_line_index = marker_line_indexes[-1]
@@ -59,7 +64,7 @@ def read_typed_input_area_text(screen_lines_with_faint_flags, input_line_marker,
     typed_lines = []
     for index in range(input_line_index, end_index):
         text, faint_flags = screen_lines_with_faint_flags[index]
-        first_input_position = text.index(input_line_marker) + 1 if index == input_line_index else 0
+        first_input_position = len(input_line_marker) if index == input_line_index else 0
         typed_lines.append("".join(
             text[position] for position in range(first_input_position, len(text))
             if not (position < len(faint_flags) and faint_flags[position]) and not EMPTY_INPUT_CELL_PATTERN.match(text[position])))

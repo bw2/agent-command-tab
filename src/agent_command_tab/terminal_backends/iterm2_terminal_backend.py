@@ -2,8 +2,11 @@
 tabs, typing into and reading its sessions, and the list's actions on its windows and tabs.
 
 Everything here runs on the core's event loop. iTerm2 pushes its changes (new sessions, layout
-changes, ended sessions, focus changes, and the variables in SESSION_VARIABLES_TO_WATCH), so
-nothing is polled but the window frames (DashboardCore.poll_window_frames_when_they_matter).
+changes, ended sessions, focus changes, and the variables in SESSION_VARIABLES_TO_WATCH), so those
+aren't polled. Three things are polled: whether iTerm2 runs, until the backend has connected to it
+(Iterm2TerminalBackend.run); the window frames (DashboardCore.poll_window_frames_when_they_matter);
+and the screens of the sessions whose status needs a look at the screen
+(DashboardCore.read_agent_screens_periodically).
 """
 
 import asyncio
@@ -126,10 +129,16 @@ class Iterm2TerminalSession(TerminalSession):
         self.session = session
 
     async def send_text(self, text):
+        """Types text into this session alone: not into the sessions iTerm2 broadcasts input to.
+        Sent through iterm2.rpc, since Session.async_send_text drops iTerm2's reply, which says
+        whether the session was still there to take the text."""
         try:
-            await self.session.async_send_text(text, suppress_broadcast=True)
+            response = await iterm2.rpc.async_send_text(self.session.connection, self.session.session_id, text, True)
         except iterm2.RPCException as error:
             raise TerminalRequestFailed(str(error)) from error
+        status = response.send_text_response.status
+        if status != api_pb2.SendTextResponse.Status.Value("OK"):
+            raise TerminalRequestFailed(api_pb2.SendTextResponse.Status.Name(status))
 
     async def paste_text(self, text):
         await self.send_text(BRACKETED_PASTE_START + text + BRACKETED_PASTE_END)
@@ -447,24 +456,33 @@ class Iterm2TerminalBackend(TerminalBackend):
         session = self.app.get_session_by_id(session_id) if self.app is not None else None
         return Iterm2TerminalSession(session) if session is not None else None
 
-    def remember_what_is_in_front(self):
-        """Returns the current terminal window and each window's selected tab. The App's current
-        window, not the key window: while the dropdown is open the dashboard is active and no
-        iTerm2 window is key."""
+    async def remember_what_is_in_front(self):
+        """Returns the current terminal window, each window's selected tab, and each tab's active
+        pane, the one its keys go to (a peek activates the agent's, the first pane, which in a
+        split tab may be another than the one being typed into), where iTerm2 has reported it.
+        The App's current window, not the key window: while the dropdown is open the dashboard is
+        active and no iTerm2 window is key."""
         if self.app is None:
             return None
         current_window = self.app.current_terminal_window
         return {"key_window_id": current_window.window_id if current_window is not None else None,
                 "selected_tab_id_by_window_id": {window.window_id: window.current_tab.tab_id
-                                                 for window in self.app.terminal_windows if window.current_tab is not None}}
+                                                 for window in self.app.terminal_windows if window.current_tab is not None},
+                "active_session_id_by_tab_id": {tab.tab_id: active_session.session_id for window in self.app.terminal_windows
+                                                for tab in window.tabs if (active_session := tab.current_session) is not None}}
 
     async def put_back_what_was_in_front(self, what_was_in_front, bring_back_the_front_window):
-        """Each window gets back the tab it had selected, and, when iTerm2 was in front before,
-        its front window comes back to the front, with iTerm2 active again: a peek at a tmux tab
-        shown in another terminal app made that app active."""
+        """Each tab gets back the active pane it had, without its tab being selected or its
+        window raised, then each window the tab it had selected, and, when iTerm2 was in front
+        before, its front window comes back to the front, with iTerm2 active again: a peek at a
+        tmux tab shown in another terminal app made that app active."""
         if what_was_in_front is None or self.app is None:
             return ActionResult(True)
         for window in self.app.terminal_windows:
+            for tab in window.tabs:
+                session_before = self.app.get_session_by_id(what_was_in_front["active_session_id_by_tab_id"].get(tab.tab_id))
+                if session_before is not None and session_before is not tab.current_session:
+                    await session_before.async_activate(select_tab=False, order_window_front=False)
             tab_id_before = what_was_in_front["selected_tab_id_by_window_id"].get(window.window_id)
             if tab_id_before and window.current_tab is not None and window.current_tab.tab_id != tab_id_before:
                 tab_before = self.app.get_tab_by_id(tab_id_before)
@@ -537,8 +555,9 @@ class Iterm2TerminalBackend(TerminalBackend):
             return ActionResult(False, "that tab or window no longer exists")
         tabs_by_tab_id = {target_tab.tab_id: target_tab for target_tab in target_window.tabs}
         tabs_by_tab_id[tab_id] = tab
-        # Every tab of the window, those the list hides (no agent) too: iTerm2 needs them all, and a
-        # hidden tab keeps its place next to its neighbors. A tab from another window is new to them.
+        # Every tab of the window, those the list hides (no agent) too: iTerm2 puts the tabs it is
+        # given first and the window's other tabs after them, so only a hidden tab that is named
+        # keeps its place next to its neighbors. A tab from another window is new to them.
         new_tab_order = move_id_before_another([target_tab.tab_id for target_tab in target_window.tabs], tab_id, drop_before_tab_id)
         await target_window.async_set_tabs([tabs_by_tab_id[ordered_tab_id] for ordered_tab_id in new_tab_order])
         return ActionResult(True)
@@ -566,16 +585,17 @@ class Iterm2TerminalBackend(TerminalBackend):
 
         Returns:
             An ActionResult with details {"tab_id": the new tab's ID}, plus {"window_id": its ID}
-            for a new window; a successful one with details None when iTerm2 gives no tab or
-            window (its session ended right away).
+            for a new window; a failed one when iTerm2 gives no tab or window (its session ended
+            right away).
         """
         profile = build_new_agent_session_profile(folder, launch_command)
         if window_id is None:
-            # Its ID lets the lists select it once its agent shows, and the
-            # tab's lets a restored session's tab get its saved name.
             window = await iterm2.Window.async_create(self.connection, profile_customizations=profile)
-            return ActionResult(True, details={"window_id": window.window_id, "tab_id": window.current_tab.tab_id}
-                                if window is not None and window.current_tab is not None else None)
+            if window is None:
+                return ActionResult(False, "the new window closed at once")
+            # Its ID lets the lists select it once its agent shows, and the ID of its tab (a new
+            # window's only one) lets a restored session's tab get its saved name.
+            return ActionResult(True, details={"window_id": window.window_id, "tab_id": window.tabs[0].tab_id})
         window = self.app.get_window_by_id(window_id)
         if window is None:
             return ActionResult(False, "that window no longer exists")
@@ -586,7 +606,9 @@ class Iterm2TerminalBackend(TerminalBackend):
                 return ActionResult(False, "that tab no longer exists")
             tab_index = tab_ids.index(after_tab_id) + 1
         tab = await window.async_create_tab(profile_customizations=profile, index=tab_index)
-        return ActionResult(True, details={"tab_id": tab.tab_id} if tab is not None else None)
+        if tab is None:
+            return ActionResult(False, "the new tab closed at once")
+        return ActionResult(True, details={"tab_id": tab.tab_id})
 
     async def move_window_to_monitor(self, window_id, monitors, target_monitor_id):
         """Moves a window to another monitor, keeping its size if it fits and its relative position.

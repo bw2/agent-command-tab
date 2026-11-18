@@ -15,7 +15,9 @@ Shape of a gathered window (see Iterm2TerminalBackend.gather_windows and tmux_te
                                  "status_set_in_iterm2": str or None (always None in tmux),
                                  "status_set_in_iterm2_at": float or None (when iTerm2 last reported
                                      changing it, since the dashboard connected),
-                                 "status": str or None (the one the row goes by), "path": str}}]}
+                                 "status": str or None (the one the row goes by), "path": str,
+                                 "is_hidden_behind_a_zoomed_pane": bool (tmux only: another pane of
+                                     its window, zoomed to fill it, covers this one)}}]}
 """
 
 import collections
@@ -103,14 +105,23 @@ def find_title_the_user_gave(gathered_tab_or_window):
     return gathered_tab_or_window.get("title") or gathered_tab_or_window["title_override_format"]
 
 
+def build_tab_title_without_one_from_the_user(agent_session_name, working_folder, gathered_tab):
+    """Returns the title of a tab row whose user gave the tab none: its agent session's name,
+    else the last part of its folder (build_folder_display_name), else the terminal's own title
+    for the tab, else ""."""
+    return agent_session_name or build_folder_display_name(working_folder) or gathered_tab.get("title") or ""
+
+
 def find_status_set_in_iterm2_since_the_job_started(first_session):
     """Returns the status value iTerm2 was seen to set after the tab's foreground job started, or None.
 
     Only such a value tells that an unknown program in front reports a status (the generic
     adapter). An older value is left over from the program before: Claude Code's last status can
     stay after it exits, and a `gh` command run at that prompt was listed as an agent. A value iTerm2 already
-    held when the dashboard connected has no time, so it
-    doesn't count either, and neither does the status iTerm2's tab bar shows.
+    held when the dashboard connected has no time, so it doesn't count either. The time is that of
+    the status variable's last change, also for a status that only iTerm2's tab bar shows (the
+    gather passes that one on while the variable is empty): such a status counts only when the
+    variable changed after the job started.
     """
     status_set_at, job_started_at = first_session.get("status_set_in_iterm2_at"), first_session.get("job_started_at")
     if status_set_at is None or job_started_at is None or status_set_at < job_started_at:
@@ -210,7 +221,10 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
 
     Args:
         gathered_tab: A gathered tab dict (module docstring).
-        agent_session: The tab's entry from resolve_agent_sessions.
+        agent_session: The tab's entry from resolve_agent_sessions, with what the core adds for an
+            agent paused from the list (DashboardCore.continue_the_processes_of_agents_no_longer_paused):
+            "is_paused_with_the_processes_below_it", and "names_of_processes_its_pause_left_running",
+            the names of the processes below the agent that its pause could not stop.
         claude_agent_record: The tab's entry from `claude agents --json` (matched by the agent's
             process ID), or None.
         session_tracking: {"status_change_time": float, "last_time_tab_was_seen": float or None,
@@ -234,16 +248,24 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
     working_folder = claude_agent_record.get("cwd") or agent_session["working_folder"] or first_session.get("path") or ""
     agent_session_name = claude_agent_record.get("name") or ""
     title_the_user_gave = find_title_the_user_gave(gathered_tab)
-    tab_title = (title_the_user_gave or agent_session_name or build_folder_display_name(working_folder)
-                 or gathered_tab.get("title") or "")
+    tab_title = title_the_user_gave or build_tab_title_without_one_from_the_user(agent_session_name, working_folder, gathered_tab)
     is_paused_with_the_processes_below_it = agent_session.get("is_paused_with_the_processes_below_it", False)
+    names_of_processes_its_pause_left_running = agent_session.get("names_of_processes_its_pause_left_running", ())
+    # A finished turn stops waiting to be seen when the tab is seen, or when /clear cleared it.
+    last_time_the_finished_turn_was_seen_or_cleared = max(
+        (time_ for time_ in (session_tracking.get("last_time_tab_was_seen"), session_tracking.get("finished_turn_cleared_at"))
+         if time_ is not None), default=None)
     if agent_session["is_stopped"]:
         # Paused from the list, or suspended with Ctrl+Z by hand, which leaves the processes the
         # agent started in their own process groups running: stopped until it is resumed.
         state = "paused"
-        reason = ("paused: the agent and the processes below it are stopped until it is resumed"
-                  if is_paused_with_the_processes_below_it
-                  else "suspended with Ctrl+Z: the agent is stopped, but commands it started may still run")
+        if not is_paused_with_the_processes_below_it:
+            reason = "suspended with Ctrl+Z: the agent is stopped, but commands it started may still run"
+        elif names_of_processes_its_pause_left_running:
+            reason = ("paused: the agent is stopped until it is resumed, but its pause left these processes below it running, "
+                      "since they run as another user (with sudo): " + ", ".join(names_of_processes_its_pause_left_running))
+        else:
+            reason = "paused: the agent and the processes below it are stopped until it is resumed"
         status_since = (previous_displayed_state.since if previous_displayed_state and previous_displayed_state.state == "paused"
                         else now)
     elif agent_session["is_in_background"]:
@@ -258,23 +280,26 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
           and claude_agent_record.get("status") in CLAUDE_AGENTS_STATUSES_TO_STATES):
         # iTerm2 has no status for the tab, neither its variable nor its tab bar's (the core reads
         # that when the variable is empty): Claude Code's own report, which the core reads again from
-        # its session file for each snapshot. It can't tell "done" from
-        # "idle", and the screen check behind an answered "asking" doesn't run.
+        # its session file for each snapshot. It can't tell "done" from "idle" (only a turn end
+        # the tracking recorded does, below), and the screen check behind an answered "asking"
+        # doesn't run.
         state = CLAUDE_AGENTS_STATUSES_TO_STATES[claude_agent_record["status"]]
         if claude_agent_record["status"] == "shell" and session_reading.get("hooks_report_background_tasks_after_the_turn"):
             state = "idle"  # its turn is over, and its background tasks run
-        reason = "from claude agents --json: iTerm2 reports no status for this tab"
+        reason = "from Claude Code's own report of its session: iTerm2 reports no status for this tab"
+        if state == "idle" and compute_session_status_from_sources(
+                "idle", now, session_tracking.get("last_turn_ended_at"), last_time_the_finished_turn_was_seen_or_cleared,
+                session_id == seen_session_id, None)[0] == "done":
+            # Its turn's end was recorded while iTerm2 still had a status for the tab, and the tab
+            # wasn't seen since: the turn goes on waiting to be seen, as it did under that status.
+            state, reason = "done", "turn finished"
         status_since = compute_displayed_state_since(state, now, previous_displayed_state, now)
     else:
-        # A finished turn stops waiting to be seen when the tab is seen, or when /clear cleared it.
-        times_the_finished_turn_was_dealt_with = [time_ for time_ in (session_tracking.get("last_time_tab_was_seen"),
-                                                                      session_tracking.get("finished_turn_cleared_at"))
-                                                  if time_ is not None]
         state, reason = compute_session_status_from_sources(
             first_session.get("status"),
             session_tracking.get("status_change_time", now),
             session_tracking.get("last_turn_ended_at"),
-            max(times_the_finished_turn_was_dealt_with, default=None),
+            last_time_the_finished_turn_was_seen_or_cleared,
             session_id == seen_session_id,
             session_reading,
         )
@@ -319,28 +344,41 @@ def build_agent_session_entry(gathered_tab, agent_session, claude_agent_record, 
         slash_commands=agent_session["adapter"].slash_commands,
         background_task_count=session_reading.get("background_task_count", 0),
         child_processes=session_reading.get("child_processes", ()),
+        last_message_at=session_reading.get("last_message_at"),
     )
 
 
-def build_exited_agent_session_entry(last_agent_session_entry, ended_at, highlighted_session_id, gathered_tab):
+def build_exited_agent_session_entry(last_agent_session_entry, ended_at, highlighted_session_id, gathered_tab, session_tracking):
     """Returns the row of an agent that ended without a normal session end (a crash, or
     killed), kept for EXITED_ROW_SECONDS: what its row last showed (name, tool, folder),
-    gray and "exited" since it ended, without the readings of a running agent. A title the user
-    gives the tab meanwhile (Rename stays in its menu) is its name.
+    gray and "exited" since it ended, without the readings of a running agent (it keeps when its
+    last message was written, which its end doesn't change). A title the user
+    gives the tab meanwhile (Rename stays in its menu) is its name, and once the user clears the
+    title the tab had when the agent ended, the row is named as a tab without one is. When the
+    tab was last seen goes by its tracking, so a look at the tab after its agent ended counts.
 
     Args:
         last_agent_session_entry: The AgentSessionEntry from the last snapshot before it ended.
         ended_at: When the dashboard noticed its process was gone.
         highlighted_session_id: See build_agent_session_entry.
         gathered_tab: The tab's gathered dict now (module docstring).
+        session_tracking: The tab's tracking dict (build_agent_session_entry), which goes on
+            after its agent ended, or None: the row then keeps the time it last showed.
     """
     title_the_user_gave = find_title_the_user_gave(gathered_tab)
     if title_the_user_gave is not None:
         last_agent_session_entry = last_agent_session_entry._replace(tab_title=title_the_user_gave, tab_title_set_by_user=True)
+    elif last_agent_session_entry.tab_title_set_by_user:
+        last_agent_session_entry = last_agent_session_entry._replace(
+            tab_title=build_tab_title_without_one_from_the_user(
+                last_agent_session_entry.agent_session_name, last_agent_session_entry.working_folder, gathered_tab),
+            tab_title_set_by_user=False)
     return last_agent_session_entry._replace(
         status="exited", status_reason="the agent ended without a normal session end (a crash, or killed)",
         status_since=ended_at,
-        is_in_front=last_agent_session_entry.session_id == highlighted_session_id, running_tool_name="",
+        is_in_front=last_agent_session_entry.session_id == highlighted_session_id,
+        last_time_tab_was_seen=(session_tracking or {}).get("last_time_tab_was_seen", last_agent_session_entry.last_time_tab_was_seen),
+        running_tool_name="",
         running_tool_started_at=None, context_tokens=None, context_fill_percent=None, memory_bytes=None,
         cpu_percent=None, slash_commands=(), is_paused_with_the_processes_below_it=False, background_task_count=0,
         child_processes=())
@@ -407,7 +445,8 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
             if agent_session is None:
                 if first_session and first_session["session_id"] in exited_agent_sessions_by_session_id:
                     agent_session_entries.append(build_exited_agent_session_entry(
-                        *exited_agent_sessions_by_session_id[first_session["session_id"]], highlighted_session_id, gathered_tab))
+                        *exited_agent_sessions_by_session_id[first_session["session_id"]], highlighted_session_id, gathered_tab,
+                        session_tracking_by_session_id.get(first_session["session_id"])))
                 continue
             agent_session_entries.append(build_agent_session_entry(
                 gathered_tab, agent_session, claude_agents_by_process_id.get(agent_session["process_id"]),
@@ -433,7 +472,8 @@ def build_computer_snapshot(gathered_windows, agent_sessions, monitors, window_o
          if window_entry.can_move_to_another_monitor},
         [monitor["frame"] for monitor in monitors_left_to_right])
     ordered_window_ids = [window_id for window_id in window_order if window_id in window_entries_by_window_id]
-    ordered_window_ids += [window_id for window_id in window_entries_by_window_id if window_id not in set(window_order)]
+    window_ids_in_the_order = set(window_order)
+    ordered_window_ids += [window_id for window_id in window_entries_by_window_id if window_id not in window_ids_in_the_order]
     monitor_entries = []
     for monitor_index, monitor in enumerate(monitors_left_to_right):
         monitor_entries.append(MonitorEntry(

@@ -1,13 +1,16 @@
 import asyncio
+import glob
+import json
 import os
 import tempfile
+import threading
 import unittest
 import unittest.mock
 
-from agent_command_tab.agent_adapters import agy, codex
+from agent_command_tab.agent_adapters import agy, claude_code, codex
 from agent_command_tab.agent_adapters import (build_built_in_agent_tool_adapters, find_agent_tool_adapter_for_tab,
                                               list_agent_tool_names_whose_conversations_can_be_resumed)
-from agent_command_tab.agent_adapters.agy import AgyAdapter, build_agy_transcript_path, find_agy_conversation_and_transcript
+from agent_command_tab.agent_adapters.agy import AgyAdapter, find_agy_conversation_and_transcript
 from agent_command_tab.agent_adapters.base import (command_line_is_a_shell_with_no_script_or_command, command_line_runs_a_shell,
                                                    split_command_line_into_program_names)
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
@@ -100,7 +103,8 @@ class AgyConversationLookupTests(unittest.TestCase):
                         for conversation_id in conversation_ids]
 
     def write_transcript(self, conversation_id):
-        transcript_path = build_agy_transcript_path(self.agy_folder.name, conversation_id)
+        # Where agy itself writes it, spelled out rather than built by the code the lookup uses.
+        transcript_path = os.path.join(self.agy_folder.name, "brain", conversation_id, ".system_generated", "logs", "transcript.jsonl")
         os.makedirs(os.path.dirname(transcript_path))
         open(transcript_path, "w").close()
         return transcript_path
@@ -110,6 +114,13 @@ class AgyConversationLookupTests(unittest.TestCase):
         self.assertEqual(find_agy_conversation_and_transcript(open_file_paths), (self.CONVERSATION_ID, None))
         transcript_path = self.write_transcript(self.CONVERSATION_ID)
         self.assertEqual(find_agy_conversation_and_transcript(open_file_paths), (self.CONVERSATION_ID, transcript_path))
+
+    def test_the_whole_transcript_is_the_one_read_once_agy_wrote_it_beside_the_one_with_long_texts_cut_short(self):
+        transcript_path = self.write_transcript(self.CONVERSATION_ID)
+        whole_transcript_path = os.path.join(os.path.dirname(transcript_path), "transcript_full.jsonl")
+        open(whole_transcript_path, "w").close()
+        self.assertEqual(find_agy_conversation_and_transcript(self.build_open_file_paths(self.CONVERSATION_ID)),
+                         (self.CONVERSATION_ID, whole_transcript_path))
 
     def test_no_lock_is_no_conversation_yet_and_files_that_cant_be_read_or_two_locks_tell_nothing(self):
         self.assertEqual(find_agy_conversation_and_transcript(self.build_open_file_paths()), (None, None))
@@ -134,6 +145,25 @@ class AgyConversationLookupTests(unittest.TestCase):
         self.assertEqual(ask_the_adapter(None), (None, None, None))
         self.assertIsNone(asyncio.run(adapter.find_whether_no_message_was_sent_in_its_conversation(None)))
 
+    def test_the_adapter_looks_for_the_transcript_on_disk_in_a_worker_thread(self):
+        # The lookup runs on the core's event loop, which a slow disk must not hold up.
+        ids_of_the_threads_that_looked_on_disk = []
+        is_file = os.path.isfile
+
+        def note_the_thread_and_look(path):
+            ids_of_the_threads_that_looked_on_disk.append(threading.get_ident())
+            return is_file(path)
+
+        async def ask_the_adapter_and_return_the_event_loops_thread_id():
+            await AgyAdapter().find_conversation_file(4242, None, [])
+            return threading.get_ident()
+        with unittest.mock.patch.object(agy, "list_the_files_a_process_has_open",
+                                        return_value=dict(enumerate(self.build_open_file_paths(self.CONVERSATION_ID)))), \
+                unittest.mock.patch.object(agy.os.path, "isfile", note_the_thread_and_look):
+            event_loop_thread_id = asyncio.run(ask_the_adapter_and_return_the_event_loops_thread_id())
+        self.assertTrue(ids_of_the_threads_that_looked_on_disk)
+        self.assertNotIn(event_loop_thread_id, ids_of_the_threads_that_looked_on_disk)
+
 
 class CodexConversationLookupTests(unittest.TestCase):
     def test_codex_conversation_file_names(self):
@@ -153,12 +183,39 @@ class CodexConversationLookupTests(unittest.TestCase):
                 ((["codex"], {}), os.path.expanduser("~/.codex/sessions")),  # the agent has none: Codex's default
                 (([], {}), "/app-codex-home/sessions")):  # its environment can't be read: the app's own
             with unittest.mock.patch.object(codex, "read_process_info", return_value=ProcessInfo(301, 1, "codex", 10.0)), \
-                    unittest.mock.patch.object(codex, "read_process_arguments_and_environment", return_value=arguments_and_environment), \
+                    unittest.mock.patch.object(codex, "read_process_arguments_and_environment",
+                                               return_value=arguments_and_environment) as read_arguments_and_environment, \
                     unittest.mock.patch.object(codex, "read_process_current_folder", return_value="/p"), \
                     unittest.mock.patch.object(codex, "find_codex_conversation_files", find_conversation_files), \
                     unittest.mock.patch.dict(os.environ, {"CODEX_HOME": "/app-codex-home"}):
                 CodexAdapter().find_conversation_files(301)
             self.assertEqual(sessions_folders[-1], expected_sessions_folder, arguments_and_environment)
+            read_arguments_and_environment.assert_called_once_with(301)  # one reading tells its home and whether it resumed
+
+    def test_the_conversation_a_codex_process_was_started_to_resume_is_looked_for_by_its_id_and_only_once(self):
+        # As Restore sessions starts it. Listing every conversation file Codex has kept takes longer the more there are.
+        conversation_id = "01a151f0-8f89-7711-a0cc-cfcae10915f8"
+        with tempfile.TemporaryDirectory() as codex_home_folder:
+            day_folder = os.path.join(codex_home_folder, "sessions", "2026", "10", "18")
+            os.makedirs(day_folder)
+            resumed_file = os.path.join(day_folder, f"rollout-2026-10-18T15-04-05-{conversation_id}.jsonl")
+            with open(resumed_file, "w") as conversation_file:
+                json.dump({"type": "session_meta", "payload": {"cwd": "/p", "timestamp": "2026-10-18T15:04:05Z", "source": "cli",
+                                                               "originator": "codex-tui"}}, conversation_file)
+            adapter = CodexAdapter()
+            with unittest.mock.patch.object(codex, "read_process_info",
+                                            return_value=ProcessInfo(301, 1, "codex", os.path.getmtime(resumed_file) - 60)), \
+                    unittest.mock.patch.object(codex, "read_process_arguments_and_environment",
+                                               return_value=(["codex", "resume", conversation_id], {"CODEX_HOME": codex_home_folder})), \
+                    unittest.mock.patch.object(codex, "read_process_current_folder", return_value="/p"), \
+                    unittest.mock.patch.object(codex, "find_codex_conversation_file_by_id",
+                                               wraps=codex.find_codex_conversation_file_by_id) as find_conversation_file_by_id, \
+                    unittest.mock.patch.object(glob, "glob", wraps=glob.glob) as list_files:
+                self.assertEqual(adapter.find_conversation_files(301), [resumed_file])
+                self.assertEqual(adapter.find_conversation_files(301), [resumed_file])
+            find_conversation_file_by_id.assert_called_once()
+            self.assertNotIn(os.path.join(codex_home_folder, "sessions", "*", "*", "*", "rollout-*.jsonl"),
+                             [call.args[0] for call in list_files.call_args_list])  # not every file of every day folder
 
 
 class ClaudeCodeTranscriptLookupTests(unittest.TestCase):
@@ -170,6 +227,31 @@ class ClaudeCodeTranscriptLookupTests(unittest.TestCase):
             open(transcript_path, "w").close()
             record = {"sessionId": "abc-123", "config_folder": new_config_folder}
             self.assertEqual(asyncio.run(ClaudeCodeAdapter().find_conversation_file(4242, record, [])), transcript_path)
+
+
+class ClaudeConfigFoldersTests(unittest.TestCase):
+    def test_the_config_folder_the_claude_code_launch_command_sets_is_listed_wherever_it_is(self):
+        # Its sessions are in no ~/.claude* folder, so `claude agents --json` and the hooks installer would miss them.
+        with tempfile.TemporaryDirectory() as home_folder:
+            home_folder = os.path.realpath(home_folder)
+            settings_file_path = os.path.join(home_folder, "settings.json")
+            config_folder = os.path.join(home_folder, "my claude")
+            os.mkdir(config_folder)
+            os.symlink(config_folder, os.path.join(home_folder, "link-to-my-claude"))
+            # The default folder of this home: the adapter worked out the real home's when it was imported.
+            default_config_folder = os.path.join(home_folder, ".claude")
+            os.mkdir(default_config_folder)
+            for launch_command, dashboards_own_config_folder, expected_folders in (
+                    ("claude", "", [None]),
+                    ('ANTHROPIC_MODEL=x CLAUDE_CONFIG_DIR="$HOME/my claude" claude --verbose', "", [None, config_folder]),
+                    ("CLAUDE_CONFIG_DIR=~/link-to-my-claude claude", config_folder, [None, config_folder]),  # listed once
+                    ("CLAUDE_CONFIG_DIR=~/.claude claude", "", [None]),  # the default, listed as None
+                    ("CLAUDE_CONFIG_DIR=~/not-made-yet claude", "", [None])):
+                with open(settings_file_path, "w") as settings_file:
+                    json.dump({"agent_tools": [{"agent_tool_name": "Claude Code", "launch_command": launch_command}]}, settings_file)
+                with unittest.mock.patch.dict(os.environ, {"HOME": home_folder, "CLAUDE_CONFIG_DIR": dashboards_own_config_folder}), \
+                        unittest.mock.patch.object(claude_code, "DEFAULT_CLAUDE_CONFIG_FOLDER", default_config_folder):
+                    self.assertEqual(claude_code.list_claude_config_folders(settings_file_path), expected_folders, launch_command)
 
 
 class SplitCommandLineTests(unittest.TestCase):

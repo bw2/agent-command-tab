@@ -11,7 +11,8 @@ sessions go last in either direction.
 """
 
 from agent_command_tab.session_status_computation import STATES_IN_URGENCY_ORDER
-from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list
+from agent_command_tab.snapshot_data_classes import (build_window_title_shown_in_the_list,
+                                                     find_last_message_time_unless_the_agent_is_working)
 
 
 def find_when_the_shown_state_started(agent_session_entry):
@@ -35,6 +36,14 @@ def rank_agent_session_by_created_time(agent_session_entry):
     """Sort key: the agent session that started last first."""
     started_at = agent_session_entry.started_at
     return None if started_at is None else -started_at
+
+
+def rank_agent_session_by_time_since_last_message(agent_session_entry):
+    """Sort key: the agent session whose last message is the most recent first, so the shortest
+    time in the Last Msg column; None, as that column is empty, while the agent is working or
+    the time isn't known (find_last_message_time_unless_the_agent_is_working)."""
+    last_message_at = find_last_message_time_unless_the_agent_is_working(agent_session_entry)
+    return None if last_message_at is None else -last_message_at
 
 
 def rank_agent_session_by_title(agent_session_entry):
@@ -68,6 +77,7 @@ AGENT_SESSION_RANK_BY_LIST_SORT_ORDER = {
     "alphabet": rank_agent_session_by_title,
     "context_percent": rank_agent_session_by_context_percent,
     "created_time": rank_agent_session_by_created_time,
+    "time_since_last_message": rank_agent_session_by_time_since_last_message,
     "memory_usage": rank_agent_session_by_memory_usage,
     "cpu_usage": rank_agent_session_by_cpu_usage,
 }

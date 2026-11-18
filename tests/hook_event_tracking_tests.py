@@ -7,7 +7,9 @@ from agent_command_tab.hook_event_tracking import (apply_hook_event, find_agent_
                                                    find_when_the_hooks_ended_the_turn,
                                                    hooks_report_no_prompt_since_the_agent_started,
                                                    hooks_report_the_last_turn_failed,
-                                                   list_reported_background_task_ids_still_running)
+                                                   list_background_task_ids_known_so_far,
+                                                   list_reported_background_task_ids_still_running,
+                                                   list_reported_shells_a_reading_can_check)
 import hook_event_builders
 
 
@@ -135,6 +137,26 @@ class ApplyHookEventTests(unittest.TestCase):
         self.assertIsNone(hook_state["background_task_ids"])
         hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("Stop", 2.0, background_tasks=[{"id": "a1", "status": "running"}]))
         self.assertEqual(hook_state["background_task_ids"], {"a1"})
+
+    def test_a_background_shell_whose_start_was_reported_is_known_before_the_list_is(self):
+        self.assertEqual(list_background_task_ids_known_so_far(None), set())  # no event yet
+        # A process started to go on with an earlier conversation: what else it runs isn't known.
+        hook_state = apply_events(
+            make_event_of_process_101_sent_at("SessionStart", 1.0, source="resume"),
+            make_event_of_process_101_sent_at("PostToolUse", 1.5, background_task_launched_id="b9", background_task_launched_type="shell"),
+            make_event_of_process_101_sent_at("PostToolUse", 1.6, background_task_launched_id="a2", background_task_launched_type="subagent"))
+        self.assertIsNone(hook_state["background_task_ids"])
+        self.assertEqual(list_background_task_ids_known_so_far(hook_state), {"b9"})  # a subagent has no shell to tell by
+        self.assertEqual(list_reported_shells_a_reading_can_check(hook_state, 9.0), set())  # none counts as ended while the list isn't known
+        # The list of the turn's end takes over: b9 ended before it.
+        hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at("Stop", 2.0, background_tasks=[
+            {"id": "b3", "type": "shell", "status": "running"}, {"id": "a2", "type": "subagent", "status": "running"}]))
+        self.assertEqual(list_background_task_ids_known_so_far(hook_state), {"b3", "a2"})
+        # A shell started after the list is in both.
+        hook_state = apply_hook_event(hook_state, make_event_of_process_101_sent_at(
+            "PostToolUse", 3.0, background_task_launched_id="b4", background_task_launched_type="shell"))
+        self.assertEqual((hook_state["background_task_ids"], list_background_task_ids_known_so_far(hook_state)),
+                         ({"b3", "a2", "b4"}, {"b3", "a2", "b4"}))
 
     def test_resume_or_a_new_session_in_the_same_process_isnt_its_end(self):
         hook_state = apply_events(make_event_of_process_101_sent_at("SessionStart", 1.0, source="startup"), make_event_of_process_101_sent_at("SessionEnd", 2.0, reason="resume"))

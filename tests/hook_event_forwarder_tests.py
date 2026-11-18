@@ -8,7 +8,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 import unittest.mock
 
@@ -75,25 +74,24 @@ class ListAncestorProcessesTests(unittest.TestCase):
 
 class SendingTests(unittest.TestCase):
     def test_one_line_reaches_the_apps_socket(self):
-        folder = tempfile.TemporaryDirectory()
+        # Under /tmp, not the temporary folder TMPDIR names: a Unix socket's path may be at most 103
+        # bytes long on macOS, and a long TMPDIR would make it longer.
+        folder = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(folder.cleanup)
         socket_path = os.path.join(folder.name, "hook_events.sock")
-        received_lines = []
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
             server.bind(socket_path)
             server.listen(1)
-
-            def accept_one():
-                connection, _ = server.accept()
-                with connection, connection.makefile() as lines:
-                    received_lines.extend(lines)
-            accepting_thread = threading.Thread(target=accept_one)
-            accepting_thread.start()
+            server.settimeout(5)  # a forwarder that never connected fails the test rather than hanging it
             with unittest.mock.patch.object(hook_event_forwarder, "HOOK_EVENTS_SOCKET_PATH", socket_path), \
                     unittest.mock.patch.object(sys, "stdin", io.StringIO(json.dumps(TURN_ENDED))), \
                     unittest.mock.patch.object(sys, "argv", ["hook_event_forwarder.py", "Claude Code"]):
                 hook_event_forwarder.main()
-            accepting_thread.join(5)
+            # The forwarder connects, sends its line and closes without waiting for an answer, so
+            # the connection and the line wait in the socket until they are accepted here.
+            connection, _ = server.accept()
+            with connection, connection.makefile() as lines:
+                received_lines = list(lines)
         self.assertEqual(len(received_lines), 1)
         event = json.loads(received_lines[0])
         self.assertEqual((event["hook_event_name"], event["ancestor_processes"][0][0]), ("Stop", os.getppid()))

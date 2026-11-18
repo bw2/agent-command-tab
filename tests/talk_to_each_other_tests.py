@@ -3,9 +3,10 @@ agents or iTerm2 sessions): who gets which message, how, when a Claude Code sess
 held, and how failures are named; plus the actions on several selected sessions."""
 
 import asyncio
-import itertools
 import os
+import shlex
 import tempfile
+import types
 import unittest
 import unittest.mock
 
@@ -32,6 +33,9 @@ EMPTY_CLAUDE_CODE_INPUT_BOX_BELOW_A_REPLY = [("⏺ On it.", [False] * 8)] + EMPT
 CLAUDE_CODE_INPUT_BOX_HOLDING_THE_PASTE = ([(EMPTY_CLAUDE_CODE_INPUT_BOX[0][0] + "[Pasted text #1 +2 lines]", [False] * 27)]
                                            + EMPTY_CLAUDE_CODE_INPUT_BOX[1:])
 CLAUDE_CODE_INPUT_BOX_HOLDING_SLASH_COMPACT = [(EMPTY_CLAUDE_CODE_INPUT_BOX[0][0] + "/compact", [False] * 10)] + EMPTY_CLAUDE_CODE_INPUT_BOX[1:]
+# How long the core waits for an agent at its prompt in the tests of the core, in place of its 30
+# minutes: a test whose change 0.05 s in goes unnoticed then fails within seconds.
+SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT_IN_THESE_TESTS = 5
 
 
 class StandInTerminalSession(TerminalSession):
@@ -94,10 +98,33 @@ def make_core():
     return core
 
 
+def make_core_where_s3_cant_be_told_apart_any_more_once_s7_was_looked_up():
+    """Returns make_core's core with one more Codex session, s7, in a folder of its own. While the
+    conversation of s7 is looked up, another Codex session is listed in the folder of s3: when s3
+    is selected ahead of s7, its conversation ID was found before that."""
+    core = make_core()
+    adapter_of_s7 = StandInCodexAdapter()
+    core.agent_sessions["s7"] = make_agent_session(701, adapter_of_s7, "Codex", "/p/another-folder")
+
+    async def find_conversation_id_while_another_session_is_listed_in_the_folder_of_s3(agent_process_id, claude_agent_record):
+        core.agent_sessions["s6"] = make_agent_session(601, StandInCodexAdapter(), "Codex", "/p/codex")
+        return "codex-conversation-7"
+    adapter_of_s7.find_conversation_id = find_conversation_id_while_another_session_is_listed_in_the_folder_of_s3
+    return core
+
+
 def ask_to_talk(core, session_ids, recipient_session_ids=None):
     arguments = {"note": NOTE} if recipient_session_ids is None else {"note": NOTE, "recipient_session_ids": recipient_session_ids}
     return core.handle_ask_agent_sessions_to_talk_to_each_other(
         ActionRequest("ask_agent_sessions_to_talk_to_each_other", {"session_ids": session_ids}, arguments))
+
+
+def patch_how_long_the_core_waits_for_an_agent_at_its_prompt():
+    """Returns the patcher that has the core look for an agent at its prompt every 0.01 s, and give
+    up after SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT_IN_THESE_TESTS."""
+    return unittest.mock.patch.multiple(
+        dashboard_core, SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT=0.01,
+        SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT=SECONDS_A_MESSAGE_WAITS_FOR_AN_AGENT_AT_ITS_PROMPT_IN_THESE_TESTS)
 
 
 def run_with_a_change_50_milliseconds_in(change, action):
@@ -133,7 +160,7 @@ class TalkToEachOtherTests(unittest.TestCase):
                         unittest.mock.patch.object(dashboard_core, "queue_message_for_codex_session", queue),
                         unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                                    lambda config_folder, process_id: self.claude_code_status_by_process_id.get(process_id)),
-                        unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.01)):
+                        patch_how_long_the_core_waits_for_an_agent_at_its_prompt()):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -151,8 +178,9 @@ class TalkToEachOtherTests(unittest.TestCase):
         message_for_planning = self.pasted[0][1]
         self.assertTrue(message_for_planning.startswith(NOTE + "\n\nYou are the Claude Code session \"planning-3a\" (process ID 101"))
         self.assertIn('use your SendMessage tool with to: "reviews-7f"', message_for_planning)
-        # With the Codex session's own CODEX_HOME, where codex queue finds its conversation.
-        self.assertIn("run: CODEX_HOME=/Users/me/.codex-tests codex queue --thread codex-conversation-1", message_for_planning)
+        # With the Codex session's own CODEX_HOME, where codex queue finds its conversation, and the
+        # codex program the core itself queues with, which the `codex` planning's shell finds may not be.
+        self.assertIn("run: CODEX_HOME=/Users/me/.codex-tests /stand-in/codex queue --thread codex-conversation-1", message_for_planning)
         self.assertNotIn('with to: "planning-3a"', message_for_planning)  # not told to message itself
         self.assertEqual([conversation_id for conversation_id, _ in self.queued], ["codex-conversation-1"])
         self.assertEqual(self.codex_home_folders_queued_with, ["/Users/me/.codex-tests"])
@@ -250,6 +278,25 @@ class TalkToEachOtherTests(unittest.TestCase):
         action_result = asyncio.run(ask_to_talk(core, ["s1", "s3"]))
         self.assertIn("\"codex tests\": another Codex session runs or ran in the same folder", action_result.message)
 
+    def test_a_codex_session_whose_conversation_cant_be_told_any_more_once_the_others_were_looked_up_gets_no_message(self):
+        action_result = asyncio.run(ask_to_talk(make_core_where_s3_cant_be_told_apart_any_more_once_s7_was_looked_up(), ["s3", "s7"]))
+        # s7, which has no row in the stand-in list, is left with nobody to talk to.
+        self.assertEqual(action_result.message, "\"codex tests\": another Codex session runs or ran in the same folder, "
+                                                "so its conversation can't be told apart; "
+                                                "\"a tab\": no other selected session can take part")
+        self.assertEqual((self.pasted, self.queued), ([], []))  # s7 isn't told to message the conversation just refused
+
+    def test_the_messages_of_the_others_leave_out_a_codex_session_whose_conversation_cant_be_told_any_more(self):
+        action_result = asyncio.run(ask_to_talk(make_core_where_s3_cant_be_told_apart_any_more_once_s7_was_looked_up(),
+                                                ["s3", "s7", "s1"]))
+        self.assertEqual(action_result.message, "\"codex tests\": another Codex session runs or ran in the same folder, "
+                                                "so its conversation can't be told apart")
+        self.assertEqual([conversation_id for conversation_id, _ in self.queued], ["codex-conversation-7"])
+        self.assertEqual([session_id for session_id, _ in self.pasted], ["s1"])
+        for message in (self.queued[0][1], self.pasted[0][1]):
+            self.assertNotIn("codex-conversation-1", message)  # the conversation of s3, which may be another session's
+        self.assertIn("codex queue --thread codex-conversation-7", self.pasted[0][1])  # the two left still learn of each other
+
     def test_nothing_is_sent_when_fewer_than_two_can_take_part(self):
         action_result = asyncio.run(ask_to_talk(make_core(), ["s1", "s4"]))
         self.assertEqual(action_result.message, "\"planning\": no other selected session can take part; "
@@ -300,7 +347,7 @@ class ContactInfoInTheCoreTests(unittest.TestCase):
                          'To message it, use your SendMessage tool with to: "planning-3a".')
         self.assertEqual(self.build_contact_info("s3").details["text"],
                          'Codex session codex-conversation-1 (process ID 301, folder /p/codex, iTerm2 tab "codex tests"). '
-                         "To message it, run: CODEX_HOME=/Users/me/.codex-tests codex queue --thread codex-conversation-1 "
+                         "To message it, run: CODEX_HOME=/Users/me/.codex-tests /stand-in/codex queue --thread codex-conversation-1 "
                          '--message="<your message>"')
 
     def test_a_session_other_sessions_cant_message_says_why(self):
@@ -309,6 +356,30 @@ class ContactInfoInTheCoreTests(unittest.TestCase):
         self.assertEqual(self.build_contact_info("s5"),
                          ActionResult(False, "its Claude Code session name isn't known yet"))
         self.assertEqual(self.build_contact_info("s6"), ActionResult(False, "that tab no longer runs an agent"))
+
+    def test_a_codex_session_whose_conversation_cant_be_told_any_more_once_it_was_looked_up_gets_no_contact_info(self):
+        # The lookup waits on a worker thread, and a snapshot published meanwhile may change what the conversation ID it finds is worth.
+        def another_codex_session_is_listed_in_its_folder(core):  # the one file that fits may be that session's
+            core.agent_sessions["s6"] = make_agent_session(601, StandInCodexAdapter(), "Codex", "/p/codex")
+
+        def its_conversation_is_cleared(core):
+            core.forget_the_cleared_conversation("s3", core.agent_sessions["s3"], "/codex/ended.jsonl")
+
+        def another_agent_starts_in_its_tab(core):
+            core.agent_sessions["s3"] = make_agent_session(302, StandInCodexAdapter(), "Codex", "/p/codex")
+        for what_happens_during_the_lookup, reason in (
+                (another_codex_session_is_listed_in_its_folder,
+                 "another Codex session runs or ran in the same folder, so its conversation can't be told apart"),
+                (its_conversation_is_cleared, "it has had no conversation since its /clear"),
+                (another_agent_starts_in_its_tab, "that tab no longer runs the agent")):
+            core = make_core()
+
+            async def find_conversation_id_while_that_happens(agent_process_id, claude_agent_record):
+                what_happens_during_the_lookup(core)
+                return "codex-conversation-1"
+            core.agent_sessions["s3"]["adapter"].find_conversation_id = find_conversation_id_while_that_happens
+            self.assertEqual(asyncio.run(core.handle_build_contact_info(ActionRequest("build_contact_info", {"session_id": "s3"}))),
+                             ActionResult(False, reason))
 
 
 class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
@@ -329,7 +400,7 @@ class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
         for patcher in (unittest.mock.patch.object(agent_input_box_typing, "type_slash_command", type_command),
                         unittest.mock.patch.object(dashboard_core, "read_claude_code_session_status",
                                                    lambda config_folder, process_id: None),
-                        unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_AN_AGENT_AT_ITS_PROMPT", 0.01)):
+                        patch_how_long_the_core_waits_for_an_agent_at_its_prompt()):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -342,12 +413,15 @@ class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
         core.find_current_conversation_file = unittest.mock.AsyncMock(return_value="/old-conversation.jsonl")
         core.forget_the_cleared_conversation = unittest.mock.Mock()
 
+        def s3_reaches_its_prompt():
+            core.displayed_state_by_session_id["s3"] = DisplayedState("idle", 0, 0)
+            self.typed.append("s3 is idle")
+
         # s1 is idle, s2 (Claude Code) and s3 (Codex) are working; s3 reaches its prompt a moment later.
-        self.assertEqual(run_with_a_change_50_milliseconds_in(
-            lambda: core.displayed_state_by_session_id.__setitem__("s3", DisplayedState("idle", 0, 0)),
-            self.send(core, ["s1", "s2", "s3"], "/clear")), ActionResult(True))
+        self.assertEqual(run_with_a_change_50_milliseconds_in(s3_reaches_its_prompt, self.send(core, ["s1", "s2", "s3"], "/clear")),
+                         ActionResult(True))
         self.assertEqual(sorted(self.typed[:2]), [("s1", "/clear"), ("s2", "/clear")])
-        self.assertEqual(self.typed[2], ("s3", "/clear"))  # Codex refuses commands during a task
+        self.assertEqual(self.typed[2:], ["s3 is idle", ("s3", "/clear")])  # only then: Codex refuses commands during a task
         # Only s2's is typed during a turn, which needs the screen checked before Enter.
         self.assertEqual(self.typed_in_the_middle_of_a_turn_by_session_id, {"s1": False, "s2": True, "s3": False})
         # Only a /clear typed at the prompt ends the conversation at once; s2's waits in Claude Code's queue.
@@ -437,6 +511,7 @@ class SlashCommandsForSeveralSessionsTests(unittest.TestCase):
         core.displayed_state_by_session_id["s1"] = DisplayedState("error", 0, 0)
         self.assertEqual(asyncio.run(core.handle_send_slash_command(
             ActionRequest("send_slash_command", {"session_id": "s1"}, {"command": "/compact"}))), ActionResult(True))
+        self.assertFalse(self.typed_in_the_middle_of_a_turn_by_session_id["s1"])  # checked before the next typing replaces it
         self.assertEqual(asyncio.run(self.send(core, ["s1"], "/clear")), ActionResult(True))
         self.assertEqual(self.typed, [("s1", "/compact"), ("s1", "/clear")])
         self.assertFalse(self.typed_in_the_middle_of_a_turn_by_session_id["s1"])
@@ -463,7 +538,7 @@ class QueueMessageForCodexSessionTests(unittest.TestCase):
         # Attached, a note starting with a bullet ("- ...") isn't taken for an unknown option.
         with tempfile.TemporaryDirectory() as folder:
             arguments_path = os.path.join(folder, "arguments")
-            codex_path = self.write_stand_in_codex(folder, f"printf '%s\\0' \"$@\" > {arguments_path}\n")
+            codex_path = self.write_stand_in_codex(folder, f"printf '%s\\0' \"$@\" > {shlex.quote(arguments_path)}\n")
             action_result = asyncio.run(queue_message_for_codex_session(codex_path, "conversation-1", "- point one\n- point two"))
             with open(arguments_path) as arguments_file:
                 arguments = arguments_file.read().split("\0")[:-1]
@@ -482,7 +557,7 @@ class QueueMessageForCodexSessionTests(unittest.TestCase):
         # Where that session keeps its conversation (a launch command may set another than the app's).
         with tempfile.TemporaryDirectory() as folder:
             codex_home_path = os.path.join(folder, "codex-home")
-            codex_path = self.write_stand_in_codex(folder, f'printf %s "$CODEX_HOME" > {codex_home_path}\n')
+            codex_path = self.write_stand_in_codex(folder, f'printf %s "$CODEX_HOME" > {shlex.quote(codex_home_path)}\n')
             for codex_home_folder, expected_codex_home in (("/Users/me/.codex-tests", "/Users/me/.codex-tests"),
                                                           (None, "/app-codex-home")):  # not known: the app's own
                 with unittest.mock.patch.dict(os.environ, {"CODEX_HOME": "/app-codex-home"}):
@@ -525,11 +600,22 @@ class PasteMessageIntoEmptyInputBoxTests(unittest.TestCase):
         self.assertEqual(action_result, ActionResult(True))
 
     def test_a_hidden_tabs_screen_from_before_the_paste_is_read_again(self):
-        # The first read after Enter still shows the empty box from before the paste.
-        screens_read = itertools.chain([EMPTY_CLAUDE_CODE_INPUT_BOX, EMPTY_CLAUDE_CODE_INPUT_BOX],
-                                       itertools.repeat(CLAUDE_CODE_INPUT_BOX_HOLDING_THE_PASTE))
-        action_result, _ = self.paste(None, read_screen=lambda typing_count: next(screens_read), seconds_the_screen_may_lag=0.3)
+        # The first read after Enter still shows the empty box from before the paste, and the next
+        # one the paste still in the box.
+        screens_read = iter([EMPTY_CLAUDE_CODE_INPUT_BOX, EMPTY_CLAUDE_CODE_INPUT_BOX, CLAUDE_CODE_INPUT_BOX_HOLDING_THE_PASTE])
+        typing_count_at_each_read = []
+
+        def read_screen(typing_count):
+            typing_count_at_each_read.append(typing_count)
+            return next(screens_read)
+        # Each read takes a second on the clock the wait goes by, so the time a hidden tab's screen
+        # may lag is up after the second read that follows Enter. Only the typing module's own name
+        # for the clock is replaced: the event loop keeps the real one.
+        with unittest.mock.patch.object(agent_input_box_typing, "time",
+                                        types.SimpleNamespace(monotonic=lambda: float(len(typing_count_at_each_read)))):
+            action_result, _ = self.paste(None, read_screen=read_screen, seconds_the_screen_may_lag=1.5)
         self.assertFalse(action_result.succeeded)
+        self.assertEqual(typing_count_at_each_read, [0, 2, 2])  # once before the paste, twice after its Enter
 
 
 class TypeSlashCommandTests(unittest.TestCase):

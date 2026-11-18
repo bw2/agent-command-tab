@@ -11,12 +11,13 @@ import time
 
 from agent_command_tab.context_window_usage import format_token_count
 from agent_command_tab.session_status_computation import pick_most_urgent_state, summarize_state_counts_in_urgency_order
-from agent_command_tab.snapshot_data_classes import build_window_title_shown_in_the_list
+from agent_command_tab.snapshot_data_classes import (build_window_title_shown_in_the_list,
+                                                     find_last_message_time_unless_the_agent_is_working)
 
 # Each optional field beside its default, so a field added or moved can't take another's default.
 ROW_TEXT_PARTS_DEFAULTS_BY_OPTIONAL_FIELD = {
     "agent_tool_name": "", "state_text": "", "context_text": "",
-    "created_time_text": "", "existence_duration_text": "", "memory_text": "", "cpu_text": "",
+    "created_time_text": "", "existence_duration_text": "", "time_since_last_message_text": "", "memory_text": "", "cpu_text": "",
     "details_color_name": "gray", "dot_tool_tip": "", "details_tool_tip": "",
     "context_fill_percent_color_name": "", "state_color_name": "", "state_text_is_semibold": False,
 }
@@ -29,7 +30,9 @@ RowTextParts.__doc__ = ("The pieces of one row; dot_blinks marks a working sessi
                         "context_text (the context's size and its share of the context window, "
                         "\"425k (42%)\", the share in parentheses in context_fill_percent_color_name, or in the "
                         "column's color for \"\"), created_time_text (when the agent session "
-                        "started) and existence_duration_text (how long ago), memory_text and cpu_text (what the "
+                        "started) and existence_duration_text (how long ago), time_since_last_message_text (how "
+                        "long ago the last message of its conversation was written, \"\" while the agent is "
+                        "working or that isn't known), memory_text and cpu_text (what the "
                         "agent and the processes it started use), the icon for agent_tool_name and state_text "
                         "(in state_color_name, semibold for state_text_is_semibold). "
                         "A tab row's details are its background task lights, in details_color_name. "
@@ -117,6 +120,7 @@ LONGEST_TEXT_BY_COLUMN_FIELD_NAME = {
     "context_text": "999k (100%)",
     "created_time_text": "12:59 PM",  # format_clock_time: "6:08 AM" today, otherwise "Oct 17"
     "existence_duration_text": "23h 59m",  # format_elapsed_time
+    "time_since_last_message_text": "23h 59m",  # format_elapsed_time
     "memory_text": "1024M",  # format_memory_size: "1024M" just under a gigabyte, then "1.4G" up to "99.9G"
     "cpu_text": "100%",  # an agent using ten cores or more gets a wider column
     "state_text": "thinking",  # the longest state, then running and unknown
@@ -241,12 +245,13 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
     Args:
         agent_session_entry: An AgentSessionEntry.
         is_last_child_at_each_level: See build_tree_connector_text.
-        now: The current time, for the elapsed time since the agent session started.
+        now: The current time, for the elapsed times since the agent session started and since its last message.
     """
     state = agent_session_entry.status if agent_session_entry.status in DOT_GLYPH_AND_COLOR_BY_STATE else "unknown"
     dot_glyph, dot_color_name = DOT_GLYPH_AND_COLOR_BY_STATE[state]
     state_text, dot_tool_tip = name_and_describe_tab_rows_state(agent_session_entry, state)
     started_at = agent_session_entry.started_at
+    last_message_at = find_last_message_time_unless_the_agent_is_working(agent_session_entry)
     memory_text, cpu_text = build_resource_usage_texts(agent_session_entry.memory_bytes, agent_session_entry.cpu_percent)
     return RowTextParts(
         connector_text=build_tree_connector_text(is_last_child_at_each_level),
@@ -267,6 +272,7 @@ def build_agent_session_row_text_parts(agent_session_entry, is_last_child_at_eac
         context_fill_percent_color_name=choose_context_fill_percent_color_name(agent_session_entry.context_fill_percent),
         created_time_text=format_clock_time(started_at, now) if started_at is not None else "",
         existence_duration_text=format_elapsed_time(now - started_at) if started_at is not None else "",
+        time_since_last_message_text=format_elapsed_time(now - last_message_at) if last_message_at is not None else "",
         memory_text=memory_text,
         cpu_text=cpu_text,
     )

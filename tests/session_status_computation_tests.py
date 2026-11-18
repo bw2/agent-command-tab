@@ -39,7 +39,7 @@ class ComputeSessionStatusTests(unittest.TestCase):
     def test_no_status_is_unknown(self):
         self.assertEqual(compute_state(None, 100), "unknown")
 
-    # A status of done always comes with its turn's end (track_status_value), here at 100.
+    # A status of done that ended a turn comes with that turn's end (track_status_value), here at 100.
     def test_done_while_never_seen(self):
         self.assertEqual(compute_state("done", 100, last_turn_ended_at=100), "done")
 
@@ -66,6 +66,13 @@ class ComputeSessionStatusTests(unittest.TestCase):
 
     def test_idle_without_an_ended_turn_is_idle(self):
         self.assertEqual(compute_state("idle", 100), "idle")
+
+    def test_done_that_ended_no_turn_of_the_tabs_agent_is_idle(self):
+        # The done the tab's last agent left in iTerm2, or one an agent running inside the tab's agent set.
+        tracking = track_status_value(track_status_value(None, "idle", 100), "done", 150, ends_no_turn=True)
+        self.assertNotIn("last_turn_ended_at", tracking)
+        for seen_now in (False, True):  # no turn waits to be seen, so it isn't "done" until the tab is seen
+            self.assertEqual(compute_session_status_from_sources("done", 150, None, None, seen_now, None), ("idle", ""))
 
     def test_a_session_first_seen_as_done_stays_done_after_the_status_says_idle(self):
         tracking = track_status_value(None, "done", 100)  # the turn ended before the dashboard started

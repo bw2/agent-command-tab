@@ -14,10 +14,17 @@ from cleared_conversation_tests import StandInAdapter
 
 
 class TextReadingStandInAdapter(StandInAdapter):
-    """Reads each record's "text" as its search text."""
+    """Reads each record's "text" as its search text, and keeps the texts it read, in order
+    (texts_read_from_records): a line read twice is there twice."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.texts_read_from_records = []
 
     def extract_search_texts_from_conversation_record(self, record):
-        return [record["text"]] if "text" in record else []
+        texts = [record["text"]] if "text" in record else []
+        self.texts_read_from_records += texts
+        return texts
 
 
 class ConversationSearchInTheCoreTests(unittest.TestCase):
@@ -69,6 +76,7 @@ class ConversationSearchInTheCoreTests(unittest.TestCase):
         conversation_search_text = self.core.conversation_search_texts_by_session_id["s1"]
         self.assertEqual(conversation_search_text.text, "\nMerge the VCF files\nbcftools merge -Oz")
         self.assertGreater(conversation_search_text.read_up_to_byte, read_up_to_byte)
+        self.assertEqual(self.adapter.texts_read_from_records, ["Merge the VCF files", "bcftools merge -Oz"])  # the first line once
         self.assertEqual(self.search("bcftools"), ["s1"])
         self.assertEqual(self.search("files bcftools"), [])
         self.assertEqual(self.search(""), [])

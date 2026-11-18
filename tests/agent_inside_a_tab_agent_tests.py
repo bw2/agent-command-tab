@@ -9,6 +9,7 @@ from agent_command_tab import dashboard_core
 from agent_command_tab.agent_adapters.codex import CodexAdapter
 from agent_command_tab.agent_adapters.generic import GenericAdapter
 from agent_command_tab.dashboard_core import DashboardCore
+from agent_command_tab.session_status_computation import compute_session_status_from_sources
 from gathered_window_builders import make_agent_session
 
 
@@ -59,6 +60,45 @@ class AgentInsideATabAgentTests(unittest.TestCase):
         self.an_agent_runs_inside = False
         self.assertEqual(self.track(4.0, "done"), {"s1": "done", "s2": "done", "s3": "done"})
         self.assertEqual(self.core.iterm2_status_seen_while_an_inner_agent_ran_by_session_id, {})
+        # iTerm2's done for the idle that Claude Code and Codex reported is the turn that ended at 3.0,
+        # not another one: a later end would make a turn seen since then unseen again. The third
+        # tool's turn ends now, with the first value iTerm2 got after the inner agent ended.
+        self.assertEqual({session_id: tracking["last_turn_ended_at"]
+                          for session_id, tracking in self.core.session_tracking_by_session_id.items()},
+                         {"s1": 3.0, "s2": 3.0, "s3": 4.0})
+
+    def test_a_turn_that_ends_as_iterm2s_value_counts_again_is_recorded(self):
+        self.an_agent_runs_inside = True
+        self.track(2.0, "idle")  # the inner agent starts, while the tab's agent goes on with its turn
+        self.an_agent_runs_inside = False
+        self.claude_code_status = "idle"  # the tab's agent ends its turn, and iTerm2 says so
+        self.assertEqual(self.track(3.0, "done")["s1"], "done")
+        self.assertEqual(self.core.session_tracking_by_session_id["s1"]["last_turn_ended_at"], 3.0)
+
+    def test_a_turn_a_tool_without_its_own_report_ended_behind_the_inner_agent_is_recorded(self):
+        self.track(2.0, "idle")  # the tabs' agents end their turns
+        self.an_agent_runs_inside = True  # an agent left in the background sets working
+        self.assertEqual(self.track(3.0, "working")["s3"], "idle")  # the row keeps its value
+        self.an_agent_runs_inside = False
+        # The first value iTerm2 gets after the inner agent ended is the tab's agent's own: its done
+        # for a row that said idle is a turn of its own that ended, not the one that ended at 2.0.
+        self.assertEqual(self.track(4.0, "done")["s3"], "done")
+        self.assertEqual(self.core.session_tracking_by_session_id["s3"]["last_turn_ended_at"], 4.0)
+
+    def test_the_done_an_inner_agent_left_shows_an_agent_that_ended_no_turn_as_idle(self):
+        self.core.session_tracking_by_session_id.clear()  # as a new core has it
+        self.core.status_set_in_iterm2_and_since_by_session_id.clear()
+        self.claude_code_status = "idle"
+        self.track(2.0, "idle")  # first seen at its prompt: no turn of its own has ended
+        self.an_agent_runs_inside = True
+        self.assertEqual(self.track(3.0, "working")["s1"], "idle")  # the inner agent's turn, not the tab's agent's
+        self.an_agent_runs_inside = False
+        self.assertEqual(self.track(4.0, "done")["s1"], "done")  # the inner agent's done, left in iTerm2
+        tracking = self.core.session_tracking_by_session_id["s1"]
+        self.assertNotIn("last_turn_ended_at", tracking)
+        # Nothing of the tab's agent waits to be seen, so its row isn't "done" until the tab is seen.
+        self.assertEqual(compute_session_status_from_sources("done", tracking["status_change_time"], None, None, False, None),
+                         ("idle", ""))
 
     def test_a_tab_first_seen_while_an_agent_runs_inside_its_agent_goes_by_its_own_agent(self):
         # The app restarted while the inner agent ran and had set idle: the check came only once
@@ -100,7 +140,7 @@ class AgentInsideATabAgentTests(unittest.TestCase):
         self.assertEqual(self.track(5.0)["s2"], "idle")
         self.assertEqual(self.core.session_tracking_by_session_id["s2"]["last_turn_ended_at"], 5.0)
 
-    def test_the_processes_are_listed_only_when_the_status_set_in_iterm2_changed(self):
+    def test_unchanged_status_skips_the_process_scan_when_no_inner_agent_was_detected(self):
         # The first sighting (setUp's) counts as a change.
         self.assertEqual(self.list_descendant_processes.call_count, 3)
         self.list_descendant_processes.reset_mock()

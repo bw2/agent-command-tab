@@ -6,7 +6,7 @@ the tool a working session waits on: a tool call open for a while shows as "runn
 
 from agent_command_tab.claude_code_transcript_records import (RECORD_KINDS_THAT_START_A_TURN, classify_user_record,
                                                               list_message_blocks)
-from agent_command_tab.context_window_usage import parse_iso_time, read_last_records
+from agent_command_tab.context_window_usage import CODEX_TURN_EVENT_TYPES, parse_iso_time, read_last_records
 
 
 def build_open_tool_call_fields(open_tool_name, open_tool_started_at):
@@ -77,7 +77,10 @@ def read_open_tool_call_from_codex_conversation_file(file_path):
     """Returns the open tool call at the end of a Codex conversation file (rollout-*.jsonl).
 
     Records are read newest first, back to the last prompt: an "item_completed" event with a
-    UserMessage item (Codex 0.163) or a "user_message" event (earlier versions). A function_call
+    UserMessage item (Codex 0.163) or a "user_message" event (earlier versions). They are read no
+    further back than the newest event that starts or ends a turn (CODEX_TURN_EVENT_TYPES) either:
+    Codex writes a turn's start a moment before its prompt, and a call left unanswered in a turn
+    that is over isn't one the agent waits on. A function_call
     or custom_tool_call of any kind (also one without a command, such as a wait on a command that
     runs) is open while no later output record has its call_id and the agent has said nothing
     since (an AgentMessage item or an "agent_message" event).
@@ -92,7 +95,7 @@ def read_open_tool_call_from_codex_conversation_file(file_path):
             continue
         payload_type = payload.get("type")
         if record.get("type") == "event_msg":
-            if read_codex_message_text(record).strip():
+            if payload_type in CODEX_TURN_EVENT_TYPES or read_codex_message_text(record).strip():
                 break
         elif record.get("type") == "response_item":
             if payload_type in ("function_call_output", "custom_tool_call_output"):

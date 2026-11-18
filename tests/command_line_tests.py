@@ -1,4 +1,5 @@
 import contextlib
+import functools
 import io
 import json
 import os
@@ -6,6 +7,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -15,6 +17,8 @@ from agent_command_tab.command_line import (SECONDS_TO_WAIT_FOR_THE_APP_AFTER_CT
                                             stop_the_running_copy, take_the_running_lock, the_running_lock_is_held,
                                             wait_for_app_process)
 from agent_command_tab.hooks_installer import HOOKS_ARE_INSTALLED, HOOKS_ARE_MISSING, check_hooks, install_hooks
+from agent_command_tab.settings_store import load_settings
+from agent_command_tab.snapshot_data_classes import ComputerSnapshot
 
 
 class VersionOptionTests(unittest.TestCase):
@@ -24,6 +28,58 @@ class VersionOptionTests(unittest.TestCase):
             main(["--version"])
         self.assertEqual(raised.exception.code, 0)
         self.assertEqual(printed.getvalue(), f"agent-command-tab {__version__}\n")
+
+
+class DumpSnapshotTests(unittest.TestCase):
+    def dump_snapshot_with_a_stand_in_core(self, settings_file_path, seconds_to_wait_for_agent_names,
+                                           reason_the_core_stops_right_after_its_first_snapshot=None):
+        """Runs dump-snapshot with a core that publishes one snapshot without monitors and then,
+        given a reason, stops for it a moment later, while dump-snapshot waits for the agents' names.
+
+        Returns:
+            (the exit status, what it printed on stdout, what it printed on stderr).
+        """
+        def make_stand_in_core_thread(publish_snapshot, report_connection_lost, verbose, **keyword_arguments):
+            def start():
+                publish_snapshot(ComputerSnapshot("computer", "Mac", 0, []))
+                if reason_the_core_stops_right_after_its_first_snapshot is not None:
+                    threading.Timer(0.05, report_connection_lost, [reason_the_core_stops_right_after_its_first_snapshot]).start()
+            stand_in_core_thread = unittest.mock.Mock(start=start)
+            stand_in_core_thread.core.terminal_backends = []
+            return stand_in_core_thread
+        printed, printed_errors = io.StringIO(), io.StringIO()
+        # Neither the app's own files nor the screens are read.
+        with unittest.mock.patch("agent_command_tab.dashboard_core.DashboardCoreThread", make_stand_in_core_thread), \
+                unittest.mock.patch("agent_command_tab.settings_store.load_settings",
+                                    functools.partial(load_settings, settings_file_path)), \
+                unittest.mock.patch("agent_command_tab.pause_records_store.load_pause_records", return_value={}), \
+                unittest.mock.patch("agent_command_tab.hook_states_store.load_hook_states", return_value={}), \
+                unittest.mock.patch("agent_command_tab.codex_processes_that_shared_their_folder_store"
+                                    ".load_codex_processes_that_shared_their_folder", return_value={}), \
+                unittest.mock.patch("agent_command_tab.user_interface.screen_layout.read_monitors_from_screens", return_value=[]), \
+                unittest.mock.patch.object(command_line, "SECONDS_TO_WAIT_FOR_AGENT_NAMES", seconds_to_wait_for_agent_names), \
+                contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed_errors):
+            exit_status = main(["dump-snapshot"])
+        return exit_status, printed.getvalue(), printed_errors.getvalue()
+
+    def test_stdout_holds_only_the_json_when_the_settings_file_cant_be_read(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings_file_path = os.path.join(folder, "settings.json")
+            with open(settings_file_path, "w") as settings_file:
+                settings_file.write("{not json")
+            exit_status, printed, printed_errors = self.dump_snapshot_with_a_stand_in_core(settings_file_path, 0.01)
+        self.assertEqual(exit_status, 0)
+        self.assertEqual(json.loads(printed)["computer_name"], "Mac")
+        self.assertIn(f"settings file {settings_file_path} could not be read", printed_errors)
+
+    def test_a_core_that_stops_after_its_first_snapshot_gives_its_reason_instead_of_the_snapshot(self):
+        # As when iTerm2 quits meanwhile. The wait for the agents' names, far longer here, ends as the core stops.
+        started_at = time.time()
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(self.dump_snapshot_with_a_stand_in_core(os.path.join(folder, "settings.json"), 60,
+                                                                     "the iTerm2 connection closed"),
+                             (1, "", "the iTerm2 connection closed\n"))
+        self.assertLess(time.time() - started_at, 30)
 
 
 KILL_THE_SUPERVISOR = "a plain kill of this process"  # a planned outcome: SIGTERM to the test's own process
@@ -123,13 +179,6 @@ class RunningLockTests(unittest.TestCase):  # one copy at a time
 
     def test_the_supervisor_hands_the_lock_to_the_app_it_starts(self):
         # So an app left running after its supervisor ended still keeps a second copy out.
-        popen_keyword_arguments = []
-        commands = []
-
-        def start_the_app(command, **keyword_arguments):
-            commands.append(command)
-            popen_keyword_arguments.append(keyword_arguments)
-            return FakeAppProcess([0])
         with tempfile.TemporaryFile("a+") as lock_file, \
                 unittest.mock.patch.object(command_line, "take_the_running_lock_or_name_the_copy_holding_it",
                                            return_value=lock_file), \
@@ -137,12 +186,13 @@ class RunningLockTests(unittest.TestCase):  # one copy at a time
                                     return_value="/opt/homebrew/opt/agent-command-tab/libexec/bin/python"), \
                 unittest.mock.patch(  # not the real login shell, which a bare PATH (launchd's) would ask
                     "agent_command_tab.login_shell_environment.add_the_login_shells_environment_when_started_without_it"), \
-                unittest.mock.patch.object(command_line.subprocess, "Popen", side_effect=start_the_app):
+                unittest.mock.patch.object(command_line.subprocess, "Popen", return_value=FakeAppProcess([0])) as start_the_app:
             self.assertEqual(command_line.run_with_restarts(verbose=False), 0)
+            start_the_app.assert_called_once()
             # By the Python's path that survives `brew upgrade`, not sys.executable.
-            self.assertEqual(commands[0][0], "/opt/homebrew/opt/agent-command-tab/libexec/bin/python")
-            self.assertEqual(popen_keyword_arguments[0]["pass_fds"], [lock_file.fileno()])
-            self.assertEqual(popen_keyword_arguments[0]["env"][command_line.RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE],
+            self.assertEqual(start_the_app.call_args.args[0][0], "/opt/homebrew/opt/agent-command-tab/libexec/bin/python")
+            self.assertEqual(start_the_app.call_args.kwargs["pass_fds"], [lock_file.fileno()])
+            self.assertEqual(start_the_app.call_args.kwargs["env"][command_line.RUNNING_LOCK_FILE_DESCRIPTOR_VARIABLE],
                              str(lock_file.fileno()))
 
     def test_the_app_started_directly_takes_the_lock_itself(self):
@@ -173,6 +223,19 @@ STAND_IN_FOR_THE_APP = ("import sys, time\n"
                         "time.sleep(60)\n")
 
 
+@contextlib.contextmanager
+def keep_the_cleanup_away_from_the_users_files_and_running_copy(claude_settings_path, codex_hooks_path, autolaunch_folder,
+                                                                result_of_stopping_the_running_copy):
+    """While open, the hooks are read and written in these two files and the AutoLaunch script is
+    looked for in this folder, instead of the user's own, and no running copy is stopped:
+    stop_the_running_copy returns result_of_stopping_the_running_copy."""
+    with unittest.mock.patch.object(hooks_installer, "list_settings_file_paths", lambda agent_tool_name: {
+                "Claude Code": [claude_settings_path], "Codex": [codex_hooks_path]}[agent_tool_name]), \
+            unittest.mock.patch.object(start_with_iterm2, "find_iterm2_autolaunch_folder", lambda: autolaunch_folder), \
+            unittest.mock.patch.object(command_line, "stop_the_running_copy", lambda: result_of_stopping_the_running_copy):
+        yield
+
+
 class CleanUpBeforeUninstallingTests(unittest.TestCase):
     def test_the_signal_that_stops_a_copy_follows_what_the_process_is(self):
         self.assertEqual(choose_signal_that_stops_the_copy(["/venv/bin/python", "-m", "agent_command_tab.command_line", "app"]),
@@ -187,14 +250,18 @@ class CleanUpBeforeUninstallingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             lock_file_path = os.path.join(folder, "running.lock")
             self.assertEqual(stop_the_running_copy(lock_file_path), (True, "AgentCommandTab isn't running"))
-            copy = subprocess.Popen([sys.executable, "-c", STAND_IN_FOR_THE_APP, lock_file_path, "app"],
+            copy = subprocess.Popen([sys.executable, "-c", STAND_IN_FOR_THE_APP, lock_file_path],
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
             try:
                 self.assertEqual(copy.stdout.readline(), "locked\n")
                 self.assertTrue(the_running_lock_is_held(lock_file_path))
-                self.assertEqual(stop_the_running_copy(lock_file_path, seconds_to_wait=10),
-                                 (True, f"stopped AgentCommandTab (process {copy.pid})"))
-                copy.wait(timeout=5)
+                # The stand-in was started as `python -c <its source>`, so it is given the arguments the app is started with.
+                with unittest.mock.patch("agent_command_tab.agent_process_tree.read_process_arguments_and_environment", return_value=(
+                        ["/venv/bin/python", "-m", "agent_command_tab.command_line", "app"], {})) as read_process_arguments:
+                    self.assertEqual(stop_the_running_copy(lock_file_path, seconds_to_wait=10),
+                                     (True, f"stopped AgentCommandTab (process {copy.pid})"))
+                read_process_arguments.assert_called_once_with(copy.pid)  # the process the lock file names
+                self.assertEqual(copy.wait(timeout=5), -signal.SIGINT)  # ended by the signal chosen for the app
             finally:
                 copy.kill()
                 copy.wait()
@@ -214,11 +281,8 @@ class CleanUpBeforeUninstallingTests(unittest.TestCase):
                 json.dump({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/venv/bin/python -I -S /f/hook_event_forwarder.py Codex",
                                                           "statusMessage": "Report to AgentCommandTab"}]}]}}, codex_hooks_file)
             printed = io.StringIO()
-            with unittest.mock.patch.object(hooks_installer, "list_settings_file_paths", lambda agent_tool_name: {
-                        "Claude Code": [claude_settings_path], "Codex": [codex_hooks_path]}[agent_tool_name]), \
-                    unittest.mock.patch.object(start_with_iterm2, "find_iterm2_autolaunch_folder", lambda: autolaunch_folder), \
-                    unittest.mock.patch.object(command_line, "stop_the_running_copy",
-                                               lambda: (True, "AgentCommandTab isn't running")), \
+            with keep_the_cleanup_away_from_the_users_files_and_running_copy(
+                        claude_settings_path, codex_hooks_path, autolaunch_folder, (True, "AgentCommandTab isn't running")), \
                     contextlib.redirect_stdout(printed):
                 install_hooks("Claude Code")
                 self.assertEqual(check_hooks("Claude Code"), HOOKS_ARE_INSTALLED)
@@ -230,6 +294,26 @@ class CleanUpBeforeUninstallingTests(unittest.TestCase):
             self.assertFalse(os.path.exists(autolaunch_script_path))
             self.assertIn(f"removed the script that started AgentCommandTab with iTerm2: {autolaunch_script_path}", printed.getvalue())
             self.assertIn("pipx uninstall agent-command-tab", printed.getvalue())
+
+    def test_uninstalling_isnt_suggested_while_a_copy_still_runs_or_hooks_couldnt_be_removed(self):
+        # The uninstall would delete the files that the running copy and the hooks left behind use.
+        with tempfile.TemporaryDirectory() as folder:
+            codex_hooks_path = os.path.join(folder, "hooks.json")
+            for copy_stopped, codex_hooks_text, expected_steps in (
+                    (False, "{}", "first quit AgentCommandTab (it still runs), then run"),
+                    (True, '{"hooks": ', "first fix the hooks file named above (its hooks couldn't be removed), then run"),  # cut short
+                    (False, '{"hooks": ', "first quit AgentCommandTab (it still runs) and fix the hooks file named above")):
+                with open(codex_hooks_path, "w") as codex_hooks_file:
+                    codex_hooks_file.write(codex_hooks_text)
+                printed, printed_errors = io.StringIO(), io.StringIO()
+                with keep_the_cleanup_away_from_the_users_files_and_running_copy(
+                            os.path.join(folder, "settings.json"), codex_hooks_path, folder,
+                            (copy_stopped, "what happened to the running copy")), \
+                        contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed_errors):
+                    self.assertEqual(main(["clean-up-before-uninstalling"]), 1)
+                self.assertNotIn("uninstall agent-command-tab", printed.getvalue(), expected_steps)
+                self.assertIn(expected_steps, printed_errors.getvalue())
+                self.assertIn("then run agent-command-tab clean-up-before-uninstalling again", printed_errors.getvalue())
 
 
 if __name__ == "__main__":

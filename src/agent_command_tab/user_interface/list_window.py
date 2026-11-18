@@ -6,7 +6,7 @@ A titled window you can move, resize and minimize, holding its own list controll
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSEvent, NSEventMaskLeftMouseDragged, NSEventMaskLeftMouseUp,
-                    NSEventTrackingRunLoopMode, NSEventTypeLeftMouseUp, NSFloatingWindowLevel, NSMakeRect,
+                    NSEventTrackingRunLoopMode, NSEventTypeLeftMouseUp, NSFloatingWindowLevel, NSIntersectsRect, NSMakeRect,
                     NSNormalWindowLevel, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable,
                     NSWindowStyleMaskResizable, NSWindowStyleMaskTitled)
 from Foundation import NSDate
@@ -59,7 +59,9 @@ class ListWindowController(WindowFrameSavingController):
         connected screen, else in the middle of the main screen: in front with the keyboard, in
         front without it (the app you are typing in keeps it), or, with
         stays_behind_other_windows (at the app's start, also after each automatic restart while
-        iTerm2 can't be reached), behind the other windows."""
+        iTerm2 can't be reached), behind the other windows. "Always on top" counts over that:
+        macOS orders a window only among those of its level, so one always on top (apply_settings)
+        goes behind the other windows of that level and stays above every normal window."""
         if not self.window.isVisible():
             place_window_at_saved_frame_or_center(self.window, saved_frame)
             self.list_controller.prepare_to_appear()  # the list skips redraws while hidden
@@ -78,9 +80,28 @@ class ListWindowController(WindowFrameSavingController):
     @objc.python_method
     def is_in_front(self):
         """Whether the window shows in front of other windows: it is on the desktop (Space) in
-        view, and it has the keyboard or is always on top (a minimized window isn't visible)."""
+        view (a minimized window isn't visible), and it has the keyboard, or is always on top
+        with none of the app's other windows over it."""
         return (self.window.isVisible() and self.window.isOnActiveSpace()
-                and (self.window.isKeyWindow() or self.window.level() > NSNormalWindowLevel))
+                and (self.window.isKeyWindow()
+                     or (self.window.level() > NSNormalWindowLevel and not self.is_under_another_window_of_the_app())))
+
+    @objc.python_method
+    def is_under_another_window_of_the_app(self):
+        """Whether another of the app's titled windows lies in front of the list window and over
+        some part of it: the settings window and the Saved sessions window open at the level of a
+        list window that is always on top, in front of it. NSApp.orderedWindows lists the app's
+        windows from the front one back, closed ones too, without its panels (the sidebar, the
+        dropdown, tooltips); the untitled ones among them are macOS's own, for the menu bar icon
+        and for open menus, and don't count."""
+        list_window_frame = self.window.frame()
+        for window in NSApp.orderedWindows():
+            if window is self.window:
+                return False
+            if (window.styleMask() & NSWindowStyleMaskTitled and window.isVisible() and window.isOnActiveSpace()
+                    and NSIntersectsRect(window.frame(), list_window_frame)):
+                return True
+        return False
 
     @objc.python_method
     def apply_settings(self, settings):
@@ -114,3 +135,7 @@ class ListWindowController(WindowFrameSavingController):
         # A click in another app ends an open rename without renaming, as in the sidebar; the list
         # would stop updating while the field stays open.
         self.list_controller.cancel_rename()
+        # The search box lets go of the keyboard too, as in the sidebar. Left with it (after Return
+        # showed a tab the search found, or Esc hid the window), it would take the keys the next
+        # time the window has the keyboard, and the rows' shortcuts would type into it.
+        self.window.makeFirstResponder_(self.list_controller.outline_view)

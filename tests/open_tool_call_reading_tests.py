@@ -155,6 +155,18 @@ class ReadCodexOpenToolCallTests(unittest.TestCase):
             codex_event({"type": "agent_message", "message": "The error comes from a missing file."}),
         ]), NO_OPEN_TOOL_CALL)
 
+    def test_a_call_left_unanswered_in_a_turn_that_is_over_is_not_open(self):
+        turn_with_an_open_call = [
+            codex_event({"type": "task_started"}),
+            codex_event({"type": "item_completed", "item": {"type": "UserMessage", "content": [{"type": "text", "text": "Sleep for a while"}]}}),
+            codex_response_item({"type": "function_call", "name": "wait", "call_id": "c1", "arguments": "{}"}),
+        ]
+        self.assertEqual(self.read(turn_with_an_open_call)["open_tool_name"], "wait")
+        for turn_end in ("turn_aborted", "task_complete"):
+            self.assertEqual(self.read(turn_with_an_open_call + [codex_event({"type": turn_end})]), NO_OPEN_TOOL_CALL, turn_end)
+        # Nor in the next turn, whose start Codex writes a moment before its prompt.
+        self.assertEqual(self.read(turn_with_an_open_call + [codex_event({"type": "task_started"})]), NO_OPEN_TOOL_CALL)
+
 
 if __name__ == "__main__":
     unittest.main()

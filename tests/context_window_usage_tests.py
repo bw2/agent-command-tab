@@ -4,16 +4,20 @@ import os
 import tempfile
 import time
 import unittest
+import unittest.mock
 
-from agent_command_tab.agent_adapters.codex import CodexAdapter
+from agent_command_tab import context_window_usage
+from agent_command_tab.agent_adapters import claude_code, codex
+from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_command_tab.agent_adapters.codex import (CodexAdapter, codex_process_runs_its_turns_in_the_shared_server,
+                                                    find_conversation_id_named_after_resume)
 from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens,
                                                     claude_model_has_a_200k_context_window, find_claude_code_transcript,
-                                                    find_codex_conversation_files, format_token_count,
-                                                    read_claude_code_model_setting, read_context_tokens_from_agy_transcript,
-                                                    read_context_tokens_from_claude_code_transcript,
-                                                    read_context_tokens_from_codex_conversation_file,
-                                                    read_context_window_tokens_from_codex_conversation_file, read_last_lines,
-                                                    read_last_records, read_model_from_claude_code_transcript,
+                                                    find_codex_conversation_file_by_id, find_codex_conversation_files,
+                                                    format_token_count, read_claude_code_model_setting,
+                                                    read_context_tokens_and_context_window_tokens_from_codex_conversation_file,
+                                                    read_context_tokens_and_model_from_claude_code_transcript,
+                                                    read_context_tokens_from_agy_transcript, read_last_lines, read_last_records,
                                                     read_turn_is_under_way_from_codex_conversation_file,
                                                     read_turn_started_at_from_claude_code_transcript,
                                                     read_turn_started_at_from_codex_conversation_file)
@@ -44,19 +48,21 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "assistant", "message": {"model": "<synthetic>", "usage": {"input_tokens": 0, "output_tokens": 0}}},
             "{not json",
         ])
-        self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 673930)
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(path), (673930, None))
         self.assertEqual(find_claude_code_transcript(["/no/such/folder", self.folder.name], "abc"), path)
         self.assertIsNone(find_claude_code_transcript([self.folder.name], "other"))
 
     def test_after_a_compaction_the_size_is_the_compacted_one_until_the_next_reply(self):
-        reply_before = {"type": "assistant", "message": {"usage": {"input_tokens": 709217}}}
+        reply_before = {"type": "assistant", "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 709217}}}
         compaction = {"type": "system", "subtype": "compact_boundary", "compactMetadata": {"preTokens": 709217, "postTokens": 20183}}
         path = self.write_lines("compacted.jsonl", [reply_before, compaction,
                                                     {"type": "user", "isCompactSummary": True, "message": {"content": "Summary"}}])
-        self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 20183)
+        # The size from the compaction, the model from the reply before it.
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(path), (20183, "claude-opus-5-5"))
         path = self.write_lines("replied.jsonl", [reply_before, compaction,
-                                                  {"type": "assistant", "message": {"usage": {"input_tokens": 73525}}}])
-        self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 73525)
+                                                  {"type": "assistant", "message": {"model": "claude-sonnet-5-5",
+                                                                                    "usage": {"input_tokens": 73525}}}])
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(path), (73525, "claude-sonnet-5-5"))
 
     def test_a_subagents_replies_dont_count_as_the_main_agents(self):
         path = self.write_lines("with_a_subagent.jsonl", [
@@ -64,8 +70,7 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "assistant", "isSidechain": True,
              "message": {"model": "claude-haiku-5-5", "usage": {"input_tokens": 12000}}},
         ])
-        self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 300000)
-        self.assertEqual(read_model_from_claude_code_transcript(path), "claude-opus-5-5")
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(path), (300000, "claude-opus-5-5"))
 
     def test_a_codex_turn_is_under_way_from_its_task_started_until_its_task_complete(self):
         started = {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}}
@@ -82,7 +87,7 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"total_tokens": 40546}}}},
             {"type": "response_item", "payload": {"type": "message"}},
         ])
-        self.assertEqual(read_context_tokens_from_codex_conversation_file(path), 40546)
+        self.assertEqual(read_context_tokens_and_context_window_tokens_from_codex_conversation_file(path), (40546, None))
 
     def test_agy_context_is_the_latest_replys_input_and_cache_read_tokens(self):  # records as agy 1.5.9 writes them
         path = self.write_lines("transcript.jsonl", [
@@ -105,7 +110,32 @@ class ContextWindowUsageTests(unittest.TestCase):
                                               "info": {"last_token_usage": {"total_tokens": 40546}, "model_context_window": 258400}}},
             {"type": "event_msg", "payload": {"type": "token_count", "info": None}},  # a rate-limit-only report
         ])
-        self.assertEqual(read_context_window_tokens_from_codex_conversation_file(path), 258400)
+        self.assertEqual(read_context_tokens_and_context_window_tokens_from_codex_conversation_file(path), (40546, 258400))
+        # Each from the newest event that has it: a later usage without a window leaves the window as it was reported.
+        path = self.write_lines("rollout_with_a_later_usage.jsonl", [
+            {"type": "event_msg", "payload": {"type": "token_count",
+                                              "info": {"last_token_usage": {"total_tokens": 40546}, "model_context_window": 258400}}},
+            {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"total_tokens": 51000}}}},
+        ])
+        self.assertEqual(read_context_tokens_and_context_window_tokens_from_codex_conversation_file(path), (51000, 258400))
+
+    def test_the_codex_adapter_reads_the_files_end_once_for_the_context_size_and_the_windows(self):
+        path = self.write_lines("rollout_read_once.jsonl", [
+            {"type": "event_msg", "payload": {"type": "token_count",
+                                              "info": {"last_token_usage": {"total_tokens": 40546}, "model_context_window": 258400}}}])
+        with unittest.mock.patch.object(context_window_usage, "read_last_lines", wraps=read_last_lines) as read_the_files_end:
+            self.assertEqual(CodexAdapter().read_context_tokens_and_context_window_tokens(path, 301, None, None), (40546, 258400))
+        read_the_files_end.assert_called_once()
+
+    def test_the_claude_code_adapter_reads_the_files_end_once_for_the_context_size_and_the_model(self):
+        path = self.write_lines("transcript_read_once.jsonl", [
+            {"type": "assistant", "message": {"model": "claude-opus-4-6", "usage": {"input_tokens": 40_000}}}])
+        with unittest.mock.patch.object(context_window_usage, "read_last_lines", wraps=read_last_lines) as read_the_files_end, \
+                unittest.mock.patch.object(claude_code, "read_process_arguments_and_environment",
+                                           return_value=(["claude", "--model", "opus"], {})):
+            self.assertEqual(ClaudeCodeAdapter().read_context_tokens_and_context_window_tokens(path, 301, None, None),
+                             (40_000, 200_000))  # the window's size follows from the reply's model
+        read_the_files_end.assert_called_once()
 
     def test_a_claude_code_sessions_context_window_follows_the_model_it_was_started_with(self):
         self.write_lines("config/settings.json", [{"model": "opus[1m]"}])
@@ -126,8 +156,9 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "assistant", "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 175_000}}},  # after /model
             {"type": "assistant", "message": {"model": "<synthetic>", "usage": {"input_tokens": 0}}},
         ])
-        self.assertEqual(read_model_from_claude_code_transcript(path), "claude-opus-5-5")
-        self.assertIsNone(read_model_from_claude_code_transcript(self.write_lines("no_reply.jsonl", [{"type": "user"}])))
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(path), (175_000, "claude-opus-5-5"))
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(
+            self.write_lines("no_reply.jsonl", [{"type": "user"}])), (None, None))
         # Claude Code started with no model setting: its default model's own window.
         self.assertEqual(choose_claude_code_context_window_tokens(None, "claude-opus-5-5", 175_000), 1_000_000)
         self.assertEqual(choose_claude_code_context_window_tokens(None, "claude-haiku-4-5-20251001", 50_000), 200_000)
@@ -146,8 +177,12 @@ class ContextWindowUsageTests(unittest.TestCase):
             self.assertFalse(claude_model_has_a_200k_context_window(model), model)
 
     def test_files_without_usage_or_missing_files_give_none(self):
-        self.assertIsNone(read_context_tokens_from_claude_code_transcript(self.write_lines("empty.jsonl", [{"type": "user"}])))
-        self.assertIsNone(read_context_tokens_from_codex_conversation_file(os.path.join(self.folder.name, "missing.jsonl")))
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(
+            self.write_lines("empty.jsonl", [{"type": "user"}])), (None, None))
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(
+            os.path.join(self.folder.name, "missing.jsonl")), (None, None))
+        self.assertEqual(read_context_tokens_and_context_window_tokens_from_codex_conversation_file(
+            os.path.join(self.folder.name, "missing.jsonl")), (None, None))
 
     def test_only_the_end_of_a_long_file_is_read_and_its_cut_first_line_is_dropped(self):
         path = self.write_lines("long.jsonl", ["x" * 100, "first", "second"])
@@ -158,10 +193,19 @@ class ContextWindowUsageTests(unittest.TestCase):
         path = self.write_lines("long_last_line.jsonl", ["x" * 100, "first", "y" * 100])
         self.assertEqual(read_last_lines(path, byte_count=10), ["y" * 100, "first"])  # 10, then 40, then 160 of its 208 bytes
 
+    def test_a_line_still_being_written_is_left_out(self):
+        path = self.write_lines("being_written.jsonl", ["first", "y" * 100])
+        with open(path, "a") as file:
+            file.write('{"type": "assi')  # no newline yet: the agent is still writing this record
+        self.assertEqual(read_last_lines(path, byte_count=1000), ["y" * 100, "first"])
+        # Nor is it the complete line the search for one stops at: 10 bytes, then 40, then all 121.
+        self.assertEqual(read_last_lines(path, byte_count=10), ["y" * 100, "first"])
+
     def test_records_are_the_json_objects_newest_first(self):
         path = self.write_lines("mixed.jsonl", [{"type": "user"}, "not json", "[1, 2]", '"text"', {"type": "assistant"}])
         self.assertEqual(list(read_last_records(path)), [{"type": "assistant"}, {"type": "user"}])
-        self.assertIsNone(read_context_tokens_from_claude_code_transcript(self.write_lines("list.jsonl", ["[1, 2]"])))
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(self.write_lines("list.jsonl", ["[1, 2]"])),
+                         (None, None))
 
     def write_codex_conversation_in_its_start_days_folder(self, name, folder, started_at, source="cli", originator="codex-tui"):
         started_day = datetime.date.fromtimestamp(started_at)
@@ -170,13 +214,54 @@ class ContextWindowUsageTests(unittest.TestCase):
             {"type": "session_meta", "payload": {"cwd": folder, "timestamp": started_at_text, "source": source,
                                                  "originator": originator}}])
 
+    def write_codex_conversation_last_written_at(self, name, started_at, modified_at):
+        """Writes a Codex conversation in /Users/me/code that started at started_at and whose file
+        was last written at modified_at; returns its path."""
+        path = self.write_codex_conversation_in_its_start_days_folder(name, "/Users/me/code", started_at)
+        os.utime(path, (modified_at, modified_at))
+        return path
+
     def test_a_codex_conversation_run_by_codexs_shared_server_says_so_in_its_header(self):
         adapter = CodexAdapter()
         shared_server_file = self.write_codex_conversation_in_its_start_days_folder("shared.jsonl", "/p", time.time(), "vscode")
         own_process_file = self.write_codex_conversation_in_its_start_days_folder("own.jsonl", "/p", time.time(), "cli")
-        self.assertEqual((adapter.read_turns_run_outside_the_tab(shared_server_file), adapter.read_turns_run_outside_the_tab(own_process_file)),
-                         (True, False))
-        self.assertFalse(adapter.read_turns_run_outside_the_tab(os.path.join(self.folder.name, "missing.jsonl")))
+        with unittest.mock.patch.object(codex, "read_process_arguments_and_environment", return_value=(["codex"], {})):
+            self.assertEqual((adapter.read_turns_run_outside_the_tab(shared_server_file, 301),
+                              adapter.read_turns_run_outside_the_tab(own_process_file, 301)), (True, False))
+            self.assertFalse(adapter.read_turns_run_outside_the_tab(os.path.join(self.folder.name, "missing.jsonl"), 301))
+
+    def test_a_resumed_codex_conversation_goes_by_how_its_process_was_started_not_by_the_header_it_kept(self):
+        started_by_a_codex_that_ran_its_own_turns = {"source": "cli", "originator": "codex-tui"}
+        started_through_the_shared_server = {"source": "vscode", "originator": "codex-tui"}
+        resume_arguments = ["node", "/opt/homebrew/bin/codex", "resume", "01a151f0-8f89-7711-a0cc-cfcae10915f8"]
+        # A later Codex resumed it through its shared server, where a pause of the tab's processes can't stop its work.
+        self.assertTrue(codex_process_runs_its_turns_in_the_shared_server(
+            started_by_a_codex_that_ran_its_own_turns, resume_arguments, lambda: True))
+        # No shared server runs: an earlier Codex, which runs its turns itself.
+        self.assertFalse(codex_process_runs_its_turns_in_the_shared_server(
+            started_by_a_codex_that_ran_its_own_turns, resume_arguments, lambda: False))
+        for header in (started_by_a_codex_that_ran_its_own_turns, started_through_the_shared_server):
+            self.assertFalse(codex_process_runs_its_turns_in_the_shared_server(header, resume_arguments + ["--no-daemon"], lambda: True))
+        # Nor does the header that a Codex run through the server left: with no shared server running, none runs this process's turns.
+        self.assertFalse(codex_process_runs_its_turns_in_the_shared_server(
+            started_through_the_shared_server, resume_arguments, lambda: False))
+        # A conversation the process started itself goes by its own header, and no server is looked for.
+        self.assertEqual([codex_process_runs_its_turns_in_the_shared_server(header, ["codex", "--model", "o3"], self.fail)
+                          for header in (started_by_a_codex_that_ran_its_own_turns, started_through_the_shared_server)], [False, True])
+        # The adapter reads the header, the process's arguments, and whether a shared server runs.
+        resumed_file = self.write_codex_conversation_in_its_start_days_folder("resumed.jsonl", "/p", time.time(), "cli")
+        with unittest.mock.patch.object(codex, "read_process_arguments_and_environment", return_value=(resume_arguments, {})), \
+                unittest.mock.patch.object(codex, "a_codex_shared_background_server_runs", return_value=True):
+            self.assertTrue(CodexAdapter().read_turns_run_outside_the_tab(resumed_file, 301))
+
+    def test_the_conversation_id_a_codex_process_was_started_to_resume_is_read_from_its_arguments(self):
+        conversation_id = "01a151f0-8f89-7711-a0cc-cfcae10915f8"
+        for arguments, expected_conversation_id in (
+                (["codex", "resume", conversation_id], conversation_id),
+                (["node", "/opt/homebrew/bin/codex", "-m", "o3", "resume", "--no-daemon", conversation_id], conversation_id),
+                (["codex", "resume", "--last"], None), (["codex", "resume"], None), (["codex", "resume", "my session"], None),
+                (["codex", "fork", conversation_id], None), (["codex"], None), ([], None)):
+            self.assertEqual(find_conversation_id_named_after_resume(arguments), expected_conversation_id, arguments)
 
     def test_codex_conversation_file_is_found_by_folder_and_start_time(self):
         now = time.time()
@@ -207,12 +292,7 @@ class ContextWindowUsageTests(unittest.TestCase):
 
     def test_a_resumed_codex_conversation_is_found_in_its_own_older_day_folder(self):
         now = time.time()
-
-        def write_conversation(name, started_at, modified_at):
-            path = self.write_codex_conversation_in_its_start_days_folder(name, "/Users/me/code", started_at)
-            os.utime(path, (modified_at, modified_at))
-            return path
-
+        write_conversation = self.write_codex_conversation_last_written_at
         # `codex resume`, started a minute ago, has written to a conversation started 3 days ago.
         resumed_file = write_conversation("rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl", now - 3 * 86400, now - 10)
         write_conversation("rollout-b-01a151f0-8f89-7711-a0cc-cfcae10915f9.jsonl", now - 2 * 86400, now - 86400)  # not since
@@ -221,11 +301,30 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now,
                                                        agent_resumed_a_conversation=True), [resumed_file])
 
+    def test_a_resumed_codex_conversation_whose_file_is_known_is_found_without_the_other_day_folders(self):
+        now = time.time()
+        write_conversation = self.write_codex_conversation_last_written_at
+        # `codex resume <ID>`, started a minute ago, has written to a conversation started 3 days ago.
+        resumed_file = write_conversation("rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl", now - 3 * 86400, now - 10)
+        # Another earlier conversation in the folder, written since by another session: not this process's.
+        write_conversation("rollout-b-01a151f0-8f89-7711-a0cc-cfcae10915f9.jsonl", now - 2 * 86400, now - 5)
+        started_later_in_the_process = write_conversation("rollout-c-01a151f0-8f89-7711-a0cc-cfcae10915fa.jsonl", now - 20, now - 1)  # /new
+        sessions_folder = os.path.join(self.folder.name, "sessions")
+        self.assertEqual(find_codex_conversation_file_by_id(sessions_folder, "01a151f0-8f89-7711-a0cc-cfcae10915f8"), resumed_file)
+        self.assertIsNone(find_codex_conversation_file_by_id(sessions_folder, "01a151f0-8f89-7711-a0cc-000000000000"))
+        self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now, agent_resumed_a_conversation=True,
+                                                       resumed_conversation_file=resumed_file),
+                         [started_later_in_the_process, resumed_file])
+        # Not yet written to since the process started: not its conversation yet.
+        os.utime(resumed_file, (now - 120, now - 120))
+        self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now, agent_resumed_a_conversation=True,
+                                                       resumed_conversation_file=resumed_file), [started_later_in_the_process])
+
     def test_unicode_line_separators_inside_a_record_do_not_split_it(self):
         # Written raw: json.dumps would escape them, Claude Code's own writer doesn't.
         path = self.write_lines("separators.jsonl", ['{"type": "assistant", "message": {"content": "a b\u0085c", '
                                                      '"usage": {"input_tokens": 7, "cache_read_input_tokens": 3}}}'])
-        self.assertEqual(read_context_tokens_from_claude_code_transcript(path), 10)
+        self.assertEqual(read_context_tokens_and_model_from_claude_code_transcript(path)[0], 10)
 
     def test_turn_start_is_the_latest_prompt_not_a_tool_result(self):
         claude_path = self.write_lines("claude.jsonl", [

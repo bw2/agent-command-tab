@@ -26,7 +26,7 @@ from agent_command_tab.user_interface.pointing_hand_button import PointingHandBu
 # title chooses that order when clicked (Age of the two that sort by when
 # the agent started). Tab Order, the terminal's own order, has no column.
 LIST_SORT_ORDER_TITLES = {"manual": "Tab Order", "activity": "Status", "alphabet": "Name", "context_percent": "Tokens",
-                          "created_time": "Age", "memory_usage": "Memory", "cpu_usage": "CPU"}
+                          "created_time": "Age", "time_since_last_message": "Last Msg", "memory_usage": "Memory", "cpu_usage": "CPU"}
 POPOVER_WIDTH = 460  # before the first fit
 SMALLEST_POPOVER_WIDTH = 320
 LARGEST_SHARE_OF_SCREEN_WIDTH = 0.9
@@ -55,7 +55,8 @@ EXPAND_OR_COLLAPSE_ALL_LOOKS = {False: ("rectangle.expand.vertical", "Expand all
 # The tooltips say how (agent_session_pausing).
 PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
     "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes, their shells and any subprocesses that they started (a STOP signal)"),
-    "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (a CONT signal)")}
+    "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (a CONT signal); "
+               "those suspended with Ctrl+Z are resumed by typing fg in their tabs instead")}
 # The top bar's Hide Idle / Show Idle button, left of the expand or collapse button: (title, tooltip), by
 # whether idle tabs are hidden; the title says what a click does.
 # Command-I presses it in the list that has the keyboard, and the tooltips say so.
@@ -88,9 +89,9 @@ HOOKS_NOTE_TOOL_TIP = ("These hooks provide AgentCommandTab more details about a
                        "launched background processes, etc.")
 # The notes about hooks that are installed but don't work, which Install Hooks wouldn't fix.
 HOOKS_CANT_RUN_TOOL_TIP = ("The Python this copy of AgentCommandTab runs on is gone (for example, Homebrew removed the "
-                           "Python version its pipx environment was made with), so its hooks can't run, and the app "
-                           "can't restart. Reinstall it (with pipx: pipx reinstall agent-command-tab), then quit it "
-                           "and start it again.")
+                           "Python version its pipx environment was made with), or the script its hooks run is, so "
+                           "its hooks can't run. Reinstall it (with pipx: pipx reinstall agent-command-tab), then "
+                           "quit it and start it again.")
 HOOKS_SEND_NO_EVENTS_TOOL_TIP = ("Claude Code sessions started after the hooks were installed haven't sent "
                                  "AgentCommandTab any events, so background tasks and turn ends may show wrong. "
                                  "Check that hooks aren't turned off in Claude Code: type /hooks in a session.")
@@ -177,7 +178,7 @@ class ListSearchField(NSSearchField):
     def becomeFirstResponder(self):
         became_first_responder = objc.super(ListSearchField, self).becomeFirstResponder()
         if became_first_responder:
-            self.panel_controller.search_box_took_the_keyboard()
+            self.panel_controller.on_search_box_took_the_keyboard()
         return became_first_responder
 
 
@@ -223,6 +224,12 @@ class ListPanelView(NSView):
             self.top_bar_drag_start = None
             self.controller.list_controller.owner.top_bar_dragged(self.controller, (start.x, start.y))
 
+    def mouseUp_(self, event):
+        # The press on the top bar is over. Its start kept, a later press elsewhere that passes its
+        # drags up to this view (on a column title) would count as a drag of the top bar from there.
+        self.top_bar_drag_start = None
+        objc.super(ListPanelView, self).mouseUp_(event)
+
 
 class ListPanelController(NSViewController):
     """Holds a list controller's outline view in a scroll view, with a top and a bottom bar and the
@@ -245,6 +252,10 @@ class ListPanelController(NSViewController):
         # Called when the search box takes the keyboard; the sidebar sets it, to keep the keyboard
         # while you type there without making the dashboard the active app.
         self.on_search_box_took_the_keyboard = lambda: None
+        # Gives the list's rows the keyboard of a search box that hides while it has it
+        # (fit_top_bar_to_width); the sidebar sets its own way, since in its panel the list takes
+        # the keyboard only through SidebarController.give_the_list_the_keyboard_focus.
+        self.give_the_list_the_keyboard = lambda: self.view().window().makeFirstResponder_(self.list_controller.outline_view)
         return self
 
     def loadView(self):
@@ -346,7 +357,7 @@ class ListPanelController(NSViewController):
             control.setFrameOrigin_((0, round(sort_popup_middle_y - control.frame().size.height / 2)))
         root_view.addSubview_(self.case_sensitive_checkbox)
         self.list_controller.on_search_keys_pressed = self.put_the_keyboard_in_the_search_box
-        self.list_controller.on_search_text_cleared = lambda: self.search_field.setStringValue_("")
+        self.list_controller.on_search_text_cleared = self.empty_the_search_box
 
         # Bottom bar: a Settings button with its name, easier to see than an icon, at the left, a
         # gray pill like the top bar's controls, and one button that pauses or resumes the
@@ -419,11 +430,17 @@ class ListPanelController(NSViewController):
         while it shows a message that asks for it (the app restarts, so there are no rows to sort
         or hide; show_message), or one that would get less than SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS
         beside them (a narrow sidebar), the sort control, the search box and the Hide Idle button step aside for it,
-        the search box only while it is empty."""
+        the search box only while it is empty. The rows take the keyboard of a search box that hides
+        while it has it, so the list's keys go on working."""
         has_a_message = bool(self.message_text_field.stringValue())
-        message_width = self.lay_out_top_bar(has_a_message and self.sort_control_and_hide_idle_step_aside_for_the_message)
-        if has_a_message and message_width < SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS:
-            self.lay_out_top_bar(True)
+        search_box_had_the_keyboard = self.search_field.currentEditor() is not None
+        message_asks_the_controls_to_step_aside = has_a_message and self.sort_control_and_hide_idle_step_aside_for_the_message
+        message_width = self.lay_out_top_bar(message_asks_the_controls_to_step_aside)
+        if (has_a_message and not message_asks_the_controls_to_step_aside
+                and message_width < SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS):
+            self.lay_out_top_bar(True)  # only after a layout that kept the controls: one where they stepped aside can't give more
+        if search_box_had_the_keyboard and self.search_field.isHidden():
+            self.give_the_list_the_keyboard()
 
     @objc.python_method
     def lay_out_top_bar(self, controls_step_aside_for_a_message):
@@ -538,7 +555,7 @@ class ListPanelController(NSViewController):
     def fit_bottom_bar_to_width(self):
         """Puts the hooks note after the Settings button at the bottom left, then its Install Hooks
         button (when there is something to install and room for it before the pause or resume
-        button, which it covered in a narrow sidebar), the note cut short
+        button, which it would otherwise cover in a narrow sidebar), the note cut short
         before the button and the pause or resume button."""
         note = self.hooks_note_text_field.stringValue()
         self.hooks_note_text_field.setHidden_(not note)
@@ -604,35 +621,51 @@ class ListPanelController(NSViewController):
         window.makeFirstResponder_(self.search_field)
         return True
 
-    @objc.python_method
-    def search_box_took_the_keyboard(self):
-        self.on_search_box_took_the_keyboard()
-
     def controlTextDidChange_(self, notification):
         """Filters the list as each letter is typed in the search box."""
         if notification.object() is self.search_field:
-            self.list_controller.set_search_text(self.search_field.stringValue())
+            self.filter_the_list_by_the_search_box_text()
 
     def searchFieldChanged_(self, sender):
         """The search box's own action: also sent when its button empties it, which typing doesn't do."""
+        self.filter_the_list_by_the_search_box_text()
+
+    @objc.python_method
+    def filter_the_list_by_the_search_box_text(self):
+        """The search box's text changed, typed or emptied by its button: the list shows that search."""
         self.list_controller.set_search_text(self.search_field.stringValue())
+        self.let_an_empty_search_box_step_aside_for_a_message()
+
+    @objc.python_method
+    def empty_the_search_box(self):
+        """The list emptied its search (clear_the_search): empties the search box with it."""
+        self.search_field.setStringValue_("")
+        self.let_an_empty_search_box_step_aside_for_a_message()
+
+    @objc.python_method
+    def let_an_empty_search_box_step_aside_for_a_message(self):
+        """Fits the top bar again once the search box is empty beside a message: a box that stayed
+        while the other controls stepped aside, because it held a search (lay_out_top_bar), steps
+        aside too, and the message gets its room."""
+        if not self.search_field.stringValue() and self.message_text_field.stringValue():
+            self.fit_top_bar_to_width()
 
     def control_textView_doCommandBySelector_(self, control, text_view, command_selector):
-        """The search box's keys: Return shows the selected row's tab, as in the list; Up and Down
+        """The search box's keys: Return shows the selected row's tab, as in the list, once the rows
+        are those of the text the box holds; Up and Down
         move the selection among the tab rows; Esc empties the box, and in an empty box closes
         the list as Esc in the list does. Other keys edit the text."""
         if control is not self.search_field:
             return False
         if command_selector == "insertNewline:":
-            self.list_controller.show_the_selected_row()
+            self.list_controller.show_the_selected_row_once_the_rows_show_the_search_box_search()
             return True
         if command_selector in ("moveUp:", "moveDown:"):
             self.list_controller.move_the_selection_among_tab_rows(-1 if command_selector == "moveUp:" else 1)
             return True
         if command_selector == "cancelOperation:":
             if self.search_field.stringValue():
-                self.search_field.setStringValue_("")
-                self.list_controller.set_search_text("")
+                self.list_controller.clear_the_search()  # the box with it (empty_the_search_box)
             else:
                 self.list_controller.owner.close_the_list_after_escape(self.list_controller)
             return True
@@ -666,12 +699,23 @@ class ListPanelController(NSViewController):
         self.fit_top_bar_to_width()
 
     @objc.python_method
-    def fit_size_to_rows(self):
-        """Sizes the panel so every row's text shows in full when all rows are expanded, scrolling
-        only when the rows are taller (or wider) than the screen allows. Collapsing or expanding
-        rows keeps that size."""
+    def fit_size_to_rows(self, screen_the_panel_is_about_to_open_on=None):
+        """Sizes the panel to its rows as if all were expanded, so collapsing or expanding rows
+        keeps that size: as wide as the widest row's texts need (a process row's command doesn't
+        count: it is cut short to the room the other rows leave it), from SMALLEST_POPOVER_WIDTH
+        up to LARGEST_SHARE_OF_SCREEN_WIDTH of the screen's usable width, where a wider row is
+        cut short to fit; and as tall as the rows, up to the height of the screen's usable area,
+        where the list then scrolls up and down (it never scrolls sideways).
+
+        Args:
+            screen_the_panel_is_about_to_open_on: The NSScreen of the menu bar icon that a closed
+                dropdown is about to open under: its panel isn't in a window on that screen yet, so
+                it can't tell which screen's size limits it. None for an open panel, which is sized
+                for its own window's screen.
+        """
         window = self.view().window()
-        screen = (window.screen() if window is not None else None) or NSScreen.screens()[0]
+        screen = (screen_the_panel_is_about_to_open_on or (window.screen() if window is not None else None)
+                  or NSScreen.screens()[0])
         usable_frame = screen.visibleFrame()
         bars_height = TOP_BAR_HEIGHT + BOTTOM_BAR_HEIGHT + self.list_controller.measure_column_titles_row_height()  # and the column titles
         list_height = self.list_controller.measure_fully_expanded_list_height()  # the list has no spacing between rows

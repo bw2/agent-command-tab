@@ -1,5 +1,7 @@
 """The colors of the menu bar icon and the list's rows, by name: the rows' color names
-(row_text_rendering), which the icon uses too. "light_blue" is the color of "asking" everywhere."""
+(row_text_rendering), which the icon uses too. "light_blue" is the color of "asking" for the dot
+and the menu bar count; the Status column's "asking" text uses "light_blue_text", darker in light
+mode so it reads on white."""
 
 from AppKit import NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor
 

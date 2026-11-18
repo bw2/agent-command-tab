@@ -12,27 +12,43 @@ from agent_command_tab.agent_adapters.base import (COMPACT_AND_CLEAR_SLASH_COMMA
 from agent_command_tab.agent_process_tree import read_process_arguments_and_environment
 from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens, find_claude_code_transcript,
                                                     read_claude_code_model_setting,
-                                                    read_context_tokens_from_claude_code_transcript,
-                                                    read_model_from_claude_code_transcript,
+                                                    read_context_tokens_and_model_from_claude_code_transcript,
                                                     read_turn_started_at_from_claude_code_transcript)
 from agent_command_tab.conversation_search_texts import extract_search_texts_from_claude_code_record
+from agent_command_tab.last_message_time_reading import read_last_message_at_from_claude_code_transcript
 from agent_command_tab.open_tool_call_reading import read_open_tool_call_from_claude_code_transcript
+from agent_command_tab.settings_store import (SETTINGS_FILE_PATH, find_launch_command, merge_settings_with_defaults,
+                                              read_environment_settings_of_launch_command, read_json_file)
 
 DEFAULT_CLAUDE_CONFIG_FOLDER = os.path.expanduser("~/.claude")  # the one a Claude Code without CLAUDE_CONFIG_DIR uses
 
 
-def list_claude_config_folders():
+def list_claude_config_folders(settings_file_path=SETTINGS_FILE_PATH):
     """Returns the Claude Code config folders in use: the default folder (None: a command run
-    without CLAUDE_CONFIG_DIR uses it), the dashboard's own CLAUDE_CONFIG_DIR, and every other
-    ~/.claude* folder with a sessions folder, since a Claude Code started with its own
-    CLAUDE_CONFIG_DIR (for example ~/.claude_work) keeps its sessions and settings there. Asked
-    by `claude agents --json`, which lists a session only from its own folder, and by the hooks
-    installer, since such a session reads only its own folder's settings.json.
+    without CLAUDE_CONFIG_DIR uses it), the dashboard's own CLAUDE_CONFIG_DIR, the one the Claude
+    Code launch command in the settings sets (CLAUDE_CONFIG_DIR=... in front of its program,
+    which may name a folder anywhere), once it exists, and every other ~/.claude* folder with a
+    sessions folder, since a Claude Code started with its own CLAUDE_CONFIG_DIR (for example
+    ~/.claude_work) keeps its sessions and settings there. Each folder is listed once, whichever
+    paths lead to it. Asked by `claude agents --json`, which lists a session only from its own
+    folder, and by the hooks installer, since such a session reads only its own folder's settings.json.
     """
-    other_folders = ([os.environ["CLAUDE_CONFIG_DIR"]] if os.environ.get("CLAUDE_CONFIG_DIR") else []) + sorted(
-        folder for folder in glob.glob(os.path.expanduser("~/.claude*")) if os.path.isdir(os.path.join(folder, "sessions")))
-    return [None] + [folder for folder in dict.fromkeys(other_folders)
-                     if os.path.realpath(folder) != os.path.realpath(DEFAULT_CLAUDE_CONFIG_FOLDER)]
+    # The settings are read without load_settings's message about an unreadable file, which every
+    # lookup of a conversation file would print again.
+    launch_command = find_launch_command(merge_settings_with_defaults(read_json_file(settings_file_path, dict)),
+                                         ClaudeCodeAdapter.agent_tool_name)
+    # As the shell the launch command is typed into reads it: "~/x" and "$HOME/x" alike ("" when it sets none).
+    folder_the_launch_command_sets = os.path.expandvars(os.path.expanduser(
+        read_environment_settings_of_launch_command(launch_command).get("CLAUDE_CONFIG_DIR", "")))
+    other_folders = (([os.environ["CLAUDE_CONFIG_DIR"]] if os.environ.get("CLAUDE_CONFIG_DIR") else [])
+                     + ([folder_the_launch_command_sets] if os.path.isdir(folder_the_launch_command_sets) else [])
+                     + sorted(folder for folder in glob.glob(os.path.expanduser("~/.claude*"))
+                              if os.path.isdir(os.path.join(folder, "sessions"))))
+    other_folder_by_real_path = {}
+    for folder in other_folders:
+        other_folder_by_real_path.setdefault(os.path.realpath(folder), folder)
+    other_folder_by_real_path.pop(os.path.realpath(DEFAULT_CLAUDE_CONFIG_FOLDER), None)
+    return [None] + list(other_folder_by_real_path.values())
 
 
 def list_claude_config_folder_paths():
@@ -82,20 +98,22 @@ class ClaudeCodeAdapter(AgentToolAdapter):
         own_config_folder = (claude_agent_record or {}).get("config_folder") or DEFAULT_CLAUDE_CONFIG_FOLDER
         return await asyncio.to_thread(find_claude_code_transcript, [own_config_folder, *claude_config_folders], conversation_id)
 
-    def read_context_tokens(self, conversation_file_path):
-        return read_context_tokens_from_claude_code_transcript(conversation_file_path)
-
-    def read_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record, context_tokens):
-        return choose_claude_code_context_window_tokens(read_claude_code_model_setting(
+    def read_context_tokens_and_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record,
+                                                      context_tokens_read_before):
+        context_tokens, model = read_context_tokens_and_model_from_claude_code_transcript(conversation_file_path)
+        return context_tokens, choose_claude_code_context_window_tokens(read_claude_code_model_setting(
             *read_process_arguments_and_environment(agent_process_id),
             (claude_agent_record or {}).get("config_folder") or DEFAULT_CLAUDE_CONFIG_FOLDER),
-            read_model_from_claude_code_transcript(conversation_file_path), context_tokens)
+            model, context_tokens if context_tokens is not None else context_tokens_read_before)
 
     def read_turn_started_at(self, conversation_file_path):
         return read_turn_started_at_from_claude_code_transcript(conversation_file_path)
 
     def read_open_tool_call(self, conversation_file_path):
         return read_open_tool_call_from_claude_code_transcript(conversation_file_path)
+
+    def read_last_message_at(self, conversation_file_path):
+        return read_last_message_at_from_claude_code_transcript(conversation_file_path)
 
     def extract_search_texts_from_conversation_record(self, record):
         return extract_search_texts_from_claude_code_record(record)
