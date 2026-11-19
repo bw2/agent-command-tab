@@ -30,6 +30,10 @@ class ClaudeCodeRecordTests(unittest.TestCase):
                 {"type": "tool_use", "name": "Bash", "input": {"command": "grep -n bcftools merge_vcfs.py"}},
                 {"type": "tool_use", "name": "Read", "input": {"file_path": "/repo/merge_vcfs.py"}},
             ]}}, ["Looking at merge_vcfs.py.", "grep -n bcftools merge_vcfs.py"]),
+            # A command its Monitor tool runs in the background, which no other record holds.
+            ({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Monitor", "input": {
+                "command": "tail -f build.log | grep --line-buffered ERROR", "description": "errors in the build log",
+                "timeout_ms": 600000}}]}}, ["tail -f build.log | grep --line-buffered ERROR"]),
             # A tool's output, a subagent's reply, Claude Code's own texts and meta records don't.
             ({"type": "user", "message": {"content": [{"type": "tool_result", "content": "bcftools output"}]}}, []),
             ({"type": "assistant", "isSidechain": True, "message": {"content": [{"type": "text", "text": "subagent says"}]}}, []),

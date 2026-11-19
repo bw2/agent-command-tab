@@ -526,6 +526,23 @@ def find_the_command_a_claude_code_shell_runs(arguments):
     return match.group(1).replace("'\"'\"'", "'") if match else None
 
 
+def process_is_a_claude_code_monitor_shell(arguments, paths_written_to_by_file_descriptor):
+    """Returns whether a process is a shell Claude Code's Monitor tool runs its command in: a shell
+    Claude Code's shell tool runs (find_the_command_a_claude_code_shell_runs) whose standard
+    output goes to no file, and that writes to no Claude Code task's output file. The Monitor
+    tool runs its command so, writing to a socket, while every command of the Bash tool writes to
+    its task's output file (checked with Claude Code 2.1.316).
+
+    Args:
+        arguments: The process's arguments (read_process_arguments_and_environment's first part).
+        paths_written_to_by_file_descriptor: The files it has open for writing
+            (list_the_files_a_process_has_open's), {} for a process that can't be read.
+    """
+    return (not paths_written_to_by_file_descriptor.get(STANDARD_OUTPUT_FILE_DESCRIPTOR)
+            and not any(find_the_claude_code_task_of_an_output_file(path) for path in paths_written_to_by_file_descriptor.values())
+            and find_the_command_a_claude_code_shell_runs(arguments) is not None)
+
+
 def list_detached_processes(earliest_started_at):
     """Returns [(ProcessInfo, arguments, current folder or None)] for this user's processes that
     launchd adopted (their parent ended) and that started at or after earliest_started_at. A job an
@@ -580,10 +597,8 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
     "is_a_shell_writing_to_a_file_of_no_claude_code_task": whether it is a shell or wrapper with a
     process running in it, writing to no Claude Code task's file, whose standard output goes to a
     file (not to a pipe, a socket or a device, as Claude Code's Monitor tool's shells write to sockets),
-    "is_a_claude_code_monitor_shell": whether it is a shell Claude Code's shell tool runs
-    (find_the_command_a_claude_code_shell_runs) whose standard output goes to no file: Claude
-    Code's Monitor tool runs its command so, writing to a socket, while every command of its
-    Bash tool writes to its task's output file (checked with Claude Code 2.1.316),
+    "is_a_claude_code_monitor_shell": whether it is a shell Claude Code's Monitor tool runs its
+    command in (process_is_a_claude_code_monitor_shell),
     "resource_usage": (memory in bytes, CPU seconds) of the child and the processes below it, or
     None}] for each process the agent started (list_child_processes_of_the_agent), then for each
     detached one (choose_detached_processes_of_the_conversation), which runs in the background.
@@ -626,7 +641,7 @@ def read_child_processes(agent_process_id, turn_is_under_way, turn_started_at, r
             "is_a_shell_writing_to_a_file_of_no_claude_code_task": (
                 child.name in SHELL_AND_WRAPPER_PROCESS_NAMES and shown_process is not child and claude_code_task_id is None
                 and output_file_path != "" and not output_file_path.startswith(DEVICES_FOLDER)),
-            "is_a_claude_code_monitor_shell": claude_code_shell_command is not None and claude_code_task_id is None and output_file_path == "",
+            "is_a_claude_code_monitor_shell": process_is_a_claude_code_monitor_shell(child_arguments, paths_written_to_by_file_descriptor),
             "resource_usage": read_process_tree_resource_usage(child.process_id) if reads_resource_usage else None})
     for process, arguments in detached_processes_of_the_conversation:
         child_processes.append({
@@ -704,24 +719,31 @@ def an_agent_program_runs_through_a_shell_below(descendant_processes, read_start
 
 def find_process_ids_of_the_shells_of_claude_code_tasks(descendant_processes, claude_code_task_ids):
     """Returns the IDs of the shells and wrappers among the processes below an agent that write to
-    the output file of one of the Claude Code tasks (find_the_claude_code_task_of_an_output_file).
+    the output file of one of the Claude Code tasks (find_the_claude_code_task_of_an_output_file),
+    and of the shells of Claude Code's Monitor tool (process_is_a_claude_code_monitor_shell).
     Given the tasks Claude Code runs in the background, as its hooks list them, they are the
     shells of the commands the agent doesn't wait on, which choose_command_the_agent_is_waiting_on
     then leaves out (as helper_process_ids) with everything below them: by the processes alone, a
     command started in the background earlier in the turn would be taken for the one the agent
-    waits on. No process's files are read when there are no tasks.
+    waits on. A Monitor's command always runs in the background, and its shell writes to no file
+    that would tell its task, so it is found whatever the tasks given.
 
     Args:
         descendant_processes: ProcessInfo of every process below the agent process.
         claude_code_task_ids: The IDs of the tasks the hooks reported so far
             (hook_event_tracking.list_background_task_ids_known_so_far); empty or None for none.
     """
-    if not claude_code_task_ids:
-        return frozenset()
-    return frozenset(
-        process.process_id for process in descendant_processes if process.name in SHELL_AND_WRAPPER_PROCESS_NAMES
-        and any(find_the_claude_code_task_of_an_output_file(path) in claude_code_task_ids
-                for path in (list_the_files_a_process_has_open(process.process_id, only_those_open_for_writing=True) or {}).values()))
+    shell_process_ids = set()
+    for process in descendant_processes:
+        if process.name not in SHELL_AND_WRAPPER_PROCESS_NAMES:
+            continue
+        paths_written_to_by_file_descriptor = list_the_files_a_process_has_open(process.process_id, only_those_open_for_writing=True) or {}
+        if (any(find_the_claude_code_task_of_an_output_file(path) in (claude_code_task_ids or ())
+                for path in paths_written_to_by_file_descriptor.values())
+                or process_is_a_claude_code_monitor_shell(read_process_arguments_and_environment(process.process_id)[0],
+                                                          paths_written_to_by_file_descriptor)):
+            shell_process_ids.add(process.process_id)
+    return frozenset(shell_process_ids)
 
 
 def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at, helper_process_names, now,
@@ -732,7 +754,8 @@ def choose_command_the_agent_is_waiting_on(descendant_processes, turn_started_at
     Not commands, and nor is anything below them: the tool's own helpers (Claude Code's
     caffeinate, Codex's code mode host), processes that were already running while the session
     was idle (MCP servers, from the second turn on), the shells of the commands Claude Code's
-    hooks list as running in the background, and Claude Code shells older than the turn:
+    hooks list as running in the background, those of its Monitor tool, and Claude Code shells
+    older than the turn:
     each runs one command, so one from an earlier turn is a command left in the background, and
     what it starts now (a wait loop's next `sleep 30`) isn't this turn's. Any other process older
     than the turn isn't a command itself, but what it starts in this turn is (Codex runs new

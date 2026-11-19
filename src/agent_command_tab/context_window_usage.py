@@ -274,7 +274,7 @@ def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent
                                   agent_resumed_a_conversation=False, resumed_conversation_file=None):
     """Returns the files that may be a Codex session's conversation, most recently written first;
     empty before the first prompt (Codex writes the file then, and doesn't keep it open, so lsof
-    can't find it).
+    can't find it), unless the process was started to resume a conversation its arguments name.
 
     They are the rollout-*.jsonl files in the day folders (YYYY/MM/DD, local time) from the
     agent's start to today whose first line, the session_meta header, is a terminal session's
@@ -287,9 +287,13 @@ def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent
     folder with its own header: once written since the process started, it fits whatever start
     its header names. It is resumed_conversation_file for a process whose arguments name its
     conversation, and the day folders since the process started are searched as well, for a
-    conversation it starts later. Only for a resume that names none (`codex resume --last`, or
-    its picker) is every day folder searched, any file written since the process started
-    fitting: that lists and checks every conversation file Codex has kept.
+    conversation it starts later. Until the process writes to that file (Codex does so only
+    with the next prompt), the file fits only while no other file does: it is the conversation
+    the process shows from its start, and another file that fits means the process has gone on
+    to a new conversation since (/new or /clear) and left the resumed one without a prompt.
+    Only for a resume that names none (`codex resume --last`, or its picker) is every day
+    folder searched, any file written since the process started fitting: that lists and checks
+    every conversation file Codex has kept, and finds none before the process's next prompt.
 
     Args:
         codex_sessions_folder: Codex's sessions folder ($CODEX_HOME/sessions).
@@ -316,14 +320,17 @@ def find_codex_conversation_files(codex_sessions_folder, agent_started_at, agent
             modified_at = os.path.getmtime(path)
         except OSError:
             continue
-        if modified_at >= agent_started_at:
+        if modified_at >= agent_started_at or path == resumed_conversation_file:
             candidates.append((modified_at, path))
     conversation_files = []
-    for _, path in sorted(candidates, reverse=True):
+    for modified_at, path in sorted(candidates, reverse=True):
         header = read_codex_session_header(path)
         if (codex_session_header_comes_from_a_terminal_session(header) and header.get("cwd") == agent_working_folder
                 and (resumed_conversation_is_not_known or path == resumed_conversation_file
-                     or parse_iso_time(header.get("timestamp")) >= agent_started_at - 5)):
+                     or parse_iso_time(header.get("timestamp")) >= agent_started_at - 5)
+                # A file not written since the process started is the one its arguments name, the
+                # last of the candidates: it fits only when none of those written since does.
+                and (modified_at >= agent_started_at or not conversation_files)):
             conversation_files.append(path)
     return conversation_files
 

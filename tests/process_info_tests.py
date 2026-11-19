@@ -146,12 +146,15 @@ class KillProcessTests(unittest.TestCase):
     def test_what_ignores_sigterm_gets_sigkill(self):
         with tempfile.TemporaryDirectory() as folder:
             shell = start_claude_code_style_shell(folder, agent_command="trap \"\" TERM; sleep 60")
+            self.addCleanup(kill_the_shell_and_what_runs_in_it, shell)  # so a check that fails below leaves nothing running
+            command_process_id = list_descendant_processes(shell.pid)[0].process_id  # sleep: it ignores SIGTERM as its shell does
             core = make_core_listing("s1", shell.pid)
             with unittest.mock.patch.object(dashboard_core, "SECONDS_AN_AGENT_GETS_TO_END_BEFORE_IT_IS_KILLED", 0.5):
                 asyncio.run(core.handle_end_child_process(
                     ActionRequest("end_child_process", {"session_id": "s1"}, {"process_id": shell.pid})))
             self.assertTrue(wait_until(lambda: shell.returncode is not None))
         self.assertEqual(shell.returncode, -signal.SIGKILL)
+        self.assertTrue(wait_until(lambda: not process_is_alive(command_process_id)))  # SIGKILL for the shell alone would leave it running
 
     def test_kill_names_the_processes_below_it_that_run_as_another_user_and_keep_running(self):
         with tempfile.TemporaryDirectory() as folder:

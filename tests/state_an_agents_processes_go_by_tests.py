@@ -192,6 +192,8 @@ class BackgroundCommandStartedInTheTurnTests(unittest.IsolatedAsyncioTestCase):
                     unittest.mock.patch.object(dashboard_core, "read_process_arguments_and_environment", lambda process_id: ([], {})), \
                     unittest.mock.patch.object(dashboard_core, "read_name_the_process_was_started_as",
                                                lambda process_id: {4: "npm", 6: "pytest"}[process_id]), \
+                    unittest.mock.patch("agent_command_tab.agent_process_tree.read_process_arguments_and_environment",
+                                        lambda process_id: ([], {})), \
                     unittest.mock.patch("agent_command_tab.agent_process_tree.list_the_files_a_process_has_open",
                                         lambda process_id, only_those_open_for_writing: paths_written_to_by_process_id.get(process_id)):
                 await core.note_command_the_agent_is_waiting_on("s1", agent_session, reading, "working", 1100.0)

@@ -1,14 +1,18 @@
 """The message each agent session gets from "Talk to Each Other", and the text a tab row's "Copy
 contact info" copies (messages_between_agent_sessions)."""
 
+import os
+import subprocess
+import tempfile
 import unittest
 
 from agent_command_tab.agent_adapters.base import MESSAGES_THROUGH_CODEX_QUEUE, MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL
-from agent_command_tab.messages_between_agent_sessions import (AgentSessionForMessages,
+from agent_command_tab.messages_between_agent_sessions import (AgentSessionForMessages, build_codex_queue_command,
                                                                build_message_asking_agent_session_to_talk_to_the_others,
                                                                build_contact_info)
+from executable_script_writing import write_executable_script
 
-PLANNING = AgentSessionForMessages("Claude Code", MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, "planning-3a", 101,
+PLANNING =AgentSessionForMessages("Claude Code", MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, "planning-3a", 101,
                                    "/Users/me/project", "planning", "iTerm2 tab")
 REVIEWS = AgentSessionForMessages("Claude Code", MESSAGES_THROUGH_THE_SEND_MESSAGE_TOOL, "reviews-7f", 102,
                                   "/Users/me/project", "reviews", "tmux window")
@@ -16,6 +20,8 @@ CODEX_TESTS = AgentSessionForMessages("Codex", MESSAGES_THROUGH_CODEX_QUEUE, "01
                                       "/Users/me/project/tests", "codex tests", "iTerm2 tab")
 CODEX_DOCS = AgentSessionForMessages("Codex", MESSAGES_THROUGH_CODEX_QUEUE, "01a15e4e-facd-7073-85e7-90d8392b1d54", 104,
                                      "/Users/me/project/docs", "codex docs", "iTerm2 tab")
+# How every `codex queue` command ends: the message read from the here-document that follows it.
+END_OF_A_CODEX_QUEUE_COMMAND = " --message=\"$(cat)\") <<'END_OF_MESSAGE'\n<your message>\nEND_OF_MESSAGE"
 
 
 class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
@@ -31,8 +37,11 @@ class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
             '- the Claude Code session "reviews-7f" (process ID 102, folder /Users/me/project, tmux window "reviews"). '
             'To message it, use your SendMessage tool with to: "reviews-7f".',
             "- the Codex session 01a15e4e-de92-7f31-af6e-877571d0444b (process ID 103, folder /Users/me/project/tests, "
-            'iTerm2 tab "codex tests"). To message it, run: codex queue --thread 01a15e4e-de92-7f31-af6e-877571d0444b '
-            '--message="<your message>"',
+            'iTerm2 tab "codex tests"). To message it, run this, with your message in place of <your message>, written as '
+            "it is (nothing in it needs quoting or escaping):",
+            "(codex queue --thread 01a15e4e-de92-7f31-af6e-877571d0444b --message=\"$(cat)\") <<'END_OF_MESSAGE'",
+            "<your message>",
+            "END_OF_MESSAGE",
         ])
 
     def test_a_codex_session_can_message_codex_sessions_but_not_claude_code_sessions(self):
@@ -43,18 +52,20 @@ class MessageAskingAgentSessionToTalkToTheOthersTests(unittest.TestCase):
                                    'folder /Users/me/project/tests, iTerm2 tab "codex tests").')
         self.assertIn("A Codex session has no way to send a Claude Code session a message", lines[5])
         self.assertIn("but it can message you", lines[5])
-        self.assertTrue(lines[6].endswith('run: codex queue --thread 01a15e4e-facd-7073-85e7-90d8392b1d54 --message="<your message>"'))
+        self.assertTrue(lines[6].endswith("run this, with your message in place of <your message>, written as it is "
+                                          "(nothing in it needs quoting or escaping):"))
+        self.assertEqual("\n".join(lines[7:]), "(codex queue --thread 01a15e4e-facd-7073-85e7-90d8392b1d54" + END_OF_A_CODEX_QUEUE_COMMAND)
 
     def test_a_codex_sessions_own_codex_home_is_set_for_codex_queue(self):  # the sender's may be another
         codex_docs_with_its_own_home = CODEX_DOCS._replace(codex_home_folder="/Users/me/Codex Work")
         message = build_message_asking_agent_session_to_talk_to_the_others("Please sync up.", PLANNING, [codex_docs_with_its_own_home],
                                                                            [PLANNING, codex_docs_with_its_own_home])
-        self.assertTrue(message.endswith("run: CODEX_HOME='/Users/me/Codex Work' codex queue --thread "
-                                         '01a15e4e-facd-7073-85e7-90d8392b1d54 --message="<your message>"'))
+        self.assertTrue(message.endswith(":\n(CODEX_HOME='/Users/me/Codex Work' codex queue --thread "
+                                         "01a15e4e-facd-7073-85e7-90d8392b1d54" + END_OF_A_CODEX_QUEUE_COMMAND))
 
     def test_the_codex_queue_command_runs_the_codex_program_the_app_queues_with(self):  # the sender's shell may find another
         codex_docs_with_the_apps_codex_program = CODEX_DOCS._replace(codex_command_path="/opt/My Tools/codex")
-        command = "run: '/opt/My Tools/codex' queue --thread 01a15e4e-facd-7073-85e7-90d8392b1d54 --message=\"<your message>\""
+        command = ":\n('/opt/My Tools/codex' queue --thread 01a15e4e-facd-7073-85e7-90d8392b1d54" + END_OF_A_CODEX_QUEUE_COMMAND
         self.assertTrue(build_message_asking_agent_session_to_talk_to_the_others(
             "Please sync up.", PLANNING, [codex_docs_with_the_apps_codex_program],
             [PLANNING, codex_docs_with_the_apps_codex_program]).endswith(command))
@@ -80,8 +91,32 @@ class ContactInfoTests(unittest.TestCase):
     def test_a_codex_session_comes_with_its_codex_queue_command_and_its_own_codex_home(self):
         self.assertEqual(build_contact_info(CODEX_DOCS._replace(codex_home_folder="/Users/me/Codex Work")),
                          "Codex session 01a15e4e-facd-7073-85e7-90d8392b1d54 (process ID 104, folder /Users/me/project/docs, "
-                         "iTerm2 tab \"codex docs\"). To message it, run: CODEX_HOME='/Users/me/Codex Work' codex queue "
-                         '--thread 01a15e4e-facd-7073-85e7-90d8392b1d54 --message="<your message>"')
+                         'iTerm2 tab "codex docs"). To message it, run this, with your message in place of <your message>, '
+                         "written as it is (nothing in it needs quoting or escaping):\n"
+                         "(CODEX_HOME='/Users/me/Codex Work' codex queue --thread 01a15e4e-facd-7073-85e7-90d8392b1d54"
+                         + END_OF_A_CODEX_QUEUE_COMMAND)
+
+
+class CodexQueueCommandRunByAShellTests(unittest.TestCase):
+    def test_a_message_put_in_place_of_the_placeholder_reaches_codex_queue_as_written(self):
+        # What a reply written in Markdown may hold: the shell must run none of it and change none of it.
+        message = ("- I'm running `touch ran-what-is-in-backticks` and $(touch ran-what-is-in-parentheses), \"quoted\", $HOME, "
+                   "a ) and a \\n\n\n-- the second part (unfinished")
+        with tempfile.TemporaryDirectory() as folder:
+            # In place of codex: writes its CODEX_HOME, then each of its arguments, with a NUL after each.
+            os.mkdir(os.path.join(folder, "My Tools"))
+            stand_in_codex_path = write_executable_script(
+                os.path.join(folder, "My Tools"), "codex", "#!/bin/sh\nprintf '%s\\0' \"$CODEX_HOME\" \"$@\"\n")
+            command = build_codex_queue_command(CODEX_DOCS._replace(
+                codex_home_folder="/Users/me/Codex Work", codex_command_path=stand_in_codex_path)).replace("<your message>", message)
+            # The shells an agent may run it in (macOS's bash is 3.2), each without the user's startup files.
+            for shell_arguments in (["/bin/bash", "-c"], ["/bin/zsh", "-f", "-c"], ["/bin/sh", "-c"]):
+                with self.subTest(shell_arguments=shell_arguments):
+                    shell = subprocess.run(shell_arguments + [command], cwd=folder, env={"PATH": "/bin:/usr/bin"},
+                                           stdin=subprocess.DEVNULL, capture_output=True, text=True)
+                    self.assertEqual((shell.stdout.split("\0"), shell.stderr),
+                                     (["/Users/me/Codex Work", "queue", "--thread", CODEX_DOCS.address, f"--message={message}", ""], ""))
+            self.assertEqual(os.listdir(folder), ["My Tools"])  # neither touch ran
 
 
 if __name__ == "__main__":

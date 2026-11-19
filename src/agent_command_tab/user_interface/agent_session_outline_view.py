@@ -181,7 +181,9 @@ SELECTION_OUTLINE_INSET = 1
 SELECTION_OUTLINE_CORNER_RADIUS = 4
 # The outline of the selected rows: dark gray in light mode (white wouldn't show on the light
 # rows), white in dark mode. The tab in front's row has one the same size in the accent color.
+# The bottom bar's legend draws its two small squares with these makers too (popover_container).
 SELECTION_OUTLINE_COLOR_MAKER = make_light_and_dark_mode_color_maker(make_srgb_color_maker(85, 85, 85), NSColor.whiteColor)
+FRONT_TAB_OUTLINE_COLOR_MAKER = NSColor.controlAccentColor
 TAB_DRAG_TYPE = "org.agent-command-tab.tab-id"
 WINDOW_DRAG_TYPE = "org.agent-command-tab.window-id"
 COLUMN_IDENTIFIER = "main"
@@ -325,7 +327,7 @@ class RowViewWithSelectionAndFrontTabOutlines(NSTableRowView):
             traceback.print_exc()  # rather than end the app, as for the selection outline
             return
         if is_the_tab_in_front:
-            self.stroke_outline(NSColor.controlAccentColor(), False, False)
+            self.stroke_outline(FRONT_TAB_OUTLINE_COLOR_MAKER(), False, False)
 
     @objc.python_method
     def stroke_outline(self, color, joins_the_row_above, joins_the_row_below):
@@ -1109,6 +1111,9 @@ class AgentSessionListController(NSObject):
             self.redraw_visible_rows()
         elif not self.update_rows_in_place(children_before_by_parent, children_after_by_parent):
             self.reload_and_restore_expansion()
+        # measure_right_columns updated the row of titles while the items were still the old rows':
+        # once more now, since the row hides while no item is a tab's (measure_column_titles_row_height).
+        self.update_column_titles_row()
         self.select_the_window_that_showed()
         self.select_a_row_when_the_rows_were_built_for_another_search(list_search)
         self.on_snapshot_expansion_or_selection_changed()  # a closed window may be gone
@@ -2193,8 +2198,13 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def measure_column_titles_row_height(self):
         """Returns the height of the row of column titles: room for one line of titles, or 0 while
-        none shows (no tab rows, or every titled column turned off or dropped)."""
-        if any(width and COLUMN_TITLES[column_name] for column_name, width in self.column_widths.items()):
+        none shows (no tab rows, or every titled column turned off or dropped). Whether a tab row
+        shows is read from the items, counting those inside collapsed windows, and not from the
+        columns' widths: during a search they stay measured over every tab (measure_right_columns),
+        also when it finds none, and the dropdown, fitted to the rows left, can be narrower than
+        the titles."""
+        if (any(width and COLUMN_TITLES[column_name] for column_name, width in self.column_widths.items())
+                and any(item.kind == "tab" for item in self.list_all_items())):
             return COLUMN_TITLE_LINE_HEIGHT + 2 * COLUMN_TITLES_ROW_PADDING
         return 0
 

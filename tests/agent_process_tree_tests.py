@@ -136,20 +136,44 @@ class CommandTheAgentIsWaitingOnTests(unittest.TestCase):
         # Each shell writes to its task's output file, and the hooks list the first task as running in the background.
         paths_written_to_by_process_id = {3: {1: "/tmp/claude-502/-repo/tasks/b7x1ehsbe.output", 2: "/tmp/claude-502/-repo/tasks/b7x1ehsbe.output"},
                                           5: {1: "/tmp/claude-502/-repo/tasks/bq2m4k0wd.output"}}
-        with unittest.mock.patch("agent_command_tab.agent_process_tree.list_the_files_a_process_has_open",
-                                 lambda process_id, only_those_open_for_writing: paths_written_to_by_process_id.get(process_id)):
+        with processes_below_the_agent(descendants, {}), unittest.mock.patch(
+                "agent_command_tab.agent_process_tree.list_the_files_a_process_has_open",
+                lambda process_id, only_those_open_for_writing: paths_written_to_by_process_id.get(process_id)):
             background_shell_process_ids = find_process_ids_of_the_shells_of_claude_code_tasks(descendants, {"b7x1ehsbe"})
+            # Without background tasks, or before the hooks have listed them, neither shell is found.
+            self.assertEqual([find_process_ids_of_the_shells_of_claude_code_tasks(descendants, task_ids) for task_ids in (set(), None)],
+                             [frozenset(), frozenset()])
         self.assertEqual(background_shell_process_ids, frozenset({3}))
         self.assertEqual(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, frozenset(), NOW, background_shell_process_ids),
                          (foreground_python, 1050.0))
         # Once only the background command runs, the agent waits on none.
         self.assertIsNone(choose_command_the_agent_is_waiting_on(descendants[:2], TURN_STARTED_AT, frozenset(), NOW,
                                                                  background_shell_process_ids))
-        # Without background tasks, or before the hooks have listed them, no process's files are read.
-        with unittest.mock.patch("agent_command_tab.agent_process_tree.list_the_files_a_process_has_open") as list_the_files:
-            self.assertEqual([find_process_ids_of_the_shells_of_claude_code_tasks(descendants, task_ids) for task_ids in (set(), None)],
-                             [frozenset(), frozenset()])
-        list_the_files.assert_not_called()
+
+    def test_a_command_claude_codes_monitor_tool_runs_is_not_the_one_the_agent_waits_on(self):
+        # Started in this turn, each in a shell of Claude Code's shell tool: first a Monitor, then the command the agent waits on.
+        monitor_shell, monitor_tail = ProcessInfo(3, 1, "bash", 1001.0), ProcessInfo(4, 3, "tail", 1001.1)
+        foreground_shell, foreground_python = ProcessInfo(5, 1, "bash", 1050.0), ProcessInfo(6, 5, "python3", 1050.1)
+        descendants = [monitor_shell, monitor_tail, foreground_shell, foreground_python]
+        arguments_by_process_id = {
+            3: ["/bin/bash", "-c", "source snapshot.sh && eval 'tail -f build.log' < /dev/null && pwd -P >| /tmp/claude-1a2b-cwd"],
+            5: ["/bin/bash", "-c", "source snapshot.sh && eval 'python3 run.py' < /dev/null && pwd -P >| /tmp/claude-3c4d-cwd"]}
+        # By the processes alone, the older of the two is taken.
+        self.assertEqual(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, frozenset(), NOW), (monitor_tail, 1001.0))
+        # The Monitor's shell writes to a socket: to no file, so to none of a task the hooks could list it by.
+        paths_written_to_by_process_id = {3: {}, 5: {1: "/tmp/claude-502/-repo/tasks/bq2m4k0wd.output"}}
+        with processes_below_the_agent(descendants, arguments_by_process_id), unittest.mock.patch(
+                "agent_command_tab.agent_process_tree.list_the_files_a_process_has_open",
+                lambda process_id, only_those_open_for_writing: paths_written_to_by_process_id.get(process_id)):
+            # Before the hooks have reported any task, with none running, and with another one running.
+            monitor_shell_process_ids = [find_process_ids_of_the_shells_of_claude_code_tasks(descendants, task_ids)
+                                         for task_ids in (None, set(), {"b7x1ehsbe"})]
+        self.assertEqual(monitor_shell_process_ids, [frozenset({3})] * 3)
+        self.assertEqual(choose_command_the_agent_is_waiting_on(descendants, TURN_STARTED_AT, frozenset(), NOW, monitor_shell_process_ids[0]),
+                         (foreground_python, 1050.0))
+        # Once only the Monitor's command runs, the agent waits on none.
+        self.assertIsNone(choose_command_the_agent_is_waiting_on(descendants[:2], TURN_STARTED_AT, frozenset(), NOW,
+                                                                 monitor_shell_process_ids[0]))
 
     def test_a_command_more_than_six_shells_down_is_the_one_the_agent_waits_on(self):
         with sleep_running_eight_shells_down() as (outermost_shell_process_id, sleep_process):
@@ -350,10 +374,13 @@ class ChildProcessTests(unittest.TestCase):
                     {"task": ("b3jvsqvs2", False, False), "loop sent to /dev/null": ("b5loop", False, False),
                      "other file": (None, True, False), "pipe": (None, False, False), "monitor": (None, False, True),
                      "device": (None, False, False)})
-                # The shell of a task that runs in the background is found among them by that file.
-                self.assertEqual(find_process_ids_of_the_shells_of_claude_code_tasks(
-                    [read_process_info(shell.pid) for shell in shells.values()], {"b5loop"}),
-                    frozenset({shells["loop sent to /dev/null"].pid}))
+                # The shell of a task that runs in the background is found among them by that file,
+                # and the Monitor's with it, also when no task is known.
+                shell_processes = [read_process_info(shell.pid) for shell in shells.values()]
+                self.assertEqual(find_process_ids_of_the_shells_of_claude_code_tasks(shell_processes, {"b5loop"}),
+                                 frozenset({shells["loop sent to /dev/null"].pid, shells["monitor"].pid}))
+                self.assertEqual(find_process_ids_of_the_shells_of_claude_code_tasks(shell_processes, None),
+                                 frozenset({shells["monitor"].pid}))
             finally:
                 for shell in shells.values():
                     os.killpg(shell.pid, signal.SIGKILL)

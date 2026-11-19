@@ -666,8 +666,8 @@ class SettingsWindowController(WindowFrameSavingController):
         if self.window is None:  # show takes the settings when it builds the window
             return
         # A width typed but not saved yet is kept (a click on a switch doesn't end its editing);
-        # the field saves it once its editing ends. A field that only has the focus, as the first
-        # text field does when the window opens, shows the new width.
+        # the field saves it once its editing ends. A field that only has the focus (Tab moved to
+        # it) shows the new width.
         width_editor = self.sidebar_width_field.currentEditor()
         width_is_being_typed = width_editor is not None and width_editor.string() != str(int(self.settings["sidebar_width"]))
         self.settings = dict(settings)

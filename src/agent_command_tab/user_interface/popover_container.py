@@ -1,4 +1,4 @@
-"""The panel around the list: the sort order, the search box with its "aA" checkbox, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a note while the app's hooks are missing, and pause or resume the selected rows at the bottom right.
+"""The panel around the list: the sort order, the search box with its "aA" checkbox, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a legend of the rows' two outlines, then a note while the app's hooks are missing, and pause or resume the selected rows at the bottom right.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
 sidebar and in the list window, each with its own list controller.
@@ -7,16 +7,19 @@ sidebar and in the list window, each with its own list controller.
 import math
 
 import objc
-from AppKit import (NSBezelStyleRecessed, NSButton, NSColor, NSControlSizeSmall, NSControlStateValueOff, NSControlStateValueOn,
-                    NSEdgeInsetsMake, NSEvent, NSEventModifierFlagCommand, NSFont,
-                    NSFontWeightRegular,
-                    NSImage, NSImageLeading, NSImageSymbolConfiguration,
+from AppKit import (NSAlignAllEdgesNearest, NSAttributedString, NSBezelStyleRecessed, NSBezierPath, NSButton, NSColor,
+                    NSControlSizeSmall, NSControlStateValueOff, NSControlStateValueOn,
+                    NSEdgeInsetsMake, NSEvent, NSEventModifierFlagCommand, NSFont, NSFontAttributeName,
+                    NSFontWeightRegular, NSForegroundColorAttributeName,
+                    NSImage, NSImageLeading, NSImageSymbolConfiguration, NSInsetRect,
                     NSLineBreakByTruncatingTail, NSMakeRect, NSPopover, NSPopoverBehaviorTransient, NSPopUpButton, NSRectFill, NSScreen,
                     NSScrollView, NSSearchField, NSTextField, NSView, NSViewController, NSViewHeightSizable, NSViewMaxXMargin,
-                    NSViewMaxYMargin, NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
+                    NSViewMaxYMargin, NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable, NSZeroRect)
 
 from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_CANT_RUN, HOOKS_SEND_NO_EVENTS
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
+from agent_command_tab.user_interface.agent_session_outline_view import (FRONT_TAB_OUTLINE_COLOR_MAKER,
+                                                                         SELECTION_OUTLINE_COLOR_MAKER, SELECTION_OUTLINE_WIDTH)
 from agent_command_tab.user_interface.control_helpers import (add_popup_choices, is_a_command_press_of_letter,
                                                               read_popup_choice, select_popup_choice, show_symbol_on_button)
 from agent_command_tab.user_interface.named_colors import appearance_is_dark
@@ -64,12 +67,15 @@ IDLE_TABS_BUTTON_KEY = "i"
 IDLE_TABS_BUTTON_LOOKS = {False: ("Hide Idle", "Hide tabs whose agent is idle (⌘-i)"),
                           True: ("Show Idle", "Show tabs whose agent is idle (⌘-i)")}
 # Command-S and Command-Shift-S open the top bar's Sort pop-up in the list that has the keyboard,
-# and its tooltip says so.
+# and its tooltip says so. While the pop-up is hidden (a list too narrow for it), they open its
+# menu at its place (ListPanelView.performKeyEquivalent_).
 SORT_ORDER_POPUP_KEY = "s"
 SORT_ORDER_POPUP_TOOL_TIP = "Sort the list (⌘-s)"
 GAP_BETWEEN_TOP_BAR_BUTTONS = 4
 SMALLEST_SORT_POPUP_WIDTH = 60  # a few letters of its title and its arrows
-GAP_AFTER_THE_SORT_CONTROL = 8  # before the search box, or the message line where no search box shows
+# Before the search box (or the message line where no search box shows), and in the bottom bar
+# before the legend: one gap for both, so each bar's second control starts as far from its first.
+GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON = 16
 # The search box after the Sort pop-up, with the "aA" checkbox (whether case counts) after it: as
 # wide as LARGEST_SEARCH_FIELD_WIDTH where there is room, narrower in a narrow sidebar, the
 # checkbox hidden where even the narrowest box wouldn't leave it room, and the box hidden below
@@ -95,6 +101,17 @@ HOOKS_CANT_RUN_TOOL_TIP = ("The Python this copy of AgentCommandTab runs on is g
 HOOKS_SEND_NO_EVENTS_TOOL_TIP = ("Claude Code sessions started after the hooks were installed haven't sent "
                                  "AgentCommandTab any events, so background tasks and turn ends may show wrong. "
                                  "Check that hooks aren't turned off in Claude Code: type /hooks in a session.")
+GAP_BEFORE_THE_HOOKS_NOTE = 8  # after the legend, or after the Settings button where the legend doesn't show
+# The bottom bar's legend of the rows' two outlines, after the Settings button: its title, then, for
+# each outline, a small square stroked like it (the maker of its color) and what it marks. The
+# current tab is the one tab in front, whose row has the outline in the accent color (many tabs can
+# be on screen at once).
+ROW_OUTLINES_LEGEND_TITLE = "Legend:"
+ROW_OUTLINES_LEGEND_ENTRIES = ((FRONT_TAB_OUTLINE_COLOR_MAKER, "= current tab"), (SELECTION_OUTLINE_COLOR_MAKER, "= selected"))
+ROW_OUTLINES_LEGEND_SQUARE_SIZE = 9  # a little more than the height of the small text's capital letters
+ROW_OUTLINES_LEGEND_SQUARE_CORNER_RADIUS = 2
+GAP_BEFORE_A_LEGEND_SQUARE = 8
+GAP_AFTER_A_LEGEND_SQUARE = 4
 
 
 def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
@@ -137,6 +154,12 @@ def make_gray_pill_button(title, target, action_name):
     return button
 
 
+def measure_text_baseline_y_in_its_frame(control):
+    """Returns how far above the bottom of the control's frame the baseline of its text is (AppKit
+    measures it from the frame less the insets it lines controls up by)."""
+    return control.alignmentRectInsets().bottom + control.lastBaselineOffsetFromBottom()
+
+
 def click_control_on_a_command_press_of_letter(control, letter, event):
     """Clicks the control, when it shows, for Command and the letter, with or without Shift (a
     control's own key equivalent matches only one of them). Returns whether it did."""
@@ -157,7 +180,9 @@ class ExpandOrCollapseAllButton(PointingHandButton):
 
 
 class SortOrderPopUpButton(NSPopUpButton):
-    """The top bar's Sort pop-up, whose menu Command-S and Command-Shift-S open while it shows. The
+    """The top bar's Sort pop-up, whose menu Command-S and Command-Shift-S open while it shows
+    (AppKit doesn't ask a hidden view for its keys: the panel opens the menu of a hidden pop-up,
+    ListPanelView.performKeyEquivalent_). The
     open menu takes the keys (the arrows, Return and typing choose an order, Esc closes it), and
     the list's rows have the keyboard again once it closes, as they never lost it."""
 
@@ -182,14 +207,77 @@ class ListSearchField(NSSearchField):
         return became_first_responder
 
 
+class RowOutlinesLegendView(NSView):
+    """The bottom bar's legend of the rows' two outlines: ROW_OUTLINES_LEGEND_TITLE, then, for each
+    of ROW_OUTLINES_LEGEND_ENTRIES, a small square stroked as the rows stroke that outline (the same
+    color maker and line width) and the text of what it marks, in the hooks note's font and color.
+    It draws them each time AppKit draws it, as the rows draw their outlines, so its squares follow
+    light and dark mode and the accent color as those do."""
+
+    def initWithHeight_textBaselineY_(self, height, text_baseline_y):
+        """Makes the legend as wide as its texts and squares need.
+
+        Args:
+            height: The height of the view, the bottom bar's.
+            text_baseline_y: Where the texts' baseline is, from the view's bottom.
+        """
+        self = objc.super(RowOutlinesLegendView, self).initWithFrame_(NSZeroRect)
+        if self is None:
+            return None
+        font = NSFont.systemFontOfSize_(NSFont.smallSystemFontSize())
+        self.text_baseline_y = text_baseline_y
+        # The squares' middle is the middle of the texts' capital letters.
+        self.square_y = text_baseline_y + (font.capHeight() - ROW_OUTLINES_LEGEND_SQUARE_SIZE) / 2
+        text_attributes = {NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.secondaryLabelColor()}
+        title = NSAttributedString.alloc().initWithString_attributes_(ROW_OUTLINES_LEGEND_TITLE, text_attributes)
+        self.texts_and_their_x = [(title, 0)]
+        self.square_color_makers_and_their_x = []
+        x = math.ceil(title.size().width)  # whole points, so each square starts on a whole one
+        for outline_color_maker, text in ROW_OUTLINES_LEGEND_ENTRIES:
+            x += GAP_BEFORE_A_LEGEND_SQUARE
+            self.square_color_makers_and_their_x.append((outline_color_maker, x))
+            x += ROW_OUTLINES_LEGEND_SQUARE_SIZE + GAP_AFTER_A_LEGEND_SQUARE
+            attributed_text = NSAttributedString.alloc().initWithString_attributes_(text, text_attributes)
+            self.texts_and_their_x.append((attributed_text, x))
+            x += math.ceil(attributed_text.size().width)
+        self.setFrameSize_((x, height))
+        return self
+
+    def drawRect_(self, rect):
+        for attributed_text, x in self.texts_and_their_x:
+            # With no drawing option the rectangle's origin is the text's baseline, and its height isn't used.
+            attributed_text.drawWithRect_options_(NSMakeRect(x, self.text_baseline_y, self.bounds().size.width - x, 0), 0)
+        for outline_color_maker, x in self.square_color_makers_and_their_x:
+            # The square's outer edges on whole pixels, so its lines are as sharp as a row's outline.
+            square_rect = self.backingAlignedRect_options_(
+                NSMakeRect(x, self.square_y, ROW_OUTLINES_LEGEND_SQUARE_SIZE, ROW_OUTLINES_LEGEND_SQUARE_SIZE), NSAlignAllEdgesNearest)
+            outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSInsetRect(square_rect, SELECTION_OUTLINE_WIDTH / 2, SELECTION_OUTLINE_WIDTH / 2),
+                ROW_OUTLINES_LEGEND_SQUARE_CORNER_RADIUS, ROW_OUTLINES_LEGEND_SQUARE_CORNER_RADIUS)
+            outline.setLineWidth_(SELECTION_OUTLINE_WIDTH)
+            outline_color_maker().setStroke()
+            outline.stroke()
+
+
 class ListPanelView(NSView):
     """The panel's root view: tells its controller when its size changes, so the top bar fits,
     and when the top bar's empty space is dragged (the dropdown or the sidebar then turns into
     the list window). The top bar's controls take
-    their own clicks."""
+    their own clicks. It answers the Sort pop-up's keys while the pop-up is hidden."""
 
     def acceptsFirstMouse_(self, event):
         return True  # the sidebar's top bar drags from the first click, though the dashboard isn't the active app
+
+    def performKeyEquivalent_(self, event):
+        # AppKit asks only the views that show for their keys, so a hidden Sort pop-up never gets
+        # Command-S. A list too narrow for the pop-up may have dropped the column titles that
+        # sort it too, so the panel opens the pop-up's menu for it.
+        controller = getattr(self, "controller", None)
+        if (controller is not None and controller.list_sort_order_popup.isHidden()
+                and is_a_command_press_of_letter(SORT_ORDER_POPUP_KEY, event.charactersIgnoringModifiers(), event.modifierFlags())):
+            controller.open_the_menu_of_the_hidden_sort_popup()
+            return True
+        return objc.super(ListPanelView, self).performKeyEquivalent_(event)
 
     def drawRect_(self, rect):
         # In dark mode, the top bar, the column titles and the bottom bar are filled with the list's
@@ -381,7 +469,17 @@ class ListPanelController(NSViewController):
         self.pause_or_resume_selected_rows_button.setAction_("pauseOrResumeSelectedRowsClicked:")
         self.pause_or_resume_selected_rows_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)  # stays at the bottom right
         root_view.addSubview_(self.pause_or_resume_selected_rows_button)
-        # After the Settings button, while the app's hooks are missing for an agent tool with a session
+        # After the Settings button, the legend of the rows' outlines; fit_bottom_bar_to_width shows
+        # it where it fits. Its texts, and the hooks note's after it, sit on the baseline of the
+        # button's title.
+        settings_button_frame = self.settings_button.frame()
+        self.bottom_bar_text_baseline_y = settings_button_frame.origin.y + measure_text_baseline_y_in_its_frame(self.settings_button)
+        self.row_outlines_legend_view = RowOutlinesLegendView.alloc().initWithHeight_textBaselineY_(
+            BOTTOM_BAR_HEIGHT, self.bottom_bar_text_baseline_y)
+        self.row_outlines_legend_view.setFrameOrigin_((
+            settings_button_frame.origin.x + settings_button_frame.size.width + GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON, 0))
+        root_view.addSubview_(self.row_outlines_legend_view)
+        # After the legend, while the app's hooks are missing for an agent tool with a session
         # in the list, a note and a button that installs them.
         self.hooks_note_text_field = NSTextField.labelWithString_("")
         self.hooks_note_text_field.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
@@ -423,7 +521,8 @@ class ListPanelController(NSViewController):
         control shows with its "Sort:" label when there is
         room, without it in a narrower one, and then with the pop-up narrowed, cutting its title
         short, until it hides below SMALLEST_SORT_POPUP_WIDTH (only in a sidebar or a list window,
-        where the column titles still sort the list). The search box takes the room left, up to
+        where the column titles that still show sort the list and Command-S opens the pop-up's
+        menu at its place). The search box takes the room left, up to
         LARGEST_SEARCH_FIELD_WIDTH. Where each step happens depends on how wide
         macOS draws the controls. The message line takes the room left before the buttons, so it never covers them,
         while the search box keeps its smallest width;
@@ -467,8 +566,8 @@ class ListPanelController(NSViewController):
                               and room_right_edge - label_x >= SMALLEST_SEARCH_FIELD_WIDTH)
         checkbox_shows = (search_field_shows and not controls_step_aside_for_a_message
                           and room_right_edge - label_x >= SMALLEST_SEARCH_FIELD_WIDTH + checkbox_room)
-        smallest_search_room = (SMALLEST_SEARCH_FIELD_WIDTH + (checkbox_room if checkbox_shows else 0) + GAP_AFTER_THE_SORT_CONTROL
-                                if search_field_shows else 0)
+        smallest_search_room = (SMALLEST_SEARCH_FIELD_WIDTH + (checkbox_room if checkbox_shows else 0)
+                                + GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON if search_field_shows else 0)
         sort_room_right_edge = room_right_edge - smallest_search_room
         popup_x_after_label = label_x + label_width + 2
         label_fits = (not controls_step_aside_for_a_message
@@ -479,7 +578,7 @@ class ListPanelController(NSViewController):
         self.sort_label.setHidden_(not label_fits)
         self.list_sort_order_popup.setHidden_(not popup_fits)
         self.list_sort_order_popup.setFrame_(NSMakeRect(popup_x, popup_frame.origin.y, popup_width, popup_frame.size.height))
-        search_x = popup_x + popup_width + GAP_AFTER_THE_SORT_CONTROL if popup_fits else label_x
+        search_x = popup_x + popup_width + GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON if popup_fits else label_x
         has_a_message = bool(self.message_text_field.stringValue())
         search_field_width = (SMALLEST_SEARCH_FIELD_WIDTH if has_a_message  # the message takes the rest
                               else max(min(LARGEST_SEARCH_FIELD_WIDTH,
@@ -553,30 +652,48 @@ class ListPanelController(NSViewController):
 
     @objc.python_method
     def fit_bottom_bar_to_width(self):
-        """Puts the hooks note after the Settings button at the bottom left, then its Install Hooks
+        """Shows the legend of the rows' outlines, after the Settings button at the bottom left, only
+        whole: where it ends before the pause or resume button's place (kept free also while that
+        button is hidden, so the legend doesn't come and go as rows are selected) and, while there
+        is a hooks note, where the whole note and the Install Hooks button it needs fit after it
+        too. The note asks for something to be done and the legend only explains, so in a narrower
+        bar the legend hides and the note takes its place.
+
+        Puts the hooks note after the legend, or after the Settings button where the legend is
+        hidden, then its Install Hooks
         button (when there is something to install and room for it before the pause or resume
         button, which it would otherwise cover in a narrow sidebar), the note cut short
         before the button and the pause or resume button."""
         note = self.hooks_note_text_field.stringValue()
+        note_size = self.hooks_note_text_field.fittingSize()
+        button_width, button_height = self.install_hooks_button.frame().size
+        pause_or_resume_button_place_x = self.pause_or_resume_selected_rows_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
+        legend_frame = self.row_outlines_legend_view.frame()
+        legend_right_end_x = legend_frame.origin.x + legend_frame.size.width
+        room_for_the_whole_note_and_its_button = (
+            GAP_BEFORE_THE_HOOKS_NOTE + note_size.width
+            + (GAP_BETWEEN_TOP_BAR_BUTTONS + button_width if self.agent_tool_names_to_install_hooks_for else 0)
+            if note else 0)
+        legend_shows = legend_right_end_x + room_for_the_whole_note_and_its_button <= pause_or_resume_button_place_x
+        self.row_outlines_legend_view.setHidden_(not legend_shows)
         self.hooks_note_text_field.setHidden_(not note)
         if not note:
             self.install_hooks_button.setHidden_(True)
             return
-        right_end_x = (self.pause_or_resume_selected_rows_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
-                       if not self.pause_or_resume_selected_rows_button.isHidden()
+        right_end_x = (pause_or_resume_button_place_x if not self.pause_or_resume_selected_rows_button.isHidden()
                        else self.view().bounds().size.width - PANEL_SIDE_MARGIN)
         settings_button_frame = self.settings_button.frame()
-        note_x = settings_button_frame.origin.x + settings_button_frame.size.width + 8
-        button_width, button_height = self.install_hooks_button.frame().size
+        note_x = (legend_right_end_x if legend_shows
+                  else settings_button_frame.origin.x + settings_button_frame.size.width) + GAP_BEFORE_THE_HOOKS_NOTE
         shows_install_button = (bool(self.agent_tool_names_to_install_hooks_for)
                                 and note_x + GAP_BETWEEN_TOP_BAR_BUTTONS + button_width <= right_end_x)
         self.install_hooks_button.setHidden_(not shows_install_button)
         if shows_install_button:
             right_end_x -= button_width + GAP_BETWEEN_TOP_BAR_BUTTONS
-        note_size = self.hooks_note_text_field.fittingSize()
         note_width = max(min(note_size.width, right_end_x - note_x), 0)
-        self.hooks_note_text_field.setFrame_(NSMakeRect(note_x, (BOTTOM_BAR_HEIGHT - note_size.height) / 2,
-                                                        note_width, note_size.height))
+        self.hooks_note_text_field.setFrame_(NSMakeRect(
+            note_x, self.bottom_bar_text_baseline_y - measure_text_baseline_y_in_its_frame(self.hooks_note_text_field),
+            note_width, note_size.height))
         self.install_hooks_button.setFrameOrigin_((note_x + note_width + GAP_BETWEEN_TOP_BAR_BUTTONS,
                                                    (BOTTOM_BAR_HEIGHT - button_height) / 2))
 
@@ -585,6 +702,17 @@ class ListPanelController(NSViewController):
 
     def listSortOrderChosen_(self, sender):
         self.list_controller.owner.list_sort_order_chosen(read_popup_choice(sender), False)  # in its first direction
+
+    @objc.python_method
+    def open_the_menu_of_the_hidden_sort_popup(self):
+        """Opens the Sort pop-up's own menu with its chosen order at the top left of the pop-up's
+        place, the left end of the top bar, as the pop-up opens it while it shows, and returns
+        once the menu closes. The menu's items are the pop-up's, so an order chosen there is
+        selected in the pop-up and reported like one chosen in the pop-up (listSortOrderChosen_)."""
+        popup_frame = self.list_sort_order_popup.frame()
+        self.list_sort_order_popup.menu().popUpMenuPositioningItem_atLocation_inView_(
+            self.list_sort_order_popup.selectedItem(), (popup_frame.origin.x, popup_frame.origin.y + popup_frame.size.height),
+            self.view())
 
     @objc.python_method
     def show_list_sort_order(self, list_sort_order, is_reversed):

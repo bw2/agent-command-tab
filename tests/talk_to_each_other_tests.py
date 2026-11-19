@@ -180,7 +180,7 @@ class TalkToEachOtherTests(unittest.TestCase):
         self.assertIn('use your SendMessage tool with to: "reviews-7f"', message_for_planning)
         # With the Codex session's own CODEX_HOME, where codex queue finds its conversation, and the
         # codex program the core itself queues with, which the `codex` planning's shell finds may not be.
-        self.assertIn("run: CODEX_HOME=/Users/me/.codex-tests /stand-in/codex queue --thread codex-conversation-1", message_for_planning)
+        self.assertIn("\n(CODEX_HOME=/Users/me/.codex-tests /stand-in/codex queue --thread codex-conversation-1 ", message_for_planning)
         self.assertNotIn('with to: "planning-3a"', message_for_planning)  # not told to message itself
         self.assertEqual([conversation_id for conversation_id, _ in self.queued], ["codex-conversation-1"])
         self.assertEqual(self.codex_home_folders_queued_with, ["/Users/me/.codex-tests"])
@@ -347,8 +347,10 @@ class ContactInfoInTheCoreTests(unittest.TestCase):
                          'To message it, use your SendMessage tool with to: "planning-3a".')
         self.assertEqual(self.build_contact_info("s3").details["text"],
                          'Codex session codex-conversation-1 (process ID 301, folder /p/codex, iTerm2 tab "codex tests"). '
-                         "To message it, run: CODEX_HOME=/Users/me/.codex-tests /stand-in/codex queue --thread codex-conversation-1 "
-                         '--message="<your message>"')
+                         "To message it, run this, with your message in place of <your message>, written as it is (nothing in it "
+                         "needs quoting or escaping):\n"
+                         "(CODEX_HOME=/Users/me/.codex-tests /stand-in/codex queue --thread codex-conversation-1 "
+                         "--message=\"$(cat)\") <<'END_OF_MESSAGE'\n<your message>\nEND_OF_MESSAGE")
 
     def test_a_session_other_sessions_cant_message_says_why(self):
         self.assertEqual(self.build_contact_info("s4"),

@@ -108,8 +108,8 @@ CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up a
 CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "open_tool_call", "conversation_shows_a_turn_under_way",
                                    "last_message_at")
 # Actions that only read what the core already knows: they don't ask for a fresh gather of the
-# terminals, which every other action does (perform_action). The list's search asks again after
-# every snapshot, so a gather would bring a snapshot, and that snapshot another search.
+# terminals, which every other action does (perform_action). The list's search asks at each
+# change of the text searched for, and changes nothing that a gather would show.
 ACTIONS_THAT_CHANGE_NOTHING = frozenset({"find_agent_sessions_whose_conversations_contain"})
 # How long iTerm2 must have said working before Claude Code's own "idle" counts over it without a
 # turn end from the hooks: at a turn's start Claude Code's own report may lag iTerm2's for a moment
@@ -2837,7 +2837,9 @@ class DashboardCore:
 
     async def update_conversation_file_readings(self, session_id, agent_session):
         """Looks up one agent session's conversation file when due and reads its end again when
-        it changed. A /clear can change the session's record (conversation_files_by_session_id)
+        it changed. What the end of the same file no longer tells (the context size, the last
+        message's time, whether a turn is under way) stays as read before, until the file gets
+        shorter. A /clear can change the session's record (conversation_files_by_session_id)
         while this waits on a lookup or a read; the record is then fetched again, and the reads'
         results are dropped. So are those of a lookup or a read during which the tab closed, got
         another agent (tab_still_runs_the_agent_process), or, for a Codex session, came to share
@@ -2910,6 +2912,7 @@ class DashboardCore:
             # During the reads, the tab closed or got another agent, /clear or a new conversation took this
             # file's place, or another Codex session came to share its folder (which forgets the file).
             return
+        started_over = False
         if new_search_texts is not None:
             texts, read_up_to_byte, started_over = new_search_texts
             self.conversation_search_texts_by_session_id[session_id] = add_texts_to_conversation_search_text(
@@ -2917,13 +2920,17 @@ class DashboardCore:
             if texts or started_over:
                 self.note_that_conversation_search_texts_changed()
         conversation_file["modified_at"] = modified_at
-        if context_tokens is not None:
-            self.note_reading_value(session_id, "context_tokens", context_tokens)
-        if context_window_tokens is not None:
-            self.note_reading_value(session_id, "context_window_tokens", context_window_tokens)
+        # None for one of these says only that the file's end holds no record that tells (a long
+        # turn's tool calls and output fill it), not that the turn ended or that there is no
+        # message, so the value read before stays. A file that got shorter was written anew
+        # (started_over), and what its earlier content told is forgotten.
+        for reading_name, value in (("context_tokens", context_tokens), ("context_window_tokens", context_window_tokens),
+                                    ("last_message_at", last_message_at), ("conversation_shows_a_turn_under_way", turn_is_under_way)):
+            if value is not None or started_over:
+                self.note_reading_value(session_id, reading_name, value)
+        # The open tool call is replaced each time: the agent writes little after a call it waits
+        # on, so a file's end without one nearly always means that none is open.
         self.note_reading_value(session_id, "open_tool_call", open_tool_call)
-        self.note_reading_value(session_id, "last_message_at", last_message_at)
-        self.note_reading_value(session_id, "conversation_shows_a_turn_under_way", turn_is_under_way)
         self.note_reading_value(session_id, "process_id_whose_turns_run_outside_the_tab",
                                 agent_session["process_id"] if turns_run_outside_the_tab else None)
         open_tool_started_at = (open_tool_call or {}).get("open_tool_started_at")

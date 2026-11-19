@@ -44,22 +44,33 @@ def describe_agent_session_for_messages(agent_session):
 
 
 def build_codex_queue_command(recipient):
-    """Returns the command that sends the recipient, a Codex session, a message, with
-    "<your message>" in place of the message. It runs the codex program the app itself runs
-    `codex queue` with (recipient.codex_command_path), which may not be the `codex` the sender's
-    shell finds, or plain `codex` when the app found none."""
-    # The message attached to its option, so one starting with "-" isn't read as an option. Its
-    # CODEX_HOME, since the sender's may differ.
-    return (f"{build_codex_home_setting(recipient.codex_home_folder)}{shlex.quote(recipient.codex_command_path or 'codex')} "
-            f'queue --thread {shlex.quote(recipient.address)} --message="<your message>"')
+    """Returns the command that sends the recipient, a Codex session, a message: three lines, the
+    middle one "<your message>" in place of the message, which may take several lines. It runs
+    the codex program the app itself runs `codex queue` with (recipient.codex_command_path),
+    which may not be the `codex` the sender's shell finds, or plain `codex` when the app found
+    none."""
+    # The message is the text of a here-document whose end word is quoted, so the shell passes it
+    # on as written, less the line breaks at its end: between double quotes, it would run what a
+    # message has in backticks or $(...). (Only a line that is just END_OF_MESSAGE can't be part
+    # of a message: the here-document ends there.) The here-document is the standard input of the
+    # whole parenthesized command, where `cat` reads it: one inside the $(...) itself fails in
+    # bash 3.2, macOS's /bin/bash, on a message with an apostrophe. The message attached to its
+    # option, so one starting with "-" isn't read as an option. Its CODEX_HOME, since the
+    # sender's may differ.
+    return (f"({build_codex_home_setting(recipient.codex_home_folder)}{shlex.quote(recipient.codex_command_path or 'codex')} "
+            f'queue --thread {shlex.quote(recipient.address)} --message="$(cat)") <<\'END_OF_MESSAGE\'\n'
+            "<your message>\n"
+            "END_OF_MESSAGE")
 
 
 def explain_how_to_send_a_message_to(recipient):
-    """Returns the sentence telling a session that can message the recipient how to: run
-    `codex queue` for a Codex session, which any agent with a shell can, or use the SendMessage
-    tool for a Claude Code session, which only another Claude Code session has."""
+    """Returns the text telling a session that can message the recipient how to: run
+    `codex queue` for a Codex session (a sentence, then build_codex_queue_command's lines), which
+    any agent with a shell can, or use the SendMessage tool for a Claude Code session, which only
+    another Claude Code session has."""
     if recipient.how_other_agent_sessions_send_it_messages == MESSAGES_THROUGH_CODEX_QUEUE:
-        return f"To message it, run: {build_codex_queue_command(recipient)}"
+        return ("To message it, run this, with your message in place of <your message>, written as it is (nothing in it "
+                f"needs quoting or escaping):\n{build_codex_queue_command(recipient)}")
     return f'To message it, use your SendMessage tool with to: "{recipient.address}".'
 
 
@@ -83,7 +94,7 @@ def build_contact_info(agent_session):
 
 
 def explain_how_to_send_a_message(sender, recipient, recipient_gets_the_message_too):
-    """Returns the sentence telling the sender how to send the recipient a message, or why it can't.
+    """Returns the text telling the sender how to send the recipient a message, or why it can't.
 
     Args:
         sender: The AgentSessionForMessages that gets this explanation.

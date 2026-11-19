@@ -1,16 +1,19 @@
+import asyncio
 import datetime
 import json
 import os
+import shlex
 import tempfile
 import time
 import unittest
 import unittest.mock
 
-from agent_command_tab import context_window_usage
+from agent_command_tab import context_window_usage, dashboard_core
 from agent_command_tab.agent_adapters import claude_code, codex
 from agent_command_tab.agent_adapters.claude_code import ClaudeCodeAdapter
 from agent_command_tab.agent_adapters.codex import (CodexAdapter, codex_process_runs_its_turns_in_the_shared_server,
                                                     find_conversation_id_named_after_resume)
+from agent_command_tab.agent_process_tree import ProcessInfo
 from agent_command_tab.context_window_usage import (choose_claude_code_context_window_tokens,
                                                     claude_model_has_a_200k_context_window, find_claude_code_transcript,
                                                     find_codex_conversation_file_by_id, find_codex_conversation_files,
@@ -21,6 +24,10 @@ from agent_command_tab.context_window_usage import (choose_claude_code_context_w
                                                     read_turn_is_under_way_from_codex_conversation_file,
                                                     read_turn_started_at_from_claude_code_transcript,
                                                     read_turn_started_at_from_codex_conversation_file)
+from agent_command_tab.dashboard_core import DashboardCore
+from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
+from gathered_window_builders import make_agent_session
+from tab_duplicating import find_launch_command_of_a_duplicate_of_the_tab_of_s1
 
 
 class ContextWindowUsageTests(unittest.TestCase):
@@ -315,10 +322,162 @@ class ContextWindowUsageTests(unittest.TestCase):
         self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now, agent_resumed_a_conversation=True,
                                                        resumed_conversation_file=resumed_file),
                          [started_later_in_the_process, resumed_file])
-        # Not yet written to since the process started: not its conversation yet.
-        os.utime(resumed_file, (now - 120, now - 120))
-        self.assertEqual(find_codex_conversation_files(sessions_folder, now - 60, "/Users/me/code", now, agent_resumed_a_conversation=True,
-                                                       resumed_conversation_file=resumed_file), [started_later_in_the_process])
+
+    def test_the_conversation_a_codex_process_was_started_to_resume_is_its_conversation_before_its_next_prompt(self):
+        now = time.time()
+        sessions_folder = os.path.join(self.folder.name, "sessions")
+
+        def find_files(working_folder="/Users/me/code", **how_the_process_was_started):
+            return find_codex_conversation_files(sessions_folder, now - 60, working_folder, now, **how_the_process_was_started)
+        # `codex resume <ID>`, started a minute ago, of a conversation started 3 days ago and last written a day ago.
+        resumed_file = self.write_codex_conversation_last_written_at("rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl",
+                                                                     now - 3 * 86400, now - 86400)
+        started_to_resume_it = {"agent_resumed_a_conversation": True, "resumed_conversation_file": resumed_file}
+        self.assertEqual(find_files(**started_to_resume_it), [resumed_file])
+        self.assertEqual(find_files("/Users/me/other", **started_to_resume_it), [])  # its header has to fit, as once it is written
+        # Not the conversation of a process started without resume, or to resume one that its arguments don't name.
+        self.assertEqual((find_files(), find_files(agent_resumed_a_conversation=True)), ([], []))
+        os.utime(resumed_file, (now - 10, now - 10))  # its next prompt
+        self.assertEqual(find_files(**started_to_resume_it), [resumed_file])
+
+    def test_a_resumed_codex_conversation_left_without_a_prompt_gives_way_to_the_one_the_process_started_after_it(self):
+        now = time.time()
+        write_conversation = self.write_codex_conversation_last_written_at
+        # `codex resume <ID>`, started a minute ago, then /new or /clear and a prompt, with none in the resumed conversation.
+        # With both files fitting, Save session and Duplicate couldn't tell which conversation runs now.
+        resumed_file = write_conversation("rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl", now - 3 * 86400, now - 86400)
+        started_later_in_the_process = write_conversation("rollout-c-01a151f0-8f89-7711-a0cc-cfcae10915fa.jsonl", now - 20, now - 1)
+        self.assertEqual(find_codex_conversation_files(os.path.join(self.folder.name, "sessions"), now - 60, "/Users/me/code", now,
+                                                       agent_resumed_a_conversation=True, resumed_conversation_file=resumed_file),
+                         [started_later_in_the_process])
+
+    def make_core_with_one_codex_session(self, arguments, started_at, a_shared_server_runs=False):
+        """Returns a core whose one agent session, s1, is a Codex process (301) started with these
+        arguments at started_at in /Users/me/code, with the test's folder as its Codex home. The
+        process is made up: what the adapter and the core read of it, and whether Codex's shared
+        background server runs, are replaced until the test ends."""
+        arguments_and_environment = (arguments, {"CODEX_HOME": self.folder.name})
+        for module, name, replacement in (
+                (codex, "read_process_info", lambda process_id: ProcessInfo(process_id, 1, "codex", started_at)),
+                (codex, "read_process_arguments_and_environment", lambda process_id: arguments_and_environment),
+                (dashboard_core, "read_process_arguments_and_environment", lambda process_id: arguments_and_environment),
+                (codex, "read_process_current_folder", lambda process_id: "/Users/me/code"),
+                (codex, "a_codex_shared_background_server_runs", lambda: a_shared_server_runs)):
+            patch = unittest.mock.patch.object(module, name, replacement)
+            patch.start()
+            self.addCleanup(patch.stop)
+        core = DashboardCore(lambda snapshot: None, lambda message: None)
+        core.agent_sessions = {"s1": make_agent_session(301, CodexAdapter(), "Codex", "/Users/me/code", started_at)}
+        return core
+
+    def test_a_restored_codex_sessions_conversation_is_known_to_save_session_duplicate_and_its_row_before_its_next_prompt(self):
+        now = time.time()
+        conversation_id = "01a151f0-8f89-7711-a0cc-cfcae10915f8"
+        # Restore sessions started it a minute ago, as `codex resume <ID>`; its conversation was last written a day ago.
+        resumed_file = self.write_codex_conversation_last_written_at(f"rollout-a-{conversation_id}.jsonl", now - 3 * 86400, now - 86400)
+        with open(resumed_file, "a") as file:
+            file.write(json.dumps({"type": "event_msg", "payload": {
+                "type": "token_count", "info": {"last_token_usage": {"total_tokens": 23000}}}}) + "\n")
+        os.utime(resumed_file, (now - 86400, now - 86400))
+        core = self.make_core_with_one_codex_session(["codex", "resume", conversation_id], now - 60)
+        self.assertEqual(asyncio.run(core.find_conversation_to_save_or_copy("s1", core.agent_sessions["s1"])),
+                         (conversation_id, None, self.folder.name, ""))
+        self.assertEqual(find_launch_command_of_a_duplicate_of_the_tab_of_s1(core),
+                         f"CODEX_HOME={shlex.quote(self.folder.name)} codex fork {conversation_id}")
+        asyncio.run(core.update_conversation_file_readings("s1", core.agent_sessions["s1"]))
+        self.assertEqual(core.session_readings_by_session_id["s1"]["context_tokens"], 23000)
+
+    def test_a_restored_codex_session_that_shares_its_folder_with_another_codex_session_still_has_no_conversation_it_can_tell(self):
+        now = time.time()
+        conversation_id = "01a151f0-8f89-7711-a0cc-cfcae10915f8"
+        self.write_codex_conversation_last_written_at(f"rollout-a-{conversation_id}.jsonl", now - 3 * 86400, now - 86400)
+        core = self.make_core_with_one_codex_session(["codex", "resume", conversation_id], now - 60)
+        core.agent_sessions["s2"] = make_agent_session(302, CodexAdapter(), "Codex", "/Users/me/code", now - 30)
+        self.assertEqual(asyncio.run(core.find_conversation_to_save_or_copy("s1", core.agent_sessions["s1"])), (
+            None, None, None, "another Codex session runs or ran in the same folder, so its conversation can't be told apart"))
+        self.assertIsNone(asyncio.run(core.look_up_conversation_file("s1", core.agent_sessions["s1"])))  # nor does its row show one
+
+    def test_a_restored_codex_session_cleared_before_its_next_prompt_has_no_conversation_until_it_writes_the_new_one(self):
+        now = time.time()
+        resumed_conversation_id, next_conversation_id = "01a151f0-8f89-7711-a0cc-cfcae10915f8", "01a151f0-8f89-7711-a0cc-cfcae10915f9"
+        self.write_codex_conversation_last_written_at(f"rollout-a-{resumed_conversation_id}.jsonl", now - 3 * 86400, now - 86400)
+        core = self.make_core_with_one_codex_session(["codex", "resume", resumed_conversation_id], now - 60)
+        agent_session = core.agent_sessions["s1"]
+
+        async def clear_from_the_list():  # what DashboardCore.type_slash_command_into_agent_session does around its typing
+            core.forget_the_cleared_conversation("s1", agent_session, await core.find_current_conversation_file("s1", agent_session))
+
+        def look_up_and_read_its_conversation_file():
+            core.conversation_files_by_session_id["s1"]["looked_up_at"] = 0  # a lookup is due
+            asyncio.run(core.update_conversation_file_readings("s1", agent_session))
+        asyncio.run(clear_from_the_list())
+        look_up_and_read_its_conversation_file()  # still finds the resumed conversation's file, which the /clear ended
+        self.assertIsNone(core.conversation_files_by_session_id["s1"]["path"])
+        self.assertEqual(asyncio.run(core.find_conversation_to_save_or_copy("s1", agent_session)),
+                         (None, None, None, "it has had no conversation since its /clear"))
+        self.assertEqual(find_launch_command_of_a_duplicate_of_the_tab_of_s1(core), "codex")  # the copy starts fresh
+        # The new conversation's first prompt writes its file, the only one that fits from then on.
+        next_file = self.write_codex_conversation_last_written_at(f"rollout-b-{next_conversation_id}.jsonl", now - 20, now - 1)
+        look_up_and_read_its_conversation_file()
+        self.assertEqual(core.conversation_files_by_session_id["s1"]["path"], next_file)
+        self.assertEqual(asyncio.run(core.find_conversation_to_save_or_copy("s1", agent_session)),
+                         (next_conversation_id, None, self.folder.name, ""))
+
+    def test_a_restored_codex_session_paused_before_its_next_prompt_is_asked_where_its_turns_run(self):
+        now = time.time()
+        conversation_id = "01a151f0-8f89-7711-a0cc-cfcae10915f8"
+        self.write_codex_conversation_last_written_at(f"rollout-a-{conversation_id}.jsonl", now - 3 * 86400, now - 86400)
+        for arguments, a_shared_server_runs, turns_run_outside_the_tab in (
+                (["codex", "resume", conversation_id], True, True), (["codex", "resume", conversation_id], False, False),
+                (["codex", "resume", "--no-daemon", conversation_id], True, False)):
+            core = self.make_core_with_one_codex_session(arguments, now - 60, a_shared_server_runs)
+            with unittest.mock.patch.object(dashboard_core, "pause_agent_session",
+                                            return_value=(ActionResult(False, "can't be paused"), None)) as pause:
+                asyncio.run(core.handle_pause_agent_sessions(ActionRequest("pause_agent_sessions", {"session_ids": ["s1"]})))
+            self.assertEqual(pause.call_args.kwargs["turns_run_outside_the_tab"], turns_run_outside_the_tab, arguments)
+
+    def test_a_long_codex_turn_stays_under_way_with_its_last_messages_time_while_the_files_end_holds_only_its_tool_output(self):
+        now = time.time()
+        conversation_name = "rollout-a-01a151f0-8f89-7711-a0cc-cfcae10915f8.jsonl"
+        path = self.write_codex_conversation_last_written_at(conversation_name, now - 30, now - 30)
+        core = self.make_core_with_one_codex_session(["codex"], now - 60)
+        agent_session = core.agent_sessions["s1"]
+        core.session_readings_by_session_id["s1"] = {"turn_shows_on_screen": False}  # Codex hides its timer while its answer streams
+        modified_at = now - 30
+
+        def append_records_and_read_the_file(*records):
+            """Returns what the core then knows of the conversation: (whether a turn is under way,
+            its last message's time, its context size, the state of the tab's agent)."""
+            nonlocal modified_at
+            with open(path, "a") as file:
+                for record in records:
+                    file.write(json.dumps(record) + "\n")
+            modified_at += 1  # a new modification time, which is what makes the core read the file again
+            os.utime(path, (modified_at, modified_at))
+            asyncio.run(core.update_conversation_file_readings("s1", agent_session))
+            reading = core.session_readings_by_session_id["s1"]
+            return (reading.get("conversation_shows_a_turn_under_way"), reading.get("last_message_at"), reading.get("context_tokens"),
+                    core.read_status_value_of_the_tabs_own_agent("s1", agent_session))
+        prompt_written_at = datetime.datetime(2026, 11, 3, 14, 5, 12, tzinfo=datetime.timezone.utc).timestamp()
+        self.assertEqual(append_records_and_read_the_file(
+            {"timestamp": "2026-11-03T14:05:11.900Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
+            {"timestamp": "2026-11-03T14:05:12.000Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "UserMessage", "content": [{"type": "text", "text": "Count the samples in each cohort"}]}}},
+            {"timestamp": "2026-11-03T14:05:14.000Z", "type": "event_msg", "payload": {
+                "type": "token_count", "info": {"last_token_usage": {"total_tokens": 23000}}}}),
+            (True, prompt_written_at, 23000, "working"))
+        # More tool output than the part of the file's end that is read: it holds no turn's start, message or usage.
+        tool_output = {"timestamp": "2026-11-03T14:06:00.000Z", "type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "c1", "output": "x" * 8000}}
+        self.assertEqual(append_records_and_read_the_file(*[tool_output] * (context_window_usage.BYTES_TO_READ_FROM_THE_END // 8000 + 1)),
+                         (True, prompt_written_at, 23000, "working"))
+        # The turn's end does replace what was read before.
+        self.assertEqual(append_records_and_read_the_file(
+            {"timestamp": "2026-11-03T14:20:00.000Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1"}}),
+            (False, prompt_written_at, 23000, "idle"))
+        # Written anew and shorter (only its header): what its earlier content told is forgotten.
+        self.write_codex_conversation_last_written_at(conversation_name, now - 30, now - 30)
+        self.assertEqual(append_records_and_read_the_file(), (None, None, None, "idle"))
 
     def test_unicode_line_separators_inside_a_record_do_not_split_it(self):
         # Written raw: json.dumps would escape them, Claude Code's own writer doesn't.

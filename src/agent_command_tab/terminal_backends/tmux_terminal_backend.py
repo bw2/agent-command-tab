@@ -42,7 +42,8 @@ FIELD_SEPARATOR = "\x1f"  # between the fields of one line of tmux's output: nam
 # the pane each window's keys go to, pane_last the pane that tmux's last-pane command goes back to
 # in its window, window_zoomed_flag whether the active pane is zoomed to fill its window, and
 # window_last_flag the window that tmux's last-window command goes back to in its session: a peek
-# puts all four back.
+# puts all four back. automatic-rename is the value in effect for the window, its own or the one
+# every window inherits: find_ids_of_windows_renamed_by_their_user asks tmux which, where it is off.
 PANE_FIELD_NAMES = ("session_id", "session_name", "session_created", "window_id", "window_active", "automatic-rename",
                     "window_name", "pane_id", "pane_index", "pane_pid", "pane_current_path", "pane_current_command", "pane_active",
                     "pane_last", "window_zoomed_flag", "window_last_flag")
@@ -210,17 +211,18 @@ def describe_the_process_in_front(process_id_in_front):
     return process_id_in_front, command_line, read_process_current_folder(process_id_in_front), process.started_at
 
 
-def build_gathered_windows(pane_records, describe_process=describe_the_process_in_front):
+def build_gathered_windows(pane_records, ids_of_windows_renamed_by_their_user, describe_process=describe_the_process_in_front):
     """Returns gathered window dicts (snapshot_builder's module docstring) for list-panes's records:
     one per tmux session, a tab per tmux window, and the window's first pane as its session.
 
     A session named by its user (tmux names the others after the number in their ID: "3" for $3,
     so another number is its user's choice, such as "2026") and a window renamed by its user
-    (which turns automatic-rename off) count as titles of their own; otherwise the list names the
-    row after its agent session.
+    count as titles of their own; otherwise the list names the row after its agent session.
 
     Args:
         pane_records: parse_pane_records_with_the_process_in_front's records, in tmux's order.
+        ids_of_windows_renamed_by_their_user: The IDs of the tmux windows whose names their users
+            gave them (TmuxTerminalBackend.find_ids_of_windows_renamed_by_their_user's).
         describe_process: describe_the_process_in_front, or a stand-in.
     """
     gathered_windows_by_session_id = {}
@@ -243,7 +245,7 @@ def build_gathered_windows(pane_records, describe_process=describe_the_process_i
     for gathered_window in gathered_windows_by_session_id.values():
         for gathered_tab in gathered_window["tabs"]:
             pane_record = first_pane_record_by_window_id[gathered_tab["tab_id"]]
-            window_was_renamed = pane_record["automatic-rename"] == "0"
+            window_was_renamed = gathered_tab["tab_id"] in ids_of_windows_renamed_by_their_user
             job_process_id, command_line, job_folder, job_started_at = describe_process(pane_record["process_id_in_front"])
             gathered_tab.update({
                 "title": pane_record["window_name"],
@@ -412,10 +414,31 @@ class TmuxTerminalBackend(TerminalBackend):
         ids_opened_before_this_gather = set(self.window_and_tab_ids_opened_since_the_last_gather)
         pane_records = await asyncio.to_thread(parse_pane_records_with_the_process_in_front,
                                                await self.run_tmux(build_list_panes_command()))
+        ids_of_windows_renamed_by_their_user = await self.find_ids_of_windows_renamed_by_their_user(pane_records)
         self.pane_records_of_the_last_gather = pane_records
-        self.gathered_windows = await asyncio.to_thread(build_gathered_windows, pane_records)
+        self.gathered_windows = await asyncio.to_thread(build_gathered_windows, pane_records, ids_of_windows_renamed_by_their_user)
         self.window_and_tab_ids_opened_since_the_last_gather -= ids_opened_before_this_gather
         return self.gathered_windows
+
+    async def find_ids_of_windows_renamed_by_their_user(self, pane_records):
+        """Returns the IDs of the tmux windows that have automatic-rename turned off for
+        themselves, as tmux turns it off for a window that is given a name (rename-window, or
+        new-window -n). The automatic-rename field of pane_records can't tell them: it is the
+        value in effect for the window, which is off for every window, also those nobody named,
+        once automatic renaming is turned off for all windows (`set-option -g -w automatic-rename
+        off` in tmux's configuration file). The oldest tmux the app works with has no format that
+        tells a window's own value from an inherited one, so each window where the field says off
+        is asked with show-options -A, which prints one line: "automatic-rename off" for the
+        window's own value, and "automatic-rename* off" for an inherited one. All of them are
+        asked in one tmux run, and tmux isn't run while the field says on for every window.
+
+        Raises TerminalRequestFailed when one of those windows was closed since pane_records were read."""
+        window_ids = sorted({pane_record["window_id"] for pane_record in pane_records if pane_record["automatic-rename"] == "0"})
+        if not window_ids:
+            return set()
+        output = await self.run_tmux(join_tmux_commands(
+            [["show-options", "-A", "-w", "-t", window_id, "automatic-rename"] for window_id in window_ids]))
+        return {window_id for window_id, line in zip(window_ids, output.splitlines()) if line == "automatic-rename off"}
 
     def find_gathered_window(self, window_id):
         return next((gathered_window for gathered_window in self.gathered_windows if gathered_window["window_id"] == window_id),

@@ -34,8 +34,9 @@ ITERM2_BUNDLE_IDENTIFIER = "com.googlecode.iterm2"
 SESSION_VARIABLES_TO_WATCH = ("commandLine", "status")
 SECONDS_TO_WAIT_FOR_THE_STATUS_IN_ITERM2S_TAB_BAR = 2
 SECONDS_FOR_FULL_SCREEN_ANIMATION = 1.0
-# Asking the iterm2 package to connect while iTerm2 isn't running would start iTerm2 (it asks
-# for its cookie through AppleScript), so the backend waits for iTerm2 to run, checking this often.
+# While iTerm2 isn't running, the iterm2 package can't connect: it asks iTerm2 for its cookie
+# through AppleScript, which fails then (it doesn't start iTerm2). So the backend waits for iTerm2
+# to run, checking this often, rather than running AppleScript again and again.
 SECONDS_BETWEEN_CHECKS_FOR_ITERM2_RUNNING = 3
 SECONDS_BEFORE_CONNECTING_AGAIN_AFTER_A_FAILURE = 30  # iTerm2 runs, but refused (its Python API is off, say)
 # A bracketed paste: the agent takes the text between these as one paste, newlines included,

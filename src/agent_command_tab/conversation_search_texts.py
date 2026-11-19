@@ -18,8 +18,9 @@ from agent_command_tab.claude_code_transcript_records import (COMMAND_NAME_PATTE
                                                               list_message_blocks)
 from agent_command_tab.open_tool_call_reading import read_codex_message_text
 
-# Claude Code's tool that runs shell commands.
-CLAUDE_CODE_SHELL_TOOL_NAME = "Bash"
+# Claude Code's tools that run a shell command, each with the command as its input's "command":
+# Bash, and Monitor, which runs one in the background and passes on what it prints.
+CLAUDE_CODE_SHELL_TOOL_NAMES = ("Bash", "Monitor")
 # What the user typed after a slash command or skill's name, in the record Claude Code writes for it
 # (claude_code_transcript_records.COMMAND_NAME_PATTERN has the name).
 CLAUDE_CODE_COMMAND_ARGUMENTS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.S)
@@ -100,7 +101,8 @@ def describe_claude_code_command_the_user_typed(text):
 
 def extract_search_texts_from_claude_code_record(record):
     """Returns the texts of one Claude Code transcript record: a prompt, slash command or skill the
-    user typed, the main agent's reply text and the commands its Bash tool ran (not a subagent's)."""
+    user typed, the main agent's reply text and the commands its Bash and Monitor tools ran (not a
+    subagent's)."""
     blocks = list_message_blocks(record)
     if record.get("type") == "user":
         kind = classify_user_record(record, blocks)
@@ -113,7 +115,7 @@ def extract_search_texts_from_claude_code_record(record):
     for block in blocks:
         if block.get("type") == "text":
             texts.append(str(block.get("text") or ""))
-        elif block.get("type") == "tool_use" and block.get("name") == CLAUDE_CODE_SHELL_TOOL_NAME:
+        elif block.get("type") == "tool_use" and block.get("name") in CLAUDE_CODE_SHELL_TOOL_NAMES:
             command = (block.get("input") or {}).get("command")
             if isinstance(command, str):
                 texts.append(command)

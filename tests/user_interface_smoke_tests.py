@@ -40,13 +40,16 @@ from Foundation import NSContainsRect, NSIndexSet, NSMaxY, NSMinY, NSNotificatio
 from agent_command_tab.app_controller import SECONDS_BEFORE_THE_INSTALLED_AGENT_TOOLS_ARE_CHECKED_AGAIN, AppController, yield_activation_to
 from agent_command_tab.command_line import RECONNECT_EXIT_STATUS
 from agent_command_tab.dashboard_core_api import ActionRequest, ActionResult
+from agent_command_tab.list_sorting import LIST_SORT_ORDERS
 from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMALLEST_WINDOW_SIZES
 from agent_command_tab.snapshot_data_classes import (ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry,
                                                      build_window_title_shown_in_the_list)
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, CASE_SENSITIVE_CHECKBOX_TOOL_TIP,
-                                                                GAP_AFTER_THE_SORT_CONTROL, GAP_BETWEEN_TOP_BAR_BUTTONS,
+                                                                GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON,
+                                                                GAP_BEFORE_THE_HOOKS_NOTE, GAP_BETWEEN_TOP_BAR_BUTTONS,
                                                                 HOOKS_SEND_NO_EVENTS_TOOL_TIP, LARGEST_SEARCH_FIELD_WIDTH,
-                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH,
+                                                                LIST_SORT_ORDER_TITLES,
+                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH, ROW_OUTLINES_LEGEND_SQUARE_SIZE,
                                                                 SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS,
                                                                 SMALLEST_POPOVER_WIDTH, SMALLEST_SEARCH_FIELD_WIDTH,
                                                                 SMALLEST_SORT_POPUP_WIDTH,
@@ -55,9 +58,11 @@ from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKIN
 from agent_command_tab.saved_agent_sessions_store import rename_saved_session
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
                                                                          CONVERSATION_ONLY_MATCH_ROW_ALPHA, DIM_DOT_ALPHA,
+                                                                         FRONT_TAB_OUTLINE_COLOR_MAKER,
                                                                          GAP_BEFORE_DETAILS, ROW_HEIGHT, ROW_RIGHT_MARGIN,
                                                                          SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW,
-                                                                         SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW, SMALLEST_TAB_NAME_WIDTH,
+                                                                         SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW,
+                                                                         SELECTION_OUTLINE_COLOR_MAKER, SMALLEST_TAB_NAME_WIDTH,
                                                                          TEXT_FIELD_INSETS,
                                                                          AgentSessionListController, RowButton,
                                                                          RowViewWithSelectionAndFrontTabOutlines, build_index_set,
@@ -65,6 +70,7 @@ from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_
                                                                          compute_selection_outline_rect, list_moves_that_reorder)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons
 from agent_command_tab.user_interface.app_icon import build_app_icon
+from agent_command_tab.user_interface.control_helpers import add_popup_choices, read_popup_choice
 from agent_command_tab.user_interface.named_colors import COLOR_MAKERS_BY_NAME
 from agent_command_tab.user_interface.row_text_rendering import STATE_TEXT_COLOR_NAME_BY_STATE
 from agent_command_tab.user_interface.talk_to_each_other_alert import build_talk_to_each_other_alert
@@ -263,6 +269,15 @@ class MenuThatRecordsWhereItWouldOpen(NSMenu):
     def popUpMenuPositioningItem_atLocation_inView_(self, item, location, view):
         self.delegate().menuNeedsUpdate_(self)
         self.openings = getattr(self, "openings", []) + [(tuple(location), self.delegate().menu_target_item)]
+        return False
+
+
+class MenuThatRecordsItsOpenings(NSMenu):
+    """A menu that records each time it is asked to open, as (the item to place, where, in which view), and stays
+    closed: a menu that opens waits there for a choice."""
+
+    def popUpMenuPositioningItem_atLocation_inView_(self, item, location, view):
+        self.openings = getattr(self, "openings", []) + [(item, tuple(location), view)]
         return False
 
 
@@ -903,6 +918,31 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(titles_row_view.isHidden())
         self.assertEqual(titles_row_view.frame().size.height, COLUMN_TITLE_LINE_HEIGHT + 2 * COLUMN_TITLES_ROW_PADDING)
 
+    def test_the_column_titles_row_hides_while_a_search_finds_no_tab_and_comes_back_as_it_was(self):
+        # During a search the columns keep the widths of every tab's texts, while the dropdown shrinks to the "+" row
+        # that is left: titles placed by those widths can start left of the dropdown's edge.
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        titles_row_view = self.list_controller.column_titles_row_view
+        titles_row_view.layoutSubtreeIfNeeded()
+        status_title_field = titles_row_view.column_title_text_fields["state"]
+        column_widths_before_the_search = dict(self.list_controller.column_widths)
+        status_title_x_before_the_search = status_title_field.frame().origin.x
+        self.type_in_the_search_box("quagga")  # in no title, and in no conversation
+        self.owner.answer_conversation_search([])
+        self.assertEqual(self.list_row_item_ids(), ["new_window"])
+        self.assertTrue(titles_row_view.isHidden())
+        self.assertEqual(titles_row_view.frame().size.height, 0)
+        scroll_view_frame = self.list_controller.outline_view.enclosingScrollView().frame()
+        self.assertEqual(scroll_view_frame.origin.y + scroll_view_frame.size.height,
+                         self.window.contentView().frame().size.height - TOP_BAR_HEIGHT)
+        self.assertEqual(self.list_controller.column_widths, column_widths_before_the_search)
+        self.type_in_the_search_box("")  # every row again, at once
+        titles_row_view.layoutSubtreeIfNeeded()
+        self.assertFalse(titles_row_view.isHidden())
+        self.assertEqual(titles_row_view.frame().size.height, COLUMN_TITLE_LINE_HEIGHT + 2 * COLUMN_TITLES_ROW_PADDING)
+        self.assertFalse(status_title_field.isHidden())
+        self.assertEqual(status_title_field.frame().origin.x, status_title_x_before_the_search)
+
     def test_memory_and_cpu_columns_show_the_agents_use(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(0, 0, memory_bytes=512 * 1024 ** 2, cpu_percent=12))
         self.list_controller.set_shown_columns(["memory_usage", "cpu_usage", "state"])
@@ -926,8 +966,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.select_rows(1)  # "planning", which runs
         # The widths where each step happens follow from the controls' measured widths, which differ
-        # between macOS versions and Python builds: on macOS 27 the label drops below 368 points and
-        # the pop-up would hide below 298, while GitHub's macOS 26 runners measure the controls a few
+        # between macOS versions and Python builds: on macOS 27 the label drops below 376 points and
+        # the pop-up would hide below 306, while GitHub's macOS 26 runners measure the controls a few
         # points wider or narrower.
         label_frame = panel.sort_label.frame()
         full_popup_width = panel.sort_popup_width_for_its_widest_title
@@ -937,14 +977,14 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             + GAP_BETWEEN_TOP_BAR_BUTTONS + panel.expand_or_collapse_all_button.frame().size.width + PANEL_SIDE_MARGIN)
         # The search box at its smallest and its "aA" checkbox keep their room before the sort control's.
         width_from_the_search_box_to_the_right_edge = (
-            GAP_AFTER_THE_SORT_CONTROL + SMALLEST_SEARCH_FIELD_WIDTH + GAP_BETWEEN_TOP_BAR_BUTTONS
+            GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON + SMALLEST_SEARCH_FIELD_WIDTH + GAP_BETWEEN_TOP_BAR_BUTTONS
             + panel.case_sensitive_checkbox.frame().size.width + width_from_the_buttons_to_the_right_edge)
         narrowest_width_with_the_label = (label_frame.origin.x + label_frame.size.width + 2 + full_popup_width
                                           + width_from_the_search_box_to_the_right_edge)
         narrowest_width_with_the_full_popup = label_frame.origin.x + full_popup_width + width_from_the_search_box_to_the_right_edge
         narrowest_width_with_the_popup = label_frame.origin.x + SMALLEST_SORT_POPUP_WIDTH + width_from_the_search_box_to_the_right_edge
         # The label drops first, then the pop-up narrows, then it hides, which never happens in the
-        # dropdown (only in a sidebar or a list window, where the column titles still sort the list).
+        # dropdown (only in a sidebar or a list window, where Command-S still opens its menu).
         self.assertGreater(narrowest_width_with_the_label, narrowest_width_with_the_full_popup)
         self.assertGreater(narrowest_width_with_the_full_popup, narrowest_width_with_the_popup)
         self.assertLessEqual(narrowest_width_with_the_popup, SMALLEST_POPOVER_WIDTH)
@@ -976,7 +1016,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertTrue(SMALLEST_SEARCH_FIELD_WIDTH <= search_frame.size.width <= LARGEST_SEARCH_FIELD_WIDTH, width)
             if not panel.list_sort_order_popup.isHidden():
                 popup_frame = panel.list_sort_order_popup.frame()
-                self.assertEqual(popup_frame.origin.x + popup_frame.size.width + GAP_AFTER_THE_SORT_CONTROL, search_frame.origin.x)
+                self.assertEqual(popup_frame.origin.x + popup_frame.size.width + GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON,
+                                 search_frame.origin.x)
             else:
                 self.assertEqual(search_frame.origin.x, label_frame.origin.x)
             self.assertLessEqual(
@@ -2572,19 +2613,21 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_dropdown_fits_its_size_to_all_rows(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(
-            0, 0, tab_title="a-tab-name-long-enough-to-widen-the-dropdown-past-its-default-width"))
+            0, 0, tab_title="a-tab-name-long-enough-to-widen-the-dropdown-past-its-default-width", background_task_count=3))
         self.dropdown_panel_controller.fit_size_to_rows()
         width, height = self.dropdown_panel_controller.preferredContentSize()
         self.assertGreater(width, self.list_controller.measure_widest_row_width())
         self.assertGreaterEqual(height, self.list_controller.measure_fully_expanded_list_height() + TOP_BAR_HEIGHT
                                 + BOTTOM_BAR_HEIGHT)
-        # Laid out at that size, the long name and every row's details show in full.
+        # Laid out at that size, the long name and the background task lights after it (the row's details) show in
+        # full. A row short of room cuts its name short before its details: too narrow a dropdown fails the name's check.
         self.window.setContentSize_((width, height))
         self.window.contentView().layoutSubtreeIfNeeded()
         row_view = self.lay_out_row_view(1)
         name_text_field = row_view.name_text_field
         self.assertGreaterEqual(name_text_field.frame().size.width, name_text_field.fittingSize().width)
         details_text_field = row_view.details_text_field
+        self.assertEqual(details_text_field.stringValue(), "•••")
         self.assertGreaterEqual(details_text_field.frame().size.width, details_text_field.fittingSize().width)
 
     def test_the_dropdown_opens_sized_for_the_screen_its_menu_bar_icon_is_on(self):
@@ -2725,9 +2768,49 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual(press_s(characters, modifier_flags), (True, 1), (characters, modifier_flags))
         self.assertEqual(press_s("s", NSEventModifierFlagCommand | NSEventModifierFlagControl), (False, 0))  # another key
         self.assertIs(self.window.firstResponder(), first_responder)  # the rows keep the keyboard
-        popup.setHidden_(True)  # a list too narrow for it: the column titles still sort it
-        self.assertEqual(press_s("s", NSEventModifierFlagCommand), (False, 0))
-        popup.setHidden_(False)
+
+    def test_command_s_opens_the_sort_menu_at_the_popups_place_in_a_list_too_narrow_to_show_the_popup(self):
+        # Such a list may have dropped the column titles that sort it too: the key is then the only way left to sort it.
+        panel = self.dropdown_panel_controller
+        popup = panel.list_sort_order_popup
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.owner.list_sort_order_chosen = panel.show_list_sort_order  # as the app controller has every list show a chosen order
+        self.assertEqual([str(menu_item.representedObject()) for menu_item in popup.menu().itemArray()], LIST_SORT_ORDERS)
+        # In place of the pop-up's own menu, which would open and wait for a choice: one that records where it would
+        # open, filled as the panel fills the pop-up's.
+        sort_menu = MenuThatRecordsItsOpenings.alloc().initWithTitle_("")
+        popup.setMenu_(sort_menu)
+        add_popup_choices(popup, LIST_SORT_ORDER_TITLES)
+        panel.show_list_sort_order("alphabet", False)
+        self.set_dropdown_panel_width(200)  # the sidebar's smallest width
+        self.assertTrue(popup.isHidden())
+        first_responder = self.window.firstResponder()
+
+        def press_s(characters, modifier_flags):
+            return self.window.performKeyEquivalent_(make_key_down_event(self.window, characters, 1, modifier_flags))
+        for characters, modifier_flags in (("s", NSEventModifierFlagCommand),
+                                           ("S", NSEventModifierFlagCommand | NSEventModifierFlagShift)):  # Shift makes it "S"
+            self.assertTrue(press_s(characters, modifier_flags), (characters, modifier_flags))
+        self.assertFalse(press_s("s", NSEventModifierFlagCommand | NSEventModifierFlagControl))  # another key
+        self.assertEqual(len(sort_menu.openings), 2)
+        self.assertEqual(sort_menu.openings[0], sort_menu.openings[1])
+        # The chosen order's item at the left end of the top bar, where the pop-up is while it shows.
+        item_placed, (x, y), view = sort_menu.openings[0]
+        self.assertEqual((item_placed.title(), view), ("Name", panel.view()))
+        panel_size = panel.view().bounds().size
+        self.assertEqual(x, panel.sort_label.frame().origin.x)
+        self.assertTrue(panel_size.height - TOP_BAR_HEIGHT < y <= panel_size.height, y)
+        self.assertIs(self.window.firstResponder(), first_responder)  # the rows keep the keyboard
+        # An order chosen in that menu sorts the list, in its first direction, and is the pop-up's choice once it shows again.
+        sort_menu.performActionForItemAtIndex_(sort_menu.indexOfItemWithRepresentedObject_("context_percent"))
+        self.assertEqual((self.list_controller.list_sort_order, self.list_controller.list_sort_order_is_reversed, read_popup_choice(popup)),
+                         ("context_percent", False, "context_percent"))
+        # Wide enough for the pop-up again, the key is the pop-up's own.
+        self.set_dropdown_panel_width(POPOVER_WIDTH)
+        self.assertFalse(popup.isHidden())
+        with unittest.mock.patch.object(popup, "performClick_") as open_the_popups_menu:
+            self.assertTrue(press_s("s", NSEventModifierFlagCommand))
+        self.assertEqual((open_the_popups_menu.call_count, len(sort_menu.openings)), (1, 2))
 
     def test_a_collapsed_monitor_left_without_windows_doesnt_count_as_collapsed(self):
         two_monitor_snapshot = make_two_monitor_snapshot(make_sample_snapshot())
@@ -3349,7 +3432,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         note_frame, button_frame = panel.hooks_note_text_field.frame(), panel.install_hooks_button.frame()
         settings_button_frame = panel.settings_button.frame()  # at the bottom left, then the note, then its button
         self.assertEqual(settings_button_frame.origin.x, PANEL_SIDE_MARGIN)
-        self.assertEqual(note_frame.origin.x, settings_button_frame.origin.x + settings_button_frame.size.width + 8)
+        self.assertEqual(note_frame.origin.x, settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BEFORE_THE_HOOKS_NOTE)
         self.assertLess(note_frame.origin.x + note_frame.size.width, button_frame.origin.x)
         self.assertLessEqual(button_frame.origin.x + button_frame.size.width, panel.pause_or_resume_selected_rows_button.frame().origin.x)
         self.assertLess(button_frame.origin.y + button_frame.size.height, BOTTOM_BAR_HEIGHT)
@@ -3367,6 +3450,135 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             hooks_status_per_agent_tool=(("Claude Code", "missing"),))
         self.list_controller.apply_snapshot(only_codex_sessions)  # no Claude Code session listed: nothing to say about its hooks
         self.assertTrue(panel.hooks_note_text_field.isHidden())
+
+    # ----- the bottom bar's legend of the rows' outlines -----
+
+    def set_dropdown_panel_width(self, width):
+        """Makes the dropdown's panel this wide, as dragging a sidebar's or a list window's edge does, laid out at once."""
+        self.window.setContentSize_((width, 260))
+        self.window.contentView().layoutSubtreeIfNeeded()
+
+    def test_the_legend_starts_as_far_after_the_settings_button_as_the_search_box_after_the_sort_popup(self):
+        panel = self.dropdown_panel_controller
+        legend_view = panel.row_outlines_legend_view
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.window.contentView().layoutSubtreeIfNeeded()
+        for view in (panel.list_sort_order_popup, panel.search_field, panel.settings_button, legend_view):
+            self.assertFalse(view.isHidden())
+        popup_frame, settings_button_frame = panel.list_sort_order_popup.frame(), panel.settings_button.frame()
+        legend_frame = legend_view.frame()
+        gap_before_the_search_box = panel.search_field.frame().origin.x - (popup_frame.origin.x + popup_frame.size.width)
+        gap_before_the_legend = legend_frame.origin.x - (settings_button_frame.origin.x + settings_button_frame.size.width)
+        self.assertEqual(gap_before_the_legend, gap_before_the_search_box)
+        self.assertEqual(gap_before_the_legend, GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON)
+        # It is as tall as the bottom bar, and draws its texts on the baseline of the Settings button's title, where
+        # AppKit says that one is.
+        self.assertEqual((legend_frame.origin.y, legend_frame.size.height), (0, BOTTOM_BAR_HEIGHT))
+        self.assertEqual(legend_view.text_baseline_y, settings_button_frame.origin.y + panel.settings_button.alignmentRectInsets().bottom
+                         + panel.settings_button.lastBaselineOffsetFromBottom())
+
+    def test_the_legend_shows_whole_or_not_at_all_and_never_under_the_pause_or_resume_button(self):
+        panel = self.dropdown_panel_controller
+        legend_view, pause_or_resume_button = panel.row_outlines_legend_view, panel.pause_or_resume_selected_rows_button
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # its hooks are installed: no note
+        legend_frame = legend_view.frame()
+        # The narrowest panel whose bottom bar has room for all of the legend before the pause or resume button.
+        narrowest_width_with_the_legend = math.ceil(legend_frame.origin.x + legend_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS
+                                                    + pause_or_resume_button.frame().size.width + PANEL_SIDE_MARGIN)
+        # Narrowed to that width, to a point less, to the sidebar's smallest width (200), and widened again.
+        for width in (POPOVER_WIDTH, narrowest_width_with_the_legend, narrowest_width_with_the_legend - 1, 200, POPOVER_WIDTH):
+            self.set_dropdown_panel_width(width)
+            # The pause or resume button's place stays free while that button is hidden (no row selected), so the legend
+            # doesn't come and go as rows are selected ("planning", row 1, runs).
+            for selected_rows in ((), (1,)):
+                self.select_rows(*selected_rows)
+                self.assertEqual(pause_or_resume_button.isHidden(), not selected_rows)
+                self.assertEqual(legend_view.isHidden(), width < narrowest_width_with_the_legend, (width, selected_rows))
+                self.assertEqual(tuple(legend_view.frame().size), tuple(legend_frame.size), width)  # never cut short
+                if not legend_view.isHidden():
+                    self.assertLessEqual(legend_frame.origin.x + legend_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                                         pause_or_resume_button.frame().origin.x, width)
+
+    def test_a_hooks_note_follows_the_legend_where_both_fit_whole_and_takes_its_place_where_they_dont(self):
+        panel = self.dropdown_panel_controller
+        legend_view, note_field = panel.row_outlines_legend_view, panel.hooks_note_text_field
+        install_hooks_button, pause_or_resume_button = panel.install_hooks_button, panel.pause_or_resume_selected_rows_button
+        legend_frame, settings_button_frame = legend_view.frame(), panel.settings_button.frame()
+        legend_right_end_x = legend_frame.origin.x + legend_frame.size.width
+        # A note with its Install Hooks button, and one without (hooks that are installed but send nothing).
+        for hooks_status, has_install_hooks_button in (("missing", True), ("send no events", False)):
+            self.list_controller.apply_snapshot(
+                make_sample_snapshot()._replace(hooks_status_per_agent_tool=(("Claude Code", hooks_status),)))
+            note_width = note_field.fittingSize().width
+            narrowest_width_with_both = math.ceil(
+                legend_right_end_x + GAP_BEFORE_THE_HOOKS_NOTE + note_width
+                + (GAP_BETWEEN_TOP_BAR_BUTTONS + install_hooks_button.frame().size.width if has_install_hooks_button else 0)
+                + GAP_BETWEEN_TOP_BAR_BUTTONS + pause_or_resume_button.frame().size.width + PANEL_SIDE_MARGIN)
+            # Room for both: the legend, then the whole note, then its button, before the pause or resume button's place.
+            self.set_dropdown_panel_width(narrowest_width_with_both)
+            self.assertEqual((legend_view.isHidden(), note_field.isHidden(), install_hooks_button.isHidden()),
+                             (False, False, not has_install_hooks_button), hooks_status)
+            note_frame = note_field.frame()
+            self.assertEqual((note_frame.origin.x, note_frame.size.width), (legend_right_end_x + GAP_BEFORE_THE_HOOKS_NOTE, note_width))
+            if has_install_hooks_button:
+                button_frame = install_hooks_button.frame()
+                self.assertEqual(button_frame.origin.x, note_frame.origin.x + note_width + GAP_BETWEEN_TOP_BAR_BUTTONS)
+                self.assertLessEqual(button_frame.origin.x + button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                                     pause_or_resume_button.frame().origin.x)
+            # A point narrower, the legend, which only explains, hides, and the note, which asks for something to be
+            # done, takes its place after the Settings button, still whole.
+            self.set_dropdown_panel_width(narrowest_width_with_both - 1)
+            self.assertEqual((legend_view.isHidden(), note_field.isHidden(), install_hooks_button.isHidden()),
+                             (True, False, not has_install_hooks_button), hooks_status)
+            note_frame = note_field.frame()
+            self.assertEqual((note_frame.origin.x, note_frame.size.width),
+                             (settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BEFORE_THE_HOOKS_NOTE, note_width))
+
+    def test_the_legend_pairs_the_colors_of_the_rows_two_outlines_with_current_tab_and_selected(self):
+        panel = self.dropdown_panel_controller
+        legend_view = panel.row_outlines_legend_view
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # planning (row 1) is the current tab
+        outline_view = self.list_controller.outline_view
+        self.select_rows(3)  # codex-review: row 1 has the current tab's outline, row 3 the selection's, row 2 none
+        # The squares take their colors from the makers the rows stroke their outlines with,
+        (current_tab_color_maker, current_tab_square_x), (selected_color_maker, selected_square_x) = (
+            legend_view.square_color_makers_and_their_x)
+        self.assertIs(current_tab_color_maker, FRONT_TAB_OUTLINE_COLOR_MAKER)
+        self.assertIs(selected_color_maker, SELECTION_OUTLINE_COLOR_MAKER)
+        # each right before the text of what it marks,
+        (title, title_x), (current_tab_text, current_tab_text_x), (selected_text, selected_text_x) = legend_view.texts_and_their_x
+        self.assertEqual([text.string() for text in (title, current_tab_text, selected_text)], ["Legend:", "= current tab", "= selected"])
+        self.assertTrue(title_x < current_tab_square_x < current_tab_text_x < selected_square_x < selected_text_x)
+        content_view = self.window.contentView()
+        content_view.layoutSubtreeIfNeeded()
+        self.assertFalse(legend_view.isHidden())
+        # and are drawn in the colors the rows' outlines are drawn in, in light and in dark mode: read halfway down the
+        # left edge of each square and of each row (given from the panel's bottom left).
+        legend_frame = legend_view.frame()
+        points_on_the_left_edges = [(legend_frame.origin.x + square_x + 0.5,
+                                     legend_frame.origin.y + legend_view.square_y + ROW_OUTLINES_LEGEND_SQUARE_SIZE / 2)
+                                    for square_x in (current_tab_square_x, selected_square_x)]
+        for row in (1, 2, 3):
+            row_view = outline_view.rowViewAtRow_makeIfNecessary_(row, True)
+            row_rect = content_view.convertRect_fromView_(row_view.bounds(), row_view)
+            points_on_the_left_edges.append((row_rect.origin.x + 1, row_rect.origin.y + row_rect.size.height / 2))
+        for appearance_name in (NSAppearanceNameAqua, NSAppearanceNameDarkAqua):
+            self.window.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
+            content_view.layoutSubtreeIfNeeded()
+            bitmap = render_view_into_bitmap(content_view)
+            scale = bitmap.pixelsWide() / content_view.bounds().size.width
+            current_tab_square_edge, selected_square_edge, current_tab_row_edge, row_without_an_outline, selected_row_edge = (
+                convert_color_components_to_0_to_255(
+                    read_drawn_color_components(bitmap, scale, x, content_view.bounds().size.height - y))[:3]
+                for x, y in points_on_the_left_edges)
+            # Each square is far nearer its own outline, as a row draws it, than the other outline or a row without
+            # one (a row's outline may blend with the row where it covers only part of a pixel).
+            for square_edge, its_outline_on_a_row, other_edges in (
+                    (current_tab_square_edge, current_tab_row_edge, (selected_row_edge, row_without_an_outline)),
+                    (selected_square_edge, selected_row_edge, (current_tab_row_edge, row_without_an_outline))):
+                for other_edge in other_edges:
+                    self.assertLess(math.dist(square_edge, its_outline_on_a_row), math.dist(square_edge, other_edge) / 2,
+                                    (appearance_name, square_edge, its_outline_on_a_row, other_edge))
 
 
 class RememberMyChoiceTests(unittest.TestCase):
@@ -4607,7 +4819,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
     def test_a_width_field_that_only_has_the_focus_follows_a_width_dragged_at_the_sidebar(self):
         self.show_the_sidebar_section()
         width_field = self.controller.sidebar_width_field
-        self.assertTrue(self.controller.window.makeFirstResponder_(width_field))  # as the first text field when the window opens
+        self.assertTrue(self.controller.window.makeFirstResponder_(width_field))  # as when Tab moves to it: it only has the focus
         self.owner.settings = dict(self.owner.settings, sidebar_width=555)  # dragged at the sidebar's edge
         self.controller.reflect_settings(self.owner.settings)
         self.assertEqual(width_field.currentEditor().string(), "555")
@@ -4845,6 +5057,10 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         command_fields[0].currentEditor().setString_(typed_command)
         command_fields[0].currentEditor().setSelectedRange_((len(typed_command), 0))  # typed up to its end
         self.controller.show_launch_command_problems({command_fields[1].stringValue(): ""})  # Codex can be run: the note goes
+        # A window lays its views out before it draws them, and that is when AppKit lays the editor's text out and scrolls
+        # to the insertion point in a Python built with the macOS 26 SDK or a later one. In a Python built with an earlier
+        # SDK, AppKit has done both by now.
+        self.controller.window.contentView().layoutSubtreeIfNeeded()
         editor = command_fields[0].currentEditor()
         last_character_x = editor.layoutManager().boundingRectForGlyphRange_inTextContainer_(
             (len(typed_command) - 1, 1), editor.textContainer()).origin.x

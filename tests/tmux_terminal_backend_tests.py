@@ -56,7 +56,7 @@ class ParsingTests(unittest.TestCase):
             make_pane_record("$1", "research", "@2", "%6", window_active="0", automatic_rename="0", window_name="reviews"),
             make_pane_record("$3", "3", "@7", "%9"),  # a session tmux named itself: after the number in its ID
             make_pane_record("$4", "2026", "@8", "%10")]  # another number is a name its user gave it
-        gathered_windows = build_gathered_windows(pane_records, describe_stand_in_process)
+        gathered_windows = build_gathered_windows(pane_records, {"@2"}, describe_stand_in_process)
         self.assertEqual([(gathered_window["window_id"], gathered_window["title_override_format"], gathered_window["selected_tab_id"],
                            [gathered_tab["tab_id"] for gathered_tab in gathered_window["tabs"]]) for gathered_window in gathered_windows],
                          [("$1", "research", "@1", ["@1", "@2"]), ("$3", None, "@7", ["@7"]), ("$4", "2026", "@8", ["@8"])])
@@ -73,7 +73,7 @@ class ParsingTests(unittest.TestCase):
         def first_pane_is_hidden(active_pane_id, window_zoomed_flag):
             pane_records = [make_pane_record("$1", "research", "@1", pane_id, pane_index, pane_active="1" if pane_id == active_pane_id else "0",
                                              window_zoomed_flag=window_zoomed_flag) for pane_id, pane_index in (("%4", "0"), ("%5", "1"))]
-            return build_gathered_windows(pane_records, describe_stand_in_process)[0]["tabs"][0]["first_session"][
+            return build_gathered_windows(pane_records, set(), describe_stand_in_process)[0]["tabs"][0]["first_session"][
                 "is_hidden_behind_a_zoomed_pane"]
         self.assertTrue(first_pane_is_hidden(active_pane_id="%5", window_zoomed_flag="1"))
         self.assertFalse(first_pane_is_hidden(active_pane_id="%4", window_zoomed_flag="1"))  # it is the zoomed pane itself
@@ -215,6 +215,30 @@ class TmuxServerTests(unittest.TestCase):
         self.assertIsNone(find_title_the_user_gave())  # tmux's own name for it
         self.assertTrue(asyncio.run(self.backend.rename_window(new_session_id, "2026")).succeeded)
         self.assertEqual(find_title_the_user_gave(), "2026")
+
+    def open_a_window_named_reviews_and_gather_the_title_each_windows_user_gave_it(self):
+        """Opens a second tmux window and names it "reviews" as its user would (rename-window); returns the gathered
+        title_override_format of the session's first window, which nobody named, and of the renamed one."""
+        renamed_tab_id = self.run_tmux("new-window", "-d", "-P", "-F", "#{window_id}", "-t", "research:").strip()
+        self.run_tmux("rename-window", "-t", renamed_tab_id, "reviews")
+        return [gathered_tab["title_override_format"] for gathered_tab in self.gather()[0]["tabs"]]
+
+    def test_only_a_window_its_user_renamed_has_a_title_from_its_user(self):
+        self.assertEqual(self.open_a_window_named_reviews_and_gather_the_title_each_windows_user_gave_it(), [None, "reviews"])
+
+    def test_with_automatic_renaming_off_for_all_windows_only_a_window_its_user_renamed_has_a_title_from_its_user(self):
+        # As a tmux configuration file with `set-option -g -w automatic-rename off` leaves it: tmux then reports the option
+        # off for every window, also for one nobody named, which only inherits it.
+        self.run_tmux("set-option", "-g", "-w", "automatic-rename", "off")
+        self.assertEqual(self.open_a_window_named_reviews_and_gather_the_title_each_windows_user_gave_it(), [None, "reviews"])
+        self.assertEqual(self.run_tmux("list-windows", "-t", "research", "-F", "#{automatic-rename}").split(), ["0", "0"])
+
+    def test_asking_about_a_window_closed_since_the_panes_were_listed_is_a_failed_request(self):
+        # The gather fails, and is tried again, rather than taking tmux's answers for the wrong windows.
+        first_tab_id = self.gather()[0]["tabs"][0]["tab_id"]
+        pane_records = [make_pane_record("$0", "research", window_id, "%0", automatic_rename="0") for window_id in (first_tab_id, "@99")]
+        with self.assertRaises(TerminalRequestFailed):
+            asyncio.run(self.backend.find_ids_of_windows_renamed_by_their_user(pane_records))
 
     def test_a_windows_only_pane_is_typed_into_though_its_window_has_synchronized_panes(self):
         # No other pane gets its keys; and with the option on for every window, a start still types into its new window.
@@ -553,7 +577,7 @@ class PeekTests(unittest.TestCase):
         backend, sent_commands = make_backend_that_records_tmux_commands("".join(
             [build_tmux_output_line("pane", PANE_FIELD_NAMES, pane_record) for pane_record in pane_records]
             + [build_tmux_output_line("client", CLIENT_FIELD_NAMES, make_client_record())]))
-        backend.gathered_windows = build_gathered_windows(pane_records, describe_stand_in_process)
+        backend.gathered_windows = build_gathered_windows(pane_records, set(), describe_stand_in_process)
         backend.client_records = [make_client_record()]
         what_was_in_front = asyncio.run(backend.remember_what_is_in_front())
         self.assertTrue(asyncio.run(backend.focus_session("%2")).succeeded)  # switches the client to $2
@@ -624,6 +648,20 @@ class GatherTests(unittest.TestCase):
             self.assertEqual(backend.window_and_tab_ids_opened_since_the_last_gather, {"@9"})  # $5 is listed now, @9 not yet
             self.assertEqual(gather_and_list_tab_ids_by_window(), [("$5", ["@8", "@9"])])
             self.assertEqual(backend.window_and_tab_ids_opened_since_the_last_gather, set())  # @9 is listed now too
+
+    def test_the_windows_with_automatic_rename_off_are_asked_in_one_tmux_run_whether_it_is_off_for_themselves(self):
+        # As show-options -A prints it: without an asterisk for the window's own value, with one for an inherited value.
+        backend, sent_commands = make_backend_that_records_tmux_commands("automatic-rename off\nautomatic-rename* off\n")
+        pane_records = [make_pane_record("$1", "research", "@1", "%1"),
+                        make_pane_record("$1", "research", "@2", "%2", automatic_rename="0", window_name="reviews"),
+                        make_pane_record("$1", "research", "@2", "%3", pane_index="1", automatic_rename="0", window_name="reviews"),
+                        make_pane_record("$1", "research", "@3", "%4", automatic_rename="0")]
+        self.assertEqual(asyncio.run(backend.find_ids_of_windows_renamed_by_their_user(pane_records)), {"@2"})
+        self.assertEqual(sent_commands, [join_tmux_commands([["show-options", "-A", "-w", "-t", window_id, "automatic-rename"]
+                                                             for window_id in ("@2", "@3")])])
+        sent_commands.clear()
+        self.assertEqual(asyncio.run(backend.find_ids_of_windows_renamed_by_their_user(pane_records[:1])), set())
+        self.assertEqual(sent_commands, [])  # tmux isn't run while every window has automatic-rename on
 
 
 class ClientTests(unittest.TestCase):
