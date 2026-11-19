@@ -1817,15 +1817,15 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             {"10": dict(agent_tool_name="Aider"), "11": dict(status="exited")}))
         saved_session_ids = []
         self.owner.save_agent_sessions = saved_session_ids.append
-        so_that_restore_continues_them = " so that Restore sessions… can continue them later"
+        so_that_they_can_be_restarted = " so that you can restart them later even after they exit"
         only_these_can_be_saved = " sessions: only Claude Code, Codex and agy sessions whose agent runs can be saved"
         for rows, expected_tool_tip, expected_session_ids in (
                 # No row is selected: every session in the list that can be saved (not the Aider tab or the ended agent's).
-                ((), "Save every session in the list (no row is selected)" + so_that_restore_continues_them
+                ((), "Save every session in the list (no row is selected)" + so_that_they_can_be_restarted
                  + ". Saves 3 of the 5" + only_these_can_be_saved, ["s1", "s2", "s3"]),
-                ((2,), "Save the selected rows' sessions" + so_that_restore_continues_them, ["s2"]),  # phase0-tests alone
-                ((0,), "Save the selected rows' sessions" + so_that_restore_continues_them, ["s1", "s2", "s3"]),  # a window row: its tabs
-                ((3, 5), "Save the selected rows' sessions" + so_that_restore_continues_them  # codex-review and the Aider tab
+                ((2,), "Save the sessions of selected rows" + so_that_they_can_be_restarted, ["s2"]),  # phase0-tests alone
+                ((0,), "Save the sessions of selected rows" + so_that_they_can_be_restarted, ["s1", "s2", "s3"]),  # a window row: its tabs
+                ((3, 5), "Save the sessions of selected rows" + so_that_they_can_be_restarted  # codex-review and the Aider tab
                  + ". Saves 1 of the 2" + only_these_can_be_saved, ["s3"]),
                 # Grayed out, saying why, while none of the selected rows' sessions can be saved.
                 ((5,), "Only Claude Code, Codex and agy sessions can be saved", None),
@@ -1846,8 +1846,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual((button.title(), button.image().accessibilityDescription()), ("", "Restore sessions"))  # the tray's picture
         self.owner.has_saved_sessions = True
         panel.show_whether_sessions_are_saved()  # as the app controller does when the saved list changes
-        self.assertEqual((button.isEnabled(), button.toolTip()),
-                         (True, "Opens the Saved sessions window, to continue sessions saved earlier"))
+        self.assertEqual((button.isEnabled(), button.toolTip()), (True, "Restore saved sessions"))
         panel.restoreSessionsClicked_(button)
         self.assertEqual(self.owner.saved_sessions_window_opening_count, 1)
 

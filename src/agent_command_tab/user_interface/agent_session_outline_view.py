@@ -174,8 +174,8 @@ SEARCH_KEY_ALONE = "/"  # the search box too, typed alone
 SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME = 1.0
 # The hover text of the greyed-out items in the menu of several selected rows that have all exited.
 AGENTS_HAVE_ENDED_TOOL_TIP = "The agents have ended"
-# "Restore sessions…" in the row menus and the menu bar icon's menu, and the bottom bar's Restore
-# button; the second while nothing is saved, where it is grayed out.
+# "Restore sessions…" in the row menus and the menu bar icon's menu; the second while nothing is
+# saved, where the row menus' item and the bottom bar's Restore button are grayed out.
 RESTORE_SESSIONS_TOOL_TIP = "Opens the Saved sessions window, to continue sessions saved earlier"
 NO_SESSIONS_ARE_SAVED_TOOL_TIP = "No sessions are saved"
 SELECTION_OUTLINE_WIDTH = 1.5

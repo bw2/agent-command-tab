@@ -19,7 +19,7 @@ from AppKit import (NSAlignAllEdgesNearest, NSAttributedString, NSBezelStyleRece
 from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_CANT_RUN, HOOKS_SEND_NO_EVENTS
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
 from agent_command_tab.user_interface.agent_session_outline_view import (FRONT_TAB_OUTLINE_COLOR_MAKER,
-                                                                         NO_SESSIONS_ARE_SAVED_TOOL_TIP, RESTORE_SESSIONS_TOOL_TIP,
+                                                                         NO_SESSIONS_ARE_SAVED_TOOL_TIP,
                                                                          SELECTION_OUTLINE_COLOR_MAKER, SELECTION_OUTLINE_WIDTH,
                                                                          explain_which_agent_sessions_cant_be_saved,
                                                                          list_agent_sessions_that_can_be_saved)
@@ -69,6 +69,7 @@ PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
 # choose_what_the_save_button_saves chooses. Each keeps its place and is grayed out, its tooltip
 # saying why, while it has nothing to act on.
 RESTORE_SESSIONS_BUTTON_LOOK = ("tray.and.arrow.up", "Restore", "Restore sessions")
+RESTORE_SESSIONS_BUTTON_TOOL_TIP = "Restore saved sessions"  # while something is saved; else NO_SESSIONS_ARE_SAVED_TOOL_TIP
 SAVE_SESSIONS_BUTTON_LOOK = ("tray.and.arrow.down", "Save", "Save sessions")
 # The top bar's Hide Idle / Show Idle button, left of the expand or collapse button: (title, tooltip), by
 # whether idle tabs are hidden; the title says what a click does.
@@ -136,8 +137,8 @@ def choose_what_the_save_button_saves(agent_session_entries_of_the_selected_rows
     what_isnt_saved = explain_which_agent_sessions_cant_be_saved(agent_session_entries, sessions_to_save)
     if not sessions_to_save:
         return [], what_isnt_saved
-    which_sessions = "the selected rows' sessions" if a_row_is_selected else "every session in the list (no row is selected)"
-    what_it_saves = f"Save {which_sessions} so that Restore sessions… can continue them later"
+    which_sessions = "the sessions of selected rows" if a_row_is_selected else "every session in the list (no row is selected)"
+    what_it_saves = f"Save {which_sessions} so that you can restart them later even after they exit"
     return sessions_to_save, f"{what_it_saves}. {what_isnt_saved}" if what_isnt_saved else what_it_saves
 
 
@@ -712,7 +713,7 @@ class ListPanelController(NSViewController):
         self.save_sessions_button.setEnabled_(there_are_sessions_to_save)
         self.save_sessions_button.setToolTip_(save_sessions_tool_tip)
         self.restore_sessions_button.setEnabled_(sessions_are_saved)
-        self.restore_sessions_button.setToolTip_(RESTORE_SESSIONS_TOOL_TIP if sessions_are_saved else NO_SESSIONS_ARE_SAVED_TOOL_TIP)
+        self.restore_sessions_button.setToolTip_(RESTORE_SESSIONS_BUTTON_TOOL_TIP if sessions_are_saved else NO_SESSIONS_ARE_SAVED_TOOL_TIP)
         if self.expand_or_collapse_all_button.isHidden() != expand_or_collapse_all_button_was_hidden:
             self.fit_top_bar_to_width()
         self.hooks_note_text_field.setStringValue_(note)
