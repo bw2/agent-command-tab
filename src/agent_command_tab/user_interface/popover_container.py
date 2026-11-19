@@ -1,4 +1,4 @@
-"""The panel around the list: the sort order, the search box with its "aA" checkbox, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a legend of the rows' two outlines, then a note while the app's hooks are missing, and pause or resume the selected rows at the bottom right.
+"""The panel around the list: the sort order, the search box with its "aA" checkbox, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a legend of the rows' two outlines, then a note while the app's hooks are missing, and, at the bottom right, Restore sessions, Save sessions and pause or resume the selected rows.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
 sidebar and in the list window, each with its own list controller.
@@ -19,7 +19,10 @@ from AppKit import (NSAlignAllEdgesNearest, NSAttributedString, NSBezelStyleRece
 from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_CANT_RUN, HOOKS_SEND_NO_EVENTS
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
 from agent_command_tab.user_interface.agent_session_outline_view import (FRONT_TAB_OUTLINE_COLOR_MAKER,
-                                                                         SELECTION_OUTLINE_COLOR_MAKER, SELECTION_OUTLINE_WIDTH)
+                                                                         NO_SESSIONS_ARE_SAVED_TOOL_TIP, RESTORE_SESSIONS_TOOL_TIP,
+                                                                         SELECTION_OUTLINE_COLOR_MAKER, SELECTION_OUTLINE_WIDTH,
+                                                                         explain_which_agent_sessions_cant_be_saved,
+                                                                         list_agent_sessions_that_can_be_saved)
 from agent_command_tab.user_interface.control_helpers import (add_popup_choices, is_a_command_press_of_letter,
                                                               read_popup_choice, select_popup_choice, show_symbol_on_button)
 from agent_command_tab.user_interface.named_colors import appearance_is_dark
@@ -60,6 +63,13 @@ PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
     "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes, their shells and any subprocesses that they started (a STOP signal)"),
     "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (a CONT signal); "
                "those suspended with Ctrl+Z are resumed by typing fg in their tabs instead")}
+# The bottom bar's Restore and Save buttons, left of the pause or resume button in that order:
+# (SF Symbol, text fallback, what a screen reader calls it). Restore opens the Saved sessions
+# window, as "Restore sessions…" in the menus does; Save saves the sessions
+# choose_what_the_save_button_saves chooses. Each keeps its place and is grayed out, its tooltip
+# saying why, while it has nothing to act on.
+RESTORE_SESSIONS_BUTTON_LOOK = ("tray.and.arrow.up", "Restore", "Restore sessions")
+SAVE_SESSIONS_BUTTON_LOOK = ("tray.and.arrow.down", "Save", "Save sessions")
 # The top bar's Hide Idle / Show Idle button, left of the expand or collapse button: (title, tooltip), by
 # whether idle tabs are hidden; the title says what a click does.
 # Command-I presses it in the list that has the keyboard, and the tooltips say so.
@@ -112,6 +122,23 @@ ROW_OUTLINES_LEGEND_SQUARE_SIZE = 9  # a little more than the height of the smal
 ROW_OUTLINES_LEGEND_SQUARE_CORNER_RADIUS = 2
 GAP_BEFORE_A_LEGEND_SQUARE = 8
 GAP_AFTER_A_LEGEND_SQUARE = 4
+
+
+def choose_what_the_save_button_saves(agent_session_entries_of_the_selected_rows, a_row_is_selected, every_agent_session_entry):
+    """Returns (the agent sessions the bottom bar's Save button saves, its tooltip): those of the
+    selected rows, or, while no row is selected, every one in the list (also those whose rows
+    Hide Idle or a search hides), that can be saved (list_agent_sessions_that_can_be_saved). With
+    none to save the button is grayed out, and the tooltip says why."""
+    agent_session_entries = agent_session_entries_of_the_selected_rows if a_row_is_selected else every_agent_session_entry
+    if not agent_session_entries:
+        return [], "There are no sessions to save"
+    sessions_to_save = list_agent_sessions_that_can_be_saved(agent_session_entries)
+    what_isnt_saved = explain_which_agent_sessions_cant_be_saved(agent_session_entries, sessions_to_save)
+    if not sessions_to_save:
+        return [], what_isnt_saved
+    which_sessions = "the selected rows' sessions" if a_row_is_selected else "every session in the list (no row is selected)"
+    what_it_saves = f"Save {which_sessions} so that Restore sessions… can continue them later"
+    return sessions_to_save, f"{what_it_saves}. {what_isnt_saved}" if what_isnt_saved else what_it_saves
 
 
 def choose_hooks_note(hooks_status_per_agent_tool, listed_agent_tool_names):
@@ -448,9 +475,9 @@ class ListPanelController(NSViewController):
         self.list_controller.on_search_text_cleared = self.empty_the_search_box
 
         # Bottom bar: a Settings button with its name, easier to see than an icon, at the left, a
-        # gray pill like the top bar's controls, and one button that pauses or resumes the
-        # selected rows, at the right; a new window with an agent session is the "+" row at the end
-        # of the list.
+        # gray pill like the top bar's controls, and, at the right, one button that pauses or
+        # resumes the selected rows, with the Save button left of it and the Restore button left
+        # of that; a new window with an agent session is the "+" row at the end of the list.
         self.settings_button = make_gray_pill_button("Settings", self, "settingsClicked:")
         # A gear before its name, as tall as the small text; the name alone where the symbol is missing.
         gear_image = NSImage.imageWithSystemSymbolName_accessibilityDescription_("gearshape", None)
@@ -462,13 +489,22 @@ class ListPanelController(NSViewController):
         self.settings_button.setFrameOrigin_((PANEL_SIDE_MARGIN, (BOTTOM_BAR_HEIGHT - self.settings_button.frame().size.height) / 2))
         self.settings_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMaxXMargin)  # stays at the bottom left
         root_view.addSubview_(self.settings_button)
-        self.pause_or_resume_selected_rows_button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(
-            width - PANEL_SIDE_MARGIN - button_width, (BOTTOM_BAR_HEIGHT - button_height) / 2, button_width, button_height))
-        self.pause_or_resume_selected_rows_button.setBordered_(False)
-        self.pause_or_resume_selected_rows_button.setTarget_(self)
-        self.pause_or_resume_selected_rows_button.setAction_("pauseOrResumeSelectedRowsClicked:")
-        self.pause_or_resume_selected_rows_button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)  # stays at the bottom right
-        root_view.addSubview_(self.pause_or_resume_selected_rows_button)
+        # The buttons at the right, the rightmost first; update_top_and_bottom_bar_buttons gives the
+        # pause or resume button its look and each its tooltip.
+        bottom_right_buttons = []
+        for action_name in ("pauseOrResumeSelectedRowsClicked:", "saveSessionsClicked:", "restoreSessionsClicked:"):
+            button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(
+                width - PANEL_SIDE_MARGIN - button_width - len(bottom_right_buttons) * (button_width + GAP_BETWEEN_TOP_BAR_BUTTONS),
+                (BOTTOM_BAR_HEIGHT - button_height) / 2, button_width, button_height))
+            button.setBordered_(False)
+            button.setTarget_(self)
+            button.setAction_(action_name)
+            button.setAutoresizingMask_(NSViewMaxYMargin | NSViewMinXMargin)  # stays at the bottom right
+            root_view.addSubview_(button)
+            bottom_right_buttons.append(button)
+        self.pause_or_resume_selected_rows_button, self.save_sessions_button, self.restore_sessions_button = bottom_right_buttons
+        show_symbol_on_button(self.save_sessions_button, *SAVE_SESSIONS_BUTTON_LOOK)
+        show_symbol_on_button(self.restore_sessions_button, *RESTORE_SESSIONS_BUTTON_LOOK)
         # After the Settings button, the legend of the rows' outlines; fit_bottom_bar_to_width shows
         # it where it fits. Its texts, and the hooks note's after it, sit on the baseline of the
         # button's title.
@@ -612,6 +648,30 @@ class ListPanelController(NSViewController):
             [entry.session_id for entry in (sessions_to_pause if pause else sessions_to_resume)], pause=pause)
 
     @objc.python_method
+    def choose_what_the_save_button_saves_now(self):
+        """Returns (the agent sessions the Save button saves now, its tooltip):
+        choose_what_the_save_button_saves for the list's selection and rows."""
+        return choose_what_the_save_button_saves(self.list_controller.list_agent_session_entries_of_the_selected_rows(),
+                                                 bool(self.list_controller.list_selected_items()),
+                                                 self.list_controller.list_agent_session_entries())
+
+    def saveSessionsClicked_(self, sender):
+        """Saves the agent sessions of the selected rows, or, while no row is selected, every one
+        in the list, as a row menu's Save does for its rows."""
+        self.list_controller.owner.save_agent_sessions([entry.session_id for entry in self.choose_what_the_save_button_saves_now()[0]])
+
+    def restoreSessionsClicked_(self, sender):
+        self.list_controller.owner.open_saved_sessions_window()
+
+    @objc.python_method
+    def show_whether_sessions_are_saved(self):
+        """Shows the Restore button as clickable or grayed out as the owner now says
+        (has_saved_agent_sessions). The app controller calls it when the saved list changes, which
+        no snapshot or selection change tells."""
+        self.view()
+        self.update_top_and_bottom_bar_buttons()
+
+    @objc.python_method
     def update_top_and_bottom_bar_buttons(self):
         """Gives the expand or collapse button (top bar) and the pause or resume button (bottom
         bar) the look of the list's current state and shows each only when it applies; the top bar
@@ -620,10 +680,13 @@ class ListPanelController(NSViewController):
 
         The expand or collapse button shows while the list has two or more windows; the pause or resume button
         while the selected rows have an agent session that
-        a click would pause or resume."""
+        a click would pause or resume. The Save and Restore buttons always show, each grayed out
+        while it has nothing to act on (no session that can be saved; nothing saved), with a
+        tooltip that says so."""
         agent_session_entries = self.list_controller.list_agent_session_entries()
         sessions_to_pause, sessions_to_resume = split_agent_sessions_into_pausable_and_resumable(
             self.list_controller.list_agent_session_entries_of_the_selected_rows())
+        sessions_to_save, save_sessions_tool_tip = self.choose_what_the_save_button_saves_now()
         snapshot = self.list_controller.snapshot
         note, note_tool_tip, agent_tool_names_to_install_hooks_for = choose_hooks_note(
             snapshot.hooks_status_per_agent_tool if snapshot is not None else (),
@@ -631,12 +694,14 @@ class ListPanelController(NSViewController):
         bars_state = (EXPAND_OR_COLLAPSE_ALL_LOOKS[self.list_controller.is_fully_expanded()],
                       self.list_controller.count_window_rows() < 2,
                       PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS["pause" if sessions_to_pause else "resume"],
-                      not (sessions_to_pause or sessions_to_resume), note, note_tool_tip, list(agent_tool_names_to_install_hooks_for))
+                      not (sessions_to_pause or sessions_to_resume), note, note_tool_tip, list(agent_tool_names_to_install_hooks_for),
+                      bool(sessions_to_save), save_sessions_tool_tip, bool(self.list_controller.owner.has_saved_agent_sessions()))
         if bars_state == self.shown_bars_state:
             return
         self.shown_bars_state = bars_state
         (expand_or_collapse_all_look, expand_or_collapse_all_button_is_hidden, pause_or_resume_selected_rows_look,
-         pause_or_resume_selected_rows_button_is_hidden, _, _, self.agent_tool_names_to_install_hooks_for) = bars_state
+         pause_or_resume_selected_rows_button_is_hidden, _, _, self.agent_tool_names_to_install_hooks_for,
+         there_are_sessions_to_save, _, sessions_are_saved) = bars_state
         expand_or_collapse_all_button_was_hidden = self.expand_or_collapse_all_button.isHidden()
         show_symbol_on_button(self.expand_or_collapse_all_button, *expand_or_collapse_all_look)
         self.expand_or_collapse_all_button.setToolTip_(expand_or_collapse_all_look[2])
@@ -644,6 +709,10 @@ class ListPanelController(NSViewController):
         show_symbol_on_button(self.pause_or_resume_selected_rows_button, *pause_or_resume_selected_rows_look)
         self.pause_or_resume_selected_rows_button.setToolTip_(pause_or_resume_selected_rows_look[2])
         self.pause_or_resume_selected_rows_button.setHidden_(pause_or_resume_selected_rows_button_is_hidden)
+        self.save_sessions_button.setEnabled_(there_are_sessions_to_save)
+        self.save_sessions_button.setToolTip_(save_sessions_tool_tip)
+        self.restore_sessions_button.setEnabled_(sessions_are_saved)
+        self.restore_sessions_button.setToolTip_(RESTORE_SESSIONS_TOOL_TIP if sessions_are_saved else NO_SESSIONS_ARE_SAVED_TOOL_TIP)
         if self.expand_or_collapse_all_button.isHidden() != expand_or_collapse_all_button_was_hidden:
             self.fit_top_bar_to_width()
         self.hooks_note_text_field.setStringValue_(note)
@@ -653,35 +722,33 @@ class ListPanelController(NSViewController):
     @objc.python_method
     def fit_bottom_bar_to_width(self):
         """Shows the legend of the rows' outlines, after the Settings button at the bottom left, only
-        whole: where it ends before the pause or resume button's place (kept free also while that
-        button is hidden, so the legend doesn't come and go as rows are selected) and, while there
+        whole: where it ends before the buttons at the bottom right (the Restore button, the
+        leftmost of them, which always shows) and, while there
         is a hooks note, where the whole note and the Install Hooks button it needs fit after it
         too. The note asks for something to be done and the legend only explains, so in a narrower
         bar the legend hides and the note takes its place.
 
         Puts the hooks note after the legend, or after the Settings button where the legend is
         hidden, then its Install Hooks
-        button (when there is something to install and room for it before the pause or resume
-        button, which it would otherwise cover in a narrow sidebar), the note cut short
-        before the button and the pause or resume button."""
+        button (when there is something to install and room for it before the buttons at the
+        right, which it would otherwise cover in a narrow sidebar), the note cut short
+        before the button and the buttons at the right."""
         note = self.hooks_note_text_field.stringValue()
         note_size = self.hooks_note_text_field.fittingSize()
         button_width, button_height = self.install_hooks_button.frame().size
-        pause_or_resume_button_place_x = self.pause_or_resume_selected_rows_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
+        right_end_x = self.restore_sessions_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
         legend_frame = self.row_outlines_legend_view.frame()
         legend_right_end_x = legend_frame.origin.x + legend_frame.size.width
         room_for_the_whole_note_and_its_button = (
             GAP_BEFORE_THE_HOOKS_NOTE + note_size.width
             + (GAP_BETWEEN_TOP_BAR_BUTTONS + button_width if self.agent_tool_names_to_install_hooks_for else 0)
             if note else 0)
-        legend_shows = legend_right_end_x + room_for_the_whole_note_and_its_button <= pause_or_resume_button_place_x
+        legend_shows = legend_right_end_x + room_for_the_whole_note_and_its_button <= right_end_x
         self.row_outlines_legend_view.setHidden_(not legend_shows)
         self.hooks_note_text_field.setHidden_(not note)
         if not note:
             self.install_hooks_button.setHidden_(True)
             return
-        right_end_x = (pause_or_resume_button_place_x if not self.pause_or_resume_selected_rows_button.isHidden()
-                       else self.view().bounds().size.width - PANEL_SIDE_MARGIN)
         settings_button_frame = self.settings_button.frame()
         note_x = (legend_right_end_x if legend_shows
                   else settings_button_frame.origin.x + settings_button_frame.size.width) + GAP_BEFORE_THE_HOOKS_NOTE

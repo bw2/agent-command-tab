@@ -1036,6 +1036,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             pause_button_frame = panel.pause_or_resume_selected_rows_button.frame()
             self.assertEqual(pause_button_frame.origin.x + pause_button_frame.size.width, width - PANEL_SIDE_MARGIN)
             self.assertLessEqual(pause_button_frame.origin.y + pause_button_frame.size.height, BOTTOM_BAR_HEIGHT)
+            # Left of it the Save button, and left of that the Restore button, clear of the Settings button also in
+            # the narrowest sidebar.
+            save_button_frame, restore_button_frame = panel.save_sessions_button.frame(), panel.restore_sessions_button.frame()
+            self.assertEqual((panel.save_sessions_button.isHidden(), panel.restore_sessions_button.isHidden()), (False, False))
+            self.assertEqual(save_button_frame.origin.x + save_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                             pause_button_frame.origin.x)
+            self.assertEqual(restore_button_frame.origin.x + restore_button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
+                             save_button_frame.origin.x)
+            self.assertEqual({restore_button_frame.origin.y, save_button_frame.origin.y}, {pause_button_frame.origin.y})
+            self.assertLess(settings_button_frame.origin.x + settings_button_frame.size.width, restore_button_frame.origin.x, width)
         self.window.setContentSize_((320, 260))
         panel.show_message("iTerm2 can't be reached; retrying")  # the sort control, the search box and Hide Idle step aside for it
         self.assertTrue(panel.list_sort_order_popup.isHidden())
@@ -1797,6 +1807,59 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         save_position = exited_tab_menu_titles.index("Save session")
         self.assertEqual(exited_tab_menu_titles[save_position - 2:save_position + 3],
                          ["Copy contact info", "---", "Save session", "Restore sessions…", "---"])
+
+    def test_the_bottom_bars_save_button_saves_the_selected_rows_sessions_or_every_session_while_no_row_is_selected(self):
+        panel = self.dropdown_panel_controller
+        button = panel.save_sessions_button
+        self.assertEqual((button.isEnabled(), button.isHidden(), button.toolTip()), (False, False, "There are no sessions to save"))
+        self.assertEqual((button.title(), button.image().accessibilityDescription()), ("", "Save sessions"))  # the tray's picture
+        self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id(
+            {"10": dict(agent_tool_name="Aider"), "11": dict(status="exited")}))
+        saved_session_ids = []
+        self.owner.save_agent_sessions = saved_session_ids.append
+        so_that_restore_continues_them = " so that Restore sessions… can continue them later"
+        only_these_can_be_saved = " sessions: only Claude Code, Codex and agy sessions whose agent runs can be saved"
+        for rows, expected_tool_tip, expected_session_ids in (
+                # No row is selected: every session in the list that can be saved (not the Aider tab or the ended agent's).
+                ((), "Save every session in the list (no row is selected)" + so_that_restore_continues_them
+                 + ". Saves 3 of the 5" + only_these_can_be_saved, ["s1", "s2", "s3"]),
+                ((2,), "Save the selected rows' sessions" + so_that_restore_continues_them, ["s2"]),  # phase0-tests alone
+                ((0,), "Save the selected rows' sessions" + so_that_restore_continues_them, ["s1", "s2", "s3"]),  # a window row: its tabs
+                ((3, 5), "Save the selected rows' sessions" + so_that_restore_continues_them  # codex-review and the Aider tab
+                 + ". Saves 1 of the 2" + only_these_can_be_saved, ["s3"]),
+                # Grayed out, saying why, while none of the selected rows' sessions can be saved.
+                ((5,), "Only Claude Code, Codex and agy sessions can be saved", None),
+                ((6,), "The agent has ended", None)):
+            self.select_rows(*rows)
+            self.assertEqual((button.isEnabled(), button.isHidden(), button.toolTip()),
+                             (expected_session_ids is not None, False, expected_tool_tip), rows)
+            if expected_session_ids is not None:
+                panel.saveSessionsClicked_(button)
+                self.assertEqual(saved_session_ids[-1], expected_session_ids, rows)
+        self.assertEqual(len(saved_session_ids), 4)
+
+    def test_the_bottom_bars_restore_button_opens_the_saved_sessions_window_once_something_is_saved(self):
+        panel = self.dropdown_panel_controller
+        button = panel.restore_sessions_button
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        self.assertEqual((button.isEnabled(), button.isHidden(), button.toolTip()), (False, False, "No sessions are saved"))
+        self.assertEqual((button.title(), button.image().accessibilityDescription()), ("", "Restore sessions"))  # the tray's picture
+        self.owner.has_saved_sessions = True
+        panel.show_whether_sessions_are_saved()  # as the app controller does when the saved list changes
+        self.assertEqual((button.isEnabled(), button.toolTip()),
+                         (True, "Opens the Saved sessions window, to continue sessions saved earlier"))
+        panel.restoreSessionsClicked_(button)
+        self.assertEqual(self.owner.saved_sessions_window_opening_count, 1)
+
+    def test_a_grayed_out_button_keeps_the_arrow_pointer(self):
+        button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 24, 22))
+        with unittest.mock.patch("agent_command_tab.user_interface.pointing_hand_button.NSCursor") as cursor_class:
+            set_the_pointing_hand = cursor_class.pointingHandCursor.return_value.set
+            for is_enabled, expected_count in ((True, 2), (False, 2), (True, 4)):
+                button.setEnabled_(is_enabled)
+                button.mouseEntered_(None)  # the sidebar, whose window has no cursor rects
+                button.cursorUpdate_(None)
+                self.assertEqual(set_the_pointing_hand.call_count, expected_count, is_enabled)
 
     def test_pause_and_resume_in_the_row_menus_and_the_bottom_bar(self):
         self.list_controller.apply_snapshot(make_sample_snapshot_with_entries_changed(
@@ -3434,7 +3497,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(settings_button_frame.origin.x, PANEL_SIDE_MARGIN)
         self.assertEqual(note_frame.origin.x, settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BEFORE_THE_HOOKS_NOTE)
         self.assertLess(note_frame.origin.x + note_frame.size.width, button_frame.origin.x)
-        self.assertLessEqual(button_frame.origin.x + button_frame.size.width, panel.pause_or_resume_selected_rows_button.frame().origin.x)
+        self.assertLessEqual(button_frame.origin.x + button_frame.size.width, panel.restore_sessions_button.frame().origin.x)
         self.assertLess(button_frame.origin.y + button_frame.size.height, BOTTOM_BAR_HEIGHT)
         panel.installHooksClicked_(panel.install_hooks_button)
         self.assertEqual(self.owner.hooks_install_requests, [["Claude Code"]])
@@ -3477,14 +3540,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(legend_view.text_baseline_y, settings_button_frame.origin.y + panel.settings_button.alignmentRectInsets().bottom
                          + panel.settings_button.lastBaselineOffsetFromBottom())
 
-    def test_the_legend_shows_whole_or_not_at_all_and_never_under_the_pause_or_resume_button(self):
+    def test_the_legend_shows_whole_or_not_at_all_and_never_under_the_buttons_at_the_right(self):
         panel = self.dropdown_panel_controller
         legend_view, pause_or_resume_button = panel.row_outlines_legend_view, panel.pause_or_resume_selected_rows_button
         self.list_controller.apply_snapshot(make_sample_snapshot())  # its hooks are installed: no note
         legend_frame = legend_view.frame()
-        # The narrowest panel whose bottom bar has room for all of the legend before the pause or resume button.
-        narrowest_width_with_the_legend = math.ceil(legend_frame.origin.x + legend_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS
-                                                    + pause_or_resume_button.frame().size.width + PANEL_SIDE_MARGIN)
+        # The narrowest panel whose bottom bar has room for all of the legend before the three buttons at the right
+        # (Restore, the leftmost, then Save, then pause or resume).
+        narrowest_width_with_the_legend = math.ceil(
+            legend_frame.origin.x + legend_frame.size.width
+            + 3 * (GAP_BETWEEN_TOP_BAR_BUTTONS + pause_or_resume_button.frame().size.width) + PANEL_SIDE_MARGIN)
         # Narrowed to that width, to a point less, to the sidebar's smallest width (200), and widened again.
         for width in (POPOVER_WIDTH, narrowest_width_with_the_legend, narrowest_width_with_the_legend - 1, 200, POPOVER_WIDTH):
             self.set_dropdown_panel_width(width)
@@ -3497,7 +3562,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                 self.assertEqual(tuple(legend_view.frame().size), tuple(legend_frame.size), width)  # never cut short
                 if not legend_view.isHidden():
                     self.assertLessEqual(legend_frame.origin.x + legend_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
-                                         pause_or_resume_button.frame().origin.x, width)
+                                         panel.restore_sessions_button.frame().origin.x, width)
 
     def test_a_hooks_note_follows_the_legend_where_both_fit_whole_and_takes_its_place_where_they_dont(self):
         panel = self.dropdown_panel_controller
@@ -3513,8 +3578,8 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             narrowest_width_with_both = math.ceil(
                 legend_right_end_x + GAP_BEFORE_THE_HOOKS_NOTE + note_width
                 + (GAP_BETWEEN_TOP_BAR_BUTTONS + install_hooks_button.frame().size.width if has_install_hooks_button else 0)
-                + GAP_BETWEEN_TOP_BAR_BUTTONS + pause_or_resume_button.frame().size.width + PANEL_SIDE_MARGIN)
-            # Room for both: the legend, then the whole note, then its button, before the pause or resume button's place.
+                + 3 * (GAP_BETWEEN_TOP_BAR_BUTTONS + pause_or_resume_button.frame().size.width) + PANEL_SIDE_MARGIN)
+            # Room for both: the legend, then the whole note, then its button, before the three buttons at the right.
             self.set_dropdown_panel_width(narrowest_width_with_both)
             self.assertEqual((legend_view.isHidden(), note_field.isHidden(), install_hooks_button.isHidden()),
                              (False, False, not has_install_hooks_button), hooks_status)
@@ -3524,7 +3589,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
                 button_frame = install_hooks_button.frame()
                 self.assertEqual(button_frame.origin.x, note_frame.origin.x + note_width + GAP_BETWEEN_TOP_BAR_BUTTONS)
                 self.assertLessEqual(button_frame.origin.x + button_frame.size.width + GAP_BETWEEN_TOP_BAR_BUTTONS,
-                                     pause_or_resume_button.frame().origin.x)
+                                     panel.restore_sessions_button.frame().origin.x)
             # A point narrower, the legend, which only explains, hides, and the note, which asks for something to be
             # done, takes its place after the Settings button, still whole.
             self.set_dropdown_panel_width(narrowest_width_with_both - 1)
@@ -5630,8 +5695,11 @@ class SavedSessionsWindowSmokeTests(unittest.TestCase):
 
 
 def make_stand_in_app_controller_for_saved_sessions(**attributes):
-    """A stand-in AppController with these attributes whose saved-list and action helpers are the real ones."""
-    return make_stand_in_app_controller_with_real_methods(["change_saved_windows", "submit_action_and_report_failure"], **attributes)
+    """A stand-in AppController with these attributes whose saved-list and action helpers are the real ones,
+    with one list panel (a Mock), which it tells when the saved list changes."""
+    return make_stand_in_app_controller_with_real_methods(
+        ["change_saved_windows", "submit_action_and_report_failure"],
+        **{"list_all_list_panel_controllers.return_value": [unittest.mock.Mock()]}, **attributes)
 
 
 def run_started_threads_at_once():
@@ -5719,6 +5787,9 @@ class SavedSessionsInTheAppTests(unittest.TestCase):
             with open(os.path.join(folder, "saved.json")) as file:
                 self.assertEqual(json.load(file), make_saved_windows())
             stand_in_app_controller.saved_sessions_window_controller.show_saved_windows.assert_called_once_with(make_saved_windows())
+            # Each list's bottom bar is told, so its Restore button is clickable from now on.
+            (list_panel_controller,) = stand_in_app_controller.list_all_list_panel_controllers()
+            list_panel_controller.show_whether_sessions_are_saved.assert_called_once_with()
             self.assertEqual(stand_in_app_controller.report_action_failure.call_args.args[1], "Not every session was saved")
 
     def test_restore_sends_the_chosen_sessions_and_takes_those_it_restored_out_of_the_list(self):
@@ -5742,6 +5813,35 @@ class SavedSessionsInTheAppTests(unittest.TestCase):
             with open(os.path.join(folder, "saved.json")) as file:
                 self.assertEqual(json.load(file), stand_in_app_controller.saved_windows)
             self.assertEqual(stand_in_app_controller.report_action_failure.call_args.args[1], "Not every session was restored")
+
+    def test_the_tab_the_core_asks_for_during_a_restore_is_shown_as_return_on_its_row_shows_it(self):
+        stand_in_app_controller = make_stand_in_app_controller_with_real_methods(
+            ["receive_request_to_show_a_tab_on_background_thread", "show_tab_the_core_asked_for", "submit_action_and_report_failure"])
+        make_actions_finish_with(stand_in_app_controller, ActionResult(False, "that tab no longer exists"))
+        with run_main_thread_calls_at_once():
+            stand_in_app_controller.receive_request_to_show_a_tab_on_background_thread("s7")
+        self.assertEqual(stand_in_app_controller.submit_action.call_args.args[0],
+                         ActionRequest("focus_agent_session", {"session_id": "s7"}))
+        self.assertEqual(stand_in_app_controller.report_action_failure.call_args.args[1], "The tab couldn't be shown")
+
+    def test_the_alert_after_a_restore_gives_the_keyboard_back_to_the_app_it_took_it_from(self):
+        # The restored tab's terminal has the keyboard by the time the alert names what failed,
+        # unless nothing was started and the dashboard still has it.
+        for dashboard_is_active, expected_steps in ((False, ["alert", "keyboard back to the terminal"]), (True, ["alert"])):
+            with self.subTest(dashboard_is_active=dashboard_is_active), tempfile.TemporaryDirectory() as folder:
+                stand_in_app_controller = make_stand_in_app_controller_for_saved_sessions(
+                    saved_windows=make_saved_windows(), settings=DEFAULT_SETTINGS, last_other_active_application="the terminal",
+                    saved_agent_sessions_file_path=os.path.join(folder, "saved.json"))
+                make_actions_finish_with(stand_in_app_controller, ActionResult(
+                    False, '"notes": the folder /tmp/x doesn\'t exist', details={"restored_conversation_ids": ["a"]}))
+                steps = []
+                stand_in_app_controller.report_action_failure.side_effect = lambda action_result, failure_title: steps.append("alert")
+                stand_in_app_controller.give_activation_to.side_effect = (
+                    lambda application: steps.append(f"keyboard back to {application}"))
+                with run_main_thread_calls_at_once(), unittest.mock.patch(
+                        "agent_command_tab.app_controller.NSApp", unittest.mock.Mock(**{"isActive.return_value": dashboard_is_active})):
+                    AppController.restore_saved_agent_sessions(stand_in_app_controller, set(), {"a", "c"})
+                self.assertEqual(steps, expected_steps)
 
 
 if __name__ == "__main__":

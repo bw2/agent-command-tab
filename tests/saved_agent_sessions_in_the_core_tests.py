@@ -213,10 +213,15 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         self.folder = tempfile.mkdtemp()
         self.folder_as_typed_into_a_shell = shlex.quote(self.folder)  # in quotes when the temporary folder's path has a space
         self.core, self.iterm2 = make_core(self.folder)
-        # The agent processes of make_core's tabs run, whichever processes this Mac has.
-        patch = unittest.mock.patch.object(dashboard_core, "process_is_alive", lambda process_id: True)
-        patch.start()
-        self.addCleanup(patch.stop)
+        # The agent processes of make_core's tabs run, whichever processes this Mac has. The
+        # stand-in terminal's gathers never list the tabs it opens, so no restore waits for its
+        # last tab to be listed, except in the tests that list one themselves.
+        for name, value in (("process_is_alive", lambda process_id: True), ("SECONDS_A_RESTORED_TAB_HAS_TO_BE_LISTED", 0)):
+            patch = unittest.mock.patch.object(dashboard_core, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.session_ids_the_app_was_asked_to_show = []
+        self.core.ask_the_app_to_show_a_tab = self.session_ids_the_app_was_asked_to_show.append
 
     def tearDown(self):
         os.rmdir(self.folder)
@@ -227,6 +232,44 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         self.assertEqual(action_result, ActionResult(True, details={"restored_conversation_ids": ["conv-7"]}))
         self.assertEqual(self.iterm2.typed_texts, [("s2", f"\x05\x15cd {self.folder_as_typed_into_a_shell} && yc --resume conv-7\r")])
         self.assertEqual(self.iterm2.actions, [("rename_tab", "t-s2", "reviews")])
+        self.assertEqual(self.session_ids_the_app_was_asked_to_show, ["s2"])  # its tab comes to the front
+
+    def test_the_app_is_asked_to_show_the_last_tab_once_a_gather_lists_it_before_any_agent_is_waited_for(self):
+        # conv-7 resumes in its own tab; conv-8, the last one, gets a new tab, which a gather lists
+        # a moment later, as session new-s1; its agent never starts.
+        start_agent_session = self.iterm2.start_agent_session
+
+        async def start_in_a_tab_a_later_gather_lists(window_id, folder, launch_command, after_tab_id=None):
+            action_result = await start_agent_session(window_id, folder, launch_command, after_tab_id)
+            asyncio.get_running_loop().call_later(0.03, self.core.gathered_windows[0]["tabs"].append,
+                                                  make_gathered_tab(action_result.details["tab_id"], "new-s1", "-bash"))
+            return action_result
+        self.iterm2.start_agent_session = start_in_a_tab_a_later_gather_lists
+        what_each_look_for_an_agent_found = []
+
+        def an_agent_runs_in_the_tab(tab_id):
+            what_each_look_for_an_agent_found.append((list(self.session_ids_the_app_was_asked_to_show),
+                                                      self.core.regather_needed.is_set()))
+            return tab_id != "new-t1"
+        self.core.an_agent_runs_in_the_tab = an_agent_runs_in_the_tab
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_A_RESTORED_TAB_HAS_TO_BE_LISTED", 5), \
+                unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_TAB", 0.01), \
+                unittest.mock.patch.object(dashboard_core, "SECONDS_A_RESTORED_AGENT_HAS_TO_START", 0.05), \
+                unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT", 0.01):
+            action_result = restore(self.core, [make_saved_window([
+                make_saved_session("conv-7", self.folder, terminal_session_id="s2"), make_saved_session("conv-8", self.folder)],
+                terminal_window_id="w1")])
+        self.assertEqual(self.session_ids_the_app_was_asked_to_show, ["new-s1"])
+        # Asked before the first look for an agent, after asking for the gather that lists the tab.
+        self.assertEqual(what_each_look_for_an_agent_found[0], (["new-s1"], True))
+        self.assertEqual(action_result.details, {"restored_conversation_ids": ["conv-7"]})  # conv-8 stays saved
+
+    def test_a_last_tab_that_no_gather_lists_isnt_asked_for_and_the_restore_goes_on(self):
+        with unittest.mock.patch.object(dashboard_core, "SECONDS_A_RESTORED_TAB_HAS_TO_BE_LISTED", 0.03), \
+                unittest.mock.patch.object(dashboard_core, "SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_TAB", 0.01):
+            action_result = restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder)])])
+        self.assertEqual((self.session_ids_the_app_was_asked_to_show, action_result.details),
+                         ([], {"restored_conversation_ids": ["conv-7"]}))
 
     def test_a_tab_running_an_agent_gets_a_new_tab_in_its_window(self):
         restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, terminal_session_id="s4")],
@@ -464,6 +507,7 @@ class RestoreSavedAgentSessionsTests(unittest.TestCase):
         action_result = restore(self.core, [make_saved_window([make_saved_session("conv-7", self.folder, name="planning")])])
         self.assertEqual(action_result, ActionResult(False, '"planning": the new window closed at once',
                                                      details={"restored_conversation_ids": []}))
+        self.assertEqual(self.session_ids_the_app_was_asked_to_show, [])  # there is no tab to bring to the front
 
     def test_an_open_window_none_of_whose_sessions_was_restored_keeps_its_name(self):
         action_result = restore(self.core, [make_saved_window([make_saved_session("conv-1", self.folder)],  # s1 runs it

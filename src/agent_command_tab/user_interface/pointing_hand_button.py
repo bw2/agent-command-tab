@@ -13,7 +13,8 @@ from AppKit import (NSButton, NSCursor, NSTrackingActiveAlways, NSTrackingArea, 
 
 
 class PointingHandButton(NSButton):
-    """An NSButton whose pointer is the pointing hand, unless the button is hidden."""
+    """An NSButton whose pointer is the pointing hand, unless the button is hidden or grayed out
+    (a click would do nothing)."""
 
     def initWithFrame_(self, frame):
         self = objc.super(PointingHandButton, self).initWithFrame_(frame)
@@ -24,18 +25,29 @@ class PointingHandButton(NSButton):
             | NSTrackingInVisibleRect, self, None))
         return self
 
+    @objc.python_method
+    def shows_the_pointing_hand(self):
+        return self.isEnabled() and not self.isHiddenOrHasHiddenAncestor()
+
+    def setEnabled_(self, is_enabled):
+        """Grays the button out or makes it clickable again, and has its cursor rect set again
+        (resetCursorRects), which AppKit otherwise keeps as it was."""
+        objc.super(PointingHandButton, self).setEnabled_(is_enabled)
+        if self.window() is not None:
+            self.window().invalidateCursorRectsForView_(self)
+
     def resetCursorRects(self):
         # The visible part only: cursor rects aren't clipped to the scroll view, so a row's button
         # scrolled partly under the top bar would show the hand over the bar.
-        if not self.isHiddenOrHasHiddenAncestor():
+        if self.shows_the_pointing_hand():
             self.addCursorRect_cursor_(self.visibleRect(), NSCursor.pointingHandCursor())
 
     def cursorUpdate_(self, event):
-        if not self.isHiddenOrHasHiddenAncestor():
+        if self.shows_the_pointing_hand():
             NSCursor.pointingHandCursor().set()
 
     def mouseEntered_(self, event):
-        if not self.isHiddenOrHasHiddenAncestor():
+        if self.shows_the_pointing_hand():
             NSCursor.pointingHandCursor().set()
 
     def mouseExited_(self, event):

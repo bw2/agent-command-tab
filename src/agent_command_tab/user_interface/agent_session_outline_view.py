@@ -174,8 +174,10 @@ SEARCH_KEY_ALONE = "/"  # the search box too, typed alone
 SECONDS_BETWEEN_LETTERS_OF_A_TYPED_NAME = 1.0
 # The hover text of the greyed-out items in the menu of several selected rows that have all exited.
 AGENTS_HAVE_ENDED_TOOL_TIP = "The agents have ended"
-# "Restore sessions…" in the row menus and the menu bar icon's menu.
+# "Restore sessions…" in the row menus and the menu bar icon's menu, and the bottom bar's Restore
+# button; the second while nothing is saved, where it is grayed out.
 RESTORE_SESSIONS_TOOL_TIP = "Opens the Saved sessions window, to continue sessions saved earlier"
+NO_SESSIONS_ARE_SAVED_TOOL_TIP = "No sessions are saved"
 SELECTION_OUTLINE_WIDTH = 1.5
 SELECTION_OUTLINE_INSET = 1
 SELECTION_OUTLINE_CORNER_RADIUS = 4
@@ -349,6 +351,29 @@ class RowViewWithSelectionAndFrontTabOutlines(NSTableRowView):
 def describe_session_count(count):
     """Returns "1 session" or "3 sessions", for menu item titles, which are in sentence case."""
     return f"{count} session{'' if count == 1 else 's'}"
+
+
+def list_agent_sessions_that_can_be_saved(agent_session_entries):
+    """Returns those of the agent sessions a Save saves (a row menu's "Save session" and the
+    bottom bar's Save button): the ones whose agent runs a tool that can resume a conversation."""
+    return [entry for entry in agent_session_entries if entry.status != "exited"
+            and entry.agent_tool_name in AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED]
+
+
+def explain_which_agent_sessions_cant_be_saved(agent_session_entries, sessions_to_save):
+    """Returns what a Save's tooltip says about those of the agent sessions it doesn't save
+    (sessions_to_save are those it does: list_agent_sessions_that_can_be_saved): why it saves
+    none, where it is grayed out, or that it saves only some and why; "" when it saves them all."""
+    tool_names = sorted(AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED)
+    tools_that_can_be_saved = f"{', '.join(tool_names[:-1])} and {tool_names[-1]}"  # "Claude Code, Codex and agy"
+    if not sessions_to_save:
+        if all(entry.status == "exited" for entry in agent_session_entries):
+            return "The agent has ended" if len(agent_session_entries) == 1 else AGENTS_HAVE_ENDED_TOOL_TIP
+        return f"Only {tools_that_can_be_saved} sessions can be saved"
+    if len(sessions_to_save) < len(agent_session_entries):
+        return (f"Saves {len(sessions_to_save)} of the {len(agent_session_entries)} sessions: only "
+                f"{tools_that_can_be_saved} sessions whose agent runs can be saved")
+    return ""
 
 
 def list_agent_sessions_that_take_slash_command(agent_session_entries, command):
@@ -2731,8 +2756,7 @@ class AgentSessionListController(NSObject):
         it saves, as Pause counts those it pauses: it saves the conversations of those of the agent
         sessions whose agent runs a tool that can resume one, for "Restore sessions…". Grayed out
         as "Save sessions", saying why, when none of them can be saved."""
-        sessions_to_save = [entry for entry in agent_session_entries if entry.status != "exited"
-                            and entry.agent_tool_name in AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED]
+        sessions_to_save = list_agent_sessions_that_can_be_saved(agent_session_entries)
         title = ("Save session" if len(agent_session_entries) == 1
                  else f"Save {describe_session_count(len(sessions_to_save))}" if sessions_to_save else "Save sessions")
         save_item = self.add_menu_item(menu, title, "menuSaveSessions:",
@@ -2740,17 +2764,10 @@ class AgentSessionListController(NSObject):
                                        if len(sessions_to_save) == 1 else
                                        "Saves the conversations so that Restore sessions… can continue them later")
         save_item.setRepresentedObject_([entry.session_id for entry in sessions_to_save])
-        tool_names = sorted(AGENT_TOOL_NAMES_WHOSE_CONVERSATIONS_CAN_BE_RESUMED)
-        tools_that_can_be_saved = f"{', '.join(tool_names[:-1])} and {tool_names[-1]}"  # "Claude Code, Codex and agy"
-        if not sessions_to_save:
-            save_item.setEnabled_(False)
-            if all(entry.status == "exited" for entry in agent_session_entries):
-                save_item.setToolTip_("The agent has ended" if len(agent_session_entries) == 1 else AGENTS_HAVE_ENDED_TOOL_TIP)
-            else:
-                save_item.setToolTip_(f"Only {tools_that_can_be_saved} sessions can be saved")
-        elif len(sessions_to_save) < len(agent_session_entries):
-            save_item.setToolTip_(f"Saves {len(sessions_to_save)} of the {len(agent_session_entries)} sessions: only "
-                                  f"{tools_that_can_be_saved} sessions whose agent runs can be saved")
+        save_item.setEnabled_(bool(sessions_to_save))
+        what_isnt_saved = explain_which_agent_sessions_cant_be_saved(agent_session_entries, sessions_to_save)
+        if what_isnt_saved:
+            save_item.setToolTip_(what_isnt_saved)
 
     def menuSaveSessions_(self, sender):
         self.owner.save_agent_sessions(list(sender.representedObject()))
@@ -2770,7 +2787,7 @@ class AgentSessionListController(NSObject):
                                           RESTORE_SESSIONS_TOOL_TIP)
         if not self.owner.has_saved_agent_sessions():
             restore_item.setEnabled_(False)
-            restore_item.setToolTip_("No sessions are saved")
+            restore_item.setToolTip_(NO_SESSIONS_ARE_SAVED_TOOL_TIP)
 
     def menuRestoreSessions_(self, sender):
         self.owner.open_saved_sessions_window()

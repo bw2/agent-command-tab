@@ -147,6 +147,11 @@ KEYS_THAT_CLEAR_THE_SHELLS_LINE = "\x05\x15"
 # Claude Code and Codex start within a few seconds.
 SECONDS_A_RESTORED_AGENT_HAS_TO_START = 15
 SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_AGENT = 1
+# How long a restore waits for a gather to list the last tab it typed a command into, to have it
+# brought to the front, and how often it looks: a gather lists a new tab a fraction of a second
+# after it opens.
+SECONDS_A_RESTORED_TAB_HAS_TO_BE_LISTED = 5
+SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_TAB = 0.05
 
 
 async def give_a_restored_tab_or_window_its_saved_name(rename, renamed_thing):
@@ -419,16 +424,21 @@ class DashboardCore:
             (load_codex_processes_that_shared_their_folder) to start with when
             codex_processes_that_shared_their_folder_file_path is None (dump-snapshot reads the
             app's file but never writes it).
+        ask_the_app_to_show_a_tab: Called on the background thread with the session ID of a tab
+            the core wants brought to the front (the last tab of a restore): the app then sends
+            focus_agent_session for it, as for Return on its row, since only the app can first
+            hand macOS's activation over to the terminal (AppController.submit_action).
     """
 
     def __init__(self, publish_snapshot, report_connection_lost, verbose=False, docked_window_frames_file_path=None,
                  pause_records_file_path=None, pause_record_by_tab_and_agent_to_start_with=None, hook_events_socket_path=None,
                  hook_states_file_path=None, started_at_and_hook_state_by_agent_process_id_to_start_with=None,
                  report_terminal_problem=None, codex_processes_that_shared_their_folder_file_path=None,
-                 started_at_by_codex_process_id_that_shared_its_folder_to_start_with=None):
+                 started_at_by_codex_process_id_that_shared_its_folder_to_start_with=None, ask_the_app_to_show_a_tab=None):
         self.publish_snapshot = publish_snapshot
         self.report_connection_lost = report_connection_lost
         self.report_terminal_problem = report_terminal_problem or (lambda message: None)
+        self.ask_the_app_to_show_a_tab = ask_the_app_to_show_a_tab or (lambda session_id: None)
         self.verbose = verbose
         # The terminals, in the order their windows are listed.
         self.terminal_backends = [
@@ -1747,7 +1757,9 @@ class DashboardCore:
         that failed and why, with details {"restored_conversation_ids": [...]}, the conversations
         whose agent was seen running in its tab within SECONDS_A_RESTORED_AGENT_HAS_TO_START,
         which the app then takes out of the saved list: one whose
-        command failed (a launch command naming a program that isn't installed) stays saved."""
+        command failed (a launch command naming a program that isn't installed) stays saved.
+        The tab of the last saved session whose command was typed comes to the front right then,
+        before any agent is waited for (ask_the_app_to_show_the_tab_once_a_gather_lists_it)."""
         conversation_ids_running_now = await self.list_conversation_ids_running_now()
         conversation_ids_running_before_this_restore = set(conversation_ids_running_now)
         failures = []
@@ -1758,6 +1770,8 @@ class DashboardCore:
                 failures += await self.restore_saved_window(
                     saved_window, action_request.arguments["launch_command_by_agent_tool_name"], conversation_ids_running_now,
                     started_sessions, terminal_session_ids_typed_into)
+            if started_sessions:
+                await self.ask_the_app_to_show_the_tab_once_a_gather_lists_it(started_sessions[-1][2])
             sessions_whose_agent_didnt_start = await self.wait_for_the_agents_of_restored_sessions(started_sessions)
         finally:  # the conversations and tabs this restore took (restore_saved_window)
             self.conversation_ids_being_restored -= conversation_ids_running_now - conversation_ids_running_before_this_restore
@@ -1767,6 +1781,19 @@ class DashboardCore:
         return ActionResult(not failures, "; ".join(failures), details={"restored_conversation_ids": [
             conversation_id for conversation_id, name, tab_id in started_sessions
             if (conversation_id, name, tab_id) not in sessions_whose_agent_didnt_start]})
+
+    async def ask_the_app_to_show_the_tab_once_a_gather_lists_it(self, tab_id):
+        """Asks the app to bring a tab to the front (ask_the_app_to_show_a_tab) as soon as a gather
+        lists it, asking for gathers meanwhile: a tab a restore just opened isn't in the last
+        gather, and focus_agent_session finds a tab only there. One that isn't listed within
+        SECONDS_A_RESTORED_TAB_HAS_TO_BE_LISTED (it closed at once) is left where it is."""
+        deadline = time.monotonic() + SECONDS_A_RESTORED_TAB_HAS_TO_BE_LISTED
+        while self.find_first_session_id_of_tab(tab_id) is None and time.monotonic() < deadline:
+            self.regather_needed.set()  # publish_when_needed gathers while this waits
+            await asyncio.sleep(SECONDS_BETWEEN_CHECKS_FOR_A_RESTORED_TAB)
+        session_id = self.find_first_session_id_of_tab(tab_id)
+        if session_id is not None:
+            self.ask_the_app_to_show_a_tab(session_id)
 
     def an_agent_runs_in_the_tab(self, tab_id):
         """Whether the last gather found an agent process in the tab's first pane."""

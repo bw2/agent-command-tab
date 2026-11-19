@@ -7,8 +7,8 @@ app controller puts it above an always-on-top list window. Its rows can't be dra
 rows can be selected, and a saved window's row stands for all of its saved sessions. A double
 click on a name, Return on a selected row, or Rename in a row's right-click menu renames it;
 Delete (in the menu, the button, or the Delete key) deletes the selected rows; the Restore button
-restores them and closes the window, and the owner takes those restored out of the list. The
-owner keeps the saved list and its file.
+restores them and closes the window: the tab of the last one comes to the front at once, and the
+owner takes those restored out of the list. The owner keeps the saved list and its file.
 """
 
 import os
@@ -283,7 +283,8 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         self.restore_button = self.add_button(window, "Restore", "restoreClicked:", width - SIDE_MARGIN)
         self.delete_button = self.add_button(window, "Delete", "deleteClicked:",
                                              self.restore_button.frame().origin.x - GAP_BETWEEN_BUTTONS)
-        self.restore_button.setToolTip_("Resumes the selected rows' sessions; a window's row stands for all of its sessions")
+        self.restore_button.setToolTip_("Resumes the selected rows' sessions and brings the last one's tab to the front; "
+                                         "a window's row stands for all of its sessions")
         window.setInitialFirstResponder_(outline_view)
         return window
 

@@ -181,6 +181,11 @@ class AppController(NSObject):
         self.latest_snapshot_lock = threading.Lock()
         self.latest_snapshot = None
         self.snapshot_delivery_is_scheduled = False
+        # The saved sessions (saved_agent_sessions_store): the main thread
+        # alone reads and writes their file, so a rename or delete never waits on the core.
+        # Loaded before the lists are built: each one's bottom bar asks whether any are saved.
+        self.saved_agent_sessions_file_path = SAVED_AGENT_SESSIONS_FILE_PATH
+        self.saved_windows = load_saved_windows(self.saved_agent_sessions_file_path)
         self.dropdown_list_controller = AgentSessionListController.alloc().initWithOwner_(self)
         self.dropdown_panel_controller = ListPanelController.alloc().initWithListController_(self.dropdown_list_controller)
         self.popover = build_dropdown_popover(self.dropdown_panel_controller)
@@ -193,10 +198,6 @@ class AppController(NSObject):
             # do once they appear.
             list_controller.defers_rebuilding_while_hidden = True
         self.settings_window_controller = SettingsWindowController.alloc().initWithOwner_(self)
-        # The saved sessions (saved_agent_sessions_store): the main thread
-        # alone reads and writes their file, so a rename or delete never waits on the core.
-        self.saved_agent_sessions_file_path = SAVED_AGENT_SESSIONS_FILE_PATH
-        self.saved_windows = load_saved_windows(self.saved_agent_sessions_file_path)
         self.saved_sessions_window_controller = SavedSessionsWindowController.alloc().initWithOwner_(self)
         # Calls back on the key filter's own thread.
         self.global_shortcut_key_filter = GlobalShortcutKeyFilter(lambda: AppHelper.callAfter(self.global_shortcut_pressed))
@@ -207,7 +208,8 @@ class AppController(NSObject):
                                                      hook_states_file_path=HOOK_STATES_FILE_PATH,
                                                      report_terminal_problem=self.receive_terminal_problem_on_background_thread,
                                                      codex_processes_that_shared_their_folder_file_path=(
-                                                         CODEX_PROCESSES_THAT_SHARED_THEIR_FOLDER_FILE_PATH))
+                                                         CODEX_PROCESSES_THAT_SHARED_THEIR_FOLDER_FILE_PATH),
+                                                     ask_the_app_to_show_a_tab=self.receive_request_to_show_a_tab_on_background_thread)
         self.note_application_unless_it_is_the_dashboard(NSWorkspace.sharedWorkspace().frontmostApplication())
         notification_center = NSNotificationCenter.defaultCenter()
         for notification_name, selector_name in (
@@ -270,6 +272,18 @@ class AppController(NSObject):
     @objc.python_method
     def receive_terminal_problem_on_background_thread(self, message):
         AppHelper.callAfter(self.show_terminal_problem, message)
+
+    @objc.python_method
+    def receive_request_to_show_a_tab_on_background_thread(self, session_id):
+        AppHelper.callAfter(self.show_tab_the_core_asked_for, session_id)
+
+    @objc.python_method
+    def show_tab_the_core_asked_for(self, session_id):
+        """Brings a tab to the front as Return on its row in a list does (the core asks for the
+        last tab of a restore: DashboardCore.ask_the_app_to_show_a_tab), and says why in an
+        alert should that fail."""
+        self.submit_action_and_report_failure(ActionRequest("focus_agent_session", {"session_id": session_id}),
+                                              "The tab couldn't be shown")
 
     @objc.python_method
     def show_terminal_problem(self, message):
@@ -1029,13 +1043,17 @@ class AppController(NSObject):
     @objc.python_method
     def change_saved_windows(self, saved_windows):
         """Keeps the new saved list, writes it to its file and shows it in an open Saved sessions
-        window. A write that fails (a full disk) is reported; the list stays changed until the app quits."""
+        window; each list's bottom bar then shows its Restore button as clickable or grayed out
+        (whether anything is saved). A write that fails (a full disk) is reported; the list stays
+        changed until the app quits."""
         self.saved_windows = saved_windows
         try:
             save_saved_windows(self.saved_agent_sessions_file_path, saved_windows)
         except OSError as error:
             self.show_message_alert("The saved sessions couldn't be written", f"{self.saved_agent_sessions_file_path}: {error}")
         self.saved_sessions_window_controller.show_saved_windows(saved_windows)
+        for list_panel_controller in self.list_all_list_panel_controllers():
+            list_panel_controller.show_whether_sessions_are_saved()
 
     @objc.python_method
     def rename_saved_window(self, window_key, new_name):
@@ -1054,20 +1072,29 @@ class AppController(NSObject):
         """Asks the core to resume the saved sessions of these saved windows and these saved
         sessions, with each agent tool's launch command from the settings. Each one it resumed
         leaves the saved list; an alert names those that failed and
-        why, and they stay saved."""
+        why, and they stay saved. The core has the tab of the last one whose command it typed
+        brought to the front right then (show_tab_the_core_asked_for), before it knows which
+        agents started, so that alert comes later: when it takes the keyboard from another app
+        (the terminal showing that tab, unless the user went elsewhere since), that app gets it
+        back once the alert is answered."""
         saved_windows_to_restore = choose_saved_windows_to_restore(self.saved_windows, window_keys, conversation_ids)
         saved_session_count = sum(len(saved_window["saved_sessions"]) for saved_window in saved_windows_to_restore)
 
-        def take_the_restored_sessions_out_of_the_list(action_result):
+        def take_the_restored_sessions_out_of_the_list_and_name_those_that_failed(action_result):
             restored_conversation_ids = set((action_result.details or {}).get("restored_conversation_ids") or [])
             if restored_conversation_ids:
                 self.change_saved_windows(delete_saved_items(self.saved_windows, set(), restored_conversation_ids))
-        self.submit_action_and_report_failure(
-            ActionRequest("restore_saved_agent_sessions", {}, {
-                "saved_windows": saved_windows_to_restore,
-                "launch_command_by_agent_tool_name": build_launch_command_by_agent_tool_name(self.settings["agent_tools"])}),
-            "The session wasn't restored" if saved_session_count == 1 else "Not every session was restored",
-            after_any_result=take_the_restored_sessions_out_of_the_list)
+            if not action_result.succeeded:
+                another_application_has_the_keyboard = not NSApp.isActive()
+                self.report_action_failure(
+                    action_result, "The session wasn't restored" if saved_session_count == 1 else "Not every session was restored")
+                if another_application_has_the_keyboard:
+                    self.give_activation_to(self.last_other_active_application)
+        self.submit_action(ActionRequest("restore_saved_agent_sessions", {}, {
+            "saved_windows": saved_windows_to_restore,
+            "launch_command_by_agent_tool_name": build_launch_command_by_agent_tool_name(self.settings["agent_tools"])})
+        ).add_done_callback(lambda done_future: AppHelper.callAfter(
+            take_the_restored_sessions_out_of_the_list_and_name_those_that_failed, done_future.result()))
 
     @objc.python_method
     def open_settings(self):
