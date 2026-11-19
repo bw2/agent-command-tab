@@ -11,6 +11,7 @@ and the screens of the sessions whose status needs a look at the screen
 
 import asyncio
 import json
+import sys
 import time
 
 import iterm2
@@ -32,6 +33,9 @@ from agent_command_tab.window_list_ordering import move_id_before_another
 ITERM2_TERMINAL_NAME = "iTerm2"
 ITERM2_BUNDLE_IDENTIFIER = "com.googlecode.iterm2"
 SESSION_VARIABLES_TO_WATCH = ("commandLine", "status")
+# The iTerm2 user variable that names a window from the command line (README: "Naming a window from
+# the command line"), set with printf '\033]1337;SetUserVar=agent_command_tab_window_title=%s\007' "$(printf %s "$title" | base64)".
+WINDOW_TITLE_USER_VARIABLE_NAME = "agent_command_tab_window_title"
 SECONDS_TO_WAIT_FOR_THE_STATUS_IN_ITERM2S_TAB_BAR = 2
 SECONDS_FOR_FULL_SCREEN_ANIMATION = 1.0
 # While iTerm2 isn't running, the iterm2 package can't connect: it asks iTerm2 for its cookie
@@ -269,6 +273,9 @@ class Iterm2TerminalBackend(TerminalBackend):
             self.connection, self.handle_title_change, session_scope, "tab.titleOverrideFormat", "all")
         await async_subscribe_to_variable_change_notification(
             self.connection, self.handle_title_change, window_scope, "titleOverrideFormat", "all")
+        await async_subscribe_to_variable_change_notification(
+            self.connection, self.give_a_window_the_title_set_from_its_command_line, session_scope,
+            f"user.{WINDOW_TITLE_USER_VARIABLE_NAME}", "all")
         self.app = app
         self.request_regather()
 
@@ -302,6 +309,25 @@ class Iterm2TerminalBackend(TerminalBackend):
     async def handle_title_change(self, connection, notification):
         """A tab or window title changed (here, in iTerm2's own dialogs, or by a program): re-read."""
         self.request_regather()
+
+    async def give_a_window_the_title_set_from_its_command_line(self, connection, notification):
+        """Makes a title set from the command line in one of a window's sessions (with the
+        WINDOW_TITLE_USER_VARIABLE_NAME code) the window's own title, as Window > Edit Window Title
+        and the list's Rename set it, which no title a program prints later (a shell prompt over
+        ssh, say) replaces. An empty value is skipped: the command that sets a title empties the
+        variable first, so that setting the same title again is a change iTerm2 reports."""
+        title = json.loads(notification.json_new_value) if notification.json_new_value else None
+        if not isinstance(title, str) or not title.strip() or self.app is None:
+            return
+        session = self.app.get_session_by_id(notification.identifier)
+        if session is None:  # a session newer than the App object's last refresh
+            await self.app.async_refresh()
+            session = self.app.get_session_by_id(notification.identifier)
+        window, _ = self.app.get_window_and_tab_for_session(session) if session is not None else (None, None)
+        action_result = await self.rename_window(window.window_id, title) if window is not None else ActionResult(
+            False, "its session is gone")
+        if not action_result.succeeded:
+            print(f'a window didn\'t get the title "{title}" set from its command line: {action_result.message}', file=sys.stderr)
 
     async def regather_on_each_notification_of(self, monitor_class):
         """Asks for a regather each time an iTerm2 monitor (a layout change, a new session, a
@@ -530,7 +556,10 @@ class Iterm2TerminalBackend(TerminalBackend):
         window = self.app.get_window_by_id(window_id)
         if window is None:
             return ActionResult(False, "that window no longer exists")
-        await window.async_set_title(escape_text_for_iterm2_interpolated_string(new_title.strip()))
+        try:
+            await window.async_set_title(escape_text_for_iterm2_interpolated_string(new_title.strip()))
+        except iterm2.RPCException:  # it closed meanwhile
+            return ActionResult(False, "that window no longer exists")
         return ActionResult(True)
 
     async def close_window(self, window_id):

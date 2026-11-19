@@ -6,7 +6,7 @@ A macOS menu bar app that lists the iTerm2 windows and tabs, and the tmux sessio
 
 ## What it does
 
-- **One tree of your agents:** every iTerm2 window and tmux session with at least one agent tab, with its tabs below it, grouped by monitor when you have several. Tabs without an agent are left out.
+- **One tree of your agents:** every iTerm2 window and tmux session with at least one agent tab, with its tabs below it, grouped by monitor when you have several. Tabs without an agent are left out. A window is listed under the title you gave it with iTerm2's Window > Edit Window Title or Rename in the list (both set the same title), else its first agent's folder. To give it that title from the command line, see [Naming a window from the command line](#naming-a-window-from-the-command-line).
 - **What each agent is doing:** a status dot and word per tab (asking a question or for permission, thinking, running a tool, running in the background, done, new, idle, paused, error), the context size in tokens and its share of the context window (not for agy, which doesn't say how large its window is), how long ago the last message of its conversation was written (the Last Msg column, empty while the agent works), and optionally when it started, how long it has run, its memory and CPU use. "Done" stays until you look at the tab, and a Claude Code or agy session is "new" until you send it its first message. The menu bar icon counts the agents waiting for your answer.
 - **Process rows:** a tab whose agent started processes has an arrow that opens a row for each of them (right-click one for Info or Kill). The button at the top right collapses or expands all windows.
 - **Control:** double-click to bring a window or tab to the front; press and hold to peek at a tab; rename in place; drag tabs between windows and windows between monitors; start a new agent window or tab (with the agent tools that are installed and turned on in Settings > Harnesses); duplicate a tab; type `/compact` or `/clear` (agy: `/compact` only) into an agent waiting at its prompt; end an agent's process; pause agents (with every process they started) before going offline and resume them later, per tab, window or monitor from the right-click menu, or for the selected rows with the button at the bottom right. A pause leaves out the agents it can't stop, which keep running: those in tmux, and Codex sessions whose turns run in Codex's shared background server, as Codex 0.165 and later run them, since stopping that server would pause every Codex session. Select several rows (Command-click, Shift-click) to act on all their agents at once (a busy agent gets `/compact` or `/clear` when its turn ends), or, when two or more of them are Claude Code or Codex sessions, to ask those to talk to each other: each of them gets your note and how to message the others (a Codex session has no way to message a Claude Code session, and is told so), or, if you choose one of them in the window that shows the note, only that one does.
@@ -79,6 +79,18 @@ From its first start on, iTerm2 starts the app whenever iTerm2 starts: the app a
 The app's hooks, which are Claude Code's, tell a crashed Claude Code agent from one that ended normally (the row of one that crashed, or was killed from outside the app, stays, gray and "exited", for up to 5 minutes while its tab stays open; the row of one that ended normally goes at once), count its background shells and agents, tell when its turn ends while one of those still runs, and tell when a turn ended on an API error (its row then says "error" until the session goes on). The list offers to install them (Install Hooks, at its bottom left) while it lists a Claude Code session and they are missing. The first time the app changes a settings file, it copies it to `<file>.agent-command-tab-backup`. Sessions started afterwards use them. Earlier versions also added hooks to Codex, but Codex 0.165 and later run hooks in their shared background server, which belongs to no tab, so those told the app nothing; the app now takes them out of Codex's `hooks.json` when it starts (and `remove-hooks` does too).
 
 The shortcut needs the Accessibility permission (System Settings > Privacy & Security > Accessibility), because it has to see the keys before macOS's app switcher does. macOS gives it to the app that starts AgentCommandTab, so started from iTerm2, turn it on for iTerm2. Until it is on, Settings show a button that opens that page.
+
+### Naming a window from the command line
+
+A window title a command prints (`printf '\033]0;Michelle\007'`) doesn't name a window in the list: a shell prompt can print one too (over ssh, often `user@host:folder` at every prompt), and iTerm2 gives it to every tab of the window, so it can't be told from a name you chose. Have the command also set the iTerm2 variable `agent_command_tab_window_title`. While the app runs, it then makes that title the window's own, as Window > Edit Window Title does, which a title printed later can't change:
+
+```bash
+function set_window_title {
+    printf "\033]0;%s\007" "$1"
+    printf "\033]1337;SetUserVar=agent_command_tab_window_title=\007"  # emptied first, so the same title set again counts
+    printf "\033]1337;SetUserVar=agent_command_tab_window_title=%s\007" "$(printf %s "$1" | base64)"
+}
+```
 
 ## Uninstall
 

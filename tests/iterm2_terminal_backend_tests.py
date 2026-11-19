@@ -148,3 +148,39 @@ class Iterm2TerminalSessionTests(unittest.TestCase):
                                        lambda: Iterm2TerminalSession(session).read_screen_lines()):
                 with self.assertRaises(TerminalRequestFailed):
                     asyncio.run(type_paste_or_read())
+
+
+class WindowTitleSetFromTheCommandLineTests(unittest.TestCase):
+    def test_a_title_set_in_a_session_becomes_its_windows_own_title(self):
+        window = unittest.mock.Mock(window_id="w1", async_set_title=unittest.mock.AsyncMock())
+        session = unittest.mock.Mock(session_id="s1")
+        sessions_found = []  # what each lookup finds: s1 only after the App object's refresh here
+
+        def find_session(session_id):
+            return sessions_found[-1] if sessions_found else None
+        app = unittest.mock.Mock(get_session_by_id=find_session, get_window_by_id=lambda window_id: window,
+                                 get_window_and_tab_for_session=lambda found_session: (window, None),
+                                 async_refresh=unittest.mock.AsyncMock(side_effect=lambda: sessions_found.append(session)))
+        backend = make_iterm2_terminal_backend(app)
+
+        def set_title(json_new_value):
+            asyncio.run(backend.give_a_window_the_title_set_from_its_command_line(
+                None, unittest.mock.Mock(identifier="s1", json_new_value=json_new_value)))
+        # The command empties the variable before it sets the title: nothing to do then.
+        for json_new_value in ('""', None, '"  "'):
+            set_title(json_new_value)
+        window.async_set_title.assert_not_awaited()
+        set_title('"Michelle"')  # in a session newer than the App object's last refresh
+        set_title('"C:\\\\Data"')  # a backslash is no interpolation in iTerm2's title
+        self.assertEqual([call.args for call in window.async_set_title.await_args_list], [("Michelle",), ("C:\\\\Data",)])
+
+    def test_a_title_set_in_a_session_that_is_gone_is_only_reported(self):
+        app = unittest.mock.Mock(get_session_by_id=lambda session_id: None, async_refresh=unittest.mock.AsyncMock())
+        with unittest.mock.patch("sys.stderr") as standard_error:
+            asyncio.run(make_iterm2_terminal_backend(app).give_a_window_the_title_set_from_its_command_line(
+                None, unittest.mock.Mock(identifier="gone", json_new_value='"Michelle"')))
+        self.assertIn("its session is gone", "".join(call.args[0] for call in standard_error.write.call_args_list))
+
+
+if __name__ == "__main__":
+    unittest.main()
