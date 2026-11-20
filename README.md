@@ -2,7 +2,7 @@
 
 # AgentCommandTab
 
-A macOS menu bar app that lists the iTerm2 windows and tabs, and the tmux sessions and windows, where AI coding agents run (Claude Code, OpenAI Codex CLI, Google's Antigravity CLI `agy`, and others), shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents.
+A macOS app that gives you a list of all AI sessions currently running on your computer (Claude Code, OpenAI Codex, Google Antigravity (`agy`), and others). It lets you easily  shows what each agent is doing, and lets you rename, focus, reorder and move those tabs without interrupting the agents.
 
 ## What it does
 
