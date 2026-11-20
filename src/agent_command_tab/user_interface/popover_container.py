@@ -63,6 +63,9 @@ PAUSE_OR_RESUME_SELECTED_ROWS_LOOKS = {
     "pause": ("pause.circle", "Pause", "Pause the selected rows' agent processes, their shells and any subprocesses that they started (a STOP signal)"),
     "resume": ("play.circle", "Resume", "Resume the selected rows' paused agent processes (a CONT signal); "
                "those suspended with Ctrl+Z are resumed by typing fg in their tabs instead")}
+# The bottom bar's Settings button. Command-comma opens the settings from any of the app's windows
+# (the main menu's Settings item, app_controller), and the tooltip says so.
+SETTINGS_BUTTON_TOOL_TIP = "Open Settings (⌘-,)"
 # The bottom bar's Restore and Save buttons, left of the pause or resume button in that order:
 # (SF Symbol, text fallback, what a screen reader calls it). Restore opens the Saved sessions
 # window, as "Restore sessions…" in the menus does; Save saves the sessions
@@ -94,9 +97,9 @@ GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON = 16
 LARGEST_SEARCH_FIELD_WIDTH = 220
 SMALLEST_SEARCH_FIELD_WIDTH = 80  # the magnifying glass, a few letters, and the button that empties it
 SEARCH_FIELD_PLACEHOLDER = "Search"
-SEARCH_FIELD_TOOL_TIP = ("Show only the windows whose title holds this text, with all their tabs, the tabs whose title "
-                         "holds it, and, dimmed, those whose conversation does (prompts, replies and the commands the "
-                         "agent ran) (⌘-f or /)")
+SEARCH_FIELD_TOOL_TIP = ("Search the list for an exact keyword or phrase. Show only rows where it occurs inside the name "
+                         "or, in dimmer gray font, where it occurs inside the conversation log (prompts, replies, "
+                         "commands) (⌘-F or /)")
 CASE_SENSITIVE_CHECKBOX_TITLE = "aA"
 CASE_SENSITIVE_CHECKBOX_TOOL_TIP = "Toggle whether the search is case sensitive"
 # A message line narrower than this beside the sort control and Hide Idle shows too little to
@@ -480,6 +483,7 @@ class ListPanelController(NSViewController):
         # resumes the selected rows, with the Save button left of it and the Restore button left
         # of that; a new window with an agent session is the "+" row at the end of the list.
         self.settings_button = make_gray_pill_button("Settings", self, "settingsClicked:")
+        self.settings_button.setToolTip_(SETTINGS_BUTTON_TOOL_TIP)
         # A gear before its name, as tall as the small text; the name alone where the symbol is missing.
         gear_image = NSImage.imageWithSystemSymbolName_accessibilityDescription_("gearshape", None)
         if gear_image is not None:

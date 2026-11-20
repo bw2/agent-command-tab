@@ -1850,6 +1850,9 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel.restoreSessionsClicked_(button)
         self.assertEqual(self.owner.saved_sessions_window_opening_count, 1)
 
+    def test_the_bottom_bars_settings_button_names_its_keyboard_shortcut_in_its_tooltip(self):
+        self.assertEqual(self.dropdown_panel_controller.settings_button.toolTip(), "Open Settings (⌘-,)")
+
     def test_a_grayed_out_button_keeps_the_arrow_pointer(self):
         button = PointingHandButton.alloc().initWithFrame_(NSMakeRect(0, 0, 24, 22))
         with unittest.mock.patch("agent_command_tab.user_interface.pointing_hand_button.NSCursor") as cursor_class:
