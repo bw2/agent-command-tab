@@ -138,6 +138,21 @@ COLUMN_TITLES = {
     "memory_usage": "Memory", "cpu_usage": "CPU", "agent_tool_icon": "", "state": "Status",
 }
 NAME_COLUMN_TITLE = "Name"
+NAME_COLUMN_DESCRIPTION = "the name of the window or tab"  # in its title's hover text, as COLUMN_DESCRIPTIONS are
+# What each column that the settings can show or hide shows: after its title in the settings'
+# Columns section, and, starting with a capital letter, in the hover text of its title over the
+# list (build_column_title_tool_tip). A tab row's Status says "thinking" or "running" for a working
+# agent (row_text_rendering.name_and_describe_tab_rows_state), and its memory and CPU use count
+# the agent and every process below it.
+COLUMN_DESCRIPTIONS = {
+    "state": "agent's current status such as 'thinking', 'asking', 'done', 'idle'",
+    "context_tokens": "number of tokens (and % of context window) used so far",
+    "created_time": "time or date when the agent was started",
+    "existence_duration": "time elapsed since the agent was started",
+    "time_since_last_message": "time elapsed since the last message",
+    "memory_usage": "current memory usage by an agent and any subprocesses it started",
+    "cpu_usage": "current CPU usage by an agent and any subprocesses it started",
+}
 # The sort order (list_sorting.py) a click on a title chooses, by the title's column ("name" for
 # Name). Tokens sorts by the share of the context window in use; Created and Age both sort by when the agent
 # started.
@@ -602,6 +617,37 @@ def place_columns_from_the_right(right_edge, column_widths):
     return placed_columns
 
 
+def choose_what_a_click_on_a_column_title_does(title_name, list_sort_order, list_sort_order_is_reversed):
+    """Returns (the sort order a click on this title chooses, whether in its other direction, the
+    sentence of the title's hover text that says so). A click at a time sorts by the title's
+    column in its first direction, then the other, then goes back to the manual order.
+
+    Args:
+        title_name: "name", or the column's name: a key of LIST_SORT_ORDER_BY_TITLE_NAME.
+        list_sort_order: The order the list is sorted in now (one of list_sorting.LIST_SORT_ORDERS).
+        list_sort_order_is_reversed: Whether it is sorted in that order's other direction.
+    """
+    sort_order_of_the_title = LIST_SORT_ORDER_BY_TITLE_NAME[title_name]
+    if sort_order_of_the_title != list_sort_order:
+        return sort_order_of_the_title, False, "Click to sort the list by this column"
+    if not list_sort_order_is_reversed:
+        return sort_order_of_the_title, True, "Click to reverse-sort the list by this column"
+    return "manual", False, "Click to stop sorting the list by this column"
+
+
+def build_column_title_tool_tip(title_name, list_sort_order, list_sort_order_is_reversed):
+    """Returns the hover text of a column title that sorts: what its column shows
+    (COLUMN_DESCRIPTIONS, or NAME_COLUMN_DESCRIPTION for "Name"), then what a click on it does now,
+    such as "Time elapsed since the last message. Click to sort the list by this column".
+
+    Args:
+        title_name, list_sort_order, list_sort_order_is_reversed: See choose_what_a_click_on_a_column_title_does.
+    """
+    _, _, what_a_click_does = choose_what_a_click_on_a_column_title_does(title_name, list_sort_order, list_sort_order_is_reversed)
+    description = NAME_COLUMN_DESCRIPTION if title_name == "name" else COLUMN_DESCRIPTIONS[title_name]
+    return f"{description[0].upper()}{description[1:]}. {what_a_click_does}"
+
+
 class ColumnTitlesRowView(NSView):
     """The row of column titles between the top bar and the list:
     "Name" centered over the names, and each shown column's title over it, aligned as its texts are, with its
@@ -1035,7 +1081,8 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def fill_column_titles(self):
         """Puts the titles in the row of column titles, those of the columns the list is sorted by
-        ending in an arrow (SORT_ARROWS_BY_IS_ASCENDING); update_column_titles_row sets the widths."""
+        ending in an arrow (SORT_ARROWS_BY_IS_ASCENDING), and gives each title that sorts its hover
+        text (build_column_title_tool_tip); update_column_titles_row sets the widths."""
         row_view = self.column_titles_row_view
         names_titles_alignments_and_text_fields = [("name", NAME_COLUMN_TITLE, NSTextAlignmentCenter, row_view.name_title_text_field)] + [
             (column_name, COLUMN_TITLES[column_name],
@@ -1052,6 +1099,8 @@ class AgentSessionListController(NSObject):
             text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(title, {
                 NSFontAttributeName: self.column_title_font, NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
                 NSParagraphStyleAttributeName: paragraph_style}))
+            text_field.setToolTip_(build_column_title_tool_tip(title_name, self.list_sort_order, self.list_sort_order_is_reversed)
+                                   if title_name in LIST_SORT_ORDER_BY_TITLE_NAME else None)
         row_view.setNeedsLayout_(True)  # the titles' sizes may have changed
 
     # ----- applying snapshots -----
@@ -1188,14 +1237,10 @@ class AgentSessionListController(NSObject):
     @objc.python_method
     def column_title_clicked(self, title_name):
         """Sorts by the clicked title's column, a click at a time: in its first direction, then
-        the other, then back to the manual order."""
-        list_sort_order = LIST_SORT_ORDER_BY_TITLE_NAME[title_name]
-        if list_sort_order != self.list_sort_order:
-            self.owner.list_sort_order_chosen(list_sort_order, False)
-        elif not self.list_sort_order_is_reversed:
-            self.owner.list_sort_order_chosen(list_sort_order, True)
-        else:
-            self.owner.list_sort_order_chosen("manual", False)
+        the other, then back to the manual order (choose_what_a_click_on_a_column_title_does)."""
+        list_sort_order, is_reversed, _ = choose_what_a_click_on_a_column_title_does(
+            title_name, self.list_sort_order, self.list_sort_order_is_reversed)
+        self.owner.list_sort_order_chosen(list_sort_order, is_reversed)
 
     @objc.python_method
     def set_idle_tabs_are_hidden(self, idle_tabs_are_hidden):

@@ -56,7 +56,8 @@ from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGH
                                                                 TOP_BAR_HEIGHT, ListPanelController)
 from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKING_AGENT_SESSIONS_TO_TALK_TO_EACH_OTHER
 from agent_command_tab.saved_agent_sessions_store import rename_saved_session
-from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES_ROW_PADDING,
+from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES,
+                                                                         COLUMN_TITLES_ROW_PADDING,
                                                                          CONVERSATION_ONLY_MATCH_ROW_ALPHA, DIM_DOT_ALPHA,
                                                                          FRONT_TAB_OUTLINE_COLOR_MAKER,
                                                                          GAP_BEFORE_DETAILS, ROW_HEIGHT, ROW_RIGHT_MARGIN,
@@ -65,7 +66,8 @@ from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_
                                                                          SELECTION_OUTLINE_COLOR_MAKER, SMALLEST_TAB_NAME_WIDTH,
                                                                          TEXT_FIELD_INSETS,
                                                                          AgentSessionListController, RowButton,
-                                                                         RowViewWithSelectionAndFrontTabOutlines, build_index_set,
+                                                                         RowViewWithSelectionAndFrontTabOutlines,
+                                                                         build_column_title_tool_tip, build_index_set,
                                                                          choose_room_for_a_columns_texts,
                                                                          compute_selection_outline_rect, list_moves_that_reorder)
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons
@@ -83,7 +85,7 @@ from agent_command_tab.user_interface.menu_bar_status_item import (MenuBarStatus
                                                                    choose_what_a_click_on_the_icon_does_to_the_dropdown)
 from agent_command_tab.user_interface.saved_sessions_window import SavedSessionsWindowController
 from agent_command_tab.user_interface.settings_window import (GAP_BELOW_SECTION_TITLE, GAP_BETWEEN_SECTIONS,
-                                                              LAUNCH_COMMAND_FIELD_WIDTH, SECTION_TITLE_HEIGHT,
+                                                              SECTION_TITLE_HEIGHT,
                                                               KeyboardButton, KeyboardPopUpButton, SettingsWindowController)
 from agent_command_tab.user_interface.settings_window import ROW_HEIGHT as SETTINGS_ROW_HEIGHT  # the list has its own
 from agent_command_tab.user_interface.sidebar_panel import (SECONDS_SHOWN_AFTER_A_CLICK_OR_SHORTCUT, SidebarController,
@@ -764,22 +766,48 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.owner.list_sort_order_chosen = choose_and_show
         column_widths_before = dict(self.list_controller.column_widths)
         title_fields = self.list_controller.column_titles_row_view.column_title_text_fields
-        for expected_sort, expected_tokens_title, expected_tab_titles in (
-                (("context_percent", False), "Tokens ▾", ["planning", "codex-review", "phase0-tests"]),
-                (("context_percent", True), "Tokens ▴", ["codex-review", "planning", "phase0-tests"]),  # unknown size last both ways
-                (("manual", False), "Tokens", ["planning", "phase0-tests", "codex-review"])):
+        # Each title's hover text says what its column shows, then what the next click on it does.
+        what_the_tokens_column_shows = "Number of tokens (and % of context window) used so far. "
+        self.assertEqual(title_fields["context_tokens"].toolTip(), what_the_tokens_column_shows + "Click to sort the list by this column")
+        for expected_sort, expected_tokens_title, expected_tab_titles, what_the_next_click_does in (
+                (("context_percent", False), "Tokens ▾", ["planning", "codex-review", "phase0-tests"],
+                 "Click to reverse-sort the list by this column"),
+                (("context_percent", True), "Tokens ▴", ["codex-review", "planning", "phase0-tests"],  # unknown size last both ways
+                 "Click to stop sorting the list by this column"),
+                (("manual", False), "Tokens", ["planning", "phase0-tests", "codex-review"], "Click to sort the list by this column")):
             self.click_column_title("context_tokens")
             self.assertEqual(self.owner.chosen_list_sort_orders[-1], expected_sort)
             self.assertEqual(title_fields["context_tokens"].stringValue(), expected_tokens_title)
+            self.assertEqual(title_fields["context_tokens"].toolTip(), what_the_tokens_column_shows + what_the_next_click_does)
             self.assertEqual([outline_view.itemAtRow_(row).entry.tab_title for row in range(1, 4)], expected_tab_titles)
             self.assertEqual(self.list_controller.column_widths, column_widths_before)  # the arrow had room already
         self.click_column_title("state")  # another title starts over in its first direction
         self.assertEqual(self.owner.chosen_list_sort_orders[-1], ("activity", False))
         self.assertEqual(title_fields["state"].stringValue(), "Status ▾")
+        self.assertEqual(title_fields["state"].toolTip(), "Agent's current status such as 'thinking', 'asking', 'done', 'idle'. "
+                         "Click to reverse-sort the list by this column")
+        name_title_field = self.list_controller.column_titles_row_view.name_title_text_field
+        self.assertEqual(name_title_field.toolTip(), "The name of the window or tab. Click to sort the list by this column")
         self.click_column_title("name")
         self.assertEqual(self.owner.chosen_list_sort_orders[-1], ("alphabet", False))
-        self.assertEqual((self.list_controller.column_titles_row_view.name_title_text_field.stringValue(),
-                          title_fields["state"].stringValue()), ("Name ▴", "Status"))  # A to Z: up, as in Finder
+        self.assertEqual((name_title_field.stringValue(), title_fields["state"].stringValue()),
+                         ("Name ▴", "Status"))  # A to Z: up, as in Finder
+        self.assertEqual((name_title_field.toolTip(), title_fields["state"].toolTip()),
+                         ("The name of the window or tab. Click to reverse-sort the list by this column",
+                          "Agent's current status such as 'thinking', 'asking', 'done', 'idle'. Click to sort the list by this column"))
+        self.assertIsNone(title_fields["agent_tool_icon"].toolTip())  # no title, and no click sorts by it
+
+    def test_the_created_and_age_titles_which_sort_by_the_same_order_say_the_same_about_the_next_click(self):
+        for list_sort_order, is_reversed, what_the_next_click_does in (
+                ("manual", False, "Click to sort the list by this column"),
+                ("activity", True, "Click to sort the list by this column"),  # sorted by another column
+                ("created_time", False, "Click to reverse-sort the list by this column"),
+                ("created_time", True, "Click to stop sorting the list by this column")):
+            self.assertEqual(
+                [build_column_title_tool_tip(title_name, list_sort_order, is_reversed)
+                 for title_name in ("created_time", "existence_duration")],
+                ["Time or date when the agent was started. " + what_the_next_click_does,
+                 "Time elapsed since the agent was started. " + what_the_next_click_does], (list_sort_order, is_reversed))
 
     def test_the_last_msg_column_shows_the_time_since_the_last_message_and_its_title_sorts_by_it(self):
         now = time.time()
@@ -4792,8 +4820,15 @@ class SettingsWindowSmokeTests(unittest.TestCase):
 
     def test_column_switches_choose_the_shown_columns_in_their_left_to_right_order(self):
         switches = self.controller.column_switches
+        # Each labeled with its title over the list's columns, then what the column shows.
         self.assertEqual([self.find_label_of_control(column_switch) for column_switch in switches.values()],
-                         ["Status", "Tokens", "Created", "Age", "Last Msg", "Memory", "CPU"])  # as over the list's columns
+                         ["Status: agent's current status such as 'thinking', 'asking', 'done', 'idle'",
+                          "Tokens: number of tokens (and % of context window) used so far",
+                          "Created: time or date when the agent was started",
+                          "Age: time elapsed since the agent was started",
+                          "Last Msg: time elapsed since the last message",
+                          "Memory: current memory usage by an agent and any subprocesses it started",
+                          "CPU: current CPU usage by an agent and any subprocesses it started"])
         self.assertEqual([column_switch.state() for column_switch in switches.values()], [1, 1, 0, 0, 1, 0, 0])  # the defaults
         switches["state"].setState_(0)
         self.controller.controlChanged_(switches["state"])
@@ -4806,6 +4841,33 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         switches["time_since_last_message"].setState_(0)  # on by default, and turned off like the others
         self.controller.controlChanged_(switches["time_since_last_message"])
         self.assertEqual(self.owner.settings["shown_columns"], ["context_tokens", "created_time", "cpu_usage", "memory_usage"])
+
+    def test_each_column_is_described_after_its_title_in_a_lighter_color_and_cut_short_where_the_window_is_too_narrow(self):
+        def check_the_column_labels(message, descriptions_fit=None):
+            for column_name, column_switch in self.controller.column_switches.items():
+                (label,) = self.list_labels_left_of_control(column_switch)
+                text = label.attributedStringValue()
+                title_length = len(COLUMN_TITLES[column_name])
+                self.assertEqual(text.string()[title_length:title_length + 2], ": ", (message, column_name))
+                self.assertEqual([text.attribute_atIndex_effectiveRange_(NSForegroundColorAttributeName, index, None)[0]
+                                  for index in (0, title_length - 1, title_length, text.length() - 1)],
+                                 [NSColor.labelColor(), NSColor.labelColor(), NSColor.secondaryLabelColor(),
+                                  NSColor.secondaryLabelColor()], (message, column_name))
+                # The label reaches up to 10 points before its switch, however long its text is.
+                self.assertEqual(column_switch.frame().origin.x - (label.frame().origin.x + label.frame().size.width), 10,
+                                 (message, column_name))
+                if descriptions_fit is not None:
+                    self.assertEqual(label.cell().cellSize().width <= label.frame().size.width, descriptions_fit,
+                                     (message, column_name))
+                self.assertTrue(label.allowsExpansionToolTips(), (message, column_name))  # cut short, its tooltip shows it in full
+        # The longest description (Memory's) is a little too long for the narrowest window, and ends in "…" there.
+        check_the_column_labels("the narrowest window")
+        narrowest_width = self.controller.window.contentView().frame().size.width
+        self.controller.window.setContentSize_((narrowest_width + 160, 300))
+        check_the_column_labels("a wider window", descriptions_fit=True)
+        # Narrower than the window can get: each description is cut short with "…" rather than drawn over its switch.
+        self.controller.rows_view.setFrameSize_((200, self.controller.rows_view.frame().size.height))
+        check_the_column_labels("rows narrower than any window", descriptions_fit=False)
 
     def test_text_fields_save_when_they_lose_focus_too(self):
         self.assertTrue(self.controller.sidebar_width_field.cell().sendsActionOnEndEditing())
@@ -5033,11 +5095,27 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         self.controller.controlChanged_(self.controller.launch_command_fields[1])
         self.assertEqual(len(self.owner.agent_tools_asked_to_be_checked), 2)
 
-    def test_the_command_fields_start_together_keep_their_width_and_scroll_a_longer_command(self):
+    def test_the_command_fields_fill_their_rows_from_10_points_after_their_labels_and_scroll_a_longer_command(self):
         command_fields = self.controller.launch_command_fields
-        self.controller.window.setContentSize_((self.controller.window.contentView().frame().size.width + 160, 300))
-        self.assertEqual({(command_field.frame().origin.x, command_field.frame().size.width) for command_field in command_fields},
-                         {(command_fields[0].frame().origin.x, LAUNCH_COMMAND_FIELD_WIDTH)})
+        rows_view = self.controller.rows_view
+        narrowest_width = self.controller.window.contentView().frame().size.width
+
+        def check_the_command_fields(message):
+            for command_field in command_fields:
+                (label,) = self.list_labels_left_of_control(command_field)
+                self.assertEqual(label.stringValue(), "Command", message)
+                self.assertEqual(command_field.frame().origin.x - (label.frame().origin.x + label.frame().size.width), 10, message)
+                # Up to where the switches end: the window's margin of 20 points and the box's padding of 10 from the right.
+                self.assertEqual(rows_view.frame().size.width - (command_field.frame().origin.x + command_field.frame().size.width),
+                                 30, message)
+        check_the_command_fields("the narrowest window")
+        width_in_the_narrowest_window = command_fields[0].frame().size.width
+        self.controller.window.setContentSize_((narrowest_width + 160, 300))
+        check_the_command_fields("a wider window")
+        self.assertEqual(command_fields[0].frame().size.width, width_in_the_narrowest_window + 160)  # the fields take the added width
+        self.owner.settings = dict(self.owner.settings, show_as="window")  # another section shows: the rows are laid out again
+        self.controller.reflect_settings(self.owner.settings)
+        check_the_command_fields("a wider window, laid out again")
         self.assertTrue(all(command_field.cell().isScrollable() for command_field in command_fields))
 
     def check_every_section_title_starts_20_points_below_what_is_shown_above_it(self, shown_section_titles, message):
@@ -5132,7 +5210,7 @@ class SettingsWindowSmokeTests(unittest.TestCase):
         editor = command_fields[0].currentEditor()
         last_character_x = editor.layoutManager().boundingRectForGlyphRange_inTextContainer_(
             (len(typed_command) - 1, 1), editor.textContainer()).origin.x
-        self.assertGreater(last_character_x, LAUNCH_COMMAND_FIELD_WIDTH)  # the command is longer than its field
+        self.assertGreater(last_character_x, command_fields[0].frame().size.width)  # the command is longer than its field
         visible_rect = editor.visibleRect()
         self.assertTrue(visible_rect.origin.x <= last_character_x <= visible_rect.origin.x + visible_rect.size.width)
         command_fields[0].abortEditing()

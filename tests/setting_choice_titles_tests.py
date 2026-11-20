@@ -8,7 +8,8 @@ from agent_command_tab.agent_adapters import build_built_in_agent_tool_adapters
 from agent_command_tab.app_controller import APPEARANCE_NAMES_BY_CHOICE
 from agent_command_tab.settings_store import (APPEARANCE_CHOICES, DEFAULT_SETTINGS, GLOBAL_SHORTCUT_CHOICES, LIST_COLUMNS,
                                               LIST_SORT_ORDERS, SHOW_AS_CHOICES, SIDEBAR_EDGES, SIDEBAR_MODES)
-from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_NAMES_IN_DROP_ORDER, COLUMN_TITLES,
+from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_DESCRIPTIONS, COLUMN_NAMES_IN_DROP_ORDER,
+                                                                        COLUMN_TITLES,
                                                                         LIST_SORT_ORDER_BY_TITLE_NAME, NAME_COLUMN_TITLE,
                                                                         TAB_ROW_COLUMNS)
 from agent_command_tab.user_interface.popover_container import LIST_SORT_ORDER_TITLES
@@ -24,9 +25,11 @@ class SettingChoiceTitlesTests(unittest.TestCase):
                                          (SIDEBAR_MODE_TITLES, SIDEBAR_MODES),
                                          (SIDEBAR_EDGE_TITLES, SIDEBAR_EDGES), (LIST_SORT_ORDER_TITLES, LIST_SORT_ORDERS)):
             self.assertEqual(list(titles_by_value), choices)
-        # Each switch is labeled with its column's title in the list.
+        # Each switch is labeled with its column's title in the list, then what the column shows.
         self.assertEqual(sorted(LIST_COLUMN_NAMES_IN_SETTINGS_ORDER), sorted(LIST_COLUMNS))
         self.assertTrue(all(COLUMN_TITLES.get(column_name) for column_name in LIST_COLUMNS))
+        self.assertEqual(sorted(COLUMN_DESCRIPTIONS), sorted(LIST_COLUMNS))
+        self.assertTrue(all(COLUMN_DESCRIPTIONS.values()))
 
     def test_each_sort_order_is_titled_as_a_column_whose_title_chooses_it(self):
         column_titles_by_list_sort_order = {}

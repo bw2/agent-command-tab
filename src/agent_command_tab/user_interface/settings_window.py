@@ -3,9 +3,11 @@
 import collections
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSBezierPath, NSBox, NSBoxCustom, NSBoxSeparator, NSButton,
+from AppKit import (NSApp, NSAttributedString, NSBackingStoreBuffered, NSBezierPath, NSBox, NSBoxCustom, NSBoxSeparator, NSButton,
                     NSColor, NSControlSizeMini, NSControlSizeSmall, NSEventModifierFlagCommand, NSEventModifierFlagControl,
-                    NSDownArrowFunctionKey, NSEventModifierFlagOption, NSEventTypeKeyDown, NSFont, NSInsetRect, NSMakeRect, NSNoTitle,
+                    NSDownArrowFunctionKey, NSEventModifierFlagOption, NSEventTypeKeyDown, NSFont, NSFontAttributeName,
+                    NSForegroundColorAttributeName, NSInsetRect, NSLineBreakByTruncatingTail, NSMakeRect,
+                    NSMutableAttributedString, NSMutableParagraphStyle, NSNoTitle, NSParagraphStyleAttributeName,
                     NSPopUpButton, NSScreen, NSScrollView, NSSwitch, NSText, NSTextField, NSUpArrowFunctionKey, NSView,
                     NSViewMinXMargin, NSViewWidthSizable,
                     NSWindow, NSWindowOcclusionStateVisible, NSWindowStyleMaskClosable,
@@ -16,7 +18,7 @@ from PyObjCTools import AppHelper
 from agent_command_tab.settings_store import (LIST_COLUMNS, SMALLEST_WINDOW_SIZES, is_valid_setting_value,
                                               replace_agent_tool_field)
 from agent_command_tab.start_with_iterm2 import START_WITH_ITERM2_SETTING_TITLE
-from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_TITLES, ESCAPE_CHARACTER
+from agent_command_tab.user_interface.agent_session_outline_view import COLUMN_DESCRIPTIONS, COLUMN_TITLES, ESCAPE_CHARACTER
 from agent_command_tab.user_interface.control_helpers import add_popup_choices, read_popup_choice, select_popup_choice
 from agent_command_tab.user_interface.named_colors import make_light_and_dark_mode_color_maker
 from agent_command_tab.user_interface.screen_layout import (WindowFrameSavingController,
@@ -38,6 +40,9 @@ ROW_HEIGHT = 36
 ROW_PADDING = 10  # from a box's sides to the labels and controls in it
 INDENT_OF_A_ROW_THAT_CONTINUES_THE_ONE_ABOVE = 16  # a harness's command, under the harness's name
 GAP_BEFORE_UNITS = 6  # between a control and its units ("points")
+# Between "Command" and a harness's command field, which starts right after it, and at least this
+# much between a column's description and its switch (a longer description is cut short with "…").
+SMALLEST_GAP_BETWEEN_A_LABEL_AND_ITS_CONTROL = 10
 BOX_CORNER_RADIUS = 8
 MINI_SWITCH_SIZE = (26, 15)  # what a mini NSSwitch draws (checked on macOS 27)
 # The keys that work the focused control: Space and Return turn a switch
@@ -45,7 +50,6 @@ MINI_SWITCH_SIZE = (26, 15)  # what a mini NSSwitch draws (checked on macOS 27)
 KEYS_THAT_PRESS_A_CONTROL = frozenset({" ", "\r"})
 KEYS_THAT_OPEN_A_POP_UP = KEYS_THAT_PRESS_A_CONTROL | {NSUpArrowFunctionKey, NSDownArrowFunctionKey}
 NOTE_HEIGHT = 30  # the sidebar's placement note under its box: two lines of small text
-LAUNCH_COMMAND_FIELD_WIDTH = 360  # a longer command scrolls inside the field
 # A box's fill and border: a little darker than the window in light mode, a little lighter in dark mode.
 make_section_box_fill_color = make_light_and_dark_mode_color_maker(
     lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(0, 0, 0, 0.03), lambda: NSColor.colorWithSRGBRed_green_blue_alpha_(1, 1, 1, 0.04))
@@ -66,14 +70,19 @@ SIDEBAR_MODE_TITLES = {
 }
 SIDEBAR_EDGE_TITLES = {"right": "Right", "left": "Left"}
 # The tab rows' information columns, in the order the Columns section lists them (memory before
-# CPU, unlike LIST_COLUMNS). Each is labeled with the title over its column in the list (COLUMN_TITLES).
+# CPU, unlike LIST_COLUMNS). Each is labeled with the title over its column in the list (COLUMN_TITLES),
+# then, in a lighter color, what the column shows (COLUMN_DESCRIPTIONS, as SettingsRow's description).
 LIST_COLUMN_NAMES_IN_SETTINGS_ORDER = ["state", "context_tokens", "created_time", "existence_duration",
                                        "time_since_last_message", "memory_usage", "cpu_usage"]
 # One row in a section's box: its label at the left, its control at the right, and the units after the
 # control. A row that continues the one above it (a harness's command; the accessibility button under
-# the shortcut) has no line above it, and its label is indented.
-SettingsRow = collections.namedtuple("SettingsRow", ["label", "control", "units", "continues_the_row_above"],
-                                     defaults=[None, False])
+# the shortcut) has no line above it, and its label is indented. A control that fills the row after
+# its label (a harness's command field) starts SMALLEST_GAP_BETWEEN_A_LABEL_AND_ITS_CONTROL
+# after the label and ends where the other controls end, so it widens with the window. A
+# description follows the label and a colon in a lighter color (build_label_text_with_description).
+SettingsRow = collections.namedtuple("SettingsRow", ["label", "control", "units", "continues_the_row_above",
+                                                     "control_fills_the_row_after_its_label", "description"],
+                                     defaults=[None, False, False, None])
 # A titled section of the window: its rows in a rounded box under its title,
 # and, for the sidebar, a note in small text under the box, which takes no room while it is empty.
 SettingsSection = collections.namedtuple("SettingsSection", ["title", "rows", "note_field"], defaults=[None])
@@ -124,6 +133,19 @@ def can_be_reached_with_tab(control):
     AppKit leaves switches, pop-ups and buttons out of it unless System Settings > Keyboard >
     Keyboard navigation is on, so the settings window's own controls put themselves in."""
     return bool(control.isEnabled()) and not control.isHiddenOrHasHiddenAncestor()
+
+
+def build_label_text_with_description(label, description, font):
+    """Returns a row's label, then a colon and its description in the lighter color of secondary
+    text, such as "Age: time elapsed since the agent was started", on one line that is cut short with "…"
+    where its field is too narrow for it."""
+    paragraph_style = NSMutableParagraphStyle.alloc().init()
+    paragraph_style.setLineBreakMode_(NSLineBreakByTruncatingTail)
+    text = NSMutableAttributedString.alloc().init()
+    for piece, color in ((label, NSColor.labelColor()), (f": {description}", NSColor.secondaryLabelColor())):
+        text.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(piece, {
+            NSFontAttributeName: font, NSForegroundColorAttributeName: color, NSParagraphStyleAttributeName: paragraph_style}))
+    return text
 
 
 def make_section_note_field():
@@ -302,8 +324,9 @@ class SettingsWindowController(WindowFrameSavingController):
             SettingsRow("Show", self.sidebar_mode_popup), SettingsRow("Window edge", self.edge_popup),
             SettingsRow("Width", self.sidebar_width_field, "points")], self.edge_note)
         # The columns in a section of their own, above Harnesses.
-        columns_section = SettingsSection("Columns", [SettingsRow(COLUMN_TITLES[column_name], column_switch)
-                                                      for column_name, column_switch in self.column_switches.items()])
+        columns_section = SettingsSection("Columns", [
+            SettingsRow(COLUMN_TITLES[column_name], column_switch, description=COLUMN_DESCRIPTIONS[column_name])
+            for column_name, column_switch in self.column_switches.items()])
         # Each agent tool: whether it is used, and below that, indented, its launch command.
         self.include_switches = []
         self.launch_command_fields = []
@@ -311,12 +334,13 @@ class SettingsWindowController(WindowFrameSavingController):
         for agent_tool in self.settings["agent_tools"]:
             include_switch = self.make_switch(agent_tool["is_included"])
             self.include_switches.append(include_switch)
-            # Right-aligned, so the command fields start together.
-            launch_command_field = self.make_text_field(agent_tool["launch_command"], LAUNCH_COMMAND_FIELD_WIDTH,
-                                                        LaunchCommandField)
+            # From right after its "Command" label to the box's right end (add_row gives it that
+            # width), so the command fields start together; a longer command scrolls inside the field.
+            launch_command_field = self.make_text_field(agent_tool["launch_command"], 0, LaunchCommandField)
             self.launch_command_fields.append(launch_command_field)
             harness_rows += [SettingsRow(agent_tool["agent_tool_name"], include_switch),
-                             SettingsRow("Command", launch_command_field, continues_the_row_above=True)]
+                             SettingsRow("Command", launch_command_field, continues_the_row_above=True,
+                                         control_fills_the_row_after_its_label=True)]
         # The Window section shows only while "Show as" is Window, and the Sidebar section only while
         # it is Sidebar; the sidebar shown for a few seconds from the menu
         # bar icon's menu's "Show sidebar" still uses the Sidebar section's edge and width. Each
@@ -465,7 +489,10 @@ class SettingsWindowController(WindowFrameSavingController):
     def add_row(self, rows_view, row, top, right):
         """Adds a row's label at the left of its box and its control, then its units, ending at
         right, each centered in the row's height. The control and units stay at the box's right
-        end as the window widens."""
+        end as the window widens; a control that fills the row after its label starts
+        SMALLEST_GAP_BETWEEN_A_LABEL_AND_ITS_CONTROL after the label and widens with the window. A
+        label with a description reaches up to that gap before its control, so the description
+        shows as far as the window's width lets it, and in full in a tooltip while it is cut short."""
         if row.units is not None:
             units_field = NSTextField.labelWithString_(row.units)
             units_size = units_field.fittingSize()
@@ -479,21 +506,31 @@ class SettingsWindowController(WindowFrameSavingController):
         # though their frames have different margins around it. The margins are applied here, since
         # frameForAlignmentRect_ puts a control's top margin at its bottom in a flipped view.
         margins = row.control.alignmentRectInsets()
+        label_field = NSTextField.labelWithString_(row.label) if row.label is not None else None
+        if row.description is not None:
+            label_field.setAttributedStringValue_(build_label_text_with_description(row.label, row.description, label_field.font()))
+            label_field.setAllowsExpansionToolTips_(True)
+        label_size = label_field.fittingSize() if label_field is not None else None
+        label_left = SIDE_MARGIN + ROW_PADDING + (INDENT_OF_A_ROW_THAT_CONTINUES_THE_ONE_ABOVE if row.continues_the_row_above else 0)
+        if row.control_fills_the_row_after_its_label:
+            drawn_left = label_left + label_size.width + SMALLEST_GAP_BETWEEN_A_LABEL_AND_ITS_CONTROL
+            row.control.setFrameSize_((right - drawn_left + margins.left + margins.right, row.control.frame().size.height))
         frame_size = row.control.frame().size
         drawn_width = frame_size.width - margins.left - margins.right
         drawn_top = top + round((ROW_HEIGHT - (frame_size.height - margins.top - margins.bottom)) / 2)
         row.control.setFrameOrigin_((right - drawn_width - margins.left, drawn_top - margins.top))
-        row.control.setAutoresizingMask_(NSViewMinXMargin)
+        row.control.setAutoresizingMask_(NSViewWidthSizable if row.control_fills_the_row_after_its_label else NSViewMinXMargin)
         rows_view.addSubview_(row.control)
-        if row.label is not None:
-            label_field = NSTextField.labelWithString_(row.label)
-            label_size = label_field.fittingSize()
+        if label_field is not None:
             if isinstance(row.control, NSSwitch):
                 label_top = top + round((ROW_HEIGHT - label_size.height) / 2)
             else:  # on the same baseline as the control's text
                 label_top = drawn_top + row.control.firstBaselineOffsetFromTop() - label_field.firstBaselineOffsetFromTop()
-            indent = INDENT_OF_A_ROW_THAT_CONTINUES_THE_ONE_ABOVE if row.continues_the_row_above else 0
-            label_field.setFrame_(NSMakeRect(SIDE_MARGIN + ROW_PADDING + indent, label_top, *label_size))
+            label_width = label_size.width
+            if row.description is not None:
+                label_width = row.control.frame().origin.x - SMALLEST_GAP_BETWEEN_A_LABEL_AND_ITS_CONTROL - label_left
+                label_field.setAutoresizingMask_(NSViewWidthSizable)
+            label_field.setFrame_(NSMakeRect(label_left, label_top, label_width, label_size.height))
             rows_view.addSubview_(label_field)
 
     @objc.python_method
