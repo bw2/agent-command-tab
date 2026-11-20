@@ -2904,6 +2904,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         plus_row_view = self.lay_out_row_view(plus_row)
         plus_button = plus_row_view.new_window_button
         self.assertFalse(plus_button.isHidden())
+        self.assertEqual(plus_button.toolTip(), "Start an agent session in a new window")
         self.assertTrue(self.lay_out_row_view(1).new_window_button.isHidden())  # only on the "+" row
         tab_row_view = self.lay_out_row_view(plus_row - 1)  # the last tab: "└─ "
         connector_frame = tab_row_view.prefix_text_field.frame()

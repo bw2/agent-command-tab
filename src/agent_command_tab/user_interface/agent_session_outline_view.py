@@ -73,6 +73,7 @@ from agent_command_tab.user_interface.talk_to_each_other_alert import list_tab_t
 ROW_HEIGHT = 20
 FONT_SIZE = 12
 ROW_ICON_BUTTON_SIZE = 16  # the "+" row's button
+NEW_WINDOW_BUTTON_TOOL_TIP = "Start an agent session in a new window"  # the "+" row's button, whose click opens a menu of the agent tools
 # Each row's arrow (closed ›, open ⌄) opens or closes just that row;
 # every row keeps the arrow's room, so names line up whether or not a row has one.
 DISCLOSURE_ARROW_SLOT_WIDTH = 14
@@ -557,8 +558,9 @@ class RowButton(PointingHandButton):
 
 
 def make_row_icon_button():
-    """Returns a small borderless gray button for a row, without a tooltip (its icon says what it
-    does); show_symbol_on_button gives it its icon."""
+    """Returns a small borderless gray button for a row, without a tooltip (a row's arrow says what
+    it does; the "+" row's button gets NEW_WINDOW_BUTTON_TOOL_TIP); show_symbol_on_button gives it
+    its icon."""
     button = RowButton.alloc().initWithFrame_(NSMakeRect(0, 0, ROW_ICON_BUTTON_SIZE, ROW_ICON_BUTTON_SIZE))
     button.setBordered_(False)
     button.setImagePosition_(NSImageOnly)
@@ -735,6 +737,7 @@ class AgentListRowView(NSTableCellView):
         self.column_widths = {column_name: 0 for column_name, _ in TAB_ROW_COLUMNS}  # set by the list controller
         self.new_window_button = make_row_icon_button()  # the "+" row's only content
         show_symbol_on_button(self.new_window_button, "plus", "+", "New window with an agent session")
+        self.new_window_button.setToolTip_(NEW_WINDOW_BUTTON_TOOL_TIP)
         for subview in (self.prefix_text_field, self.disclosure_button, self.dot_text_field, self.name_text_field,
                         self.details_text_field, *self.column_views.values(), self.new_window_button):
             self.addSubview_(subview)
