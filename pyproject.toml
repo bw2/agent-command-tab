@@ -16,7 +16,7 @@ dependencies = [
     "iterm2>=2.30,<2.31",
     "pyobjc-framework-Cocoa>=10",
 ]
-keywords = ["iterm2", "claude-code", "codex", "ai-agents", "macos", "menu-bar", "dashboard"]
+keywords = ["iterm2", "tmux", "claude-code", "codex", "ai-agents", "macos", "menu-bar", "dashboard"]
 classifiers = [
     "Environment :: MacOS X :: Cocoa",
     "Intended Audience :: Developers",
