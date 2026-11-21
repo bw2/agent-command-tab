@@ -68,6 +68,7 @@ from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_C
                                                                  build_dot_text, build_monitor_row_text_parts,
                                                                  build_tree_connector_text,
                                                                  build_window_row_text_parts, format_elapsed_time)
+from agent_command_tab.user_interface.search_box_search import SearchBoxSearch
 from agent_command_tab.user_interface.talk_to_each_other_alert import list_tab_titles_for_alert
 
 ROW_HEIGHT = 20
@@ -93,10 +94,6 @@ ROOM_FOR_GROWING_DETAILS = "0000"
 DIM_DOT_ALPHA = 0.25  # a working dot's opacity in the dim half of its blink
 # The opacity of a tab row the search shows only because its conversation holds the text, not its title or its window's.
 CONVERSATION_ONLY_MATCH_ROW_ALPHA = 0.5
-# A new search text is shown once the core has answered which conversations hold it, which takes
-# milliseconds; when it takes longer than this, the text is shown with its title matches alone,
-# so the rows keep up with the typing (show_the_search_without_waiting_any_longer).
-SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES = 0.5
 # How many measured text widths a list keeps (measure_text_width) before it starts over.
 LARGEST_NUMBER_OF_KEPT_TEXT_WIDTHS = 5000
 SECONDS_TO_HOLD_BEFORE_PEEKING = 0.15
@@ -139,6 +136,12 @@ COLUMN_TITLES = {
 }
 NAME_COLUMN_TITLE = "Name"
 NAME_COLUMN_DESCRIPTION = "the name of the window or tab"  # in its title's hover text, as COLUMN_DESCRIPTIONS are
+# What a column title's hover text says the next click on it does, in the list
+# (choose_what_a_click_on_a_column_title_does) and in the Saved sessions window: sort by the
+# column, then the other way, then not at all.
+WHAT_A_CLICK_ON_A_COLUMN_TITLE_DOES_TOOL_TIPS = {"sort": "Click to sort the list by this column",
+                                                 "reverse": "Click to reverse-sort the list by this column",
+                                                 "stop": "Click to stop sorting the list by this column"}
 # What each column that the settings can show or hide shows: after its title in the settings'
 # Columns section, and, starting with a capital letter, in the hover text of its title over the
 # list (build_column_title_tool_tip). A tab row's Status says "thinking" or "running" for a working
@@ -629,10 +632,10 @@ def choose_what_a_click_on_a_column_title_does(title_name, list_sort_order, list
     """
     sort_order_of_the_title = LIST_SORT_ORDER_BY_TITLE_NAME[title_name]
     if sort_order_of_the_title != list_sort_order:
-        return sort_order_of_the_title, False, "Click to sort the list by this column"
+        return sort_order_of_the_title, False, WHAT_A_CLICK_ON_A_COLUMN_TITLE_DOES_TOOL_TIPS["sort"]
     if not list_sort_order_is_reversed:
-        return sort_order_of_the_title, True, "Click to reverse-sort the list by this column"
-    return "manual", False, "Click to stop sorting the list by this column"
+        return sort_order_of_the_title, True, WHAT_A_CLICK_ON_A_COLUMN_TITLE_DOES_TOOL_TIPS["reverse"]
+    return "manual", False, WHAT_A_CLICK_ON_A_COLUMN_TITLE_DOES_TOOL_TIPS["stop"]
 
 
 def build_column_title_tool_tip(title_name, list_sort_order, list_sort_order_is_reversed):
@@ -996,25 +999,24 @@ class AgentSessionListController(NSObject):
         self.list_sort_order_is_reversed = False
         self.idle_tabs_are_hidden = False  # set by the Hide Idle / Show Idle button
         # The search box at the top of the list (set_search_text, set_search_is_case_sensitive), and
-        # the search the rows show (a ListSearch), which follows them once the core has answered which
-        # conversations hold the text (conversation_matches_arrived), so the rows and the dropdown's
-        # size change once, from one search's results to the next.
-        self.search_text = ""
-        self.search_is_case_sensitive = False
-        self.shown_list_search = ListSearch("", False, frozenset())
+        # the search the rows show (its shown_search, a ListSearch), which follows them once the core
+        # has answered which conversations hold the text (search_box_search.SearchBoxSearch), so the
+        # rows and the dropdown's size change once, from one search's results to the next.
+        self.search_box_search = SearchBoxSearch(
+            ListSearch,
+            lambda text, is_case_sensitive, on_answer: self.owner.find_agent_sessions_whose_conversations_contain(
+                text, is_case_sensitive, on_answer),
+            lambda list_search: self.show_the_rows_again_after_a_filter_changed(),
+            on_new_search_of_the_search_box=self.stop_a_return_in_the_search_box_from_waiting,
+            on_answer_for_the_search_box_search=self.stop_a_return_in_the_search_box_from_waiting)
         # The ListSearch the rows were last built for (select_a_row_when_the_rows_were_built_for_another_search):
-        # shown_list_search, except while a held snapshot or a list that isn't on screen keeps the
-        # rows of an earlier search in place.
-        self.list_search_the_rows_were_built_for = self.shown_list_search
-        # Shows the search box's search without the conversation matches, if the core hasn't answered
-        # by then (show_the_search_without_waiting_any_longer).
-        self.search_answer_wait_timer = None
+        # the search box's shown search, except while a held snapshot or a list that isn't on screen
+        # keeps the rows of an earlier search in place.
+        self.list_search_the_rows_were_built_for = self.search_box_search.shown_search
         # Whether a Return pressed in the search box found no row of its search to show while the
         # core was still answering: the selected row is shown once the rows of that search have one
         # (show_the_selected_row_once_the_rows_show_the_search_box_search).
         self.return_in_the_search_box_waits_for_its_rows = False
-        self.conversation_search_is_under_way = False  # one request to the core at a time
-        self.conversation_search_is_due_again = False  # the search or a snapshot changed while one was under way
         # Command-F or "/" in the list; the panel sets it to put the keyboard in its search box,
         # returning whether it did.
         self.on_search_keys_pressed = lambda: False
@@ -1135,7 +1137,7 @@ class AgentSessionListController(NSObject):
             self.rows_wait_for_the_list_to_appear = True
             return
         if conversation_search_text_changed:
-            self.ask_the_core_which_conversations_match()
+            self.search_box_search.ask_which_conversations_match()
         self.rebuild_rows_from_the_snapshot()
 
     @objc.python_method
@@ -1145,7 +1147,7 @@ class AgentSessionListController(NSObject):
         reloads them when their structure changed otherwise, and else redraws them. Rows built for
         another search than the last time get a row selected (select_a_row_when_the_rows_were_built_for_another_search)."""
         snapshot = self.snapshot
-        list_search = self.shown_list_search
+        list_search = self.search_box_search.shown_search
         children_before_by_parent = self.list_children_by_parent()
         self.measure_right_columns()
         show_monitor_rows = snapshot_shows_monitor_rows(snapshot)
@@ -1203,7 +1205,7 @@ class AgentSessionListController(NSObject):
         return sort_window_entries(
             monitor_entry.windows, self.list_sort_order,
             list_ranked_agent_sessions=lambda window_entry: list_agent_sessions_whose_tab_rows_show(
-                window_entry, self.idle_tabs_are_hidden, self.shown_list_search),
+                window_entry, self.idle_tabs_are_hidden, self.search_box_search.shown_search),
             is_reversed=self.list_sort_order_is_reversed)
 
     @objc.python_method
@@ -1262,62 +1264,23 @@ class AgentSessionListController(NSObject):
         """Shows only the window rows whose title holds search_text, with all their tabs, the tab
         rows whose title holds it, and, dimmed, those whose conversation holds it, from now on; an
         empty text shows the rows as Hide Idle leaves them. A text is shown once the core has
-        answered which conversations hold it (conversation_matches_arrived), so the rows and the
-        dropdown's size change once, from the last text's results to this one's, rather than
-        dropping the conversation matches in between. Then selects the first tab row, unless a
-        selected row still shows (select_the_first_tab_row_found_unless_a_row_is_selected)."""
-        if search_text == self.search_text:
-            return
-        self.search_text = search_text
-        self.show_the_search_box_search_once_the_core_answers()
+        answered which conversations hold it, or after
+        search_box_search.SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES with the title matches
+        alone (SearchBoxSearch), so the rows and the dropdown's size change once, from the last
+        text's results to this one's, rather than dropping the conversation matches in between.
+        The rows are built again for a search that differs from the one they show: at once, or
+        later, when a held snapshot is applied or a list that isn't on screen appears
+        (show_snapshot). Whenever that is, the first tab row is selected, unless a selected row
+        still shows (select_a_row_when_the_rows_were_built_for_another_search)."""
+        self.search_box_search.set_text(search_text)
 
     @objc.python_method
-    def show_the_search_box_search_once_the_core_answers(self):
-        """Asks the core which conversations hold the search box's text, and shows the search once it
-        answers, or after SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES without its matches;
-        an empty search box's at once, since it needs no answer. A Return that waited for the
-        rows of the search the box held before is dropped."""
+    def stop_a_return_in_the_search_box_from_waiting(self):
+        """Drops a Return in the search box that waits for the rows of its search: when the box's
+        text or "aA" choice changes (it waited for the rows of the search the box held before),
+        and once the core has answered for the search (its row is shown by now, there is none, or
+        the rows of this answer can't show yet: a held snapshot, a list that isn't on screen)."""
         self.return_in_the_search_box_waits_for_its_rows = False
-        if self.search_answer_wait_timer is not None:
-            self.search_answer_wait_timer.invalidate()
-            self.search_answer_wait_timer = None
-        if not self.search_text:
-            self.show_list_search(ListSearch("", self.search_is_case_sensitive, frozenset()))
-            return
-        self.search_answer_wait_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES, self, "searchAnswerWaitTimerFired:", None, False)
-        self.ask_the_core_which_conversations_match()
-
-    def searchAnswerWaitTimerFired_(self, timer):
-        self.search_answer_wait_timer = None
-        self.show_the_search_without_waiting_any_longer()
-
-    @objc.python_method
-    def show_the_search_without_waiting_any_longer(self):
-        """Shows the search box's search with the title matches alone when the core still hasn't
-        answered for it (a busy core), so the search keeps up with the typing; its answer adds the
-        conversation matches when it comes."""
-        if not self.rows_show_the_search_box_search():
-            self.show_list_search(ListSearch(self.search_text, self.search_is_case_sensitive, frozenset()))
-
-    @objc.python_method
-    def rows_show_the_search_box_search(self):
-        """Whether the rows show the search box's text, with its "aA" choice, rather than still
-        the text it held before, whose rows stay until the core answers for the new one
-        (show_the_search_box_search_once_the_core_answers). Case doesn't count for an empty text."""
-        return (self.shown_list_search.text == self.search_text
-                and (not self.search_text or self.shown_list_search.is_case_sensitive == self.search_is_case_sensitive))
-
-    @objc.python_method
-    def show_list_search(self, list_search):
-        """Has the rows show this ListSearch from now on. When it differs from the one they show,
-        they are built again for it: at once, or later, when a held snapshot is applied or a list
-        that isn't on screen appears (show_snapshot). Whenever that is, the rows built for it get
-        a row selected (select_a_row_when_the_rows_were_built_for_another_search)."""
-        if list_search == self.shown_list_search:
-            return
-        self.shown_list_search = list_search
-        self.show_the_rows_again_after_a_filter_changed()
 
     @objc.python_method
     def select_a_row_when_the_rows_were_built_for_another_search(self, list_search):
@@ -1326,14 +1289,14 @@ class AgentSessionListController(NSObject):
         row still shows, then shows the selected row if a Return in the search box waits for the
         rows of its search (show_the_selected_row_once_the_rows_show_the_search_box_search). With
         no row to show, the Return waits on: these may be the title matches alone, and the core's
-        answer may still find a row (conversation_matches_arrived, where the wait ends). Rows
-        built for a search the box no longer holds (a held snapshot applied before the core
-        answered for the new text) and a list that went off screen show no row."""
+        answer may still find a row (stop_a_return_in_the_search_box_from_waiting, where the wait
+        ends). Rows built for a search the box no longer holds (a held snapshot applied before the
+        core answered for the new text) and a list that went off screen show no row."""
         if list_search == self.list_search_the_rows_were_built_for:
             return
         self.list_search_the_rows_were_built_for = list_search
         self.select_the_first_tab_row_found_unless_a_row_is_selected()
-        if (self.return_in_the_search_box_waits_for_its_rows and self.rows_show_the_search_box_search()
+        if (self.return_in_the_search_box_waits_for_its_rows and self.search_box_search.rows_show_the_search_box_search()
                 and self.list_is_on_screen()):
             self.show_the_selected_row()  # show_item ends the wait
 
@@ -1341,7 +1304,7 @@ class AgentSessionListController(NSObject):
     def select_the_first_tab_row_found_unless_a_row_is_selected(self):
         """While the rows show a search, selects the first tab row it shows when no selected row
         shows, so Return in the search box opens it."""
-        if self.shown_list_search.text and not self.list_selected_items():
+        if self.search_box_search.shown_search.text and not self.list_selected_items():
             first_tab_item = next((item for item in self.list_all_items() if item.kind == "tab"), None)
             if first_tab_item is not None:
                 self.select_row_alone_and_scroll_to_it(first_tab_item)
@@ -1350,54 +1313,13 @@ class AgentSessionListController(NSObject):
     def set_search_is_case_sensitive(self, search_is_case_sensitive):
         """Has the search count case from now on, or not (the "aA" checkbox), shown as a new text is
         (set_search_text)."""
-        if search_is_case_sensitive == self.search_is_case_sensitive:
-            return
-        self.search_is_case_sensitive = search_is_case_sensitive
-        if self.search_text:
-            self.show_the_search_box_search_once_the_core_answers()
+        self.search_box_search.set_is_case_sensitive(search_is_case_sensitive)
 
     @objc.python_method
     def clear_the_search(self):
         """Empties the search, and the panel's search box with it."""
         self.set_search_text("")
         self.on_search_text_cleared()
-
-    @objc.python_method
-    def ask_the_core_which_conversations_match(self):
-        """Asks the core which agent sessions' conversations hold the search box's text, while it
-        holds any; one request at a time, and one more after it when the text, the case choice
-        or the conversation text changed meanwhile. The answer comes in conversation_matches_arrived."""
-        if not self.search_text:
-            return
-        if self.conversation_search_is_under_way:
-            self.conversation_search_is_due_again = True
-            return
-        self.conversation_search_is_under_way = True
-        asked_for = (self.search_text, self.search_is_case_sensitive)
-        self.owner.find_agent_sessions_whose_conversations_contain(
-            self.search_text, self.search_is_case_sensitive,
-            lambda session_ids: self.conversation_matches_arrived(asked_for, session_ids))
-
-    @objc.python_method
-    def conversation_matches_arrived(self, asked_for, session_ids):
-        """Takes the core's answer to ask_the_core_which_conversations_match (on the main thread):
-        the IDs of the sessions whose conversations hold asked_for's text, or None when the core
-        couldn't answer, which shows the search with the title matches alone. An answer for the
-        search box's current search is shown (show_list_search); one for an earlier text is left
-        out, and the current one asked."""
-        self.conversation_search_is_under_way = False
-        if asked_for == (self.search_text, self.search_is_case_sensitive):
-            if self.search_answer_wait_timer is not None:
-                self.search_answer_wait_timer.invalidate()
-                self.search_answer_wait_timer = None
-            asked_for_text, asked_for_is_case_sensitive = asked_for
-            self.show_list_search(ListSearch(asked_for_text, asked_for_is_case_sensitive, frozenset(session_ids or ())))
-            # The core's answer is the last a Return in the search box waits for: its row is shown by now, there is
-            # none, or the rows of this answer can't show yet (a held snapshot, a list that isn't on screen).
-            self.return_in_the_search_box_waits_for_its_rows = False
-        if self.conversation_search_is_due_again or asked_for != (self.search_text, self.search_is_case_sensitive):
-            self.conversation_search_is_due_again = False
-            self.ask_the_core_which_conversations_match()
 
     @objc.python_method
     def set_shown_columns(self, shown_columns):
@@ -1617,7 +1539,7 @@ class AgentSessionListController(NSObject):
         shown: rebuilds them when a snapshot or a setting changed them while the list was hidden
         (show_snapshot), then refills them, and asks the search again, which a hidden list doesn't
         as the conversation text changes."""
-        self.ask_the_core_which_conversations_match()
+        self.search_box_search.ask_which_conversations_match()
         if self.rows_wait_for_the_list_to_appear:
             self.rows_wait_for_the_list_to_appear = False
             self.rebuild_rows_from_the_snapshot()
@@ -1884,14 +1806,15 @@ class AgentSessionListController(NSObject):
         show the search box's search and have one. Otherwise the Return waits while the core is
         still answering: the rows still show the text the box held before, whose selected row
         that earlier text found, or they show the box's text without a row to show (its title
-        matches alone, after SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES, or an earlier
-        answer while the core answers again). Rows then built for the box's search have their
-        selected row shown, when they have one: the first tab row found unless the selected row
-        still shows (select_a_row_when_the_rows_were_built_for_another_search). The wait ends
-        with the core's answer at the latest (conversation_matches_arrived), and before that
-        when the box's text or its "aA" checkbox changes or another row is shown (show_item)."""
-        if not (self.rows_show_the_search_box_search() and self.show_the_selected_row()):
-            self.return_in_the_search_box_waits_for_its_rows = self.conversation_search_is_under_way
+        matches alone, after search_box_search.SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES,
+        or an earlier answer while the core answers again). Rows then built for the box's search
+        have their selected row shown, when they have one: the first tab row found unless the
+        selected row still shows (select_a_row_when_the_rows_were_built_for_another_search). The
+        wait ends with the core's answer at the latest, and before that when the box's text or its
+        "aA" checkbox changes (stop_a_return_in_the_search_box_from_waiting) or another row is
+        shown (show_item)."""
+        if not (self.search_box_search.rows_show_the_search_box_search() and self.show_the_selected_row()):
+            self.return_in_the_search_box_waits_for_its_rows = self.search_box_search.request_is_under_way
 
     @objc.python_method
     def show_the_row_or_its_tab(self, item):
@@ -2085,7 +2008,7 @@ class AgentSessionListController(NSObject):
         # A tab row the search shows only because its conversation holds the text is dimmed, by its opacity alone.
         row_alpha = (CONVERSATION_ONLY_MATCH_ROW_ALPHA
                      if item.kind == "tab" and tab_row_matches_only_by_its_conversation(
-                         item.entry, item.parent_item.entry, self.shown_list_search)
+                         item.entry, item.parent_item.entry, self.search_box_search.shown_search)
                      else 1.0)
         if row_view.alphaValue() != row_alpha:
             row_view.setAlphaValue_(row_alpha)
@@ -2220,7 +2143,7 @@ class AgentSessionListController(NSObject):
         # The rows Hide Idle doesn't hide; during a search, every tab's, since any may match, so the
         # columns don't change width as the search's text does.
         agent_session_entries = [entry for _, _, entry in iterate_agent_session_entries(self.snapshot)
-                                 if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden and not self.shown_list_search.text)
+                                 if not tab_row_is_hidden(entry, self.idle_tabs_are_hidden and not self.search_box_search.shown_search.text)
                                  ] if self.snapshot else []
         now = time.time()
         # Process rows too, also those of closed tab rows, so opening one doesn't widen a column.
@@ -3013,11 +2936,11 @@ class AgentSessionListController(NSObject):
         result says how to attach one) and leaves the list and its search as they are, to choose
         another row from."""
         self.return_in_the_search_box_waits_for_its_rows = False  # this row was chosen since: one Return shows one row
-        search_text_when_asked = self.search_text
+        search_text_when_asked = self.search_box_search.text
 
         def note_that_the_item_is_in_front(action_result):
             self.on_tab_focused()
-            if self.search_text and self.search_text == search_text_when_asked:
+            if self.search_box_search.text and self.search_box_search.text == search_text_when_asked:
                 self.clear_the_search()
         if item.kind == "tab":
             self.owner.submit_action_and_report_failure(ActionRequest("focus_agent_session", {"session_id": item.entry.session_id}),

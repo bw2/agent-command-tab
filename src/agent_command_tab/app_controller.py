@@ -924,15 +924,33 @@ class AppController(NSObject):
     def find_agent_sessions_whose_conversations_contain(self, text, is_case_sensitive, on_answer):
         """Asks the core which agent sessions' conversations hold the text (a list's search box);
         on_answer(their session IDs, or None when the core couldn't answer) runs on the main thread."""
+        self.ask_the_core_which_conversations_contain(
+            ActionRequest("find_agent_sessions_whose_conversations_contain", None,
+                          {"text": text, "is_case_sensitive": is_case_sensitive}), "session_ids", on_answer)
+
+    @objc.python_method
+    def find_saved_agent_sessions_whose_conversations_contain(self, text, is_case_sensitive, on_answer):
+        """Asks the core which saved sessions' conversations hold the text (the Saved sessions
+        window's search box); on_answer(their conversation IDs, or None when the core couldn't
+        answer) runs on the main thread."""
+        self.ask_the_core_which_conversations_contain(
+            ActionRequest("find_saved_agent_sessions_whose_conversations_contain", None, {
+                "text": text, "is_case_sensitive": is_case_sensitive,
+                "saved_sessions": [saved_session for saved_window in self.saved_windows
+                                   for saved_session in saved_window["saved_sessions"]]}), "conversation_ids", on_answer)
+
+    @objc.python_method
+    def ask_the_core_which_conversations_contain(self, action_request, name_of_the_ids_in_the_details, on_answer):
+        """Submits a search box's request to the core; on_answer(the IDs its answer's details hold
+        under that name, or None when the core couldn't answer) runs on the main thread."""
         def hand_over_the_answer(done_future):
             try:
                 action_result = done_future.result()
-            except Exception:  # the core stopped (the app restarts); the list asks again after it is back
+            except Exception:  # the core stopped (the app restarts); the search asks again after it is back
                 action_result = None
-            AppHelper.callAfter(on_answer, (action_result.details or {}).get("session_ids")
+            AppHelper.callAfter(on_answer, (action_result.details or {}).get(name_of_the_ids_in_the_details)
                                 if action_result is not None and action_result.succeeded else None)
-        self.submit_action(ActionRequest("find_agent_sessions_whose_conversations_contain", None,
-                                         {"text": text, "is_case_sensitive": is_case_sensitive})).add_done_callback(hand_over_the_answer)
+        self.submit_action(action_request).add_done_callback(hand_over_the_answer)
 
     @objc.python_method
     def report_action_failure(self, action_result, failure_title):
@@ -1255,19 +1273,20 @@ class AppController(NSObject):
 
     @objc.python_method
     def search_is_case_sensitive_chosen(self, search_is_case_sensitive):
-        """The "aA" checkbox beside the search box of the dropdown, the sidebar or the list window: one choice for all, saved with the settings."""
+        """The "aA" checkbox beside the search box of the dropdown, the sidebar, the list window or the Saved sessions window: one choice for all, saved with the settings."""
         if search_is_case_sensitive != self.settings["search_is_case_sensitive"]:
             self.settings_changed(dict(self.settings, search_is_case_sensitive=search_is_case_sensitive))
 
     @objc.python_method
     def apply_list_settings(self, settings):
         """Gives the dropdown's, the sidebar's and the list window's lists the same sort order, idle tabs shown or hidden,
-        shown columns, and whether their search counts case."""
+        shown columns, and whether their search counts case, which the Saved sessions window's search follows too."""
         for list_panel_controller in self.list_all_list_panel_controllers():
             list_panel_controller.show_list_sort_order(settings["list_sort_order"], settings["list_sort_order_is_reversed"])
             list_panel_controller.show_idle_tabs_are_hidden(settings["idle_tabs_are_hidden"])
             list_panel_controller.show_search_is_case_sensitive(settings["search_is_case_sensitive"])
             list_panel_controller.list_controller.set_shown_columns(settings["shown_columns"])
+        self.saved_sessions_window_controller.show_search_is_case_sensitive(settings["search_is_case_sensitive"])
 
     @objc.python_method
     def reserve_screen_area(self, reserved_area):

@@ -98,6 +98,11 @@ class ClaudeCodeAdapter(AgentToolAdapter):
         own_config_folder = (claude_agent_record or {}).get("config_folder") or DEFAULT_CLAUDE_CONFIG_FOLDER
         return await asyncio.to_thread(find_claude_code_transcript, [own_config_folder, *claude_config_folders], conversation_id)
 
+    def find_conversation_file_by_id(self, conversation_id, claude_config_folders, claude_config_folder=None, codex_home_folder=None):
+        """Returns the transcript named after the ID: in the config folder the session ran with
+        first, else in one of the config folders."""
+        return find_claude_code_transcript([claude_config_folder or DEFAULT_CLAUDE_CONFIG_FOLDER, *claude_config_folders], conversation_id)
+
     def read_context_tokens_and_context_window_tokens(self, conversation_file_path, agent_process_id, claude_agent_record,
                                                       context_tokens_read_before):
         context_tokens, model = read_context_tokens_and_model_from_claude_code_transcript(conversation_file_path)

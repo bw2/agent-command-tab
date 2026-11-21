@@ -38,11 +38,23 @@ TURN_UNDER_WAY_SCREEN_PATTERN = re.compile(r"^esc to cancel\b")
 # prompt, reply and tool call whole; transcript.jsonl has the middle cut out of each long one
 # ("<truncated 5120 bytes>"), which the list's search would then miss.
 AGY_WHOLE_TRANSCRIPT_FILE_NAME = "transcript_full.jsonl"
+# agy's folder, where the conversation of a saved session is looked for: a running agy's own is
+# read from the path of the lock it has open (PRESENCE_LOCK_FILE_PATTERN).
+DEFAULT_AGY_FOLDER = os.path.expanduser("~/.gemini/antigravity-cli")
 
 
 def build_agy_transcript_path(agy_folder, conversation_id):
     """Returns where agy writes a conversation's transcript.jsonl."""
     return os.path.join(agy_folder, "brain", conversation_id, ".system_generated", "logs", "transcript.jsonl")
+
+
+def find_agy_transcript(agy_folder, conversation_id):
+    """Returns the path of a conversation's whole transcript (AGY_WHOLE_TRANSCRIPT_FILE_NAME), or
+    of its transcript.jsonl when agy wrote no whole one, or None while it has neither (before the
+    conversation's first message, or once it was deleted)."""
+    transcript_path = build_agy_transcript_path(agy_folder, conversation_id)
+    whole_transcript_path = os.path.join(os.path.dirname(transcript_path), AGY_WHOLE_TRANSCRIPT_FILE_NAME)
+    return next(filter(os.path.isfile, (whole_transcript_path, transcript_path)), None)
 
 
 def find_agy_conversation_and_transcript(open_file_paths):
@@ -65,9 +77,7 @@ def find_agy_conversation_and_transcript(open_file_paths):
     if len(agy_folders_and_conversation_ids) > 1:
         return None
     agy_folder, conversation_id = next(iter(agy_folders_and_conversation_ids))
-    transcript_path = build_agy_transcript_path(agy_folder, conversation_id)
-    whole_transcript_path = os.path.join(os.path.dirname(transcript_path), AGY_WHOLE_TRANSCRIPT_FILE_NAME)
-    return conversation_id, next(filter(os.path.isfile, (whole_transcript_path, transcript_path)), None)
+    return conversation_id, find_agy_transcript(agy_folder, conversation_id)
 
 
 def find_agy_conversation_and_transcript_of_process(agent_process_id):
@@ -111,6 +121,10 @@ class AgyAdapter(AgentToolAdapter):
     async def find_conversation_file(self, agent_process_id, claude_agent_record, claude_config_folders):
         """Returns the transcript of the conversation the process is in, once it has one."""
         return (await self.find_conversation_and_transcript(agent_process_id) or (None, None))[1]
+
+    def find_conversation_file_by_id(self, conversation_id, claude_config_folders, claude_config_folder=None, codex_home_folder=None):
+        """Returns the conversation's transcript in agy's folder (find_agy_transcript)."""
+        return find_agy_transcript(DEFAULT_AGY_FOLDER, conversation_id)
 
     async def find_whether_no_message_was_sent_in_its_conversation(self, agent_process_id):
         """True while the process is in no conversation, or in one without a transcript yet."""

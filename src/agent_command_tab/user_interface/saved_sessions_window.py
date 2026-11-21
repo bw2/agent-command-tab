@@ -1,6 +1,6 @@
 """The Saved sessions window, which the menu bar icon's "Restore
 sessions…" opens: the saved sessions (saved_agent_sessions_store) under the windows they were
-saved from, to restore, rename or delete.
+saved from, to find, sort, restore, rename or delete.
 
 Like the settings window it keeps its frame (saved_sessions_window_frame), Esc closes it, and the
 app controller puts it above an always-on-top list window. Its rows can't be dragged. Several
@@ -9,24 +9,40 @@ click on a name, Return on a selected row, or Rename in a row's right-click menu
 Delete (in the menu, the button, or the Delete key) deletes the selected rows; the Restore button
 restores them and closes the window: the tab of the last one comes to the front at once, and the
 owner takes those restored out of the list. The owner keeps the saved list and its file.
+
+A search box with its "aA" checkbox, above the column titles, works as the list's does: the rows
+show only the saved windows whose name holds its text, with all their sessions, the saved
+sessions whose name holds it, and, dimmed, those whose conversation does, which the owner asks
+the core for. While a search lists only some of a saved window's sessions, its row stands for
+those. A click on a column's title sorts the rows by that column, a second click the other way,
+and a third puts them back in the order they were saved in.
 """
 
+import collections
 import os
 import time
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSCarriageReturnCharacter, NSDeleteCharacter,
-                    NSDeleteFunctionKey, NSEnterCharacter, NSEventTypeKeyDown, NSMakeRect, NSMenu, NSOutlineView, NSScrollView,
+from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSCarriageReturnCharacter, NSColor, NSControlStateValueOff,
+                    NSControlStateValueOn, NSDeleteCharacter,
+                    NSDeleteFunctionKey, NSEnterCharacter, NSEventTypeKeyDown, NSImage, NSMakeRect, NSMenu, NSOutlineView, NSScrollView,
+                    NSSearchField,
                     NSTableColumn, NSTableViewUniformColumnAutoresizingStyle, NSText, NSViewHeightSizable, NSViewMaxYMargin,
-                    NSViewMinXMargin, NSViewWidthSizable, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskResizable,
-                    NSWindowStyleMaskTitled)
+                    NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable, NSWindow, NSWindowStyleMaskClosable,
+                    NSWindowStyleMaskResizable, NSWindowStyleMaskTitled)
 from Foundation import NSIndexSet, NSObject
 
+from agent_command_tab.conversation_search_texts import text_contains
 from agent_command_tab.saved_agent_sessions_store import find_saved_window_key
 from agent_command_tab.settings_store import SMALLEST_WINDOW_SIZES
-from agent_command_tab.user_interface.agent_session_outline_view import ESCAPE_CHARACTER, RENAME_KEY, build_index_set
+from agent_command_tab.user_interface.agent_session_outline_view import (ESCAPE_CHARACTER, RENAME_KEY, SEARCH_KEY, SEARCH_KEY_ALONE,
+                                                                         WHAT_A_CLICK_ON_A_COLUMN_TITLE_DOES_TOOL_TIPS,
+                                                                         build_index_set)
 from agent_command_tab.user_interface.control_helpers import is_a_command_press_of_letter
+from agent_command_tab.user_interface.popover_container import (CASE_SENSITIVE_CHECKBOX_TITLE, CASE_SENSITIVE_CHECKBOX_TOOL_TIP,
+                                                                LARGEST_SEARCH_FIELD_WIDTH, SEARCH_FIELD_PLACEHOLDER)
 from agent_command_tab.user_interface.screen_layout import WindowFrameSavingController, place_window_at_saved_frame_or_center
+from agent_command_tab.user_interface.search_box_search import SearchBoxSearch
 from agent_command_tab.user_interface.settings_window import is_a_plain_press_of
 
 WINDOW_TITLE = "Saved sessions"
@@ -37,10 +53,26 @@ WINDOW_TITLE = "Saved sessions"
 COLUMN_TITLE_STARTING_WIDTH_AND_SMALLEST_WIDTH_BY_COLUMN_NAME = {
     "name": ("Name", 230, 96), "agent_tool_name": ("Agent", 100, 84), "folder": ("Folder", 240, 80),
     "saved_at": ("Saved", 130, 120)}
+# The columns whose first click sorts from the smallest (A to Z); the Saved column's first click
+# sorts from the latest. A sorted column's title has AppKit's own arrow: up while its values go
+# from the smallest at the top.
+COLUMN_NAMES_WHOSE_ORDER_STARTS_ASCENDING = {"name", "agent_tool_name", "folder"}
+SORT_INDICATOR_IMAGE_NAMES_BY_IS_ASCENDING = {True: "NSAscendingSortIndicator", False: "NSDescendingSortIndicator"}
 WINDOW_SIZE = (720, 360)
+SEARCH_BAR_HEIGHT = 34  # above the column titles: the search box and its "aA" checkbox
 BUTTON_BAR_HEIGHT = 44
 SIDE_MARGIN = 12
 GAP_BETWEEN_BUTTONS = 8
+SEARCH_FIELD_TOOL_TIP = ("Search the saved sessions for an exact keyword or phrase. Show only rows where it occurs inside the "
+                         "name or, in dimmer gray font, where it occurs inside the conversation log (prompts, replies, "
+                         "commands) (⌘-F or /)")
+
+SavedSessionsSearch = collections.namedtuple("SavedSessionsSearch", ["text", "is_case_sensitive",
+                                                                     "conversation_ids_whose_conversations_match"])
+SavedSessionsSearch.__doc__ = ("A search the Saved sessions window's rows show: the search box's text (matched as one "
+                               "phrase), whether case counts (the \"aA\" checkbox), and the conversation IDs of the saved "
+                               "sessions whose conversation holds the text, as the core answered (a frozenset; empty "
+                               "until it has).")
 
 
 def format_saved_time(saved_at):
@@ -71,6 +103,95 @@ def build_saved_row_text(kind, saved_window, saved_session, column_name, home_fo
     return saved_session[column_name]
 
 
+def name_holds_the_search_text(name, saved_sessions_search):
+    """Whether a saved window's or a saved session's name holds the search box's text."""
+    return text_contains(name, name.casefold(), saved_sessions_search.text, saved_sessions_search.is_case_sensitive)
+
+
+def list_saved_sessions_whose_rows_show(saved_window, saved_sessions_search):
+    """Returns the saved window's sessions whose rows a search shows: all of them without a text,
+    and when the window's name holds the text (as a window the list's search finds shows all its
+    tabs), else those whose name or whose conversation holds it."""
+    if not saved_sessions_search.text or name_holds_the_search_text(saved_window["name"], saved_sessions_search):
+        return list(saved_window["saved_sessions"])
+    return [saved_session for saved_session in saved_window["saved_sessions"]
+            if name_holds_the_search_text(saved_session["name"], saved_sessions_search)
+            or saved_session["conversation_id"] in saved_sessions_search.conversation_ids_whose_conversations_match]
+
+
+def saved_session_row_matches_only_by_its_conversation(saved_window, saved_session, saved_sessions_search):
+    """Whether a search shows the saved session's row only because its conversation holds the
+    text, not its name or its window's: the row is dimmed."""
+    return (bool(saved_sessions_search.text) and not name_holds_the_search_text(saved_session["name"], saved_sessions_search)
+            and not name_holds_the_search_text(saved_window["name"], saved_sessions_search)
+            and saved_session["conversation_id"] in saved_sessions_search.conversation_ids_whose_conversations_match)
+
+
+def choose_what_a_click_on_a_saved_sessions_column_title_does(column_name, sort_column_name, sort_is_reversed):
+    """Returns (the column the rows are sorted by after a click on this column's title, or None for
+    the order they were saved in, whether in that column's other direction, the title's hover
+    text, which says so). A click at a time sorts by the column in its first direction, then the
+    other, then not at all, as a click on a column title of the list does.
+
+    Args:
+        column_name: The clicked title's column.
+        sort_column_name: The column the rows are sorted by now, or None.
+        sort_is_reversed: Whether they are sorted in that column's other direction.
+    """
+    if column_name != sort_column_name:
+        return column_name, False, WHAT_A_CLICK_ON_A_COLUMN_TITLE_DOES_TOOL_TIPS["sort"]
+    if not sort_is_reversed:
+        return column_name, True, WHAT_A_CLICK_ON_A_COLUMN_TITLE_DOES_TOOL_TIPS["reverse"]
+    return None, False, WHAT_A_CLICK_ON_A_COLUMN_TITLE_DOES_TOOL_TIPS["stop"]
+
+
+def rows_are_sorted_ascending(sort_column_name, sort_is_reversed):
+    """Whether rows sorted by this column go from its smallest value at the top (A, the earliest time)."""
+    return (sort_column_name in COLUMN_NAMES_WHOSE_ORDER_STARTS_ASCENDING) != sort_is_reversed
+
+
+def list_saved_windows_and_sessions_in_the_order_shown(saved_windows, saved_sessions_search, sort_column_name, sort_is_reversed,
+                                                       home_folder):
+    """Returns [(saved window, its saved sessions whose rows show)], one per saved window with a
+    row, in the order of the rows: the saved windows a search shows
+    (list_saved_sessions_whose_rows_show), in the order they were saved in, or sorted by a column.
+    Sorted, each window's sessions go by what they show in the column (the Saved column by the
+    time itself), ignoring case, and the windows by what their own row shows in it (its name,
+    when its latest session was saved), or, in a column where that row is empty, by their first
+    session in that order. Rows that show the same keep the order they were saved in.
+
+    Args:
+        saved_windows: saved_agent_sessions_store's saved windows.
+        saved_sessions_search: The SavedSessionsSearch the rows show.
+        sort_column_name: The column the rows are sorted by, or None for the order they were saved in.
+        sort_is_reversed: Whether they are sorted in that column's other direction.
+        home_folder: The home folder, which the Folder column shows as "~".
+    """
+    saved_windows_and_sessions = [
+        (saved_window, saved_sessions) for saved_window, saved_sessions in (
+            (saved_window, list_saved_sessions_whose_rows_show(saved_window, saved_sessions_search)) for saved_window in saved_windows)
+        if saved_sessions]
+    if sort_column_name is None:
+        return saved_windows_and_sessions
+    is_descending = not rows_are_sorted_ascending(sort_column_name, sort_is_reversed)
+
+    def find_sort_key_of_session(saved_session):
+        if sort_column_name == "saved_at":
+            return saved_session["saved_at"]
+        return build_saved_row_text("session", None, saved_session, sort_column_name, home_folder).casefold()
+
+    def find_sort_key_of_window(saved_window_and_sorted_sessions):
+        saved_window, sorted_saved_sessions = saved_window_and_sorted_sessions
+        if sort_column_name == "name":
+            return saved_window["name"].casefold()
+        if sort_column_name == "saved_at":
+            return max(saved_session["saved_at"] for saved_session in saved_window["saved_sessions"])
+        return find_sort_key_of_session(sorted_saved_sessions[0])
+    return sorted(((saved_window, sorted(saved_sessions, key=find_sort_key_of_session, reverse=is_descending))
+                   for saved_window, saved_sessions in saved_windows_and_sessions),
+                  key=find_sort_key_of_window, reverse=is_descending)
+
+
 class SavedItem(NSObject):
     """One row: a saved window (kind "window"; its saved sessions' rows are child_items) or a saved
     session (kind "session"). key names it across reloads: "window" followed by the saved window's
@@ -90,7 +211,8 @@ def make_saved_item(kind, saved_window, saved_session=None, child_items=()):
 class SavedSessionsOutlineView(NSOutlineView):
     """The tree of saved windows and sessions: Delete or Forward Delete deletes the selected rows,
     and Return or Enter renames the selected row, as in Finder (not a
-    restore), as do Command-R and Command-Shift-R, as in the list."""
+    restore), as do Command-R and Command-Shift-R, as in the list. Command-F and "/" put the
+    keyboard in the search box, as in the list."""
 
     def keyDown_(self, event):
         if is_a_plain_press_of(event, {NSDeleteCharacter, NSDeleteFunctionKey}):
@@ -98,13 +220,17 @@ class SavedSessionsOutlineView(NSOutlineView):
         elif (is_a_plain_press_of(event, {NSCarriageReturnCharacter, NSEnterCharacter})
               or is_a_command_press_of_letter(RENAME_KEY, event.charactersIgnoringModifiers(), event.modifierFlags())):
             self.delegate().rename_the_selected_row()
+        elif (is_a_plain_press_of(event, {SEARCH_KEY_ALONE})
+              or is_a_command_press_of_letter(SEARCH_KEY, event.charactersIgnoringModifiers(), event.modifierFlags())):
+            self.delegate().put_the_keyboard_in_the_search_box()
         else:
             objc.super(SavedSessionsOutlineView, self).keyDown_(event)
 
 
 class SavedSessionsWindow(NSWindow):
     """Esc closes the window as its close button does, except while a name is being renamed,
-    where Esc puts the old name back (SavedSessionsWindowController.control_textView_doCommandBySelector_)."""
+    where Esc puts the old name back, and in the search box, where it empties the box first
+    (SavedSessionsWindowController.control_textView_doCommandBySelector_)."""
 
     def sendEvent_(self, event):
         if (event.type() == NSEventTypeKeyDown and is_a_plain_press_of(event, {ESCAPE_CHARACTER})
@@ -118,8 +244,12 @@ class SavedSessionsWindowController(WindowFrameSavingController):
     """Builds the Saved sessions window and reports what the user does in it to the owner (the app
     controller): restore_saved_agent_sessions(window keys, conversation IDs),
     delete_saved_items(window keys, conversation IDs), rename_saved_window(window key, new name),
-    rename_saved_session(conversation ID, new name), and window_frame_changed(
-    "saved_sessions_window_frame", frame) after each move and resize."""
+    rename_saved_session(conversation ID, new name), search_is_case_sensitive_chosen(whether the
+    "aA" checkbox is checked), and window_frame_changed("saved_sessions_window_frame", frame) after
+    each move and resize. For its search it asks the owner's
+    find_saved_agent_sessions_whose_conversations_contain(text, is_case_sensitive, on_answer),
+    which answers on_answer(the conversation IDs of the saved sessions whose conversation holds
+    the text, or None when the core couldn't answer)."""
 
     frame_setting_name = "saved_sessions_window_frame"
 
@@ -129,18 +259,36 @@ class SavedSessionsWindowController(WindowFrameSavingController):
             return None
         self.owner = owner
         self.window = None
+        self.saved_windows = []  # as the owner last listed them (show_saved_windows)
         self.window_items = []
         self.menu_target_items = []
         self.menu_clicked_item = None
+        # The search box's text and "aA" choice, and the search the rows show (its shown_search, a
+        # SavedSessionsSearch), which follows them once the owner has answered which conversations
+        # hold the text, or after half a second with the name matches alone (the first search
+        # reads every saved conversation's file), as the list's rows follow its search box.
+        self.search_box_search = SearchBoxSearch(
+            SavedSessionsSearch,
+            lambda text, is_case_sensitive, on_answer: self.owner.find_saved_agent_sessions_whose_conversations_contain(
+                text, is_case_sensitive, on_answer),
+            lambda saved_sessions_search: self.show_rows())
+        # The saved windows whose rows the user closed, as of the last rows that showed no search:
+        # a search opens every row it shows, and the rows after it are closed as they were before it.
+        self.collapsed_window_keys = set()
+        self.rows_show_a_search = False
+        # The column the rows are sorted by, or None for the order they were saved in, and whether
+        # in its other direction (a click on a column's title); kept while the app runs.
+        self.sort_column_name = None
+        self.sort_is_reversed = False
         return self
 
     @objc.python_method
     def show(self, saved_windows, saved_frame):
         """Opens the window listing these saved windows, at its last frame while that is on a
-        connected screen, else in the middle of the main screen; brings an open one forward as it
-        is. The owner has every change of the saved windows listed in an open one
-        (show_saved_windows), and listing them here again would end a rename under way there
-        without renaming."""
+        connected screen, else in the middle of the main screen, with an empty search box;
+        brings an open one forward as it is. The owner has every change of the saved windows
+        listed in an open one (show_saved_windows), and listing them here again would end a
+        rename under way there without renaming."""
         if not self.is_open():
             self.window = self.build_window()
             place_window_at_saved_frame_or_center(self.window, saved_frame)
@@ -150,9 +298,9 @@ class SavedSessionsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def show_saved_windows(self, saved_windows):
-        """Lists these saved windows, each opened to show its sessions unless the user closed its
-        row (a rename or a delete elsewhere in the list leaves it closed), keeping the selection
-        of the rows still listed; closes the window when nothing is saved any more.
+        """Lists these saved windows (show_rows); closes the window when nothing is saved any more.
+        While the search box holds a text, the owner is asked again which conversations hold it:
+        a session saved meanwhile may.
 
         A rename still under way when they come (a session saved or restored meanwhile changed
         the list) is ended first, without renaming, as Esc ends it: listed under the name being
@@ -166,27 +314,49 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         if not saved_windows:
             self.close_if_open()
             return
+        self.saved_windows = saved_windows
+        self.show_rows()
+        self.search_box_search.ask_which_conversations_match()
+
+    @objc.python_method
+    def show_rows(self):
+        """Lists the saved windows and sessions that the shown search shows, in the sort order
+        (list_saved_windows_and_sessions_in_the_order_shown), keeping the selection of the rows
+        still listed. Each saved window's row is opened to show its sessions unless the user
+        closed it (a rename or a delete elsewhere in the list leaves it closed); a search opens
+        every row it shows, and selects its first saved session's row when no selected row is
+        listed, so Restore is ready for it. A rename under way is ended first, without renaming
+        (see show_saved_windows)."""
+        if self.outline_view.currentEditor() is not None:
+            self.end_the_rename_without_renaming()
         selected_keys = {item.key for item in self.list_selected_items()}
-        collapsed_window_keys = {window_item.key for window_item in self.window_items
-                                 if not self.outline_view.isItemExpanded_(window_item)}
-        outline_view_has_listed_nothing_yet = not self.window_items  # just built (build_window)
-        self.window_items = [make_saved_item("window", saved_window, child_items=[
-            make_saved_item("session", saved_window, saved_session) for saved_session in saved_window["saved_sessions"]])
-            for saved_window in saved_windows]
+        if not self.rows_show_a_search:
+            self.collapsed_window_keys = {window_item.key for window_item in self.window_items
+                                          if not self.outline_view.isItemExpanded_(window_item)}
+        self.window_items = [
+            make_saved_item("window", saved_window, child_items=[
+                make_saved_item("session", saved_window, saved_session) for saved_session in saved_sessions])
+            for saved_window, saved_sessions in list_saved_windows_and_sessions_in_the_order_shown(
+                self.saved_windows, self.search_box_search.shown_search, self.sort_column_name, self.sort_is_reversed,
+                os.path.expanduser("~"))]
         # The Agent column only while the saved sessions are of two or more tools.
-        agent_tool_names = {saved_session["agent_tool_name"] for saved_window in saved_windows
+        agent_tool_names = {saved_session["agent_tool_name"] for saved_window in self.saved_windows
                             for saved_session in saved_window["saved_sessions"]}
         self.outline_view.tableColumnWithIdentifier_("agent_tool_name").setHidden_(len(agent_tool_names) < 2)
         self.outline_view.reloadData()
-        if outline_view_has_listed_nothing_yet:
+        if not self.columns_were_fitted_to_the_window:
             # Together with the Agent column, the columns start wider than the window does, and
             # AppKit keeps the columns as wide as the window only from when they fit it.
             self.outline_view.sizeToFit()
+            self.columns_were_fitted_to_the_window = True
+        self.rows_show_a_search = bool(self.search_box_search.shown_search.text)
         for window_item in self.window_items:
-            if window_item.key not in collapsed_window_keys:
+            if self.rows_show_a_search or window_item.key not in self.collapsed_window_keys:
                 self.outline_view.expandItem_(window_item)
         self.outline_view.selectRowIndexes_byExtendingSelection_(build_index_set(
             row for row in range(self.outline_view.numberOfRows()) if self.outline_view.itemAtRow_(row).key in selected_keys), False)
+        if self.rows_show_a_search and not self.list_selected_items():
+            self.move_the_selection_among_session_rows(1)  # the first one
         self.update_buttons()
 
     @objc.python_method
@@ -204,18 +374,31 @@ class SavedSessionsWindowController(WindowFrameSavingController):
 
     @objc.python_method
     def split_items_into_window_keys_and_conversation_ids(self, items):
-        return ({find_saved_window_key(item.saved_window) for item in items if item.kind == "window"},
-                {item.saved_session["conversation_id"] for item in items if item.kind == "session"})
+        """Returns (the keys of the saved windows, the conversation IDs of the saved sessions) that
+        these rows stand for: a saved session's row for itself, and a saved window's row for all
+        of its sessions, by the window's key, or, while a search lists only some of them, for
+        those listed, by their conversation IDs."""
+        window_keys, conversation_ids = set(), set()
+        for item in items:
+            if item.kind == "session":
+                conversation_ids.add(item.saved_session["conversation_id"])
+            elif len(item.child_items) == len(item.saved_window["saved_sessions"]):
+                window_keys.add(find_saved_window_key(item.saved_window))
+            else:
+                conversation_ids.update(child_item.saved_session["conversation_id"] for child_item in item.child_items)
+        return window_keys, conversation_ids
 
     @objc.python_method
     def restore_selected_rows(self):
         """Restores the selected rows' saved sessions and closes the window, so the restored tabs show.
-        A name being renamed is kept first, so the restore gives it to the tab."""
+        A name being renamed is kept first, so the restore gives it to the tab. The rows to restore
+        are taken before that: the rows listed again for the kept name may no longer hold the
+        renamed row (a search its new name doesn't match), and then have another row selected."""
+        window_keys, conversation_ids = self.split_items_into_window_keys_and_conversation_ids(self.list_selected_items())
         self.window.makeFirstResponder_(None)
-        selected_items = self.list_selected_items()
-        if not selected_items:
+        if not window_keys and not conversation_ids:
             return
-        self.owner.restore_saved_agent_sessions(*self.split_items_into_window_keys_and_conversation_ids(selected_items))
+        self.owner.restore_saved_agent_sessions(window_keys, conversation_ids)
         self.close_if_open()
 
     @objc.python_method
@@ -233,6 +416,82 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         self.restore_button.setEnabled_(has_selection)
         self.delete_button.setEnabled_(has_selection)
 
+    # ----- the search -----
+
+    @objc.python_method
+    def show_search_is_case_sensitive(self, search_is_case_sensitive):
+        """Checks or unchecks the "aA" checkbox and has the search count case, or not: one choice
+        shared with the search boxes of the lists, which the owner keeps."""
+        if self.window is not None:
+            self.case_sensitive_checkbox.setState_(NSControlStateValueOn if search_is_case_sensitive else NSControlStateValueOff)
+        self.search_box_search.set_is_case_sensitive(search_is_case_sensitive)
+
+    @objc.python_method
+    def put_the_keyboard_in_the_search_box(self):
+        """Command-F or "/" in the rows: puts the keyboard in the search box, its text selected."""
+        self.window.makeFirstResponder_(self.search_field)
+
+    @objc.python_method
+    def move_the_selection_among_session_rows(self, step):
+        """Selects the saved session's row step rows below the selected row (above for a negative
+        step), among the listed saved sessions' rows, and scrolls to it: Up and Down in the
+        search box. With no such row selected, Down selects the first and Up the last; at either
+        end the selection stays."""
+        session_rows = [row for row in range(self.outline_view.numberOfRows()) if self.outline_view.itemAtRow_(row).kind == "session"]
+        if not session_rows:
+            return
+        selected_row = self.outline_view.selectedRow()
+        if selected_row in session_rows:
+            row = session_rows[min(max(session_rows.index(selected_row) + step, 0), len(session_rows) - 1)]
+        else:
+            row = session_rows[0 if step > 0 else -1]
+        self.outline_view.selectRowIndexes_byExtendingSelection_(NSIndexSet.indexSetWithIndex_(row), False)
+        self.outline_view.scrollRowToVisible_(row)
+
+    def controlTextDidChange_(self, notification):
+        """Filters the rows as each letter is typed in the search box (show_the_search_box_text)."""
+        if notification.object() is self.search_field:
+            self.show_the_search_box_text()
+
+    def searchFieldChanged_(self, sender):
+        """The search box's own action: also sent when its button empties it, which typing doesn't do."""
+        self.show_the_search_box_text()
+
+    @objc.python_method
+    def show_the_search_box_text(self):
+        """Has the rows show only the saved windows whose name holds the search box's text, with
+        all their sessions, the saved sessions whose name holds it, and, dimmed, those whose
+        conversation does (every row for an empty box), once the owner has answered which
+        conversations hold it (SearchBoxSearch)."""
+        self.search_box_search.set_text(self.search_field.stringValue())
+
+    def caseSensitiveCheckboxClicked_(self, sender):
+        self.owner.search_is_case_sensitive_chosen(sender.state() == NSControlStateValueOn)
+
+    # ----- the sort order -----
+
+    def outlineView_didClickTableColumn_(self, outline_view, table_column):
+        """A click on a column's title sorts the rows by it, a second click the other way, and a
+        third puts them back in the order they were saved in."""
+        self.sort_column_name, self.sort_is_reversed, _ = choose_what_a_click_on_a_saved_sessions_column_title_does(
+            table_column.identifier(), self.sort_column_name, self.sort_is_reversed)
+        self.show_the_sort_order_in_the_column_titles()
+        self.show_rows()
+
+    @objc.python_method
+    def show_the_sort_order_in_the_column_titles(self):
+        """Gives the title of the column the rows are sorted by its arrow, and each title its
+        hover text, which says what the next click on it does."""
+        for table_column in self.outline_view.tableColumns():
+            column_name = table_column.identifier()
+            _, _, tool_tip = choose_what_a_click_on_a_saved_sessions_column_title_does(
+                column_name, self.sort_column_name, self.sort_is_reversed)
+            table_column.setHeaderToolTip_(tool_tip)
+            self.outline_view.setIndicatorImage_inTableColumn_(
+                NSImage.imageNamed_(SORT_INDICATOR_IMAGE_NAMES_BY_IS_ASCENDING[
+                    rows_are_sorted_ascending(column_name, self.sort_is_reversed)]) if column_name == self.sort_column_name else None,
+                table_column)
+
     # ----- building -----
 
     @objc.python_method
@@ -245,7 +504,34 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         window.setReleasedWhenClosed_(False)
         window.setMinSize_(SMALLEST_WINDOW_SIZES["saved_sessions_window_frame"])
         window.setDelegate_(self)
-        scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, BUTTON_BAR_HEIGHT, width, height - BUTTON_BAR_HEIGHT))
+        # At the top, above the column titles: the search box, then its "aA" checkbox. A window
+        # opened again starts with an empty box, and its rows with no search.
+        self.search_box_search.start_over()
+        self.rows_show_a_search = False
+        self.search_field = NSSearchField.alloc().initWithFrame_(NSMakeRect(0, 0, LARGEST_SEARCH_FIELD_WIDTH, 22))
+        self.search_field.setPlaceholderString_(SEARCH_FIELD_PLACEHOLDER)
+        self.search_field.setToolTip_(SEARCH_FIELD_TOOL_TIP)
+        self.search_field.setDelegate_(self)  # controlTextDidChange_ and the keys (control_textView_doCommandBySelector_)
+        self.search_field.setTarget_(self)  # its button that empties it
+        self.search_field.setAction_("searchFieldChanged:")
+        self.case_sensitive_checkbox = NSButton.checkboxWithTitle_target_action_(
+            CASE_SENSITIVE_CHECKBOX_TITLE, self, "caseSensitiveCheckboxClicked:")
+        self.case_sensitive_checkbox.setToolTip_(CASE_SENSITIVE_CHECKBOX_TOOL_TIP)
+        self.case_sensitive_checkbox.setState_(
+            NSControlStateValueOn if self.search_box_search.is_case_sensitive else NSControlStateValueOff)
+        self.case_sensitive_checkbox.sizeToFit()
+        search_bar_bottom = height - SEARCH_BAR_HEIGHT
+        left = SIDE_MARGIN
+        for control, control_width in ((self.search_field, LARGEST_SEARCH_FIELD_WIDTH),
+                                       (self.case_sensitive_checkbox, self.case_sensitive_checkbox.frame().size.width)):
+            control_height = control.fittingSize().height
+            control.setFrame_(NSMakeRect(left, search_bar_bottom + round((SEARCH_BAR_HEIGHT - control_height) / 2), control_width,
+                                         control_height))
+            control.setAutoresizingMask_(NSViewMinYMargin)  # stays at the top left
+            window.contentView().addSubview_(control)
+            left += control_width + GAP_BETWEEN_BUTTONS
+        scroll_view = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, BUTTON_BAR_HEIGHT, width, search_bar_bottom - BUTTON_BAR_HEIGHT))
         scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         scroll_view.setHasVerticalScroller_(True)
         # Sideways too, for columns the window has no room for even at their smallest widths (a
@@ -278,13 +564,15 @@ class SavedSessionsWindowController(WindowFrameSavingController):
         window.contentView().addSubview_(scroll_view)
         self.outline_view = outline_view
         # A window opened before left its rows: the new outline view has listed none of them, and
-        # would take each for one the user closed (show_saved_windows).
+        # would take each for one the user closed (show_rows).
         self.window_items = []
+        self.columns_were_fitted_to_the_window = False
+        self.show_the_sort_order_in_the_column_titles()  # as the window opened before left it
         self.restore_button = self.add_button(window, "Restore", "restoreClicked:", width - SIDE_MARGIN)
         self.delete_button = self.add_button(window, "Delete", "deleteClicked:",
                                              self.restore_button.frame().origin.x - GAP_BETWEEN_BUTTONS)
         self.restore_button.setToolTip_("Resumes the selected rows' sessions and brings the last one's tab to the front; "
-                                         "a window's row stands for all of its sessions")
+                                         "a window's row stands for all of its sessions that are listed")
         window.setInitialFirstResponder_(outline_view)
         return window
 
@@ -308,11 +596,30 @@ class SavedSessionsWindowController(WindowFrameSavingController):
     def windowWillClose_(self, notification):
         if notification.object() is self.window:
             self.window.makeFirstResponder_(None)  # a name being renamed is kept
+            self.search_box_search.stop_waiting_for_the_answer()
 
     def control_textView_doCommandBySelector_(self, control, text_view, command_selector):
-        # Esc ends a rename without renaming.
+        """The search box's keys: Return gives the rows the keyboard, Up and Down move the
+        selection among the saved sessions' rows, and Esc empties the box, and in an empty box
+        closes the window as Esc in the rows does. In a name being renamed, Esc ends the rename
+        without renaming. Other keys edit the text."""
+        if control is not self.search_field:
+            if command_selector == "cancelOperation:":
+                self.end_the_rename_without_renaming()
+                return True
+            return False
+        if command_selector == "insertNewline:":
+            self.window.makeFirstResponder_(self.outline_view)
+            return True
+        if command_selector in ("moveUp:", "moveDown:"):
+            self.move_the_selection_among_session_rows(-1 if command_selector == "moveUp:" else 1)
+            return True
         if command_selector == "cancelOperation:":
-            self.end_the_rename_without_renaming()
+            if self.search_field.stringValue():
+                self.search_field.setStringValue_("")
+                self.show_the_search_box_text()
+            else:
+                self.window.performClose_(None)
             return True
         return False
 
@@ -330,6 +637,16 @@ class SavedSessionsWindowController(WindowFrameSavingController):
     def outlineView_objectValueForTableColumn_byItem_(self, outline_view, table_column, item):
         return build_saved_row_text(item.kind, item.saved_window, item.saved_session, table_column.identifier(),
                                     os.path.expanduser("~"))
+
+    def outlineView_willDisplayCell_forTableColumn_item_(self, outline_view, cell, table_column, item):
+        """Dims the row of a saved session that the search shows only because its conversation
+        holds the text. Not while the row is selected: a selected row's text is drawn in the
+        selection's own color, which the cell does only with its usual text color."""
+        row_is_dimmed = (item.kind == "session"
+                         and saved_session_row_matches_only_by_its_conversation(item.saved_window, item.saved_session,
+                                                                                self.search_box_search.shown_search)
+                         and not outline_view.isRowSelected_(outline_view.rowForItem_(item)))
+        cell.setTextColor_(NSColor.secondaryLabelColor() if row_is_dimmed else NSColor.controlTextColor())
 
     def outlineView_shouldEditTableColumn_item_(self, outline_view, table_column, item):
         return table_column.identifier() == "name"

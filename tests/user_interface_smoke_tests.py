@@ -83,7 +83,8 @@ from agent_command_tab.user_interface.screen_layout import (compute_list_window_
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 from agent_command_tab.user_interface.menu_bar_status_item import (MenuBarStatusItemController, choose_icon_color_name,
                                                                    choose_what_a_click_on_the_icon_does_to_the_dropdown)
-from agent_command_tab.user_interface.saved_sessions_window import SavedSessionsWindowController
+from agent_command_tab.user_interface.saved_sessions_window import (SavedSessionsSearch, SavedSessionsWindowController,
+                                                                    list_saved_windows_and_sessions_in_the_order_shown)
 from agent_command_tab.user_interface.settings_window import (GAP_BELOW_SECTION_TITLE, GAP_BETWEEN_SECTIONS,
                                                               SECTION_TITLE_HEIGHT,
                                                               KeyboardButton, KeyboardPopUpButton, SettingsWindowController)
@@ -1135,7 +1136,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
     def fire_search_answer_wait_timer(self):
         """Ends the list's wait for the core's answer to a search now, rather than after
         SECONDS_THE_ROWS_WAIT_FOR_THE_CONVERSATION_MATCHES, by firing its timer, which then won't fire a second time."""
-        self.list_controller.search_answer_wait_timer.fire()
+        self.list_controller.search_box_search.answer_wait_timer.fire()
 
     def test_a_search_box_emptied_beside_a_message_steps_aside_for_it_and_the_rows_take_its_keyboard(self):
         # An empty box left there would keep the message's room: the top bar is fitted again when the search goes, not
@@ -1158,7 +1159,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             panel.show_message("iTerm2: could not connect; the other terminals' tabs are listed")
             self.assertFalse(panel.search_field.isHidden())  # it holds a search
             empty_the_search_box()
-            self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_text), ("", ""))
+            self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_box_search.text), ("", ""))
             self.assertTrue(panel.search_field.isHidden())
             self.assertEqual(panel.message_text_field.frame().origin.x, panel.sort_label.frame().origin.x)  # from the left edge
             self.assertIs(self.window.firstResponder(), self.list_controller.outline_view)  # Esc then closes the list
@@ -1220,17 +1221,17 @@ class UserInterfaceSmokeTests(unittest.TestCase):
     def test_a_search_the_core_is_slow_to_answer_shows_its_title_matches_meanwhile(self):
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.type_in_the_search_box("plan")
-        self.assertTrue(self.list_controller.search_answer_wait_timer.isValid())
+        self.assertTrue(self.list_controller.search_box_search.answer_wait_timer.isValid())
         self.fire_search_answer_wait_timer()
         self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
         self.owner.answer_conversation_search(["s11"])  # the conversation matches come with the answer
         self.assertEqual(self.list_row_item_ids(), ["w1", "1", "w2", "11", "new_window"])
         # An answer in time stops the wait.
         self.type_in_the_search_box("planning")
-        wait_timer = self.list_controller.search_answer_wait_timer
+        wait_timer = self.list_controller.search_box_search.answer_wait_timer
         self.owner.answer_conversation_search([])
         self.assertFalse(wait_timer.isValid())
-        self.assertIsNone(self.list_controller.search_answer_wait_timer)
+        self.assertIsNone(self.list_controller.search_box_search.answer_wait_timer)
         self.assertEqual(self.list_row_item_ids(), ["w1", "1", "new_window"])
 
     def test_the_aa_checkbox_makes_case_count_and_an_answer_to_an_older_search_is_dropped(self):
@@ -1292,11 +1293,11 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "insertNewline:"))
         self.assertEqual(self.submitted_actions[-1], ActionRequest("focus_agent_session", {"session_id": "s3"}))
         self.owner.after_success_of_the_last_action(ActionResult(True))
-        self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_text), ("", ""))
+        self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_box_search.text), ("", ""))
         # Esc empties the box, then closes the list.
         self.type_in_the_search_box("codex")
         self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "cancelOperation:"))
-        self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_text, self.owner.lists_closed_after_escape),
+        self.assertEqual((panel.search_field.stringValue(), self.list_controller.search_box_search.text, self.owner.lists_closed_after_escape),
                          ("", "", []))
         self.assertTrue(panel.control_textView_doCommandBySelector_(panel.search_field, None, "cancelOperation:"))
         self.assertEqual(self.owner.lists_closed_after_escape, [self.list_controller])
@@ -1313,7 +1314,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         # The core hasn't answered for "zebra" yet: the rows, and the selected row, are still those of "tandem".
         self.type_in_the_search_box("zebra")
         self.press_return_in_the_search_box()
-        self.assertEqual((self.submitted_actions, self.list_controller.search_text), ([], "zebra"))
+        self.assertEqual((self.submitted_actions, self.list_controller.search_box_search.text), ([], "zebra"))
         self.owner.answer_conversation_search(["s2"])  # only the conversation of phase0-tests holds "zebra"
         self.assertEqual(self.submitted_actions, [ActionRequest("focus_agent_session", {"session_id": "s2"})])
         self.assertFalse(self.list_controller.return_in_the_search_box_waits_for_its_rows)
@@ -1444,7 +1445,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         panel.show_search_is_case_sensitive(True)
         self.owner.answer_conversation_search(["s2"])  # for "zebra" without "aA"
         self.owner.answer_conversation_search(["s2"])
-        self.assertEqual((self.list_controller.shown_list_search.is_case_sensitive, self.list_row_item_ids()),
+        self.assertEqual((self.list_controller.search_box_search.shown_search.is_case_sensitive, self.list_row_item_ids()),
                          (True, ["w1", "2", "new_window"]))
         # A text nothing holds has no row to show, and the Return doesn't wait for a later text's rows.
         self.type_in_the_search_box("quagga")
@@ -1487,16 +1488,16 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.press_return_in_the_search_box()
         self.assertEqual(self.submitted_actions, [ActionRequest("focus_agent_session", {"session_id": "s1"})])
         # Nothing more until the core says the tab is in front, which it never does for a tab it couldn't show.
-        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_text), ([], "plan", "plan"))
+        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_box_search.text), ([], "plan", "plan"))
         self.owner.after_success_of_the_last_action(ActionResult(True))
-        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_text), ([True], "", ""))
+        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_box_search.text), ([True], "", ""))
         # A text typed while the tab was coming to the front stays.
         self.type_in_the_search_box("plan")
         self.owner.answer_conversation_search([])
         self.press_return_in_the_search_box()
         self.type_in_the_search_box("planning")
         self.owner.after_success_of_the_last_action(ActionResult(True))
-        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_text),
+        self.assertEqual((tabs_shown, panel.search_field.stringValue(), self.list_controller.search_box_search.text),
                          ([True, True], "planning", "planning"))
 
     def test_hide_idle_hides_idle_tabs_and_windows_left_without_tabs_until_show_idle(self):
@@ -5444,6 +5445,13 @@ class SavedSessionsRecordingOwner:
 
     def __init__(self):
         self.calls = []
+        self.conversation_searches = []  # (text, is_case_sensitive, on_answer) of each search the window asked for
+
+    def find_saved_agent_sessions_whose_conversations_contain(self, text, is_case_sensitive, on_answer):
+        self.conversation_searches.append((text, is_case_sensitive, on_answer))
+
+    def search_is_case_sensitive_chosen(self, search_is_case_sensitive):
+        self.calls.append(("search is case sensitive", search_is_case_sensitive))
 
     def restore_saved_agent_sessions(self, window_keys, conversation_ids):
         self.calls.append(("restore", window_keys, conversation_ids))
@@ -5774,6 +5782,346 @@ class SavedSessionsWindowSmokeTests(unittest.TestCase):
         self.controller.show_saved_windows([])  # the last saved session was deleted
         self.assertFalse(self.controller.is_open())
 
+    # ----- the search box -----
+
+    def type_in_the_search_box(self, text):
+        """Puts text in the search box as typing or its emptying button does, which tells the window."""
+        self.controller.search_field.setStringValue_(text)
+        self.controller.searchFieldChanged_(self.controller.search_field)
+
+    def answer_the_last_conversation_search(self, conversation_ids):
+        """Answers the search the window asked the owner for last, as the app controller does once the core has."""
+        self.owner.conversation_searches[-1][2](conversation_ids)
+
+    def search(self, text, conversation_ids_whose_conversations_match=()):
+        self.type_in_the_search_box(text)
+        if text:
+            self.answer_the_last_conversation_search(list(conversation_ids_whose_conversations_match))
+
+    def list_names_of_dimmed_rows(self):
+        """Returns the names of the rows drawn dimmed, with no row selected (a selected row keeps its usual text color)."""
+        self.outline_view.deselectAll_(None)
+        dimmed_names = []
+        for row in range(self.outline_view.numberOfRows()):
+            cell = unittest.mock.Mock()
+            item = self.outline_view.itemAtRow_(row)
+            self.controller.outlineView_willDisplayCell_forTableColumn_item_(
+                self.outline_view, cell, self.outline_view.tableColumnWithIdentifier_("name"), item)
+            (text_color,), _ = cell.setTextColor_.call_args
+            self.assertIn(text_color, (NSColor.secondaryLabelColor(), NSColor.controlTextColor()))
+            if text_color == NSColor.secondaryLabelColor():
+                dimmed_names.append(self.list_names()[row])
+        return dimmed_names
+
+    def test_the_search_box_and_its_checkbox_sit_above_the_column_titles_at_the_top_left(self):
+        search_field, checkbox = self.controller.search_field, self.controller.case_sensitive_checkbox
+        self.assertEqual((search_field.placeholderString(), checkbox.title()), ("Search", "aA"))
+        self.assertIn("(⌘-F or /)", search_field.toolTip())
+        self.assertEqual(checkbox.toolTip(), "Toggle whether the search is case sensitive")
+        for content_size in ((720, 360), (480, 220), (900, 600)):  # as built, the narrowest, and larger
+            self.controller.window.setContentSize_(content_size)
+            content_height = self.controller.window.contentView().frame().size.height
+            scroll_view_frame = self.outline_view.enclosingScrollView().frame()
+            search_frame, checkbox_frame = search_field.frame(), checkbox.frame()
+            for frame in (search_frame, checkbox_frame):
+                self.assertGreaterEqual(frame.origin.y, scroll_view_frame.origin.y + scroll_view_frame.size.height, content_size)
+                self.assertLessEqual(frame.origin.y + frame.size.height, content_height, content_size)
+            self.assertEqual(search_frame.origin.x, 12)
+            self.assertGreater(checkbox_frame.origin.x, search_frame.origin.x + search_frame.size.width)
+            self.assertLessEqual(checkbox_frame.origin.x + checkbox_frame.size.width, content_size[0], content_size)
+            # The rows keep the room between the search box and the buttons.
+            self.assertEqual(scroll_view_frame.origin.y + scroll_view_frame.size.height, content_height - 34, content_size)
+            self.assertGreater(scroll_view_frame.origin.y,
+                               self.controller.restore_button.frame().origin.y + self.controller.restore_button.frame().size.height)
+
+    def test_the_search_shows_name_matches_and_dimmed_conversation_matches_then_every_row_again(self):
+        self.search("notes", conversation_ids_whose_conversations_match=["a", "c"])
+        self.assertEqual(self.owner.conversation_searches[-1][:2], ("notes", False))
+        # "notes" by its name, and "planning" only by its conversation, under its window, without "reviews".
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "tmux: work", "notes"])
+        self.assertEqual([item.key for item in self.controller.list_selected_items()], [("session", "a")])  # the first one found
+        self.assertTrue(self.controller.restore_button.isEnabled())
+        self.assertEqual(self.list_names_of_dimmed_rows(), ["planning"])
+        # A saved window whose name holds the text shows all its sessions, none of them dimmed.
+        self.search("TMUX", conversation_ids_whose_conversations_match=["c"])
+        self.assertEqual(self.list_names(), ["tmux: work", "notes"])
+        self.assertEqual(self.list_names_of_dimmed_rows(), [])
+        self.search("found nowhere")
+        self.assertEqual(self.list_names(), [])
+        self.assertFalse(self.controller.restore_button.isEnabled() or self.controller.delete_button.isEnabled())
+        searches_asked_for = len(self.owner.conversation_searches)
+        self.search("")
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "reviews", "tmux: work", "notes"])
+        self.assertEqual(self.list_names_of_dimmed_rows(), [])
+        self.assertEqual(len(self.owner.conversation_searches), searches_asked_for)  # an empty box needs no answer
+
+    def test_a_selected_row_the_search_still_lists_stays_selected_and_is_not_dimmed(self):
+        self.select_rows(2)  # reviews
+        self.search("e", conversation_ids_whose_conversations_match=["b", "c"])  # in "reviews", "notes" and both windows' names
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "reviews", "tmux: work", "notes"])
+        self.assertEqual([item.key for item in self.controller.list_selected_items()], [("session", "b")])
+        self.search("zzz", conversation_ids_whose_conversations_match=["b"])
+        self.assertEqual(self.list_names(), ["agent-command-tab", "reviews"])
+        cell = unittest.mock.Mock()
+        self.controller.outlineView_willDisplayCell_forTableColumn_item_(
+            self.outline_view, cell, self.outline_view.tableColumnWithIdentifier_("name"), self.outline_view.itemAtRow_(1))
+        cell.setTextColor_.assert_called_once_with(NSColor.controlTextColor())  # selected: the selection's own text color
+        self.assertEqual(self.list_names_of_dimmed_rows(), ["reviews"])
+
+    def test_a_slow_answer_shows_the_name_matches_meanwhile_and_adds_the_conversation_matches_when_it_comes(self):
+        self.type_in_the_search_box("plan")
+        self.assertEqual(len(self.list_names()), 5)  # the rows wait for the answer, for half a second
+        self.assertTrue(self.controller.search_box_search.answer_wait_timer.isValid())
+        self.controller.search_box_search.answer_wait_timer.fire()
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning"])
+        self.answer_the_last_conversation_search(["c"])
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "tmux: work", "notes"])
+        self.assertIsNone(self.controller.search_box_search.answer_wait_timer)
+        # An owner that couldn't answer (the core stopped) leaves the name matches alone.
+        self.type_in_the_search_box("planning")
+        self.answer_the_last_conversation_search(None)
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning"])
+
+    def test_one_search_is_asked_at_a_time_and_an_answer_for_an_earlier_text_is_left_out(self):
+        self.type_in_the_search_box("p")
+        self.type_in_the_search_box("pl")
+        self.type_in_the_search_box("pla")
+        self.assertEqual([search[:2] for search in self.owner.conversation_searches], [("p", False)])
+        self.answer_the_last_conversation_search(["b", "c"])  # for "p": the box holds "pla" by now
+        self.assertEqual(len(self.list_names()), 5)  # still the rows from before the search
+        self.assertEqual([search[:2] for search in self.owner.conversation_searches], [("p", False), ("pla", False)])
+        self.answer_the_last_conversation_search(["c"])
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "tmux: work", "notes"])
+        self.assertEqual(len(self.owner.conversation_searches), 2)
+
+    def test_saved_windows_listed_during_a_search_are_searched_too(self):
+        self.search("notes")
+        self.assertEqual(self.list_names(), ["tmux: work", "notes"])
+        self.controller.show_saved_windows(make_saved_windows() + [build_saved_window_record(
+            [make_saved_session_record("d", "more notes"), make_saved_session_record("e", "plans")], "w9", "saved since",
+            (0, 0, 800, 600))])
+        self.assertEqual(self.list_names(), ["tmux: work", "notes", "saved since", "more notes"])  # by its name, at once
+        self.assertEqual(self.owner.conversation_searches[-1][:2], ("notes", False))  # and its conversation is asked about
+        self.answer_the_last_conversation_search(["e"])
+        self.assertEqual(self.list_names(), ["tmux: work", "notes", "saved since", "more notes", "plans"])
+        self.controller.show_saved_windows([])  # the last saved session was deleted: the window closes, search or not
+        self.assertFalse(self.controller.is_open())
+
+    def test_a_search_opens_the_rows_it_shows_and_the_rows_after_it_are_closed_as_before_it(self):
+        self.outline_view.collapseItem_(self.outline_view.itemAtRow_(0))  # agent-command-tab
+        self.search("planning")
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning"])
+        self.search("re", conversation_ids_whose_conversations_match=["c"])
+        self.assertEqual(self.list_names(), ["agent-command-tab", "reviews", "tmux: work", "notes"])
+        self.search("")
+        self.assertEqual(self.list_names(), ["agent-command-tab", "tmux: work", "notes"])
+
+    def test_a_saved_windows_row_stands_for_its_sessions_that_a_search_lists(self):
+        self.search("reviews")
+        self.assertEqual(self.list_names(), ["agent-command-tab", "reviews"])
+        self.select_rows(0)  # the saved window, one of whose two sessions is listed
+        self.controller.deleteClicked_(None)
+        self.controller.window.orderFrontRegardless()
+        self.controller.restoreClicked_(None)
+        self.assertEqual(self.owner.calls, [("delete", set(), {"b"}), ("restore", set(), {"b"})])
+        self.owner.calls.clear()
+        self.search("agent-command")  # the window's own name: all its sessions are listed
+        self.select_rows(0)
+        self.controller.deleteClicked_(None)
+        self.assertEqual(self.owner.calls, [("delete", {("iTerm2", "w1", None)}, set())])
+        self.assertIn("a window's row stands for all of its sessions that are listed", self.controller.restore_button.toolTip())
+
+    def test_restore_during_a_rename_restores_the_renamed_row_though_the_search_no_longer_lists_it(self):
+        # Keeping the name lists the rows again, without the renamed one when the search doesn't hold its new name;
+        # the rows then select the first one found, which the restore mustn't take for the row to restore.
+        def keep_the_new_name(conversation_id, new_name):  # as the app controller does: the list is shown again at once
+            self.owner.calls.append(("rename session", conversation_id, new_name))
+            self.controller.show_saved_windows(rename_saved_session(make_saved_windows(), conversation_id, new_name))
+        self.owner.rename_saved_session = keep_the_new_name
+        self.controller.window.orderFrontRegardless()
+        self.search("re", conversation_ids_whose_conversations_match=["c"])  # "reviews" by its name, "notes" by its conversation
+        self.assertEqual(self.list_names(), ["agent-command-tab", "reviews", "tmux: work", "notes"])
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))
+        self.outline_view.currentEditor().setString_("Plans")
+        self.controller.restoreClicked_(None)
+        self.assertEqual(self.owner.calls, [("rename session", "b", "Plans"), ("restore", set(), {"b"})])
+        self.assertEqual(self.list_names(), ["tmux: work", "notes"])  # what the search lists since
+
+    def test_the_checkbox_tells_the_owner_and_the_owners_choice_has_the_search_count_case(self):
+        checkbox = self.controller.case_sensitive_checkbox
+        self.assertEqual(checkbox.state(), NSControlStateValueOff)
+        self.search("Notes")
+        self.assertEqual(self.list_names(), ["tmux: work", "notes"])
+        checkbox.setState_(NSControlStateValueOn)  # a click
+        self.controller.caseSensitiveCheckboxClicked_(checkbox)
+        self.assertEqual(self.owner.calls, [("search is case sensitive", True)])
+        self.controller.show_search_is_case_sensitive(True)  # as the app controller does for every search box
+        self.assertEqual(self.owner.conversation_searches[-1][:2], ("Notes", True))
+        self.answer_the_last_conversation_search(["a"])
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning"])  # "notes" no longer by its name
+        # A window opened again starts with the choice, and an empty box.
+        self.controller.window = self.controller.build_window()
+        self.assertEqual((self.controller.case_sensitive_checkbox.state(), self.controller.search_field.stringValue()),
+                         (NSControlStateValueOn, ""))
+        self.controller.show_saved_windows(make_saved_windows())
+        self.outline_view = self.controller.outline_view
+        self.assertEqual(len(self.list_names()), 5)
+        # Unchecked for a controller whose window was never opened, the window is built unchecked.
+        controller = SavedSessionsWindowController.alloc().initWithOwner_(self.owner)
+        controller.show_search_is_case_sensitive(True)
+        controller.show_search_is_case_sensitive(False)
+        controller.window = controller.build_window()
+        self.assertEqual(controller.case_sensitive_checkbox.state(), NSControlStateValueOff)
+
+    def test_command_f_and_slash_put_the_keyboard_in_the_search_box_and_its_keys_work_the_rows(self):
+        window, search_field = self.controller.window, self.controller.search_field
+        window.orderFrontRegardless()
+
+        def press_in_the_search_box(command_selector):
+            return self.controller.control_textView_doCommandBySelector_(search_field, None, command_selector)
+        for characters, key_code, modifier_flags in (("f", 3, NSEventModifierFlagCommand), ("/", 44, 0),
+                                                     ("F", 3, NSEventModifierFlagCommand | NSEventModifierFlagShift)):
+            window.makeFirstResponder_(self.outline_view)
+            self.press_key(characters, key_code, modifier_flags)
+            self.assertIs(search_field.currentEditor(), window.firstResponder(), characters)
+        self.outline_view.deselectAll_(None)
+        self.assertTrue(press_in_the_search_box("moveDown:"))  # the first saved session's row, not its window's
+        self.assertEqual(self.outline_view.selectedRow(), 1)
+        self.assertTrue(press_in_the_search_box("moveDown:"))
+        self.assertTrue(press_in_the_search_box("moveDown:"))
+        self.assertEqual(self.outline_view.selectedRow(), 4)  # past the tmux window's row
+        self.assertTrue(press_in_the_search_box("moveDown:"))
+        self.assertEqual(self.outline_view.selectedRow(), 4)  # the last one: it stays
+        self.assertTrue(press_in_the_search_box("moveUp:"))
+        self.assertEqual(self.outline_view.selectedRow(), 2)
+        self.outline_view.deselectAll_(None)
+        self.assertTrue(press_in_the_search_box("moveUp:"))
+        self.assertEqual(self.outline_view.selectedRow(), 4)  # with none selected, Up takes the last
+        self.assertFalse(press_in_the_search_box("moveLeft:"))  # other keys edit the text
+        # Return gives the rows the keyboard, with the row the search selected, and restores nothing.
+        self.search("reviews")
+        self.assertTrue(press_in_the_search_box("insertNewline:"))
+        self.assertIs(window.firstResponder(), self.outline_view)
+        self.assertEqual([item.key for item in self.controller.list_selected_items()], [("session", "b")])
+        self.assertEqual(self.owner.calls, [])
+        # Esc empties the box first, then closes the window.
+        self.assertTrue(press_in_the_search_box("cancelOperation:"))
+        self.assertEqual((search_field.stringValue(), len(self.list_names())), ("", 5))
+        self.assertTrue(self.controller.is_open())
+        self.assertTrue(press_in_the_search_box("cancelOperation:"))
+        self.assertFalse(self.controller.is_open())
+
+    def test_esc_in_a_rename_still_ends_the_rename_alone_while_a_search_is_shown(self):
+        self.controller.window.orderFrontRegardless()
+        self.search("reviews")
+        self.controller.start_renaming(self.outline_view.itemAtRow_(1))
+        self.assertEqual(self.outline_view.editedRow(), 1)
+        self.assertTrue(self.controller.control_textView_doCommandBySelector_(self.outline_view, None, "cancelOperation:"))
+        self.assertEqual(self.outline_view.editedRow(), -1)
+        self.assertTrue(self.controller.is_open())
+        self.assertEqual(self.controller.search_field.stringValue(), "reviews")
+
+    # ----- sorting by a column's title -----
+
+    def click_column_title(self, column_name):
+        self.controller.outlineView_didClickTableColumn_(self.outline_view, self.outline_view.tableColumnWithIdentifier_(column_name))
+
+    def list_title_arrows_and_tool_tips(self):
+        """Returns {column name: (the name of its title's arrow image, or None; its title's hover text)}."""
+        return {str(column.identifier()): (
+            (self.outline_view.indicatorImageInTableColumn_(column).name() if self.outline_view.indicatorImageInTableColumn_(column)
+             is not None else None), column.headerToolTip()) for column in self.outline_view.tableColumns()}
+
+    def test_a_click_on_a_column_title_sorts_by_it_then_the_other_way_then_as_saved(self):
+        sort_tool_tip, reverse_tool_tip, stop_tool_tip = ("Click to sort the list by this column",
+                                                          "Click to reverse-sort the list by this column",
+                                                          "Click to stop sorting the list by this column")
+        self.assertEqual(set(self.list_title_arrows_and_tool_tips().values()), {(None, sort_tool_tip)})
+        self.select_rows(2)  # reviews
+        self.click_column_title("name")  # A to Z: the windows by their names, and each one's sessions
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "reviews", "tmux: work", "notes"])
+        self.assertEqual(self.list_title_arrows_and_tool_tips()["name"], ("NSAscendingSortIndicator", reverse_tool_tip))
+        self.click_column_title("name")
+        self.assertEqual(self.list_names(), ["tmux: work", "notes", "agent-command-tab", "reviews", "planning"])
+        self.assertEqual([item.key for item in self.controller.list_selected_items()], [("session", "b")])  # still selected
+        self.assertEqual(self.list_title_arrows_and_tool_tips(), {
+            "name": ("NSDescendingSortIndicator", stop_tool_tip), "agent_tool_name": (None, sort_tool_tip),
+            "folder": (None, sort_tool_tip), "saved_at": (None, sort_tool_tip)})
+        self.click_column_title("name")
+        self.assertEqual(self.list_names(), ["agent-command-tab", "planning", "reviews", "tmux: work", "notes"])  # as saved
+        self.assertEqual(set(self.list_title_arrows_and_tool_tips().values()), {(None, sort_tool_tip)})
+        # The Saved column starts with the latest, and another title starts over in its own first direction.
+        self.click_column_title("name")
+        self.click_column_title("saved_at")
+        self.assertEqual(self.list_title_arrows_and_tool_tips()["saved_at"], ("NSDescendingSortIndicator", reverse_tool_tip))
+        self.assertEqual(self.list_title_arrows_and_tool_tips()["name"], (None, sort_tool_tip))
+        self.click_column_title("saved_at")  # the earliest first: "reviews" before "planning" in its window
+        self.assertEqual(self.list_names(), ["agent-command-tab", "reviews", "planning", "tmux: work", "notes"])
+        self.assertEqual(self.owner.calls, [])  # the saved list itself keeps its order
+
+    def test_the_sort_order_stays_for_a_search_a_new_list_and_a_window_opened_again(self):
+        self.click_column_title("name")
+        self.click_column_title("name")  # Z to A
+        self.search("e", conversation_ids_whose_conversations_match=["a"])
+        self.assertEqual(self.list_names(), ["tmux: work", "notes", "agent-command-tab", "reviews", "planning"])
+        self.search("")
+        self.controller.show_saved_windows(rename_saved_session(make_saved_windows(), "a", "a plan"))
+        self.assertEqual(self.list_names(), ["tmux: work", "notes", "agent-command-tab", "reviews", "a plan"])
+        self.controller.window = self.controller.build_window()
+        self.controller.show_saved_windows(make_saved_windows())
+        self.outline_view = self.controller.outline_view
+        self.assertEqual(self.list_names(), ["tmux: work", "notes", "agent-command-tab", "reviews", "planning"])
+        self.assertEqual(self.list_title_arrows_and_tool_tips()["name"][0], "NSDescendingSortIndicator")
+
+
+class SavedSessionsOrderTests(unittest.TestCase):
+    """list_saved_windows_and_sessions_in_the_order_shown: three saved windows, saved in this order.
+    "zebra" holds a Codex session in /b saved at 30 and a Claude Code session in ~/a saved at 10;
+    "Apple" holds an agy session in /c saved at 20; "mango" holds a Claude Code session in /a saved at 20."""
+
+    def setUp(self):
+        self.saved_windows = [
+            build_saved_window_record([make_saved_session_record("z1", "beta", "Codex", "/b", saved_at=30),
+                                       make_saved_session_record("z2", "Alpha", folder="/Users/someone/a", saved_at=10)],
+                                      "w1", "zebra", None),
+            build_saved_window_record([make_saved_session_record("a1", "delta", "agy", "/c", saved_at=20)], "w2", "Apple", None),
+            build_saved_window_record([make_saved_session_record("m1", "gamma", folder="/a", saved_at=20)], "w3", "mango", None)]
+
+    def list_names_in_order(self, sort_column_name, sort_is_reversed=False, text="", conversation_ids=()):
+        return [(saved_window["name"], [saved_session["name"] for saved_session in saved_sessions])
+                for saved_window, saved_sessions in list_saved_windows_and_sessions_in_the_order_shown(
+                    self.saved_windows, SavedSessionsSearch(text, False, frozenset(conversation_ids)), sort_column_name,
+                    sort_is_reversed, "/Users/someone")]
+
+    def test_unsorted_rows_keep_the_order_they_were_saved_in(self):
+        self.assertEqual(self.list_names_in_order(None), [("zebra", ["beta", "Alpha"]), ("Apple", ["delta"]), ("mango", ["gamma"])])
+
+    def test_names_sort_ignoring_case_the_windows_by_their_own_names(self):
+        self.assertEqual(self.list_names_in_order("name"), [("Apple", ["delta"]), ("mango", ["gamma"]), ("zebra", ["Alpha", "beta"])])
+        self.assertEqual(self.list_names_in_order("name", sort_is_reversed=True),
+                         [("zebra", ["beta", "Alpha"]), ("mango", ["gamma"]), ("Apple", ["delta"])])
+
+    def test_the_saved_column_starts_with_the_latest_a_window_going_by_its_latest_session(self):
+        # "Apple" and "mango" were both saved at 20, and keep the order they were saved in, either way.
+        self.assertEqual(self.list_names_in_order("saved_at"), [("zebra", ["beta", "Alpha"]), ("Apple", ["delta"]), ("mango", ["gamma"])])
+        self.assertEqual(self.list_names_in_order("saved_at", sort_is_reversed=True),
+                         [("Apple", ["delta"]), ("mango", ["gamma"]), ("zebra", ["Alpha", "beta"])])
+
+    def test_a_column_where_a_windows_row_is_empty_sorts_the_windows_by_their_first_session_in_that_order(self):
+        # Agents: agy, Claude Code, then zebra's Claude Code before its Codex.
+        self.assertEqual(self.list_names_in_order("agent_tool_name"),
+                         [("Apple", ["delta"]), ("zebra", ["Alpha", "beta"]), ("mango", ["gamma"])])
+        # Folders as shown: /a, /b (zebra's first of /b and ~/a), /c.
+        self.assertEqual(self.list_names_in_order("folder"), [("mango", ["gamma"]), ("zebra", ["beta", "Alpha"]), ("Apple", ["delta"])])
+        self.assertEqual(self.list_names_in_order("folder", sort_is_reversed=True),
+                         [("zebra", ["Alpha", "beta"]), ("Apple", ["delta"]), ("mango", ["gamma"])])
+
+    def test_a_search_leaves_out_rows_before_the_sort_and_a_window_goes_by_the_sessions_it_shows(self):
+        # Only "beta" (its name) and "delta" (its conversation) show; zebra now goes by "beta" in /b.
+        self.assertEqual(self.list_names_in_order("folder", text="bet", conversation_ids=["a1"]),
+                         [("zebra", ["beta"]), ("Apple", ["delta"])])
+        self.assertEqual(self.list_names_in_order(None, text="found nowhere"), [])
+
 
 def make_stand_in_app_controller_for_saved_sessions(**attributes):
     """A stand-in AppController with these attributes whose saved-list and action helpers are the real ones,
@@ -5852,6 +6200,48 @@ class SavedSessionsInTheAppTests(unittest.TestCase):
             self.assertEqual(list_menu_items_without_a_tool_tip(menu), [])
         status_item_controller.restoreSessionsClicked_(None)
         status_item_controller.owner.open_saved_sessions_window.assert_called_once_with()
+
+    def test_a_search_box_gets_the_ids_the_core_found_or_none_when_it_couldnt_answer(self):
+        stand_in_app_controller = make_stand_in_app_controller_with_real_methods(
+            ["find_agent_sessions_whose_conversations_contain", "find_saved_agent_sessions_whose_conversations_contain",
+             "ask_the_core_which_conversations_contain"], saved_windows=make_saved_windows())
+        answers = []
+        with run_main_thread_calls_at_once():
+            # The Saved sessions window's search: every saved session goes to the core with the text.
+            make_actions_finish_with(stand_in_app_controller, ActionResult(True, details={"conversation_ids": ["c"]}))
+            stand_in_app_controller.find_saved_agent_sessions_whose_conversations_contain("notes", True, answers.append)
+            saved_sessions = [saved_session for saved_window in make_saved_windows() for saved_session in saved_window["saved_sessions"]]
+            self.assertEqual([saved_session["conversation_id"] for saved_session in saved_sessions], ["a", "b", "c"])
+            self.assertEqual(stand_in_app_controller.submit_action.call_args.args[0], ActionRequest(
+                "find_saved_agent_sessions_whose_conversations_contain", None,
+                {"text": "notes", "is_case_sensitive": True, "saved_sessions": saved_sessions}))
+            # A list's search.
+            make_actions_finish_with(stand_in_app_controller, ActionResult(True, details={"session_ids": ["s1"]}))
+            stand_in_app_controller.find_agent_sessions_whose_conversations_contain("notes", False, answers.append)
+            self.assertEqual(stand_in_app_controller.submit_action.call_args.args[0], ActionRequest(
+                "find_agent_sessions_whose_conversations_contain", None, {"text": "notes", "is_case_sensitive": False}))
+            # A core that failed, or stopped before it answered: None, and the rows keep their name matches.
+            make_actions_finish_with(stand_in_app_controller, ActionResult(False, "the core couldn't read them"))
+            stand_in_app_controller.find_saved_agent_sessions_whose_conversations_contain("notes", False, answers.append)
+            stopped_future = concurrent.futures.Future()
+            stopped_future.set_exception(RuntimeError("the core stopped"))
+            stand_in_app_controller.submit_action.return_value = stopped_future
+            stand_in_app_controller.find_agent_sessions_whose_conversations_contain("notes", False, answers.append)
+        self.assertEqual(answers, [["c"], ["s1"], None, None])
+
+    def test_the_saved_sessions_windows_search_counts_case_as_the_lists_searches_do(self):
+        list_panel_controller = unittest.mock.Mock()
+        stand_in_app_controller = make_stand_in_app_controller_with_real_methods(
+            ["apply_list_settings", "search_is_case_sensitive_chosen"], settings=DEFAULT_SETTINGS,
+            **{"list_all_list_panel_controllers.return_value": [list_panel_controller]})
+        stand_in_app_controller.search_is_case_sensitive_chosen(False)  # as it is: nothing to save
+        stand_in_app_controller.settings_changed.assert_not_called()
+        stand_in_app_controller.search_is_case_sensitive_chosen(True)  # the "aA" checkbox of any search box
+        settings_with_the_choice = dict(DEFAULT_SETTINGS, search_is_case_sensitive=True)
+        stand_in_app_controller.settings_changed.assert_called_once_with(settings_with_the_choice)
+        stand_in_app_controller.apply_list_settings(settings_with_the_choice)  # which every settings change ends in
+        list_panel_controller.show_search_is_case_sensitive.assert_called_once_with(True)
+        stand_in_app_controller.saved_sessions_window_controller.show_search_is_case_sensitive.assert_called_once_with(True)
 
     def test_a_save_keeps_what_the_core_found_and_names_what_it_couldnt(self):
         with tempfile.TemporaryDirectory() as folder:

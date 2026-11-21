@@ -130,6 +130,19 @@ class AgentToolAdapter:
         """
         return None
 
+    def find_conversation_file_by_id(self, conversation_id, claude_config_folders, claude_config_folder=None, codex_home_folder=None):
+        """Returns the path of the file that holds the conversation with this ID, which no process
+        may be in any more (a saved session's), or None when the tool keeps none or it is gone.
+        It looks through folders, so the core calls it in a worker thread.
+
+        Args:
+            conversation_id: The conversation's ID, as find_conversation_id gave it.
+            claude_config_folders: Folders that may hold Claude Code transcripts.
+            claude_config_folder: The Claude Code config folder the session ran with, or None for the default.
+            codex_home_folder: The CODEX_HOME a Codex session ran with, or None when not known.
+        """
+        return None
+
     async def find_whether_no_message_was_sent_in_its_conversation(self, agent_process_id):
         """Returns True when the tool's own files show that the agent process has had no message
         in the conversation it is in (it has none yet, or one with no message), which makes its

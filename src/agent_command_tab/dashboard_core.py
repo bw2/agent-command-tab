@@ -108,9 +108,11 @@ CONVERSATION_FILE_RECHECK_SECONDS = 60  # a conversation file found: looked up a
 CONVERSATION_FILE_READING_NAMES = ("context_tokens", "context_window_tokens", "open_tool_call", "conversation_shows_a_turn_under_way",
                                    "last_message_at")
 # Actions that only read what the core already knows: they don't ask for a fresh gather of the
-# terminals, which every other action does (perform_action). The list's search asks at each
-# change of the text searched for, and changes nothing that a gather would show.
-ACTIONS_THAT_CHANGE_NOTHING = frozenset({"find_agent_sessions_whose_conversations_contain"})
+# terminals, which every other action does (perform_action). The list's search and the Saved
+# sessions window's ask at each change of the text searched for, and change nothing that a gather
+# would show.
+ACTIONS_THAT_CHANGE_NOTHING = frozenset({"find_agent_sessions_whose_conversations_contain",
+                                         "find_saved_agent_sessions_whose_conversations_contain"})
 # How long iTerm2 must have said working before Claude Code's own "idle" counts over it without a
 # turn end from the hooks: at a turn's start Claude Code's own report may lag iTerm2's for a moment
 # (DashboardCore.claude_code_reports_the_turn_over).
@@ -570,6 +572,11 @@ class DashboardCore:
         # how many times any of it changed (note_that_conversation_search_texts_changed).
         self.conversation_search_texts_by_session_id = {}
         self.conversation_search_text_revision = 0
+        # The conversation text of the saved sessions that the Saved sessions window's search looks
+        # through, by conversation ID, kept from one search to the next
+        # (handle_find_saved_agent_sessions_whose_conversations_contain); one search at a time reads their files.
+        self.saved_conversation_search_texts_by_conversation_id = {}
+        self.saved_conversation_search_lock = asyncio.Lock()
         self.peek_lock = asyncio.Lock()  # a quick release must not undo a peek that hasn't happened yet
         self.what_was_in_front_before_peek_by_terminal_name = None  # each terminal's remember_what_is_in_front
         self.action_registry = ActionRegistry()
@@ -646,6 +653,8 @@ class DashboardCore:
         register("save_agent_sessions", self.handle_save_agent_sessions)
         register("restore_saved_agent_sessions", self.handle_restore_saved_agent_sessions)
         register("find_agent_sessions_whose_conversations_contain", self.handle_find_agent_sessions_whose_conversations_contain)
+        register("find_saved_agent_sessions_whose_conversations_contain",
+                 self.handle_find_saved_agent_sessions_whose_conversations_contain)
 
     async def perform_action(self, action_request):
         """Runs an action request, then asks for a fresh gather and snapshot, unless it is one of
@@ -672,6 +681,61 @@ class DashboardCore:
             find_session_ids_whose_conversations_contain, list(self.conversation_search_texts_by_session_id.items()),
             str(arguments.get("text") or ""), bool(arguments.get("is_case_sensitive")))
         return ActionResult(True, details={"session_ids": session_ids})
+
+    async def handle_find_saved_agent_sessions_whose_conversations_contain(self, action_request):
+        """Returns, in its details {"conversation_ids": [...]}, those of arguments {"saved_sessions":
+        [...]} (saved_agent_sessions_store's saved sessions) whose conversation holds arguments
+        {"text"} (as one phrase), ignoring case unless arguments {"is_case_sensitive"}: the Saved
+        sessions window's search, which looks through the same text as the list's
+        (conversation_search_texts). Each conversation's file is found by its ID and read whole
+        the first time, then only the lines added since: its text is kept for the next search
+        while the conversation is among saved_sessions (read_search_texts_of_saved_conversations).
+        A saved session whose file isn't found (it was deleted) never matches."""
+        arguments = action_request.arguments or {}
+        async with self.saved_conversation_search_lock:
+            self.saved_conversation_search_texts_by_conversation_id = await asyncio.to_thread(
+                self.read_search_texts_of_saved_conversations, arguments.get("saved_sessions") or [],
+                self.saved_conversation_search_texts_by_conversation_id)
+            conversation_ids = await asyncio.to_thread(
+                find_session_ids_whose_conversations_contain, list(self.saved_conversation_search_texts_by_conversation_id.items()),
+                str(arguments.get("text") or ""), bool(arguments.get("is_case_sensitive")))
+        return ActionResult(True, details={"conversation_ids": conversation_ids})
+
+    def read_search_texts_of_saved_conversations(self, saved_sessions, conversation_search_texts_read_before):
+        """Returns {conversation ID: its ConversationSearchText} for those of the saved sessions
+        whose conversation file is found: the text read before with the lines added since, or the
+        whole text of one not read before, whose file its agent tool's adapter finds by the ID
+        (find_conversation_file_by_id). A conversation whose file can't be read any more is left
+        out, and so looked for again the next time, as is one of an agent tool without an adapter.
+        It looks through folders and reads files, so it runs in a worker thread.
+
+        Args:
+            saved_sessions: saved_agent_sessions_store's saved sessions.
+            conversation_search_texts_read_before: What this returned the last time.
+        """
+        claude_config_folders = list_claude_config_folder_paths()
+        conversation_search_texts = {}
+        for saved_session in saved_sessions:
+            conversation_id = saved_session["conversation_id"]
+            adapter = self.find_adapter_of_agent_tool(saved_session["agent_tool_name"])
+            if adapter is None:
+                continue
+            conversation_search_text = conversation_search_texts_read_before.get(conversation_id)
+            if conversation_search_text is None:
+                conversation_file = adapter.find_conversation_file_by_id(
+                    conversation_id, claude_config_folders, saved_session["claude_config_folder"], saved_session["codex_home_folder"])
+                if conversation_file is None:
+                    continue
+                conversation_search_text = build_empty_conversation_search_text(conversation_file)
+            new_search_texts = read_new_search_texts(conversation_search_text.path, conversation_search_text.read_up_to_byte,
+                                                     adapter.extract_search_texts_from_conversation_record)
+            if new_search_texts is None:
+                continue
+            texts, read_up_to_byte, started_over = new_search_texts
+            conversation_search_texts[conversation_id] = add_texts_to_conversation_search_text(
+                build_empty_conversation_search_text(conversation_search_text.path) if started_over else conversation_search_text,
+                texts, read_up_to_byte)
+        return conversation_search_texts
 
     async def bring_forward_the_terminal_tab_running_the_client(self, action_result):
         """After a terminal that shows its windows through clients (tmux) brought a tab to the

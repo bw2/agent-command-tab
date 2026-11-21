@@ -164,6 +164,11 @@ class CodexAdapter(AgentToolAdapter):
         conversation_files = await asyncio.to_thread(self.find_conversation_files, agent_process_id)
         return conversation_files[0] if conversation_files else None
 
+    def find_conversation_file_by_id(self, conversation_id, claude_config_folders, claude_config_folder=None, codex_home_folder=None):
+        """Returns the conversation's file in the sessions folder of the CODEX_HOME the session ran
+        with, or of the app's own (find_codex_home_folder) when that isn't known."""
+        return find_codex_conversation_file_by_id(os.path.join(codex_home_folder or find_codex_home_folder(), "sessions"), conversation_id)
+
     def find_conversation_files(self, agent_process_id):
         """Returns the files that may be the Codex process's conversation, matched by its folder and
         start time in the sessions folder of its Codex home folder (find_codex_home_folder_of_process),
