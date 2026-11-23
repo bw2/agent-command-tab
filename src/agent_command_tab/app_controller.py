@@ -632,6 +632,9 @@ class AppController(NSObject):
 
     def popoverDidShow_(self, notification):
         self.place_the_settings_and_saved_sessions_windows_above_the_lists(dropdown_is_open=True)  # an open settings window stays above it
+        # The rows have the keyboard in the open dropdown, for Return and the arrow keys, whatever
+        # AppKit chose as it opened (MenuBarStatusItemController.show_popover gave it to them already).
+        self.dropdown_panel_controller.give_the_rows_the_keyboard()
 
     def popoverWillClose_(self, notification):
         self.status_item_controller.note_dropdown_closing()  # so a click on the icon that closed it doesn't open it again

@@ -165,6 +165,9 @@ class MenuBarStatusItemController(NSObject):
 
     @objc.python_method
     def show_popover(self):
+        """Opens the dropdown under the icon, sized for its rows, with the keyboard on the rows: not in
+        the search box or on another control, whichever AppKit would choose or had it last. The
+        owner gives the rows the keyboard once more when the dropdown has opened (popoverDidShow_)."""
         self.owner.note_application_in_front_before_dropdown(NSWorkspace.sharedWorkspace().frontmostApplication())
         NSApp.activateIgnoringOtherApps_(True)  # so the list can take typing (rename)
         list_panel_controller = self.popover.contentViewController()
@@ -173,6 +176,7 @@ class MenuBarStatusItemController(NSObject):
         # Sized for the screen the icon is on, where the dropdown opens: not always the first screen.
         list_panel_controller.fit_size_to_rows(button.window().screen())
         self.popover.showRelativeToRect_ofView_preferredEdge_(button.bounds(), button, NSMinYEdge)
+        list_panel_controller.give_the_rows_the_keyboard()
 
     @objc.python_method
     def build_right_click_menu(self):

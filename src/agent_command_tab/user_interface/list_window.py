@@ -56,7 +56,8 @@ class ListWindowController(WindowFrameSavingController):
     @objc.python_method
     def show(self, saved_frame, takes_keyboard_focus=True, stays_behind_other_windows=False):
         """Shows the window at its saved frame (x, y, width, height) when that is still on a
-        connected screen, else in the middle of the main screen: in front with the keyboard, in
+        connected screen, else in the middle of the main screen: in front with the keyboard, which
+        its rows get (not its search box or another control, whatever had it last), in
         front without it (the app you are typing in keeps it), or, with
         stays_behind_other_windows (at the app's start, also after each automatic restart while
         iTerm2 can't be reached), behind the other windows. "Always on top" counts over that:
@@ -70,6 +71,7 @@ class ListWindowController(WindowFrameSavingController):
         elif takes_keyboard_focus:
             NSApp.activateIgnoringOtherApps_(True)
             self.window.makeKeyAndOrderFront_(None)
+            self.window.makeFirstResponder_(self.list_controller.outline_view)
         else:
             self.window.orderFrontRegardless()
 

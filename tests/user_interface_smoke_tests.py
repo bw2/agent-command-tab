@@ -45,11 +45,12 @@ from agent_command_tab.settings_store import DEFAULT_SETTINGS, LIST_COLUMNS, SMA
 from agent_command_tab.snapshot_data_classes import (ChildProcessEntry, ComputerSnapshot, MonitorEntry, WindowEntry,
                                                      build_window_title_shown_in_the_list)
 from agent_command_tab.user_interface.popover_container import (BOTTOM_BAR_HEIGHT, CASE_SENSITIVE_CHECKBOX_TOOL_TIP,
+                                                                CURRENT_TAB_LEGEND_BAR_HEIGHT,
                                                                 GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON,
                                                                 GAP_BEFORE_THE_HOOKS_NOTE, GAP_BETWEEN_TOP_BAR_BUTTONS,
                                                                 HOOKS_SEND_NO_EVENTS_TOOL_TIP, LARGEST_SEARCH_FIELD_WIDTH,
                                                                 LIST_SORT_ORDER_TITLES,
-                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH, ROW_OUTLINES_LEGEND_SQUARE_SIZE,
+                                                                PANEL_SIDE_MARGIN, POPOVER_WIDTH, SELECTION_OUTLINE_LEGEND_SQUARE_SIZE,
                                                                 SMALLEST_MESSAGE_WIDTH_BESIDE_THE_CONTROLS,
                                                                 SMALLEST_POPOVER_WIDTH, SMALLEST_SEARCH_FIELD_WIDTH,
                                                                 SMALLEST_SORT_POPUP_WIDTH,
@@ -58,15 +59,15 @@ from agent_command_tab.messages_between_agent_sessions import DEFAULT_NOTE_ASKIN
 from agent_command_tab.saved_agent_sessions_store import rename_saved_session
 from agent_command_tab.user_interface.agent_session_outline_view import (COLUMN_TITLE_LINE_HEIGHT, COLUMN_TITLES,
                                                                          COLUMN_TITLES_ROW_PADDING,
-                                                                         CONVERSATION_ONLY_MATCH_ROW_ALPHA, DIM_DOT_ALPHA,
-                                                                         FRONT_TAB_OUTLINE_COLOR_MAKER,
+                                                                         CONVERSATION_ONLY_MATCH_ROW_ALPHA,
+                                                                         CURRENT_TAB_BAR_WIDTH, CURRENT_TAB_BAR_X, DIM_DOT_ALPHA,
                                                                          GAP_BEFORE_DETAILS, ROW_HEIGHT, ROW_RIGHT_MARGIN,
                                                                          SECONDS_A_LIST_MAY_SELECT_A_NEW_WINDOW,
                                                                          SECONDS_TO_WAIT_FOR_A_NEW_WINDOW_TO_SHOW,
-                                                                         SELECTION_OUTLINE_COLOR_MAKER, SMALLEST_TAB_NAME_WIDTH,
+                                                                         SMALLEST_TAB_NAME_WIDTH,
                                                                          TEXT_FIELD_INSETS,
                                                                          AgentSessionListController, RowButton,
-                                                                         RowViewWithSelectionAndFrontTabOutlines,
+                                                                         RowViewWithSelectionOutline,
                                                                          build_column_title_tool_tip, build_index_set,
                                                                          choose_room_for_a_columns_texts,
                                                                          compute_selection_outline_rect, list_moves_that_reorder)
@@ -2004,7 +2005,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual([outline_view.itemAtRow_(row).kind for row in allowed_rows],
                          ["window", "tab", "tab", "tab", "window", "tab", "tab"])  # no monitor rows, no "+" row
         row_view = self.list_controller.outlineView_rowViewForItem_(outline_view, outline_view.itemAtRow_(1))
-        self.assertIsInstance(row_view, RowViewWithSelectionAndFrontTabOutlines)
+        self.assertIsInstance(row_view, RowViewWithSelectionOutline)
         self.assertEqual(row_view.interiorBackgroundStyle(), NSBackgroundStyleNormal)  # the text keeps its colors
 
     def test_reading_a_selection_looks_only_at_its_own_rows(self):
@@ -2020,53 +2021,70 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertFalse(number_of_rows.called)  # no pass over every row
         self.assertEqual([call.args for call in item_at_row.call_args_list], [(2,), (5,), (6,), (7,)])  # each item read once
 
-    def test_the_tab_in_front_has_an_outline_of_its_own_unless_it_is_inside_the_selection_outline(self):
-        self.list_controller.apply_snapshot(make_sample_snapshot())  # planning (row 1) is in front
+    def test_the_current_tab_has_a_bar_at_its_rows_left_edge_and_only_selected_rows_have_an_outline(self):
+        self.list_controller.apply_snapshot(make_sample_snapshot())  # planning (row 1) is the current tab
         outline_view = self.list_controller.outline_view
-        self.assertEqual([row for row in range(outline_view.numberOfRows()) if self.list_controller.row_is_the_tab_in_front(row)], [1])
         content_view = self.window.contentView()
+        content_view.layoutSubtreeIfNeeded()
 
-        def read_the_middle_of_the_left_edge_of_each_row(rows):
-            """Returns the color (0 to 255) drawn on each row's left outline edge, halfway down."""
+        def list_rows_that_show_the_bar():
+            return [row for row in range(outline_view.numberOfRows()) if not self.lay_out_row_view(row).current_tab_bar_view.isHidden()]
+        self.assertEqual(list_rows_that_show_the_bar(), [1])
+        row_view = self.lay_out_row_view(1)
+        bar_view = row_view.current_tab_bar_view
+        self.assertEqual(bar_view.toolTip(), "Current tab")
+        # It has the row's left margin to itself, before the tree's lines, and stops 4 points from the row's top and bottom.
+        self.assertEqual(tuple(bar_view.frame().origin) + tuple(bar_view.frame().size), (0, 4, 8, ROW_HEIGHT - 8))
+        self.assertLessEqual(bar_view.frame().size.width, row_view.prefix_text_field.frame().origin.x)
+        self.assertIsNone(bar_view.hitTest_(NSMakePoint(5, 10)))  # a click goes through it to the row
+        outer_row_view = outline_view.rowViewAtRow_makeIfNecessary_(1, True)
+        # Read halfway down a row: on the left side of a selection outline, and in the middle of the bar.
+        outline_x = 1
+        bar_x = outer_row_view.convertRect_fromView_(bar_view.bounds(), bar_view).origin.x + CURRENT_TAB_BAR_X + CURRENT_TAB_BAR_WIDTH / 2
+        self.assertGreater(bar_x - CURRENT_TAB_BAR_WIDTH / 2, outline_x + 1.5)  # the bar is clear of an outline around its row
+
+        def read_the_outline_side_and_the_bars_place_of_each_row(rows):
+            """Returns, for each row, the colors (0 to 255) drawn at outline_x and at bar_x, halfway down the row."""
             content_view.layoutSubtreeIfNeeded()
             bitmap = render_view_into_bitmap(content_view)
             scale = bitmap.pixelsWide() / content_view.bounds().size.width
             colors = []
             for row in rows:
-                outer_row_view = outline_view.rowViewAtRow_makeIfNecessary_(row, True)
-                row_rect = content_view.convertRect_fromView_(outer_row_view.bounds(), outer_row_view)
+                row_view_of_this_row = outline_view.rowViewAtRow_makeIfNecessary_(row, True)
+                row_rect = content_view.convertRect_fromView_(row_view_of_this_row.bounds(), row_view_of_this_row)
                 y_from_the_top = content_view.bounds().size.height - row_rect.origin.y - row_rect.size.height / 2
-                colors.append(convert_color_components_to_0_to_255(
-                    read_drawn_color_components(bitmap, scale, row_rect.origin.x + 1, y_from_the_top)))
+                colors.append(tuple(convert_color_components_to_0_to_255(
+                    read_drawn_color_components(bitmap, scale, row_rect.origin.x + x, y_from_the_top)) for x in (outline_x, bar_x)))
             return colors
 
-        def is_in_the_accent_color(edge, row_without_an_outline, appearance_name):
-            """Whether a row's drawn edge is nearer the accent color than the row's own color is: the
-            outline may blend with the row where it covers only part of a pixel."""
+        def is_in_the_accent_color(color, color_of_a_row_without_the_mark, appearance_name):
+            """Whether a drawn color is nearer the accent color than the row's own color is: a mark
+            may blend with the row where it covers only part of a pixel."""
             accent_color = resolve_color(NSColor.controlAccentColor(), appearance_name)
-            return math.dist(edge[:3], accent_color[:3]) < math.dist(edge[:3], row_without_an_outline[:3]) / 2
+            return math.dist(color[:3], accent_color[:3]) < math.dist(color[:3], color_of_a_row_without_the_mark[:3]) / 2
 
-        for appearance_name, outline_is_darker_than_the_rows in ((NSAppearanceNameAqua, True), (NSAppearanceNameDarkAqua, False)):
+        def find_which_marks_show(rows, appearance_name):
+            """Returns, for each row, (whether its outline side, whether its bar's place) is in the
+            accent color, against "phase0-tests" (row 2), which is neither the current tab nor selected."""
+            plain_outline_side, plain_bars_place = read_the_outline_side_and_the_bars_place_of_each_row([2])[0]
+            return [(is_in_the_accent_color(outline_side, plain_outline_side, appearance_name),
+                     is_in_the_accent_color(bars_place, plain_bars_place, appearance_name))
+                    for outline_side, bars_place in read_the_outline_side_and_the_bars_place_of_each_row(rows)]
+
+        for appearance_name in (NSAppearanceNameAqua, NSAppearanceNameDarkAqua):
             self.window.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
             outline_view.deselectAll_(None)
-            front_tab_edge, other_tab_edge = read_the_middle_of_the_left_edge_of_each_row([1, 2])
-            self.assertTrue(is_in_the_accent_color(front_tab_edge, other_tab_edge, appearance_name),
-                            (appearance_name, front_tab_edge, other_tab_edge))
-            # Selected, it has the selection outline instead, like another selected tab row: dark gray on
-            # the light rows, white on the dark ones.
+            # The current tab's row has the bar and no rectangle around it.
+            self.assertEqual(find_which_marks_show([1, 3], appearance_name), [(False, True), (False, False)], appearance_name)
+            # Selected, it has the outline too, as another selected tab row has, which has no bar.
             outline_view.selectRowIndexes_byExtendingSelection_(build_index_set([1, 3]), False)
-            front_tab_edge, other_tab_edge, other_selected_tab_edge = read_the_middle_of_the_left_edge_of_each_row([1, 2, 3])
-            self.assertEqual(front_tab_edge, other_selected_tab_edge, appearance_name)
-            brightness_difference = sum(other_selected_tab_edge[:3]) / 3 - sum(other_tab_edge[:3]) / 3
-            self.assertGreater(-brightness_difference if outline_is_darker_than_the_rows else brightness_difference, 60,
-                               (appearance_name, other_selected_tab_edge, other_tab_edge))
-        # Once another tab is in front, the outline moves to that tab's row.
+            self.assertEqual(find_which_marks_show([1, 3], appearance_name), [(True, True), (True, False)], appearance_name)
+        # Once another tab is the current one, the bar moves to that tab's row.
         outline_view.deselectAll_(None)
         self.list_controller.apply_snapshot(make_sample_snapshot_with_changes_by_tab_id(
             {"1": dict(is_in_front=False), "3": dict(is_in_front=True)}))
-        self.assertEqual([row for row in range(outline_view.numberOfRows()) if self.list_controller.row_is_the_tab_in_front(row)], [3])
-        planning_edge, codex_review_edge = read_the_middle_of_the_left_edge_of_each_row([1, 3])
-        self.assertTrue(is_in_the_accent_color(codex_review_edge, planning_edge, NSAppearanceNameDarkAqua))  # as the loop left it
+        self.assertEqual(list_rows_that_show_the_bar(), [3])
+        self.assertEqual(find_which_marks_show([1, 3], NSAppearanceNameDarkAqua), [(False, False), (False, True)])  # as the loop left it
 
     def test_adjacent_selected_rows_draw_one_outline_around_them_all(self):
         bounds = NSMakeRect(0, 0, 300, 22)
@@ -2745,6 +2763,38 @@ class UserInterfaceSmokeTests(unittest.TestCase):
         self.assertEqual(width, 360)  # the long name cut short at 90% of the icon's screen
         self.assertLess(height, 300)
         status_item_controller.popover.showRelativeToRect_ofView_preferredEdge_.assert_called_once()
+
+    def test_the_dropdown_opens_with_the_keyboard_on_its_rows_whatever_had_it_last(self):
+        # The search box kept the keyboard it had when the dropdown closed, so the next time the shortcut opened the
+        # dropdown, Return and the arrow keys went to the box rather than to the selected row.
+        self.list_controller.apply_snapshot(make_sample_snapshot())
+        panel = self.dropdown_panel_controller
+        outline_view = self.list_controller.outline_view
+        status_item_controller = MenuBarStatusItemController.alloc().init()  # no status item of its own
+        status_item_controller.owner = unittest.mock.Mock()
+        status_item_controller.popover = unittest.mock.Mock(contentViewController=lambda: panel)
+        status_item_controller.status_item = unittest.mock.Mock()
+        screen = unittest.mock.Mock(visibleFrame=lambda: NSMakeRect(0, 0, 1500, 1000))
+        status_item_controller.status_item.button().window().screen.return_value = screen
+        self.assertTrue(panel.put_the_keyboard_in_the_search_box())  # as Command-F or "/" does
+        self.assertIsNotNone(panel.search_field.currentEditor())
+        with unittest.mock.patch("agent_command_tab.user_interface.menu_bar_status_item.NSApp"), \
+                unittest.mock.patch("agent_command_tab.user_interface.popover_container.NSScreen",
+                                    unittest.mock.Mock(screens=lambda: [screen])):
+            status_item_controller.show_popover()
+        self.assertIs(self.window.firstResponder(), outline_view)
+        # Once more when the dropdown has opened, whatever AppKit chose while it opened.
+        app_controller = AppController.alloc().init()
+        app_controller.dropdown_panel_controller = panel
+        app_controller.place_the_settings_and_saved_sessions_windows_above_the_lists = lambda dropdown_is_open: None
+        self.assertTrue(panel.put_the_keyboard_in_the_search_box())
+        app_controller.popoverDidShow_(None)
+        self.assertIs(self.window.firstResponder(), outline_view)
+        # A name being renamed keeps the keyboard.
+        self.begin_rename_of_the_first_sample_tab()
+        app_controller.popoverDidShow_(None)
+        self.assertTrue(self.list_controller.rename_in_progress)
+        self.assertIsNot(self.window.firstResponder(), outline_view)
 
     def apply_snapshot_with_processes_on_three_tabs(self):
         """Applies the sample snapshot with a process on both tabs of the second window and on the first tab of the first."""
@@ -3555,7 +3605,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_the_legend_starts_as_far_after_the_settings_button_as_the_search_box_after_the_sort_popup(self):
         panel = self.dropdown_panel_controller
-        legend_view = panel.row_outlines_legend_view
+        legend_view = panel.row_marks_legend_view
         self.list_controller.apply_snapshot(make_sample_snapshot())
         self.window.contentView().layoutSubtreeIfNeeded()
         for view in (panel.list_sort_order_popup, panel.search_field, panel.settings_button, legend_view):
@@ -3574,7 +3624,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_the_legend_shows_whole_or_not_at_all_and_never_under_the_buttons_at_the_right(self):
         panel = self.dropdown_panel_controller
-        legend_view, pause_or_resume_button = panel.row_outlines_legend_view, panel.pause_or_resume_selected_rows_button
+        legend_view, pause_or_resume_button = panel.row_marks_legend_view, panel.pause_or_resume_selected_rows_button
         self.list_controller.apply_snapshot(make_sample_snapshot())  # its hooks are installed: no note
         legend_frame = legend_view.frame()
         # The narrowest panel whose bottom bar has room for all of the legend before the three buttons at the right
@@ -3598,7 +3648,7 @@ class UserInterfaceSmokeTests(unittest.TestCase):
 
     def test_a_hooks_note_follows_the_legend_where_both_fit_whole_and_takes_its_place_where_they_dont(self):
         panel = self.dropdown_panel_controller
-        legend_view, note_field = panel.row_outlines_legend_view, panel.hooks_note_text_field
+        legend_view, note_field = panel.row_marks_legend_view, panel.hooks_note_text_field
         install_hooks_button, pause_or_resume_button = panel.install_hooks_button, panel.pause_or_resume_selected_rows_button
         legend_frame, settings_button_frame = legend_view.frame(), panel.settings_button.frame()
         legend_right_end_x = legend_frame.origin.x + legend_frame.size.width
@@ -3631,51 +3681,49 @@ class UserInterfaceSmokeTests(unittest.TestCase):
             self.assertEqual((note_frame.origin.x, note_frame.size.width),
                              (settings_button_frame.origin.x + settings_button_frame.size.width + GAP_BEFORE_THE_HOOKS_NOTE, note_width))
 
-    def test_the_legend_pairs_the_colors_of_the_rows_two_outlines_with_current_tab_and_selected(self):
+    def test_the_legend_shows_the_current_tabs_bar_and_the_selection_outline_as_the_rows_draw_them(self):
         panel = self.dropdown_panel_controller
-        legend_view = panel.row_outlines_legend_view
+        legend_view = panel.row_marks_legend_view
         self.list_controller.apply_snapshot(make_sample_snapshot())  # planning (row 1) is the current tab
         outline_view = self.list_controller.outline_view
-        self.select_rows(3)  # codex-review: row 1 has the current tab's outline, row 3 the selection's, row 2 none
-        # The squares take their colors from the makers the rows stroke their outlines with,
-        (current_tab_color_maker, current_tab_square_x), (selected_color_maker, selected_square_x) = (
-            legend_view.square_color_makers_and_their_x)
-        self.assertIs(current_tab_color_maker, FRONT_TAB_OUTLINE_COLOR_MAKER)
-        self.assertIs(selected_color_maker, SELECTION_OUTLINE_COLOR_MAKER)
-        # each right before the text of what it marks,
+        self.select_rows(3)  # codex-review: row 1 has the current tab's bar, row 3 the selection outline, row 2 neither
+        # The bar and the square come each right before the text of what it marks,
         (title, title_x), (current_tab_text, current_tab_text_x), (selected_text, selected_text_x) = legend_view.texts_and_their_x
         self.assertEqual([text.string() for text in (title, current_tab_text, selected_text)], ["Legend:", "= current tab", "= selected"])
-        self.assertTrue(title_x < current_tab_square_x < current_tab_text_x < selected_square_x < selected_text_x)
+        self.assertTrue(title_x < legend_view.current_tab_bar_x < current_tab_text_x < legend_view.selection_square_x < selected_text_x)
         content_view = self.window.contentView()
         content_view.layoutSubtreeIfNeeded()
         self.assertFalse(legend_view.isHidden())
-        # and are drawn in the colors the rows' outlines are drawn in, in light and in dark mode: read halfway down the
-        # left edge of each square and of each row (given from the panel's bottom left).
+        # and are drawn in the colors the rows draw theirs in, in light and in dark mode. Read (from the panel's bottom
+        # left): the middle of the legend's bar and halfway down the left side of its square, then the same two places
+        # of a row for the current tab's row, the selected row and the row between them, which has neither mark.
         legend_frame = legend_view.frame()
-        points_on_the_left_edges = [(legend_frame.origin.x + square_x + 0.5,
-                                     legend_frame.origin.y + legend_view.square_y + ROW_OUTLINES_LEGEND_SQUARE_SIZE / 2)
-                                    for square_x in (current_tab_square_x, selected_square_x)]
-        for row in (1, 2, 3):
+        points = [(legend_frame.origin.x + legend_view.current_tab_bar_x + CURRENT_TAB_BAR_WIDTH / 2,
+                   legend_frame.origin.y + legend_view.current_tab_bar_y + CURRENT_TAB_LEGEND_BAR_HEIGHT / 2),
+                  (legend_frame.origin.x + legend_view.selection_square_x + 0.5,
+                   legend_frame.origin.y + legend_view.selection_square_y + SELECTION_OUTLINE_LEGEND_SQUARE_SIZE / 2)]
+        for row in (1, 3, 2):
             row_view = outline_view.rowViewAtRow_makeIfNecessary_(row, True)
             row_rect = content_view.convertRect_fromView_(row_view.bounds(), row_view)
-            points_on_the_left_edges.append((row_rect.origin.x + 1, row_rect.origin.y + row_rect.size.height / 2))
+            middle_y = row_rect.origin.y + row_rect.size.height / 2
+            points += [(row_rect.origin.x + CURRENT_TAB_BAR_X + CURRENT_TAB_BAR_WIDTH / 2, middle_y), (row_rect.origin.x + 1, middle_y)]
         for appearance_name in (NSAppearanceNameAqua, NSAppearanceNameDarkAqua):
             self.window.setAppearance_(NSAppearance.appearanceNamed_(appearance_name))
             content_view.layoutSubtreeIfNeeded()
             bitmap = render_view_into_bitmap(content_view)
             scale = bitmap.pixelsWide() / content_view.bounds().size.width
-            current_tab_square_edge, selected_square_edge, current_tab_row_edge, row_without_an_outline, selected_row_edge = (
+            (legend_bar, legend_square_side, current_tab_rows_bar, _, _, selected_rows_outline_side,
+             plain_rows_bar_place, plain_rows_outline_side) = (
                 convert_color_components_to_0_to_255(
                     read_drawn_color_components(bitmap, scale, x, content_view.bounds().size.height - y))[:3]
-                for x, y in points_on_the_left_edges)
-            # Each square is far nearer its own outline, as a row draws it, than the other outline or a row without
-            # one (a row's outline may blend with the row where it covers only part of a pixel).
-            for square_edge, its_outline_on_a_row, other_edges in (
-                    (current_tab_square_edge, current_tab_row_edge, (selected_row_edge, row_without_an_outline)),
-                    (selected_square_edge, selected_row_edge, (current_tab_row_edge, row_without_an_outline))):
-                for other_edge in other_edges:
-                    self.assertLess(math.dist(square_edge, its_outline_on_a_row), math.dist(square_edge, other_edge) / 2,
-                                    (appearance_name, square_edge, its_outline_on_a_row, other_edge))
+                for x, y in points)
+            # Each of the legend's marks is far nearer the same mark on a row than that place on a row without it (a
+            # row's outline may blend with the row where it covers only part of a pixel).
+            for legend_mark, mark_on_a_row, place_without_the_mark in (
+                    (legend_bar, current_tab_rows_bar, plain_rows_bar_place),
+                    (legend_square_side, selected_rows_outline_side, plain_rows_outline_side)):
+                self.assertLess(math.dist(legend_mark, mark_on_a_row), math.dist(legend_mark, place_without_the_mark) / 2,
+                                (appearance_name, legend_mark, mark_on_a_row, place_without_the_mark))
 
 
 class RememberMyChoiceTests(unittest.TestCase):
@@ -4520,6 +4568,24 @@ class ListWindowSmokeTests(unittest.TestCase):
         self.assertIsNotNone(controller.list_panel_controller.search_field.currentEditor())
         controller.windowDidResignKey_(None)  # as AppKit tells it when another window, or another app, takes the keyboard
         self.assertIs(controller.window.firstResponder(), controller.list_controller.outline_view)
+
+    def test_the_window_shown_with_the_keyboard_gives_it_to_its_rows(self):
+        # The shortcut and the menu bar icon show it with the keyboard on the selected row: not in the search box.
+        controller = ListWindowController.alloc().initWithOwner_(RecordingOwner())
+        controller.list_controller.refresh_timer.invalidate()
+        self.assertTrue(controller.list_panel_controller.put_the_keyboard_in_the_search_box())
+        # Shown transparent, since it shows on a real screen (macOS would pull a titled window there from anywhere
+        # else), and without making the app the active one; it is hidden again after the test.
+        controller.window.setAlphaValue_(0.0)
+        self.addCleanup(controller.window.orderOut_, None)
+        with unittest.mock.patch("agent_command_tab.user_interface.list_window.NSApp"), \
+                unittest.mock.patch("agent_command_tab.user_interface.list_window.place_window_at_saved_frame_or_center"):
+            controller.show(None)
+            self.assertIs(controller.window.firstResponder(), controller.list_controller.outline_view)
+            # Shown without the keyboard (the app you are typing in keeps it), the window leaves the keyboard where it is.
+            self.assertTrue(controller.list_panel_controller.put_the_keyboard_in_the_search_box())
+            controller.show(None, takes_keyboard_focus=False)
+            self.assertIsNotNone(controller.list_panel_controller.search_field.currentEditor())
 
     def test_the_window_is_in_front_for_the_shortcut_only_while_shown_with_the_keyboard_or_always_on_top(self):
         controller = ListWindowController.alloc().initWithOwner_(RecordingOwner())
@@ -5673,6 +5739,17 @@ class SavedSessionsWindowSmokeTests(unittest.TestCase):
                 unittest.mock.patch.object(self.controller.window, "makeKeyAndOrderFront_"):
             self.controller.show(make_saved_windows()[1:], None)
         self.assertEqual(self.list_names(), ["tmux: work", "notes"])
+
+    def test_the_window_opens_with_the_keyboard_on_its_rows_not_in_its_search_box(self):
+        # Opened transparent, since it shows on a real screen (macOS would pull a titled window there from anywhere
+        # else), and without making the app the active one; it is hidden again after the test.
+        controller = SavedSessionsWindowController.alloc().initWithOwner_(self.owner)
+        with unittest.mock.patch("agent_command_tab.user_interface.saved_sessions_window.NSApp"), \
+                unittest.mock.patch("agent_command_tab.user_interface.saved_sessions_window.place_window_at_saved_frame_or_center",
+                                    lambda window, frame: window.setAlphaValue_(0.0)):
+            controller.show(make_saved_windows(), None)
+        self.addCleanup(controller.window.orderOut_, None)
+        self.assertIs(controller.window.firstResponder(), controller.outline_view)  # the arrow keys move among the rows
 
     def test_rename_from_the_menu_renames_the_row_it_was_opened_on_though_the_rows_changed_since(self):
         # A session saved while the menu is open is listed above the row, which then has another number, and a new

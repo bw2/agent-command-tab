@@ -285,16 +285,20 @@ class SavedSessionsWindowController(WindowFrameSavingController):
     @objc.python_method
     def show(self, saved_windows, saved_frame):
         """Opens the window listing these saved windows, at its last frame while that is on a
-        connected screen, else in the middle of the main screen, with an empty search box;
-        brings an open one forward as it is. The owner has every change of the saved windows
-        listed in an open one (show_saved_windows), and listing them here again would end a
-        rename under way there without renaming."""
-        if not self.is_open():
+        connected screen, else in the middle of the main screen, with an empty search box and the
+        keyboard on its rows, so the arrow keys move among them; brings an open one forward as it
+        is. The owner has every change of the saved windows listed in an open one
+        (show_saved_windows), and listing them here again would end a rename under way there
+        without renaming."""
+        window_opens_now = not self.is_open()
+        if window_opens_now:
             self.window = self.build_window()
             place_window_at_saved_frame_or_center(self.window, saved_frame)
             self.show_saved_windows(saved_windows)
         NSApp.activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
+        if window_opens_now:
+            self.window.makeFirstResponder_(self.outline_view)  # not the search box, whatever AppKit would choose
 
     @objc.python_method
     def show_saved_windows(self, saved_windows):

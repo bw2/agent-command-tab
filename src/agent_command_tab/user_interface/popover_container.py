@@ -1,4 +1,4 @@
-"""The panel around the list: the sort order, the search box with its "aA" checkbox, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a legend of the rows' two outlines, then a note while the app's hooks are missing, and, at the bottom right, Restore sessions, Save sessions and pause or resume the selected rows.
+"""The panel around the list: the sort order, the search box with its "aA" checkbox, Hide Idle and expand or collapse all at the top, then the column titles; Settings at the bottom left, then a legend of the rows' two marks (the current tab's bar and the selection outline), then a note while the app's hooks are missing, and, at the bottom right, Restore sessions, Save sessions and pause or resume the selected rows.
 
 The same panel class is used in the dropdown (an NSPopover under the menu bar item), in the
 sidebar and in the list window, each with its own list controller.
@@ -18,7 +18,8 @@ from AppKit import (NSAlignAllEdgesNearest, NSAttributedString, NSBezelStyleRece
 
 from agent_command_tab.hooks_installer import HOOKS_ARE_MISSING, HOOKS_CANT_RUN, HOOKS_SEND_NO_EVENTS
 from agent_command_tab.session_status_computation import split_agent_sessions_into_pausable_and_resumable
-from agent_command_tab.user_interface.agent_session_outline_view import (FRONT_TAB_OUTLINE_COLOR_MAKER,
+from agent_command_tab.user_interface.agent_session_outline_view import (CURRENT_TAB_BAR_COLOR_MAKER,
+                                                                         CURRENT_TAB_BAR_CORNER_RADIUS, CURRENT_TAB_BAR_WIDTH,
                                                                          NO_SESSIONS_ARE_SAVED_TOOL_TIP,
                                                                          SELECTION_OUTLINE_COLOR_MAKER, SELECTION_OUTLINE_WIDTH,
                                                                          explain_which_agent_sessions_cant_be_saved,
@@ -116,16 +117,18 @@ HOOKS_SEND_NO_EVENTS_TOOL_TIP = ("Claude Code sessions started after the hooks w
                                  "AgentCommandTab any events, so background tasks and turn ends may show wrong. "
                                  "Check that hooks aren't turned off in Claude Code: type /hooks in a session.")
 GAP_BEFORE_THE_HOOKS_NOTE = 8  # after the legend, or after the Settings button where the legend doesn't show
-# The bottom bar's legend of the rows' two outlines, after the Settings button: its title, then, for
-# each outline, a small square stroked like it (the maker of its color) and what it marks. The
-# current tab is the one tab in front, whose row has the outline in the accent color (many tabs can
-# be on screen at once).
-ROW_OUTLINES_LEGEND_TITLE = "Legend:"
-ROW_OUTLINES_LEGEND_ENTRIES = ((FRONT_TAB_OUTLINE_COLOR_MAKER, "= current tab"), (SELECTION_OUTLINE_COLOR_MAKER, "= selected"))
-ROW_OUTLINES_LEGEND_SQUARE_SIZE = 9  # a little more than the height of the small text's capital letters
-ROW_OUTLINES_LEGEND_SQUARE_CORNER_RADIUS = 2
-GAP_BEFORE_A_LEGEND_SQUARE = 8
-GAP_AFTER_A_LEGEND_SQUARE = 4
+# The bottom bar's legend of the rows' two marks, after the Settings button: its title, then a
+# short bar like the one at the left edge of the current tab's row and what it marks, then a small
+# square stroked like the selection outline and what that marks. The current tab is the one tab in
+# front (many tabs can be on screen at once).
+ROW_MARKS_LEGEND_TITLE = "Legend:"
+CURRENT_TAB_LEGEND_TEXT = "= current tab"
+SELECTED_ROWS_LEGEND_TEXT = "= selected"
+CURRENT_TAB_LEGEND_BAR_HEIGHT = 10  # a little more than the height of the small text's capital letters, as the square is
+SELECTION_OUTLINE_LEGEND_SQUARE_SIZE = 9
+SELECTION_OUTLINE_LEGEND_SQUARE_CORNER_RADIUS = 2
+GAP_BEFORE_A_LEGEND_MARK = 8
+GAP_AFTER_A_LEGEND_MARK = 4
 
 
 def choose_what_the_save_button_saves(agent_session_entries_of_the_selected_rows, a_row_is_selected, every_agent_session_entry):
@@ -238,39 +241,43 @@ class ListSearchField(NSSearchField):
         return became_first_responder
 
 
-class RowOutlinesLegendView(NSView):
-    """The bottom bar's legend of the rows' two outlines: ROW_OUTLINES_LEGEND_TITLE, then, for each
-    of ROW_OUTLINES_LEGEND_ENTRIES, a small square stroked as the rows stroke that outline (the same
-    color maker and line width) and the text of what it marks, in the hooks note's font and color.
-    It draws them each time AppKit draws it, as the rows draw their outlines, so its squares follow
-    light and dark mode and the accent color as those do."""
+class RowMarksLegendView(NSView):
+    """The bottom bar's legend of the rows' two marks: ROW_MARKS_LEGEND_TITLE, then a short bar
+    filled as the current tab's row fills its bar (the same color maker, width and corners) with
+    CURRENT_TAB_LEGEND_TEXT, then a small square stroked as the rows stroke the selection outline
+    (the same color maker and line width) with SELECTED_ROWS_LEGEND_TEXT, the texts in the hooks
+    note's font and color. It draws them each time AppKit draws it, as the rows draw theirs, so
+    the bar and the square follow light and dark mode and the accent color as those do."""
 
     def initWithHeight_textBaselineY_(self, height, text_baseline_y):
-        """Makes the legend as wide as its texts and squares need.
+        """Makes the legend as wide as its texts and marks need.
 
         Args:
             height: The height of the view, the bottom bar's.
             text_baseline_y: Where the texts' baseline is, from the view's bottom.
         """
-        self = objc.super(RowOutlinesLegendView, self).initWithFrame_(NSZeroRect)
+        self = objc.super(RowMarksLegendView, self).initWithFrame_(NSZeroRect)
         if self is None:
             return None
         font = NSFont.systemFontOfSize_(NSFont.smallSystemFontSize())
         self.text_baseline_y = text_baseline_y
-        # The squares' middle is the middle of the texts' capital letters.
-        self.square_y = text_baseline_y + (font.capHeight() - ROW_OUTLINES_LEGEND_SQUARE_SIZE) / 2
+        # The marks' middle is the middle of the texts' capital letters.
+        self.current_tab_bar_y = text_baseline_y + (font.capHeight() - CURRENT_TAB_LEGEND_BAR_HEIGHT) / 2
+        self.selection_square_y = text_baseline_y + (font.capHeight() - SELECTION_OUTLINE_LEGEND_SQUARE_SIZE) / 2
         text_attributes = {NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.secondaryLabelColor()}
-        title = NSAttributedString.alloc().initWithString_attributes_(ROW_OUTLINES_LEGEND_TITLE, text_attributes)
+        title = NSAttributedString.alloc().initWithString_attributes_(ROW_MARKS_LEGEND_TITLE, text_attributes)
         self.texts_and_their_x = [(title, 0)]
-        self.square_color_makers_and_their_x = []
-        x = math.ceil(title.size().width)  # whole points, so each square starts on a whole one
-        for outline_color_maker, text in ROW_OUTLINES_LEGEND_ENTRIES:
-            x += GAP_BEFORE_A_LEGEND_SQUARE
-            self.square_color_makers_and_their_x.append((outline_color_maker, x))
-            x += ROW_OUTLINES_LEGEND_SQUARE_SIZE + GAP_AFTER_A_LEGEND_SQUARE
+        mark_xs = []
+        x = math.ceil(title.size().width)  # whole points, so each mark starts on a whole one
+        for mark_width, text in ((CURRENT_TAB_BAR_WIDTH, CURRENT_TAB_LEGEND_TEXT),
+                                 (SELECTION_OUTLINE_LEGEND_SQUARE_SIZE, SELECTED_ROWS_LEGEND_TEXT)):
+            x += GAP_BEFORE_A_LEGEND_MARK
+            mark_xs.append(x)
+            x += mark_width + GAP_AFTER_A_LEGEND_MARK
             attributed_text = NSAttributedString.alloc().initWithString_attributes_(text, text_attributes)
             self.texts_and_their_x.append((attributed_text, x))
             x += math.ceil(attributed_text.size().width)
+        self.current_tab_bar_x, self.selection_square_x = mark_xs
         self.setFrameSize_((x, height))
         return self
 
@@ -278,16 +285,20 @@ class RowOutlinesLegendView(NSView):
         for attributed_text, x in self.texts_and_their_x:
             # With no drawing option the rectangle's origin is the text's baseline, and its height isn't used.
             attributed_text.drawWithRect_options_(NSMakeRect(x, self.text_baseline_y, self.bounds().size.width - x, 0), 0)
-        for outline_color_maker, x in self.square_color_makers_and_their_x:
-            # The square's outer edges on whole pixels, so its lines are as sharp as a row's outline.
-            square_rect = self.backingAlignedRect_options_(
-                NSMakeRect(x, self.square_y, ROW_OUTLINES_LEGEND_SQUARE_SIZE, ROW_OUTLINES_LEGEND_SQUARE_SIZE), NSAlignAllEdgesNearest)
-            outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                NSInsetRect(square_rect, SELECTION_OUTLINE_WIDTH / 2, SELECTION_OUTLINE_WIDTH / 2),
-                ROW_OUTLINES_LEGEND_SQUARE_CORNER_RADIUS, ROW_OUTLINES_LEGEND_SQUARE_CORNER_RADIUS)
-            outline.setLineWidth_(SELECTION_OUTLINE_WIDTH)
-            outline_color_maker().setStroke()
-            outline.stroke()
+        CURRENT_TAB_BAR_COLOR_MAKER().setFill()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(self.current_tab_bar_x, self.current_tab_bar_y, CURRENT_TAB_BAR_WIDTH, CURRENT_TAB_LEGEND_BAR_HEIGHT),
+            CURRENT_TAB_BAR_CORNER_RADIUS, CURRENT_TAB_BAR_CORNER_RADIUS).fill()
+        # The square's outer edges on whole pixels, so its lines are as sharp as a row's outline.
+        square_rect = self.backingAlignedRect_options_(
+            NSMakeRect(self.selection_square_x, self.selection_square_y, SELECTION_OUTLINE_LEGEND_SQUARE_SIZE,
+                       SELECTION_OUTLINE_LEGEND_SQUARE_SIZE), NSAlignAllEdgesNearest)
+        outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSInsetRect(square_rect, SELECTION_OUTLINE_WIDTH / 2, SELECTION_OUTLINE_WIDTH / 2),
+            SELECTION_OUTLINE_LEGEND_SQUARE_CORNER_RADIUS, SELECTION_OUTLINE_LEGEND_SQUARE_CORNER_RADIUS)
+        outline.setLineWidth_(SELECTION_OUTLINE_WIDTH)
+        SELECTION_OUTLINE_COLOR_MAKER().setStroke()
+        outline.stroke()
 
 
 class ListPanelView(NSView):
@@ -510,16 +521,16 @@ class ListPanelController(NSViewController):
         self.pause_or_resume_selected_rows_button, self.save_sessions_button, self.restore_sessions_button = bottom_right_buttons
         show_symbol_on_button(self.save_sessions_button, *SAVE_SESSIONS_BUTTON_LOOK)
         show_symbol_on_button(self.restore_sessions_button, *RESTORE_SESSIONS_BUTTON_LOOK)
-        # After the Settings button, the legend of the rows' outlines; fit_bottom_bar_to_width shows
+        # After the Settings button, the legend of the rows' marks; fit_bottom_bar_to_width shows
         # it where it fits. Its texts, and the hooks note's after it, sit on the baseline of the
         # button's title.
         settings_button_frame = self.settings_button.frame()
         self.bottom_bar_text_baseline_y = settings_button_frame.origin.y + measure_text_baseline_y_in_its_frame(self.settings_button)
-        self.row_outlines_legend_view = RowOutlinesLegendView.alloc().initWithHeight_textBaselineY_(
+        self.row_marks_legend_view = RowMarksLegendView.alloc().initWithHeight_textBaselineY_(
             BOTTOM_BAR_HEIGHT, self.bottom_bar_text_baseline_y)
-        self.row_outlines_legend_view.setFrameOrigin_((
+        self.row_marks_legend_view.setFrameOrigin_((
             settings_button_frame.origin.x + settings_button_frame.size.width + GAP_AFTER_THE_SORT_CONTROL_AND_THE_SETTINGS_BUTTON, 0))
-        root_view.addSubview_(self.row_outlines_legend_view)
+        root_view.addSubview_(self.row_marks_legend_view)
         # After the legend, while the app's hooks are missing for an agent tool with a session
         # in the list, a note and a button that installs them.
         self.hooks_note_text_field = NSTextField.labelWithString_("")
@@ -726,7 +737,7 @@ class ListPanelController(NSViewController):
 
     @objc.python_method
     def fit_bottom_bar_to_width(self):
-        """Shows the legend of the rows' outlines, after the Settings button at the bottom left, only
+        """Shows the legend of the rows' marks, after the Settings button at the bottom left, only
         whole: where it ends before the buttons at the bottom right (the Restore button, the
         leftmost of them, which always shows) and, while there
         is a hooks note, where the whole note and the Install Hooks button it needs fit after it
@@ -742,14 +753,14 @@ class ListPanelController(NSViewController):
         note_size = self.hooks_note_text_field.fittingSize()
         button_width, button_height = self.install_hooks_button.frame().size
         right_end_x = self.restore_sessions_button.frame().origin.x - GAP_BETWEEN_TOP_BAR_BUTTONS
-        legend_frame = self.row_outlines_legend_view.frame()
+        legend_frame = self.row_marks_legend_view.frame()
         legend_right_end_x = legend_frame.origin.x + legend_frame.size.width
         room_for_the_whole_note_and_its_button = (
             GAP_BEFORE_THE_HOOKS_NOTE + note_size.width
             + (GAP_BETWEEN_TOP_BAR_BUTTONS + button_width if self.agent_tool_names_to_install_hooks_for else 0)
             if note else 0)
         legend_shows = legend_right_end_x + room_for_the_whole_note_and_its_button <= right_end_x
-        self.row_outlines_legend_view.setHidden_(not legend_shows)
+        self.row_marks_legend_view.setHidden_(not legend_shows)
         self.hooks_note_text_field.setHidden_(not note)
         if not note:
             self.install_hooks_button.setHidden_(True)
@@ -810,6 +821,14 @@ class ListPanelController(NSViewController):
         title, tool_tip = IDLE_TABS_BUTTON_LOOKS[self.list_controller.idle_tabs_are_hidden]
         self.idle_tabs_button.setTitle_(title)
         self.idle_tabs_button.setToolTip_(tool_tip)
+
+    @objc.python_method
+    def give_the_rows_the_keyboard(self):
+        """Gives the rows the keyboard as the dropdown opens, so Return and the arrow keys work the
+        selected row: not the search box or another control. Nothing while the panel is in no
+        window yet, or while a row is being renamed, whose name field keeps it."""
+        if self.view().window() is not None and not self.list_controller.rename_in_progress:
+            self.give_the_list_the_keyboard()
 
     @objc.python_method
     def put_the_keyboard_in_the_search_box(self):

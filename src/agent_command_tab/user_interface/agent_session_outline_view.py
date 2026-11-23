@@ -57,8 +57,7 @@ from agent_command_tab.snapshot_data_classes import (build_window_title_shown_in
 from agent_command_tab.user_interface.agent_tool_icons import build_agent_tool_icons, build_text_image, describe_agent_tool_icon
 from agent_command_tab.user_interface.control_helpers import (add_menu_item_that_sends_action_to_target,
                                                               is_a_command_press_of_letter, show_symbol_on_button)
-from agent_command_tab.user_interface.named_colors import (build_color_from_name, choose_list_background_color,
-                                                           make_light_and_dark_mode_color_maker, make_srgb_color_maker)
+from agent_command_tab.user_interface.named_colors import build_color_from_name, choose_list_background_color
 from agent_command_tab.user_interface.pointing_hand_button import PointingHandButton
 from agent_command_tab.user_interface.process_and_session_info_alerts import shorten_command_for_alert
 from agent_command_tab.user_interface.row_text_rendering import (DOT_GLYPH_AND_COLOR_BY_STATE,
@@ -200,11 +199,19 @@ NO_SESSIONS_ARE_SAVED_TOOL_TIP = "No sessions are saved"
 SELECTION_OUTLINE_WIDTH = 1.5
 SELECTION_OUTLINE_INSET = 1
 SELECTION_OUTLINE_CORNER_RADIUS = 4
-# The outline of the selected rows: dark gray in light mode (white wouldn't show on the light
-# rows), white in dark mode. The tab in front's row has one the same size in the accent color.
-# The bottom bar's legend draws its two small squares with these makers too (popover_container).
-SELECTION_OUTLINE_COLOR_MAKER = make_light_and_dark_mode_color_maker(make_srgb_color_maker(85, 85, 85), NSColor.whiteColor)
-FRONT_TAB_OUTLINE_COLOR_MAKER = NSColor.controlAccentColor
+# The outline of the selected rows, in macOS's accent color (blue unless changed in System Settings
+# > Appearance). Nothing else in the list is marked with a rectangle.
+SELECTION_OUTLINE_COLOR_MAKER = NSColor.controlAccentColor
+# The mark of the current tab (the tab in front): a short bar at the left edge of its row, inside
+# a selection outline's left side and before the tree's lines, in the accent color too. Hovering
+# over it says what it marks. The bottom bar's legend draws a bar and a small outlined square with
+# these makers and sizes (popover_container).
+CURRENT_TAB_BAR_COLOR_MAKER = NSColor.controlAccentColor
+CURRENT_TAB_BAR_X = 4
+CURRENT_TAB_BAR_WIDTH = 3
+CURRENT_TAB_BAR_CORNER_RADIUS = 1.5
+CURRENT_TAB_BAR_TOP_AND_BOTTOM_INSET = 4  # from the row's top and bottom edges
+CURRENT_TAB_BAR_TOOL_TIP = "Current tab"
 TAB_DRAG_TYPE = "org.agent-command-tab.tab-id"
 WINDOW_DRAG_TYPE = "org.agent-command-tab.window-id"
 COLUMN_IDENTIFIER = "main"
@@ -287,21 +294,20 @@ def compute_selection_outline_rect(row_bounds, is_flipped, joins_the_row_above, 
     return NSMakeRect(x, y, width, height)
 
 
-class RowViewWithSelectionAndFrontTabOutlines(NSTableRowView):
+class RowViewWithSelectionOutline(NSTableRowView):
     """A row that shows it is selected with an outline (SELECTION_OUTLINE_COLOR_MAKER) rather than a filled
     background, so its text keeps its colors; adjacent selected rows share one outline, which also takes in
     the process rows of a selected tab row, though
-    they aren't selected. The row of the tab in front has an outline of its own around that row
-    alone, in the accent color, unless it is inside a selection outline."""
+    they aren't selected."""
 
     def drawSelectionInRect_(self, dirty_rect):
         self.draw_selection_outline_if_inside_one()
 
     def drawBackgroundInRect_(self, dirty_rect):
-        objc.super(RowViewWithSelectionAndFrontTabOutlines, self).drawBackgroundInRect_(dirty_rect)
+        objc.super(RowViewWithSelectionOutline, self).drawBackgroundInRect_(dirty_rect)
         # A process row of a selected tab row draws its part of the tab row's outline.
-        if not self.isSelected() and not self.draw_selection_outline_if_inside_one():
-            self.draw_front_tab_outline_if_this_is_its_row()
+        if not self.isSelected():
+            self.draw_selection_outline_if_inside_one()
 
     @objc.python_method
     def find_outline_view_and_row(self):
@@ -337,18 +343,6 @@ class RowViewWithSelectionAndFrontTabOutlines(NSTableRowView):
         if is_inside:
             self.stroke_outline(SELECTION_OUTLINE_COLOR_MAKER(), joins_the_row_above, joins_the_row_below)
         return is_inside
-
-    @objc.python_method
-    def draw_front_tab_outline_if_this_is_its_row(self):
-        """Outlines this row alone if it is the tab in front's (AgentSessionListController.row_is_the_tab_in_front)."""
-        try:
-            outline_view, row = self.find_outline_view_and_row()
-            is_the_tab_in_front = row >= 0 and outline_view.delegate().row_is_the_tab_in_front(row)
-        except Exception:
-            traceback.print_exc()  # rather than end the app, as for the selection outline
-            return
-        if is_the_tab_in_front:
-            self.stroke_outline(FRONT_TAB_OUTLINE_COLOR_MAKER(), False, False)
 
     @objc.python_method
     def stroke_outline(self, color, joins_the_row_above, joins_the_row_below):
@@ -763,6 +757,21 @@ class ColumnTitlesRowView(NSView):
             self.window().invalidateCursorRectsForView_(self)  # the hand's areas follow the titles
 
 
+class CurrentTabBarView(NSView):
+    """The mark of the current tab: a short bar (CURRENT_TAB_BAR_COLOR_MAKER) CURRENT_TAB_BAR_X from
+    the left edge of its row, as tall as this view, which is as wide as the row's left margin.
+    A click goes through it to the row."""
+
+    def hitTest_(self, point):
+        return None
+
+    def drawRect_(self, rect):
+        CURRENT_TAB_BAR_COLOR_MAKER().setFill()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(CURRENT_TAB_BAR_X, 0, CURRENT_TAB_BAR_WIDTH, self.bounds().size.height),
+            CURRENT_TAB_BAR_CORNER_RADIUS, CURRENT_TAB_BAR_CORNER_RADIUS).fill()
+
+
 class AgentListRowView(NSTableCellView):
     """A row: [tree connector] [arrow] [dot] [name] [details] ... then, on a tab row and a
     process row, the TAB_ROW_COLUMNS at the right edge. The arrow opens or closes the row (a
@@ -787,8 +796,11 @@ class AgentListRowView(NSTableCellView):
         self.new_window_button = make_row_icon_button()  # the "+" row's only content
         show_symbol_on_button(self.new_window_button, "plus", "+", "New window with an agent session")
         self.new_window_button.setToolTip_(NEW_WINDOW_BUTTON_TOOL_TIP)
-        for subview in (self.prefix_text_field, self.disclosure_button, self.dot_text_field, self.name_text_field,
-                        self.details_text_field, *self.column_views.values(), self.new_window_button):
+        self.current_tab_bar_view = CurrentTabBarView.alloc().initWithFrame_(NSZeroRect)  # shown on the current tab's row (fill_row_view)
+        self.current_tab_bar_view.setHidden_(True)
+        self.current_tab_bar_view.setToolTip_(CURRENT_TAB_BAR_TOOL_TIP)
+        for subview in (self.current_tab_bar_view, self.prefix_text_field, self.disclosure_button, self.dot_text_field,
+                        self.name_text_field, self.details_text_field, *self.column_views.values(), self.new_window_button):
             self.addSubview_(subview)
         self.setTextField_(self.name_text_field)
         self.shows_columns = False  # tab and process rows
@@ -797,12 +809,14 @@ class AgentListRowView(NSTableCellView):
         self.shows_disclosure_button = False  # a row that can open or close
         self.tree_line_x = None  # set on the "+" row: its button is centered on the tree's vertical line
         self.look = None  # what the row shows, set by the list controller's fill_row_view
-        self.is_filled_as_the_tab_in_front = False  # set by fill_row_view, which redraws the outer row view's outline when it changes
         return self
 
     def layout(self):
         objc.super(AgentListRowView, self).layout()
         bounds = self.bounds()
+        # The current tab's bar has the row's left margin to itself, so the pointer finds its tooltip.
+        self.current_tab_bar_view.setFrame_(NSMakeRect(
+            0, CURRENT_TAB_BAR_TOP_AND_BOTTOM_INSET, ROW_LEFT_MARGIN, bounds.size.height - 2 * CURRENT_TAB_BAR_TOP_AND_BOTTOM_INSET))
         text_height = self.name_text_field.fittingSize().height
         y = (bounds.size.height - text_height) / 2
         prefix_width = self.prefix_text_field.fittingSize().width
@@ -1056,7 +1070,7 @@ class AgentSessionListController(NSObject):
         outline_view.setIntercellSpacing_((0, 0))
         outline_view.setBackgroundColor_(choose_list_background_color(outline_view.effectiveAppearance()))
         # A click selects a window or tab row, Command-click adds or removes one, Shift-click a
-        # range; RowViewWithSelectionAndFrontTabOutlines draws the selection.
+        # range; RowViewWithSelectionOutline draws the selection.
         outline_view.setAllowsMultipleSelection_(True)
         outline_view.setSelectionHighlightStyle_(NSTableViewSelectionHighlightStyleRegular)
         # The one column follows the outline view's width; its container calls sizeLastColumnToFit once it is embedded.
@@ -1606,7 +1620,7 @@ class AgentSessionListController(NSObject):
         # the kept row view again, about twice per row and reload.
         outer_row_view = self.outer_row_views_by_item_key.get(item.key)
         if outer_row_view is None:
-            outer_row_view = RowViewWithSelectionAndFrontTabOutlines.alloc().initWithFrame_(NSZeroRect)
+            outer_row_view = RowViewWithSelectionOutline.alloc().initWithFrame_(NSZeroRect)
             self.outer_row_views_by_item_key[item.key] = outer_row_view
         return outer_row_view
 
@@ -1641,14 +1655,6 @@ class AgentSessionListController(NSObject):
             return True
         item = self.outline_view.itemAtRow_(row)
         return item.kind == "process" and self.outline_view.isRowSelected_(self.outline_view.rowForItem_(item.parent_item))
-
-    @objc.python_method
-    def row_is_the_tab_in_front(self, row):
-        """Whether a row is the row of the tab in front, which has a bold name and an outline of its own."""
-        if not 0 <= row < self.outline_view.numberOfRows():
-            return False
-        item = self.outline_view.itemAtRow_(row)
-        return item.kind == "tab" and item.entry.is_in_front
 
     # ----- selection -----
 
@@ -2012,12 +2018,9 @@ class AgentSessionListController(NSObject):
                      else 1.0)
         if row_view.alphaValue() != row_alpha:
             row_view.setAlphaValue_(row_alpha)
-        if is_in_front != row_view.is_filled_as_the_tab_in_front:
-            row_view.is_filled_as_the_tab_in_front = is_in_front
-            # The outer row view draws the tab in front's outline, and AppKit redraws it only when the selection changes.
-            outer_row_view = self.outer_row_views_by_item_key.get(item.key)
-            if outer_row_view is not None:
-                outer_row_view.setNeedsDisplay_(True)
+        # The current tab's row shows the bar at its left edge.
+        if row_view.current_tab_bar_view.isHidden() == is_in_front:
+            row_view.current_tab_bar_view.setHidden_(not is_in_front)
         # Everything else the row's look depends on: an unchanged row is neither refilled nor laid out
         # again, which keeps the 0.6-second refresh cheap with many rows. The text of a column that
         # doesn't show (its width is 0) is no part of the look, so a time nobody sees doesn't refill
@@ -2042,8 +2045,8 @@ class AgentSessionListController(NSObject):
         # Only the dot, the lights and the tool icon say what they mean; the row as a whole has no hover text.
         row_view.dot_text_field.setToolTip_(parts.dot_tool_tip or None)
         row_view.details_text_field.setToolTip_(parts.details_tool_tip or None)
-        # The tab in front's name is bold, in the same color as the others (its outer row view also
-        # outlines it: RowViewWithSelectionAndFrontTabOutlines). A process row's command is gray.
+        # The tab in front's name is bold, in the same color as the others (its row also shows the
+        # current tab's bar: CurrentTabBarView). A process row's command is gray.
         row_view.name_text_field.setAttributedStringValue_(NSAttributedString.alloc().initWithString_attributes_(
             parts.name_text, {NSFontAttributeName: self.choose_name_font(item), NSForegroundColorAttributeName:
                               NSColor.secondaryLabelColor() if item.kind == "process" else NSColor.labelColor(),
